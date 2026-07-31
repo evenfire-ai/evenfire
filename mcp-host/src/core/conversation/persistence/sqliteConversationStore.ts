@@ -43,7 +43,7 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
-import { sessionPartsFromPrefixedKey } from '../sessionKeyParts'
+import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
@@ -357,9 +357,7 @@ export class SqliteConversationStore implements ConversationStore {
     prefix: string,
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
-    const suffix = query.agent === undefined ? ':rpc:' : `:rpc:${query.agent}:`
-    if (!prefix.endsWith(suffix)) return []
-    const userId = prefix.slice(0, -suffix.length)
+    const userId = userIdFromRpcPrefix(prefix, query.agent)
     if (!userId) return []
     await this.persistQueue.drainPrefix(prefix)
     const rows = await this.persistQueue.enqueueSync<PersistedSessionSummary[]>({
@@ -417,9 +415,12 @@ export class SqliteConversationStore implements ConversationStore {
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
     const cached = this.cache.get(sessionKey)
+    const userId = userIdFromRpcPrefix(prefix)
+    if (!userId) return undefined
     const parts = sessionPartsFromPrefixedKey(sessionKey, prefix)
     if (!parts) return undefined
     if (cached) {
+      if (cached.user_id !== userId) return undefined
       const turns = boundedTurns(cached.turns, query)
       return {
         key: sessionKey,
@@ -455,7 +456,7 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
-    if (!page) return undefined
+    if (!page || page.session.user_id !== userId) return undefined
 
     return {
       key: sessionKey,

@@ -2140,11 +2140,10 @@ async function startRPCServer(): Promise<void> {
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
     const convManager = agent!.getConversationManager()
-    // Same O(1) key lookup + anti-enumeration semantics as handleSessionMessages:
-    // the userSub comes from the verified rpc edge caller (routes.ts), never a
-    // client param, so a caller cannot read another user's session.
+    // Same O(1) key lookup + ownership check as handleSessionMessages: userSub
+    // comes from the verified edge caller and must match persisted ownership.
     const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
+    const conversation = await convManager.getSessionByKeyForUserAsync(key, userSub)
     if (!conversation) return null
     // `breakdown: null` when the session exists but has no snapshot yet (cold-load
     // before the first turn) — distinct from the 404 the route returns for a
@@ -2180,7 +2179,9 @@ async function startRPCServer(): Promise<void> {
         channelId: hostRef,
         threadId: chatId,
       })
-      const conversation = await agent!.getConversationManager().getSessionByKeyAsync(key)
+      const conversation = await agent!
+        .getConversationManager()
+        .getSessionByKeyForUserAsync(key, userSub)
       const saved = conversation?.modelSelections?.[provider]
       if (saved) {
         const resolution = resolveSessionModel(

@@ -5,7 +5,7 @@ import * as m011 from '../011-session-summary-user-activity-index'
 import { migrations } from '../index'
 
 describe('migration 011 — session summary user/activity index', () => {
-  it('serves current rows by activity and legacy rows by session-key range', () => {
+  it('serves owned rows without sorting unbounded catalog candidates', () => {
     const db = new Database(':memory:')
     for (const migration of migrations) migration.up(db)
 
@@ -33,7 +33,11 @@ describe('migration 011 — session summary user/activity index', () => {
     }) as Array<{ detail: string }>
 
     expect(plan.some(step => step.detail.includes('idx_sessions_summary_activity'))).toBe(true)
-    expect(plan.some(step => step.detail.includes('idx_sessions_session_key'))).toBe(true)
+    // The approval join may sort the already-limited page once. A second sort
+    // means the catalog candidates were materialized before LIMIT.
+    expect(plan.filter(step => step.detail.includes('USE TEMP B-TREE FOR ORDER BY'))).toHaveLength(
+      1
+    )
 
     m011.down(db)
     const downgraded = db

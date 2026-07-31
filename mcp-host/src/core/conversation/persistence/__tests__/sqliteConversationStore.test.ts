@@ -378,33 +378,54 @@ describe('SqliteConversationStore — session summary listing', () => {
     }
   })
 
-  it('keeps unscoped parsing stable when the user subject contains :rpc:', async () => {
+  it('fails closed when colon-bearing user subjects have overlapping key prefixes', async () => {
     const handle = await freshStore({ cacheSize: 4 })
     try {
       const manager = new ConversationManager(handle.store)
-      const userId = 'subject:rpc:embedded'
-      const key = `${userId}:rpc:agent-x:chat-1`
-      // Catalog visibility remains keyed by the authenticated prefix even when
-      // an older persistence path derived user_id differently.
-      const conversation = await manager.getOrCreate(key)
+      const callerUserId = 'subject'
+      const ownerUserId = 'subject:rpc:embedded'
+      const key = `${ownerUserId}:rpc:agent-x:chat-1`
+      const conversation = await manager.getOrCreate(key, {
+        userId: ownerUserId,
+        channelType: 'rpc',
+        channelId: 'agent-x',
+        threadId: 'chat-1',
+        source: 'rpc',
+      })
       await manager.startTurn(conversation, 'hello', 'task-1')
       await manager.completeTurn(conversation, 'done')
       await handle.persistQueue.drainSessionKey(key)
+
+      await expect(
+        handle.store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
       handle.store['cache'].clear()
 
-      const summaries = await handle.store.listSessionSummariesByPrefix(`${userId}:rpc:`)
-
-      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+      const ownerSummaries = await handle.store.listSessionSummariesByPrefix(
+        `${ownerUserId}:rpc:`
+      )
+      expect(ownerSummaries.map(session => [session.agent, session.chatId])).toEqual([
         ['agent-x', 'chat-1'],
       ])
+
+      const callerSummaries = await handle.store.listSessionSummariesByPrefix(
+        `${callerUserId}:rpc:`
+      )
+      expect(callerSummaries).toEqual([])
+      await expect(
+        handle.store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
 
       handle.worker.db.prepare('UPDATE sessions SET user_id = NULL WHERE id = ?').run(
         conversation.id
       )
-      const legacySummaries = await handle.store.listSessionSummariesByPrefix(`${userId}:rpc:`)
-      expect(legacySummaries.map(session => [session.agent, session.chatId])).toEqual([
-        ['agent-x', 'chat-1'],
-      ])
+      const ambiguousLegacySummaries = await handle.store.listSessionSummariesByPrefix(
+        `${ownerUserId}:rpc:`
+      )
+      expect(ambiguousLegacySummaries).toEqual([])
+      await expect(
+        handle.store.getSessionMessagesByKey(key, `${ownerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
     } finally {
       await handle.shutdown()
     }

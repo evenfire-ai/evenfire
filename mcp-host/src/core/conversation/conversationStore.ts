@@ -6,7 +6,7 @@ import {
   type Turn,
   type TurnToolCall,
 } from '../types'
-import { sessionPartsFromPrefixedKey } from './sessionKeyParts'
+import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
  * Token usage from a SINGLE LLM call, accumulated additively into the durable
@@ -384,8 +384,11 @@ export class InMemoryConversationStore implements ConversationStore {
     prefix: string,
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
+    const userId = userIdFromRpcPrefix(prefix, query.agent)
+    if (!userId) return []
     const summaries: ConversationSessionSummary[] = []
     for (const { key, conversation } of this.listByPrefix(prefix)) {
+      if (conversation.user_id !== userId) continue
       const parts = sessionPartsFromPrefixedKey(key, prefix, query.agent)
       if (!parts) continue
       summaries.push({
@@ -432,7 +435,8 @@ export class InMemoryConversationStore implements ConversationStore {
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
     const conversation = this.map.get(key)
-    if (!conversation) return undefined
+    const userId = userIdFromRpcPrefix(prefix)
+    if (!conversation || !userId || conversation.user_id !== userId) return undefined
     return sessionMessagesFromConversation(key, prefix, conversation, query)
   }
 

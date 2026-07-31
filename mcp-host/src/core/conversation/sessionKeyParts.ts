@@ -32,3 +32,15 @@ export function sessionPartsFromPrefixedKey(
     chatId: rest.slice(colonIndex + 1),
   }
 }
+
+/**
+ * Extract the trusted user ID from an RPC catalog/transcript prefix. The suffix
+ * is removed from the end instead of splitting on `:rpc:` because authenticated
+ * subjects may themselves contain that sequence.
+ */
+export function userIdFromRpcPrefix(prefix: string, scopedAgent?: string): string | null {
+  const suffix = scopedAgent === undefined ? ':rpc:' : `:rpc:${scopedAgent}:`
+  if (!prefix.endsWith(suffix)) return null
+  const userId = prefix.slice(0, -suffix.length)
+  return userId || null
+}

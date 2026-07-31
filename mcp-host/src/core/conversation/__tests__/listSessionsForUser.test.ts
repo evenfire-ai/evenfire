@@ -45,7 +45,7 @@ describe('ConversationManager.listSessionsForUser', () => {
 
   it('extracts agent and chatId correctly even if auth.sub contains a colon', async () => {
     const keyWithColonSub = `admin:u-99:rpc:agent-y:chat-7`
-    await manager.getOrCreate(keyWithColonSub)
+    await manager.getOrCreate(keyWithColonSub, { userId: 'admin:u-99' })
     const result = manager.listSessionsForUser('admin:u-99:rpc:')
     expect(result).toHaveLength(1)
     expect(result[0].agent).toBe('agent-y')
@@ -108,5 +108,17 @@ describe('ConversationManager.getSessionByKey', () => {
     })
     await manager.getOrCreate(keyA)
     expect(manager.getSessionByKey(keyB)).toBeUndefined()
+  })
+
+  it('fails authenticated exact-key reads closed on an ownership mismatch', async () => {
+    const ownerUserId = 'subject:rpc:embedded'
+    const key = `${ownerUserId}:rpc:agent-x:chat-1`
+    const conv = await manager.getOrCreate(key, { userId: ownerUserId })
+
+    await expect(manager.getSessionByKeyForUserAsync(key, ownerUserId)).resolves.toBe(conv)
+    await expect(manager.getSessionByKeyForUserAsync(key, 'subject')).resolves.toBeUndefined()
+    await expect(manager.getOrCreate(key, { userId: 'subject' })).rejects.toThrow(
+      'Session ownership mismatch'
+    )
   })
 })
