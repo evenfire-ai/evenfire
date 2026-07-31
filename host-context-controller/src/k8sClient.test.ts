@@ -356,6 +356,12 @@ describe('McpServerWatcher startup', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+    // Certified is the resting state. vi.clearAllMocks() in beforeEach clears
+    // calls but not implementations, so a test that degrades this getter and
+    // fails before its own restore would silently re-gate readiness for every
+    // later test in the file. Restore it structurally rather than by
+    // per-test discipline.
+    mocks.hasCertifiedSafetyInventory.mockReset().mockReturnValue(true)
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
     mocks.netPolFullReconcile.mockReset().mockImplementation(async (...args: unknown[]) => {
       const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
