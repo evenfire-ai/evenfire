@@ -89,8 +89,20 @@ function insertUnmatchedTurnlessIncoming(
 export function mergeAuthoritativeServerMessages(
   existing: ChatMessage[],
   incoming: ChatMessage[],
-  options: { activeTaskIds?: ReadonlySet<string> } = {}
+  options: {
+    activeTaskIds?: ReadonlySet<string>
+    replaceLegacyTurnlessWindow?: boolean
+  } = {}
 ): ChatMessage[] {
+  if (options.replaceLegacyTurnlessWindow) {
+    const durableLocalMessages = existing.filter(
+      message => message.role === 'system' || message.isError || message.preserveLocal
+    )
+    return mergeAuthoritativeServerMessages(durableLocalMessages, incoming, {
+      activeTaskIds: options.activeTaskIds,
+    })
+  }
+
   const authoritative = incoming
     .filter(message => messageServerTurnNumber(message) !== undefined)
     .sort((left, right) => {

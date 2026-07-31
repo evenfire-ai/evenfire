@@ -1659,8 +1659,14 @@ export class ChatStore {
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
         : []
+      const replaceLegacyTurnlessWindow =
+        existingMessages.length > 0 &&
+        !options.activeTaskIds?.length &&
+        existingMessages.every(message => messageServerTurnNumber(message) === undefined) &&
+        messages.some(message => messageServerTurnNumber(message) !== undefined)
       const merged = mergeAuthoritativeServerMessages(existingMessages, messages, {
         activeTaskIds: options.activeTaskIds ? new Set(options.activeTaskIds) : undefined,
+        replaceLegacyTurnlessWindow,
       })
       const indexedCount = await this.indexedMessageCount(agentRef, chatId)
       await this.writePagedChatUnlocked(agentRef, chatId, merged, {

@@ -203,9 +203,13 @@ function mergeUniqueMessages(
 function mergeServerMessages(
   existing: AgentChatMessage[],
   incoming: AgentChatMessage[],
-  activeTaskIds?: ReadonlySet<string>
+  activeTaskIds?: ReadonlySet<string>,
+  replaceLegacyTurnlessWindow = false
 ): AgentChatMessage[] {
-  return mergeAuthoritativeServerMessages(existing, incoming, { activeTaskIds })
+  return mergeAuthoritativeServerMessages(existing, incoming, {
+    activeTaskIds,
+    replaceLegacyTurnlessWindow,
+  })
 }
 
 function sameMessageSequence(a: AgentChatMessage[], b: AgentChatMessage[]): boolean {
@@ -1491,11 +1495,12 @@ export function useAgentChatController({
       const replaceSettledLegacyCache =
         localMessages.length > 0 && !localHasServerTurns && !resp.activeTaskId
       const rendered =
-        localMessages.length && !replaceSettledLegacyCache
+        localMessages.length > 0
           ? mergeServerMessages(
               localMessages,
               hydratedWithAttachments,
-              resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined
+              resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined,
+              replaceSettledLegacyCache
             )
           : hydratedWithAttachments
       const hasOlderAfterMerge =

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ChatStore } from '../chatStore.js'
+import { turnsToChatMessages } from '../serverTurnAdapter.js'
 import type { ChatMessage } from '../types.js'
 
 let tempDir: string
@@ -932,6 +933,53 @@ describe('messages', () => {
     expect(
       (await store.loadMessages('agent-1', 'active-window')).map(message => message.id)
     ).toEqual(['turn-1-user', 'optimistic-user'])
+  })
+
+  it('replaces a settled legacy turnless cache without persisting duplicate history', async () => {
+    await store.createChat('agent-1', 'legacy-turnless')
+    await store.saveMessages('agent-1', 'legacy-turnless', [
+      { id: 'legacy-q1', role: 'user', content: 'q1', timestamp: 1 },
+      { id: 'legacy-a1', role: 'assistant', content: 'a1', timestamp: 2 },
+      { id: 'legacy-q2', role: 'user', content: 'q2', timestamp: 3 },
+      { id: 'legacy-a2', role: 'assistant', content: 'a2', timestamp: 4 },
+    ])
+
+    const authoritative = turnsToChatMessages([
+      {
+        number: 1,
+        user_input: 'q1',
+        response: 'a1',
+        started_at: '2026-01-01T00:00:01.000Z',
+        completed_at: '2026-01-01T00:00:02.000Z',
+      },
+      {
+        number: 2,
+        user_input: 'q2',
+        response: 'a2',
+        started_at: '2026-01-01T00:00:03.000Z',
+        completed_at: '2026-01-01T00:00:04.000Z',
+      },
+      {
+        number: 3,
+        user_input: 'q3',
+        response: 'a3',
+        started_at: '2026-01-01T00:00:05.000Z',
+        completed_at: '2026-01-01T00:00:06.000Z',
+      },
+    ])
+
+    await store.replaceMessages('agent-1', 'legacy-turnless', authoritative)
+
+    expect(
+      (await store.loadMessages('agent-1', 'legacy-turnless')).map(message => message.id)
+    ).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+      'turn-2-user',
+      'turn-2-assistant',
+      'turn-3-user',
+      'turn-3-assistant',
+    ])
   })
 
   it('keeps unseen numbered history while replacing completed local-only echoes', async () => {
