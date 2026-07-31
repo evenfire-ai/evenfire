@@ -367,6 +367,18 @@ jobs:
       - name: No unannotated Cf-Access-* header reads
         run: bash scripts/check-no-cf-access-header-read.sh
 
+  # ─── Dockerfile CA-bundle guard ───────────────────────────────────────────
+  # An image that ships git/curl/wget but no CA bundle fails every TLS
+  # verification while Node's own fetch keeps working, so it looks healthy until
+  # an agent shells out. Assert the dependency is declared, not inherited.
+  dockerfile-ca-guard:
+    name: Validate Dockerfile CA bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every image shipping a TLS tool installs ca-certificates
+        run: bash scripts/check-dockerfile-ca-certificates.sh
+
   # ─── Deploy manifest check (public overlays) ──────────────────────────────
   # The public repo carries base + minikube overlays only; the gcp-dev/gcp-prod
   # overlays live in keyper-labs/evenfire-infra and are rendered by infra CI.
