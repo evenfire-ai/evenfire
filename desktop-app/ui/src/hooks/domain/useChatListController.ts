@@ -166,8 +166,10 @@ export function useChatListController({
   // ─── chatList loader (agent-scoped) ───
 
   const loadChatListOnce = useCallback(
-    async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
-      const requestGeneration = ++requestGenerationRef.current
+    async (
+      agentRef: string,
+      requestGeneration: number
+    ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
@@ -364,6 +366,7 @@ export function useChatListController({
 
   const loadChatList = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
+      const requestGeneration = ++requestGenerationRef.current
       // One retry with a short backoff: during boot a concurrent team-switch /
       // access-catalog refresh can momentarily rebind the main-process chat
       // store, rejecting `getIndex` with "Not authenticated". Swallowing that
@@ -371,14 +374,23 @@ export function useChatListController({
       // is re-selected, so give the store one chance to settle.
       for (let attempt = 0; ; attempt++) {
         try {
-          return await loadChatListOnce(agentRef)
+          return await loadChatListOnce(agentRef, requestGeneration)
         } catch (err) {
           if (attempt === 0) {
             await new Promise(resolve => setTimeout(resolve, 300))
+            if (
+              selectedAgentRef.current !== agentRef ||
+              requestGenerationRef.current !== requestGeneration
+            ) {
+              return null
+            }
             continue
           }
           console.warn('[loadChatList] failed after retry, clearing list', { agentRef, err })
-          if (selectedAgentRef.current === agentRef) {
+          if (
+            selectedAgentRef.current === agentRef &&
+            requestGenerationRef.current === requestGeneration
+          ) {
             setChatList([])
           }
           return null
@@ -534,9 +546,16 @@ export function useChatListController({
   const handleCreateChat = useCallback(async () => {
     const agentRef = selectedAgentRef.current
     if (!agentRef) return
+    const requestGeneration = requestGenerationRef.current
     const chatId = crypto.randomUUID()
     const meta = await chatStore.createChat(agentRef, chatId)
     chatStore.clearCachedRemoteData()
+    if (
+      selectedAgentRef.current !== agentRef ||
+      requestGenerationRef.current !== requestGeneration
+    ) {
+      return
+    }
     appendNewEntry(agentRef, meta)
     host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
@@ -546,8 +565,10 @@ export function useChatListController({
   const handleRenameChatForAgent = useCallback(
     async (agentRef: string, chatId: string, newTitle: string) => {
       if (!agentRef) return
+      const requestGeneration = requestGenerationRef.current
       const updatedAt = new Date().toISOString()
       await chatStore.renameChat(agentRef, chatId, newTitle)
+      if (requestGenerationRef.current !== requestGeneration) return
       setLatestChatSessions(prev =>
         prev
           .map(chat =>
@@ -578,6 +599,7 @@ export function useChatListController({
   const handleDeleteChatForAgent = useCallback(
     async (agentRef: string, chatId: string) => {
       if (!agentRef) return
+      const requestGeneration = requestGenerationRef.current
       // Stop following any in-flight task for this chat first: ack tears down the
       // SSE + connect/watchdog timers, so a later terminal can't fire onTerminal
       // and resurrect the just-deleted chat file via appendAssistantMessage.
@@ -589,6 +611,7 @@ export function useChatListController({
       host.current?.dispatchSession(deletedKey, { type: 'CHAT_DELETED' })
       await chatStore.deleteChat(agentRef, chatId)
       chatStore.clearCachedRemoteData()
+      if (requestGenerationRef.current !== requestGeneration) return
       host.current?.clearComposerDraft(chatId)
       removeLatestChatSession(agentRef, chatId)
       // Post-await guards read the LIVE committed values (selectedAgentRef /
