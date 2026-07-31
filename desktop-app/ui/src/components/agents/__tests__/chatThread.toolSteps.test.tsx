@@ -251,4 +251,55 @@ describe('ChatThread tool-steps fallback (#582)', () => {
 
     expect(container.querySelectorAll('.virtualized-message-chunk').length).toBeGreaterThan(1)
   })
+
+  it('preserves mounted chunks and message nodes across prepend and streaming updates', () => {
+    const groups = Array.from({ length: 16 }, (_, index) => {
+      const role = index % 2 === 0 ? ('user' as const) : ('assistant' as const)
+      const turn = Math.floor(index / 2) + 5
+      return {
+        role,
+        items: [
+          {
+            id: `turn-${turn}-${role}`,
+            role,
+            content: `${role} ${turn}`,
+            timestamp: index,
+            serverTurnNumber: turn,
+          },
+        ],
+      }
+    })
+    setThreadState(groups)
+    const { rerender } = render(<ChatThread />)
+    const stableMessage = screen.getByText('user 5').closest('article')
+    const stableChunk = stableMessage?.closest('.virtualized-message-chunk')
+
+    const prepended = [
+      {
+        role: 'user' as const,
+        items: [
+          {
+            id: 'turn-1-user',
+            role: 'user' as const,
+            content: 'user 1',
+            timestamp: -1,
+            serverTurnNumber: 1,
+          },
+        ],
+      },
+      ...groups.map(group => ({
+        ...group,
+        items: group.items.map(message =>
+          message.id === 'turn-5-user' ? { ...message, content: 'user 5 streaming' } : message
+        ),
+      })),
+    ]
+    setThreadState(prepended)
+    rerender(<ChatThread />)
+
+    const updatedMessage = screen.getByText('user 5 streaming').closest('article')
+    expect(updatedMessage).toBe(stableMessage)
+    expect(updatedMessage?.closest('.virtualized-message-chunk')).toBe(stableChunk)
+    expect(screen.getByText('user 1')).toBeTruthy()
+  })
 })
