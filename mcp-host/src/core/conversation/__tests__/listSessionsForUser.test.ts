@@ -52,6 +52,18 @@ describe('ConversationManager.listSessionsForUser', () => {
     expect(result[0].chatId).toBe('chat-7')
   })
 
+  it('does not list an overlapping colon-bearing owner for a shorter subject', async () => {
+    const callerUserId = 'u1'
+    const ownerUserId = 'u1:rpc:a'
+    const key = `${ownerUserId}:rpc:agent-x:chat-1`
+    await manager.getOrCreate(key, { userId: ownerUserId })
+
+    expect(manager.listSessionsForUser(`${ownerUserId}:rpc:`).map(session => session.key)).toEqual([
+      key,
+    ])
+    expect(manager.listSessionsForUser(`${callerUserId}:rpc:`)).toEqual([])
+  })
+
   it('skips malformed entries (no colon after prefix) without throwing', async () => {
     await manager.getOrCreate('u-1:rpc:')
     expect(manager.listSessionsForUser('u-1:rpc:')).toEqual([])

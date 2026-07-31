@@ -135,7 +135,11 @@ describe('dbWorker dispatcher', () => {
       }
     }
 
-    const readTurns = async (query: { limit?: number; beforeTurn?: number; afterTurn?: number }) => {
+    const readTurns = async (query: {
+      limit?: number
+      beforeTurn?: number
+      afterTurn?: number
+    }) => {
       const page = (await dispatch(
         { kind: 'load_session_message_page', sessionKey: session.session_key, ...query },
         deps
@@ -185,7 +189,7 @@ describe('dbWorker dispatcher', () => {
     const deps = createDispatcher(db)
     const session = {
       ...makeSession('conv-summary', 'u-summary:rpc:agent:default'),
-      started_at: 100,
+      started_at: 5,
     }
     await dispatch({ kind: 'insert_session', payload: session }, deps)
 
@@ -301,13 +305,48 @@ describe('dbWorker dispatcher', () => {
         .get(session.id)
     const incrementalSummary = readSummary()
     expect(incrementalSummary).toEqual({
-      last_activity_at: 100,
+      last_activity_at: 20,
       turn_count: 2,
       message_count: 3,
     })
 
     deps.statements.recomputeSessionMessageSummary.run({ id: session.id })
     expect(readSummary()).toEqual(incrementalSummary)
+  })
+
+  it('keeps session start as the activity floor when inserted messages are clock-skewed', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-summary-skew', 'u-summary:rpc:agent:skew'),
+      started_at: 100,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'user',
+          content: 'clock-skewed question',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 20,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: 1,
+        },
+      },
+      deps
+    )
+
+    expect(
+      db.prepare('SELECT last_activity_at FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ last_activity_at: 100 })
   })
 
   it('does not move session activity backward when replacing retained messages', async () => {

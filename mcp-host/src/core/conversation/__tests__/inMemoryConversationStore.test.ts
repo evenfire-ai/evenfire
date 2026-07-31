@@ -192,6 +192,19 @@ describe('InMemoryConversationStore', () => {
       ])
     })
 
+    it('does not list an overlapping colon-bearing owner for a shorter subject', async () => {
+      const callerUserId = 'u1'
+      const ownerUserId = 'u1:rpc:a'
+      const key = `${ownerUserId}:rpc:agent-x:chat-1`
+      store.set(key, makeConversation(ownerUserId))
+
+      const ownerPage = await store.listSessionSummariesByPrefix(`${ownerUserId}:rpc:`)
+      const callerPage = await store.listSessionSummariesByPrefix(`${callerUserId}:rpc:`)
+
+      expect(ownerPage.map(summary => summary.key)).toEqual([key])
+      expect(callerPage).toEqual([])
+    })
+
     it('rejects malformed unscoped keys before applying the page limit', async () => {
       const malformedEmptyAgent = {
         ...makeConversation('u-1'),
@@ -264,6 +277,22 @@ describe('InMemoryConversationStore', () => {
       expect(page?.firstTurnNumber).toBe(1)
       expect(page?.lastTurnNumber).toBe(4)
       expect(page?.turns.map(turn => turn.number)).toEqual([2, 3])
+    })
+
+    it('does not read an overlapping colon-bearing owner through a shorter subject', async () => {
+      const callerUserId = 'u1'
+      const ownerUserId = 'u1:rpc:a'
+      const key = `${ownerUserId}:rpc:agent-x:chat-1`
+      const conversation = makeConversation(ownerUserId)
+      conversation.turns = [makeTurn(1)]
+      store.set(key, conversation)
+
+      await expect(
+        store.getSessionMessagesByKey(key, `${ownerUserId}:rpc:`)
+      ).resolves.toMatchObject({ key, totalTurns: 1 })
+      await expect(
+        store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
     })
   })
 })

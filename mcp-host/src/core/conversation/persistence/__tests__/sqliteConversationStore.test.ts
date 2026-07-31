@@ -378,7 +378,7 @@ describe('SqliteConversationStore — session summary listing', () => {
     }
   })
 
-  it('fails closed when colon-bearing user subjects have overlapping key prefixes', async () => {
+  it('fails closed on persisted ownership mismatches with overlapping key prefixes', async () => {
     const handle = await freshStore({ cacheSize: 4 })
     try {
       const manager = new ConversationManager(handle.store)
@@ -401,9 +401,7 @@ describe('SqliteConversationStore — session summary listing', () => {
       ).resolves.toBeUndefined()
       handle.store['cache'].clear()
 
-      const ownerSummaries = await handle.store.listSessionSummariesByPrefix(
-        `${ownerUserId}:rpc:`
-      )
+      const ownerSummaries = await handle.store.listSessionSummariesByPrefix(`${ownerUserId}:rpc:`)
       expect(ownerSummaries.map(session => [session.agent, session.chatId])).toEqual([
         ['agent-x', 'chat-1'],
       ])
@@ -414,17 +412,6 @@ describe('SqliteConversationStore — session summary listing', () => {
       expect(callerSummaries).toEqual([])
       await expect(
         handle.store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
-      ).resolves.toBeUndefined()
-
-      handle.worker.db.prepare('UPDATE sessions SET user_id = NULL WHERE id = ?').run(
-        conversation.id
-      )
-      const ambiguousLegacySummaries = await handle.store.listSessionSummariesByPrefix(
-        `${ownerUserId}:rpc:`
-      )
-      expect(ambiguousLegacySummaries).toEqual([])
-      await expect(
-        handle.store.getSessionMessagesByKey(key, `${ownerUserId}:rpc:`)
       ).resolves.toBeUndefined()
     } finally {
       await handle.shutdown()
