@@ -483,7 +483,7 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   const renderHydratedToolSteps = useCallback(
     (message: RenderableChatMessage) => {
       const toolSteps = message.toolSteps
-      if (!toolSteps || toolSteps.length === 0) return null
+      if (!Array.isArray(toolSteps) || toolSteps.length === 0) return null
       const steps: ProgressStep[] = toolSteps.map((s, i) => ({
         toolCallId: `${message.id}-tool-${i}`,
         toolName: s.toolName,

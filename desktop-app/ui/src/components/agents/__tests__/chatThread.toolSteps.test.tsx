@@ -174,6 +174,24 @@ describe('ChatThread tool-steps fallback (#582)', () => {
     expect(screen.queryByTestId('progress-stepper')).toBeNull()
   })
 
+  it('ignores a malformed persisted toolSteps value instead of crashing the transcript', () => {
+    const assistant: AgentChatMessage = {
+      id: 'turn-1-assistant',
+      role: 'assistant',
+      content: 'still visible',
+      timestamp: 2,
+      toolSteps: 'PWNED' as never,
+    }
+    setThreadState([
+      { role: 'user', items: [userMsg] },
+      { role: 'assistant', items: [assistant] },
+    ])
+
+    expect(() => render(<ChatThread />)).not.toThrow()
+    expect(screen.getByText('still visible')).toBeTruthy()
+    expect(screen.queryByTestId('progress-stepper')).toBeNull()
+  })
+
   it('prefers live progress and does NOT double-render when both live progress and toolSteps exist', () => {
     const assistant: AgentChatMessage = {
       id: 'turn-1-assistant',

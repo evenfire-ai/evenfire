@@ -163,6 +163,82 @@ describe('RpcProxyClient.listSessions', () => {
     })
   })
 
+  it('rejects malformed tool_steps before they can reach persisted chat state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: 'world',
+              started_at: '2026-01-01T00:00:00.000Z',
+              tool_steps: 'PWNED',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).rejects.toThrow(/tool_steps/)
+  })
+
+  it('accepts producer-shaped tool_steps and validates their optional fields', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: 'world',
+              started_at: '2026-01-01T00:00:00.000Z',
+              tool_steps: [
+                {
+                  toolName: 'search',
+                  displayName: 'Search',
+                  state: 'error',
+                  durationMs: 12,
+                  errorSummary: 'timed out',
+                },
+              ],
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({
+      turns: [
+        {
+          tool_steps: [
+            {
+              toolName: 'search',
+              displayName: 'Search',
+              state: 'error',
+              durationMs: 12,
+              errorSummary: 'timed out',
+            },
+          ],
+        },
+      ],
+    })
+  })
+
   it.each([
     ['oldestTurnNumber', -1],
     ['oldestTurnNumber', 0.5],

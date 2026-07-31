@@ -10,6 +10,7 @@ import {
   HostModelsResult,
   HostRuntimeHealth,
   HostRuntimeStatus,
+  MessageToolStep,
   PendingApprovalLite,
   RpcAllowedServersResult,
   SessionLifecycleState,
@@ -96,6 +97,29 @@ function parseTokens(value: unknown, label: string): SessionTokensLite | undefin
       ? { cacheWrite: wireSafeInteger(record.cacheWrite, `${label}.cacheWrite`, 0)! }
       : {}),
   }
+}
+
+function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
+  if (!Array.isArray(value)) throw new Error(`Invalid ${label}`)
+  return value.map((step, index) => {
+    const stepLabel = `${label}[${index}]`
+    const record = wireObject(step, stepLabel)
+    const state = record.state
+    if (state !== 'completed' && state !== 'error') {
+      throw new Error(`Invalid ${stepLabel}.state`)
+    }
+    return {
+      toolName: wireString(record.toolName, `${stepLabel}.toolName`),
+      displayName: wireString(record.displayName, `${stepLabel}.displayName`),
+      state,
+      ...(record.durationMs !== undefined
+        ? { durationMs: wireSafeInteger(record.durationMs, `${stepLabel}.durationMs`, 0)! }
+        : {}),
+      ...(record.errorSummary !== undefined
+        ? { errorSummary: wireString(record.errorSummary, `${stepLabel}.errorSummary`) }
+        : {}),
+    }
+  })
 }
 
 function parseSessionsListResult(value: unknown): SessionsListResult {
@@ -272,7 +296,14 @@ function parseSessionMessagesResult(
               tokens: parseTokens(entry.tokens, `session messages response.turns[${index}].tokens`),
             }
           : {}),
-        ...(entry.tool_steps !== undefined ? { tool_steps: entry.tool_steps as never } : {}),
+        ...(entry.tool_steps !== undefined
+          ? {
+              tool_steps: parseToolSteps(
+                entry.tool_steps,
+                `session messages response.turns[${index}].tool_steps`
+              ),
+            }
+          : {}),
       }
     }),
   }
