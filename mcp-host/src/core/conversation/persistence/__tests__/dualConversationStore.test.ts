@@ -101,6 +101,69 @@ describe('DualConversationStore — dual-write parity', () => {
         limit: 1,
       })
       expect(messages?.turns.map(turn => turn.user_input)).toEqual(['memory only'])
+      await new Promise(resolve => setImmediate(resolve))
+      expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: false })
+      expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: false })
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
+  it('returns a cold sqlite transcript when memory has no session', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const seedManager = new ConversationManager(sqlite.store)
+      const seeded = await seedManager.getOrCreate('u-cold:rpc:a:chat-1')
+      await seedManager.startTurn(seeded, 'cold question', 'task-cold')
+      await seedManager.completeTurn(seeded, 'cold answer')
+      await sqlite.persistQueue.drainSessionKey('u-cold:rpc:a:chat-1')
+
+      const dual = new DualConversationStore(new InMemoryConversationStore(), sqlite.store)
+      const page = await dual.getSessionMessagesByKey(
+        'u-cold:rpc:a:chat-1',
+        'u-cold:rpc:',
+        { limit: 1 }
+      )
+
+      expect(page?.turns.map(turn => turn.user_input)).toEqual(['cold question'])
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
+  it('keeps canonical memory reads available when sqlite parity probes fail', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const manager = new ConversationManager(memory)
+      const conversation = await manager.getOrCreate('u-1:rpc:a:chat-1')
+      await manager.startTurn(conversation, 'question', 'task-1')
+      await manager.completeTurn(conversation, 'answer')
+      const parity: Array<{ op: string; match: boolean }> = []
+      const failingSqlite = new Proxy(sqlite.store, {
+        get(target, property, receiver) {
+          if (
+            property === 'listSessionSummariesByPrefix' ||
+            property === 'getSessionMessagesByKey'
+          ) {
+            return async () => {
+              throw new Error('sqlite boom')
+            }
+          }
+          const value = Reflect.get(target, property, receiver)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      const dual = new DualConversationStore(memory, failingSqlite, {
+        recordParity: (op, match) => parity.push({ op, match }),
+      })
+
+      await expect(dual.listSessionSummariesByPrefix('u-1:rpc:')).resolves.toHaveLength(1)
+      await expect(
+        dual.getSessionMessagesByKey('u-1:rpc:a:chat-1', 'u-1:rpc:')
+      ).resolves.toBeDefined()
+      await new Promise(resolve => setImmediate(resolve))
+
       expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: false })
       expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: false })
     } finally {

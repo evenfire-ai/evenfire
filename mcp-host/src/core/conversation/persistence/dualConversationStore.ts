@@ -40,6 +40,10 @@ export interface DualStoreMetrics {
   recordParity?: (op: string, match: boolean) => void
 }
 
+function pagesMatch(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 export class DualConversationStore implements ConversationStore {
   constructor(
     private readonly memory: ConversationStore,
@@ -135,11 +139,14 @@ export class DualConversationStore implements ConversationStore {
     prefix: string,
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
-    const [memList, sqlList] = await Promise.all([
-      this.memory.listSessionSummariesByPrefix(prefix, query),
-      this.sqlite.listSessionSummariesByPrefix(prefix, query),
-    ])
-    this.recordParity('listSessionSummariesByPrefix', memList.length === sqlList.length)
+    const memList = await this.memory.listSessionSummariesByPrefix(prefix, query)
+    queueMicrotask(() => {
+      this.sqlite.listSessionSummariesByPrefix(prefix, query).then(
+        sqlList =>
+          this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlList)),
+        () => this.recordParity('listSessionSummariesByPrefix', false)
+      )
+    })
     return memList
   }
 
@@ -148,15 +155,25 @@ export class DualConversationStore implements ConversationStore {
     prefix: string,
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
-    const [memPage, sqlPage] = await Promise.all([
-      this.memory.getSessionMessagesByKey(key, prefix, query),
-      this.sqlite.getSessionMessagesByKey(key, prefix, query),
-    ])
-    this.recordParity(
-      'getSessionMessagesByKey',
-      memPage === undefined ? sqlPage === undefined : sqlPage !== undefined
-    )
-    return memPage
+    const memPage = await this.memory.getSessionMessagesByKey(key, prefix, query)
+    if (memPage !== undefined) {
+      queueMicrotask(() => {
+        this.sqlite.getSessionMessagesByKey(key, prefix, query).then(
+          sqlPage => this.recordParity('getSessionMessagesByKey', pagesMatch(memPage, sqlPage)),
+          () => this.recordParity('getSessionMessagesByKey', false)
+        )
+      })
+      return memPage
+    }
+
+    try {
+      const sqlPage = await this.sqlite.getSessionMessagesByKey(key, prefix, query)
+      this.recordParity('getSessionMessagesByKey', sqlPage === undefined)
+      return sqlPage
+    } catch (error) {
+      this.recordParity('getSessionMessagesByKey', false)
+      throw error
+    }
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {
