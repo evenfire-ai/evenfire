@@ -357,10 +357,15 @@ export class SqliteConversationStore implements ConversationStore {
     prefix: string,
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
+    const suffix = query.agent === undefined ? ':rpc:' : `:rpc:${query.agent}:`
+    if (!prefix.endsWith(suffix)) return []
+    const userId = prefix.slice(0, -suffix.length)
+    if (!userId) return []
     await this.persistQueue.drainPrefix(prefix)
     const rows = await this.persistQueue.enqueueSync<PersistedSessionSummary[]>({
       kind: 'list_session_summaries_by_prefix',
       sessionKeyPrefix: prefix,
+      userId,
       limit: query.limit,
       cursorUpdatedAt: query.cursor ? query.cursor.updatedAt.getTime() / 1000 : undefined,
       cursorKey: query.cursor?.key,

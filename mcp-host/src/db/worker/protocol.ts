@@ -240,6 +240,7 @@ export type WorkerOp =
   | {
       kind: 'list_session_summaries_by_prefix'
       sessionKeyPrefix: string
+      userId: string
       limit?: number
       cursorUpdatedAt?: number
       cursorKey?: string

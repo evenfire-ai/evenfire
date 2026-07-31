@@ -8,6 +8,7 @@ import * as sessionsModelSelections from './007-sessions-model-selections'
 import * as activeTraceContext from './008-active-trace-context'
 import * as sessionSummaryIndexes from './009-session-summary-indexes'
 import * as materializedSessionSummaries from './010-materialized-session-summaries'
+import * as sessionSummaryUserActivityIndex from './011-session-summary-user-activity-index'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -29,4 +30,5 @@ export const migrations: Array<{
   activeTraceContext,
   sessionSummaryIndexes,
   materializedSessionSummaries,
+  sessionSummaryUserActivityIndex,
 ]

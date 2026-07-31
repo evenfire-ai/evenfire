@@ -662,6 +662,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,
+        user_id: op.userId,
         agent_scoped: agentScoped ? 1 : 0,
         limit,
         cursor_updated_at: op.cursorUpdatedAt ?? null,

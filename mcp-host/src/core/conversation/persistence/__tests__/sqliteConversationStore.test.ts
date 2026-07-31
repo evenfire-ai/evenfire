@@ -384,7 +384,7 @@ describe('SqliteConversationStore — session summary listing', () => {
       const manager = new ConversationManager(handle.store)
       const userId = 'subject:rpc:embedded'
       const key = `${userId}:rpc:agent-x:chat-1`
-      const conversation = await manager.getOrCreate(key)
+      const conversation = await manager.getOrCreate(key, { userId })
       await manager.startTurn(conversation, 'hello', 'task-1')
       await manager.completeTurn(conversation, 'done')
       await handle.persistQueue.drainSessionKey(key)

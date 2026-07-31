@@ -239,7 +239,8 @@ export function prepareStatements(db: Database): PreparedStatements {
       WITH scoped_sessions AS (
         SELECT *
          FROM sessions
-         WHERE session_key >= @prefix_start
+         WHERE user_id = @user_id
+           AND session_key >= @prefix_start
            AND session_key < @prefix_end
            AND (
              (@agent_scoped = 1 AND length(session_key) > length(@prefix_start))
