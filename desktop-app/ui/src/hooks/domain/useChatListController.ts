@@ -73,8 +73,16 @@ interface UseChatListControllerParams {
   host: MutableRefObject<ChatListControllerHost | null>
 }
 
+function sortableTimestamp(value: string): number {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
 const byUpdatedDesc = (a: { updatedAt: string }, b: { updatedAt: string }) =>
-  new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  sortableTimestamp(b.updatedAt) - sortableTimestamp(a.updatedAt)
+
+const byLastActivityDesc = (a: { lastActivityAt: string }, b: { lastActivityAt: string }) =>
+  sortableTimestamp(b.lastActivityAt) - sortableTimestamp(a.lastActivityAt)
 
 function isRecoverableCatalogCursorError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
@@ -206,7 +214,9 @@ export function useChatListController({
         // New hosts scope the page server-side. Keep this boundary check for
         // older hosts and malformed proxy responses so another agent's catalog
         // entry can never leak into the selected agent's sidebar.
-        const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+        const serverSessions = serverResult.items
+          .filter(s => s.agent === agentRef)
+          .sort(byLastActivityDesc)
         chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
         setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
 

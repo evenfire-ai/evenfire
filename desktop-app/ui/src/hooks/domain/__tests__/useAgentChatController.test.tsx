@@ -1365,6 +1365,36 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'older-server')
     })
 
+    it('auto-selects the newest server session from an unsorted catalog response', async () => {
+      clerum.chat.getIndex.mockResolvedValue({
+        version: 3,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [],
+      })
+      clerum.rpc.listSessions.mockResolvedValue({
+        items: [
+          {
+            agent: 'agent-x',
+            chatId: 'older-server',
+            turnCount: 1,
+            lastActivityAt: '2026-05-01T00:00:00Z',
+          },
+          {
+            agent: 'agent-x',
+            chatId: 'newest-server',
+            turnCount: 1,
+            lastActivityAt: '2026-05-03T00:00:00Z',
+          },
+        ],
+      })
+
+      const { result } = renderController({ navItem: 'chat' })
+
+      await waitFor(() => expect(result.current.activeChatId).toBe('newest-server'))
+      expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'older-server')
+    })
+
     it('loads the next remote session page only when requested', async () => {
       clerum.rpc.listSessions.mockImplementation(
         async (_hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
