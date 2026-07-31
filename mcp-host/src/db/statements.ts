@@ -407,7 +407,11 @@ export function prepareStatements(db: Database): PreparedStatements {
        ORDER BY pa.registered_at ASC
     `),
     selectPendingApprovalBySession: db.prepare(`
-      SELECT * FROM pending_approvals WHERE session_id = ? LIMIT 1
+      SELECT *
+        FROM pending_approvals
+       WHERE session_id = ?
+       ORDER BY registered_at ASC, request_id ASC
+       LIMIT 1
     `),
 
     sweepExpiredApprovals: db.prepare(`

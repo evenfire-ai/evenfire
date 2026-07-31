@@ -516,6 +516,50 @@ describe('dbWorker dispatcher', () => {
     expect(rows[0].session_key).toBe('u-3:rpc:agent:default')
   })
 
+  it('selects the earliest pending approval consistently for one session', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-approval-order', 'u-3:rpc:agent:ordered'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-1',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    for (const [requestId, registeredAt] of [
+      ['req-later', 20],
+      ['req-earlier', 10],
+    ] as const) {
+      await dispatch(
+        {
+          kind: 'insert_pending_approval',
+          payload: {
+            request_id: requestId,
+            session_id: session.id,
+            task_id: 'task-1',
+            tool_name: 'shell_exec',
+            tool_call_id: `tc-${requestId}`,
+            parameters: '{}',
+            description: requestId,
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            registered_at: registeredAt,
+            expires_at: 100,
+            trace_context: null,
+          },
+        },
+        deps
+      )
+    }
+
+    const loaded = (await dispatch(
+      { kind: 'load_active_session', sessionKey: session.session_key },
+      deps
+    )) as PersistedSession
+    expect(loaded.pending_approval?.request_id).toBe('req-earlier')
+  })
+
   it('reaps only pending approvals whose session cannot rehydrate the same task', async () => {
     const deps = createDispatcher(db)
     const now = Date.now()
