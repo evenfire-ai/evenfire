@@ -47,6 +47,8 @@ const TOKEN_COUNTER_KEYS = new Set([
   'cache_write_tokens',
 ])
 
+const DUAL_CATALOG_FALLBACK_OVERFETCH = 2
+
 function normalizeParityValue(value: unknown, key?: string): unknown {
   if (value instanceof Date) return value.toISOString()
   if (Array.isArray(value)) return value.map(entry => normalizeParityValue(entry))
@@ -173,41 +175,27 @@ export class DualConversationStore implements ConversationStore {
     let sqlList: ConversationSessionSummary[]
     const durableByKey = new Map<string, ConversationSessionSummary>()
     try {
-      sqlList = await this.sqlite.listSessionSummariesByPrefix(prefix, query)
-      let sqlPage = sqlList
-      while (true) {
-        for (const summary of sqlPage) {
-          if (!this.memory.has(summary.key)) durableByKey.set(summary.key, summary)
-        }
-        if (
-          query.limit === undefined ||
-          durableByKey.size >= query.limit ||
-          sqlPage.length < query.limit
-        ) {
-          break
-        }
-        const last = sqlPage.at(-1)
-        if (!last) break
-        const nextPage = await this.sqlite.listSessionSummariesByPrefix(prefix, {
-          ...query,
-          cursor: { updatedAt: last.lastActivityAt, key: last.key },
-        })
-        const nextLast = nextPage.at(-1)
-        if (
-          nextLast &&
-          nextLast.key === last.key &&
-          nextLast.lastActivityAt.getTime() === last.lastActivityAt.getTime()
-        ) {
-          break
-        }
-        sqlPage = nextPage
+      const memoryFillsPage = query.limit !== undefined && memList.length >= query.limit
+      // A full memory page is already canonical, so SQLite is sampled only for
+      // parity. A partial page gets one bounded over-fetch for cold durable rows;
+      // never drain cursor pages in proportion to the total mirrored catalog.
+      const sqliteQuery =
+        query.limit === undefined || memoryFillsPage
+          ? query
+          : { ...query, limit: query.limit * DUAL_CATALOG_FALLBACK_OVERFETCH }
+      sqlList = await this.sqlite.listSessionSummariesByPrefix(prefix, sqliteQuery)
+      for (const summary of sqlList) {
+        if (!this.memory.has(summary.key)) durableByKey.set(summary.key, summary)
       }
     } catch {
       this.recordParity('listSessionSummariesByPrefix', false)
       return memList
     }
 
-    this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlList))
+    const sqlParityPage =
+      query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
+    this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlParityPage))
+    if (query.limit !== undefined && memList.length >= query.limit) return memList
     // A live memory copy is canonical even when its timestamp places it outside
     // this page. Otherwise an older SQLite copy can cross a later cursor and
     // repeat a key that an earlier page already emitted from memory.

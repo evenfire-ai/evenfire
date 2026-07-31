@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ConversationManager } from '../../conversation'
 import { InMemoryConversationStore } from '../../conversationStore'
 import { DualConversationStore } from '../dualConversationStore'
@@ -173,6 +173,37 @@ describe('DualConversationStore — dual-write parity', () => {
     }
   })
 
+  it('bounds durable catalog probes when memory already has the requested page', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 128 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const dual = new DualConversationStore(memory, sqlite.store)
+      const manager = new ConversationManager(dual)
+      for (let index = 0; index < 100; index += 1) {
+        await manager.getOrCreate(`u-1:rpc:a:chat-${index.toString().padStart(3, '0')}`, {
+          userId: 'u-1',
+        })
+      }
+
+      const expected = await memory.listSessionSummariesByPrefix('u-1:rpc:', { limit: 2 })
+      const sqliteList = vi.spyOn(sqlite.store, 'listSessionSummariesByPrefix')
+      const firstPage = await dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })
+
+      expect(firstPage.map(summary => summary.key)).toEqual([expected[0]!.key])
+      expect(sqliteList).toHaveBeenCalledTimes(1)
+
+      const [first] = firstPage
+      const secondPage = await dual.listSessionSummariesByPrefix('u-1:rpc:', {
+        limit: 1,
+        cursor: { updatedAt: first!.lastActivityAt, key: first!.key },
+      })
+      expect(secondPage.map(summary => summary.key)).toEqual([expected[1]!.key])
+      expect(sqliteList).toHaveBeenCalledTimes(2)
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
   it('does not repeat a memory-owned key when sqlite has an older copy', async () => {
     const sqlite = makeSqliteStore({ cacheSize: 4 })
     try {
@@ -199,7 +230,10 @@ describe('DualConversationStore — dual-write parity', () => {
         .prepare('UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?')
         .run(100, 200, sqliteC.id)
 
-      const dual = new DualConversationStore(memory, sqlite.store)
+      const parity: Array<{ op: string; match: boolean }> = []
+      const dual = new DualConversationStore(memory, sqlite.store, {
+        recordParity: (op, match) => parity.push({ op, match }),
+      })
       const keys: string[] = []
       let cursor: { updatedAt: Date; key: string } | undefined
       for (let pageNumber = 0; pageNumber < 5; pageNumber += 1) {
@@ -213,6 +247,7 @@ describe('DualConversationStore — dual-write parity', () => {
       }
 
       expect(keys).toEqual([keyA, keyB, keyC])
+      expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: false })
     } finally {
       await sqlite.shutdown()
     }
