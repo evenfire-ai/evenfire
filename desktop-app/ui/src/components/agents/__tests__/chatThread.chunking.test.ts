@@ -57,7 +57,34 @@ describe('buildMessageGroupChunks', () => {
     expect(chunks.map(chunk => chunk.chunkKey)).toEqual([
       'server-turns-0',
       'local-local-message',
-      'server-turns-0#2',
+      'server-turns-0#assistant-2',
     ])
+  })
+
+  it('keeps repeated server bucket keys stable when an earlier segment is inserted', () => {
+    const localA = { groupKey: 'local-a', items: [{}] }
+    const localB = { groupKey: 'local-b', items: [{}] }
+    const insertedLocal = { groupKey: 'inserted-local', items: [{}] }
+    const before = buildMessageGroupChunks([
+      group(1, 'user'),
+      localA,
+      group(2, 'assistant'),
+      localB,
+      group(3, 'user'),
+    ])
+    const after = buildMessageGroupChunks([
+      group(1, 'user'),
+      insertedLocal,
+      group(1, 'assistant'),
+      localA,
+      group(2, 'assistant'),
+      localB,
+      group(3, 'user'),
+    ])
+    const keyFor = (chunks: ReturnType<typeof buildMessageGroupChunks>, groupKey: string) =>
+      chunks.find(chunk => chunk.groups.some(entry => entry.group.groupKey === groupKey))?.chunkKey
+
+    expect(keyFor(after, 'assistant-2')).toBe(keyFor(before, 'assistant-2'))
+    expect(keyFor(after, 'user-3')).toBe(keyFor(before, 'user-3'))
   })
 })

@@ -72,7 +72,7 @@ export function buildMessageGroupChunks<T extends ChunkableMessageGroup>(
     chunkKey: string
     groups: Array<{ group: T; groupIndex: number }>
   }> = []
-  const occurrencesByBaseKey = new Map<string, number>()
+  const seenBaseKeys = new Set<string>()
   let lastBaseKey: string | null = null
   for (const [groupIndex, group] of groupedWithKeys.entries()) {
     const firstTurn = group.items[0]?.serverTurnNumber
@@ -84,9 +84,8 @@ export function buildMessageGroupChunks<T extends ChunkableMessageGroup>(
     if (current && lastBaseKey === baseKey) {
       current.groups.push({ group, groupIndex })
     } else {
-      const occurrence = (occurrencesByBaseKey.get(baseKey) ?? 0) + 1
-      occurrencesByBaseKey.set(baseKey, occurrence)
-      const chunkKey = occurrence === 1 ? baseKey : `${baseKey}#${occurrence}`
+      const chunkKey = seenBaseKeys.has(baseKey) ? `${baseKey}#${group.groupKey}` : baseKey
+      seenBaseKeys.add(baseKey)
       chunks.push({ chunkKey, groups: [{ group, groupIndex }] })
       lastBaseKey = baseKey
     }
