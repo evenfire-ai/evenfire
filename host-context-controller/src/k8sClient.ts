@@ -3738,10 +3738,12 @@ export class McpServerWatcher implements McpServerProvider {
                   contextInventoryAuthoritative() &&
                   this.hasMcpServerInventoryAuthority(serverInventoryGeneration) &&
                   this.contexts.get(selectedContext.name) === selectedContext,
-                // This lane reads the result and withholds the certificate on
-                // false, so a lost delete fence is a reported outcome here
-                // rather than a thrown one.
-                honorsLostFence: true,
+                // Only opt in when there is a certificate to withhold. Without
+                // one the result below is discarded, so a reported lost fence
+                // would vanish: no throw to reach the retry, and the recovery
+                // in the desired-state branch does not run for an event that
+                // did not move the revision.
+                honorsLostFence: deltaSafetyCertificate !== undefined,
               }
             )
             if (deltaSafetyCertificate && scopedRevocationCompleted) {
