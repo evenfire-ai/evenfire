@@ -103,6 +103,28 @@ describe('handleSessionsListRoute', () => {
     expect(captured.jsonBody).toEqual({ items: [], nextCursor: 'next-page' })
   })
 
+  it('defaults a cursor-only catalog request to 50 sessions', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({ items: [] })
+    const cursor = encodeSessionsCursor(
+      '2026-04-22T00:00:00.000Z',
+      'chat-1',
+      sessionsCursorScope('user-1')
+    )
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { cursor },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      agent: undefined,
+      limit: 50,
+      cursor,
+    })
+  })
+
   it('passes a validated agent scope to the catalog handler before pagination', async () => {
     const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({ items: [] })
     const req = {
@@ -306,6 +328,32 @@ describe('handleSessionMessagesRoute', () => {
       limit: 200,
       beforeTurn: 21,
       afterTurn: undefined,
+    })
+  })
+
+  it.each([
+    ['beforeTurn', '21', { beforeTurn: 21, afterTurn: undefined }],
+    ['afterTurn', '0', { beforeTurn: undefined, afterTurn: 0 }],
+  ])('defaults a %s-only transcript request to 80 turns', async (name, value, cursors) => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue({
+      agent: 'chatllm',
+      chatId: 'c1',
+      totalTurns: 0,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      turns: [],
+    })
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { [name]: value },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1', {
+      limit: 80,
+      ...cursors,
     })
   })
 
