@@ -1575,6 +1575,10 @@ describe('useAgentChatController — characterization (D.0)', () => {
         await Promise.resolve()
       })
       rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+      rerender({ selectedAgent: 'agent-x', agentNames: ['agent-x', 'agent-y'] })
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith('agent-x'))
+      expect(result.current.chatListMoreLoading).toBe(true)
+
       resolveStalePage?.({
         items: [
           {

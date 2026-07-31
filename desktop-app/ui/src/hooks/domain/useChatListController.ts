@@ -181,7 +181,7 @@ export function useChatListController({
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
-        setChatListMoreLoading(false)
+        setChatListMoreLoading(chatListLoadingMoreByAgentRef.current.has(agentRef))
       }
       const index = await chatStore.getIndex(agentRef)
       const merged = [...index.chats].sort(byUpdatedDesc)
