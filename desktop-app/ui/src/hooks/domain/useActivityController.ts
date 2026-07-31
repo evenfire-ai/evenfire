@@ -118,9 +118,18 @@ export function useActivityController({
     let cancelled = false
     void Promise.all(
       chatIds.map(async chatId => {
-        const messages = await chatStore
-          .loadMessages(selectedAgent, chatId, ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT)
-          .catch(() => [])
+        let messages: Awaited<ReturnType<typeof chatStore.loadMessages>>
+        try {
+          messages = await chatStore.loadMessages(
+            selectedAgent,
+            chatId,
+            ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT
+          )
+        } catch {
+          // A failed read is unknown, not an empty transcript. Leave this chat
+          // unmarked so a later catalog refresh can retry the backfill.
+          return null
+        }
         try {
           await chatStore.backfillCounters(selectedAgent, chatId, messages)
         } catch {
@@ -140,9 +149,10 @@ export function useActivityController({
       })
     ).then(entries => {
       if (!cancelled) {
+        const successfulEntries = entries.filter(entry => entry !== null)
         setBackfilledCountersByChat(previous => ({
           ...previous,
-          ...Object.fromEntries(entries),
+          ...Object.fromEntries(successfulEntries),
         }))
       }
     })

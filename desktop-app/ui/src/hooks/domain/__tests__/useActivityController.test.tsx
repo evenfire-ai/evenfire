@@ -148,6 +148,57 @@ describe('useActivityController', () => {
     )
   })
 
+  it('keeps failed counter reads retryable instead of persisting zero aggregates', async () => {
+    const messages = [
+      { id: 'm1', role: 'assistant', content: 'failed', timestamp: 1, isError: true },
+    ]
+    const loadMessages = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary read failure'))
+      .mockResolvedValue(messages)
+    const backfillCounters = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        chat: {
+          getIndex: vi.fn(async () => ({ chats: [] })),
+          loadMessages,
+          backfillCounters,
+        },
+      },
+    })
+    const localChat = {
+      id: 'legacy-chat',
+      title: 'Legacy',
+      createdAt: '2026-07-22T00:00:00.000Z',
+      updatedAt: '2026-07-22T00:00:00.000Z',
+      messageCount: 1,
+    }
+    const initialProps = { chatList: [localChat] }
+    const { result, rerender } = renderHook(
+      ({ chatList }: typeof initialProps) =>
+        useActivityController({
+          selectedAgent: 'agent-a',
+          isAuthenticated: true,
+          loadMenuData: true,
+          chatList,
+          progressByAgentMessage: EMPTY_PROGRESS,
+          agentNames: AGENT_A,
+        }),
+      { initialProps }
+    )
+
+    await waitFor(() => expect(loadMessages).toHaveBeenCalledTimes(1))
+    expect(backfillCounters).not.toHaveBeenCalled()
+
+    rerender({ chatList: [{ ...localChat, remote: true }] })
+    rerender({ chatList: [localChat] })
+
+    await waitFor(() => expect(loadMessages).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.selectedAgentActivitySummary.errors).toBe(1))
+    expect(backfillCounters).toHaveBeenCalledWith('agent-a', 'legacy-chat', messages)
+  })
+
   it('does not download transcripts for server-only catalog entries', async () => {
     const getIndex = vi.fn(async () => ({
       version: 3,
