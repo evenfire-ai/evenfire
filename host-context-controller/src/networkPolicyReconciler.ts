@@ -892,7 +892,16 @@ export class NetworkPolicyReconciler {
         lostFenceOutcome
       )
       if (deleted) return true
-      if (safetySnapshotProvided) return false
+      if (safetySnapshotProvided) {
+        // The authoritative pass is condemned from here: it will unwind and
+        // throw. Losing the fence is the only doom cause that does not bump a
+        // watch generation, so without this the certification machinery stays
+        // green for the whole unwind and a concurrent scoped delta can certify
+        // readiness over the allow this pass failed to revoke. Record it the
+        // moment it is known rather than when the pass finally reports.
+        this.safetyPassLeftUncertified = true
+        return false
+      }
       lostDeleteFence = true
       return true
     }

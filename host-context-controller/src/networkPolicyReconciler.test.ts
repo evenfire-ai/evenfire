@@ -4816,6 +4816,63 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('marks the inventory uncertified the moment the authoritative pass loses the fence', async () => {
+      // The doom must be visible mid-pass, not only after the unwind. A lost
+      // fence is the one doom cause that does not bump a watch generation, so
+      // it is the only one where the whole certification machinery stays green
+      // while the pass is already condemned. A scoped delta interleaving in
+      // that window would certify readiness over a stale allow.
+      //
+      // Two contexts, each with its own stale policy: the first loses the fence
+      // and the second's delete gives an observation point while the pass is
+      // condemned but still unwinding.
+      const secondContext: ContextCRD = {
+        name: 'second',
+        namespace: 'mcp-server',
+        spec: { contextId: 'second', mcpServers: [] },
+      }
+      const secondStalePolicy: k8s.V1NetworkPolicy = {
+        metadata: {
+          name: 'ctx-second-beta',
+          namespace: 'mcp-server',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/policy-type': 'context-allow',
+            'clerum.io/context': 'second',
+            'clerum.io/mcpserver': 'beta',
+          },
+        },
+        spec: { podSelector: {}, policyTypes: ['Ingress'] },
+      }
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace }: { namespace?: string }) => ({
+          items: namespace === 'mcp-server' ? [stalePolicy, secondStalePolicy] : [],
+        })
+      )
+      let certifiedDuringUnwind: boolean | undefined
+      mockApi.deleteNamespacedNetworkPolicy.mockImplementation(async () => {
+        if (
+          certifiedDuringUnwind === undefined &&
+          mockApi.deleteNamespacedNetworkPolicy.mock.calls.length > 1
+        ) {
+          certifiedDuringUnwind = reconciler.hasCertifiedSafetyInventory()
+          return {}
+        }
+        throw lostFence
+      })
+
+      await expect(
+        reconciler.fullReconcile([staleContext, secondContext], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete: vi.fn(),
+        })
+      ).rejects.toThrow()
+
+      expect(certifiedDuringUnwind).toBe(false)
+    })
+
     it('fails the additive phase when it loses the delete fence', async () => {
       listOnlyTheStalePolicy()
       // Safety phase revokes cleanly and certifies; the additive phase then
