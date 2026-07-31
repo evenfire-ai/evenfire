@@ -1061,6 +1061,42 @@ describe('messages', () => {
     ).toBe(3)
   })
 
+  it('does not adopt an orphan page across a missing page number', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'orphan-gap')
+    await pagedStore.saveMessages('agent-1', 'orphan-gap', [
+      { id: 'm0', role: 'user', content: 'zero', timestamp: 0 },
+      { id: 'm1', role: 'assistant', content: 'one', timestamp: 1 },
+    ])
+    await fs.writeFile(
+      join(chatPagesDir('orphan-gap'), '000003.json'),
+      JSON.stringify({
+        version: 1,
+        chatId: 'orphan-gap',
+        pageNumber: 3,
+        messages: [{ id: 'm4', role: 'user', content: 'after missing page', timestamp: 4 }],
+      })
+    )
+
+    const restartedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    const firstRead = await restartedStore.loadMessages('agent-1', 'orphan-gap')
+    const secondRead = await restartedStore.loadMessages('agent-1', 'orphan-gap')
+    const meta = await readJsonFile<{ pages: Array<{ file: string }> }>(chatMetaPath('orphan-gap'))
+
+    expect(firstRead.map(message => message.id)).toEqual(['m0', 'm1'])
+    expect(secondRead.map(message => message.id)).toEqual(['m0', 'm1'])
+    expect(meta.pages.map(page => page.file)).toEqual(['000001.json'])
+    await expect(
+      fs.access(join(chatPagesDir('orphan-gap'), '000003.json'))
+    ).resolves.toBeUndefined()
+  })
+
   it('recovers page data when hot metadata contains an invalid page count', async () => {
     await store.createChat('agent-1', 'invalid-page-count')
     await store.saveMessages('agent-1', 'invalid-page-count', [

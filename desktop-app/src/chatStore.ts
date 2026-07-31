@@ -911,21 +911,29 @@ export class ChatStore {
       )
       .sort((a, b) => pageNumberFromFileName(a) - pageNumberFromFileName(b))
 
+    let expectedPageNumber = lastReferencedNumber + 1
     for (const file of durableOrphans) {
+      const pageNumber = pageNumberFromFileName(file)
+      // Reader metadata requires contiguous page numbers. A later orphan cannot
+      // prove that the missing page was never written, so stop at the first gap.
+      if (pageNumber !== expectedPageNumber) break
       try {
         const messages = await this.readPageMessagesAtPath(
           chatId,
-          pageNumberFromFileName(file),
+          pageNumber,
           this.chatPagePathFromPagesDir(pagesDir, file)
         )
-        if (!messages.length) continue
+        if (!messages.length) break
         repairedPages.push(pageEntry(file, messages))
         referenced.add(file)
         changed = true
+        expectedPageNumber += 1
       } catch (error) {
         if (isRawFilesystemError(error) && !isNotFoundError(error)) throw error
         // Leave an invalid orphan untouched. It is not referenced by metadata,
         // so it cannot break reads and may still be useful for manual recovery.
+        // Later pages are not safe to adopt across this gap.
+        break
       }
     }
 
