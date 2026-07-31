@@ -131,6 +131,75 @@ describe('RpcProxyClient.listSessions', () => {
     ).resolves.toMatchObject({ agent: 'agent-a', chatId: 'chat-a', turns: [{ number: 1 }] })
   })
 
+  it('accepts zero-based turn metadata emitted by the session service', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          totalTurns: 1,
+          oldestTurnNumber: 0,
+          latestTurnNumber: 0,
+          turns: [
+            {
+              number: 0,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({
+      oldestTurnNumber: 0,
+      latestTurnNumber: 0,
+      turns: [{ number: 0 }],
+    })
+  })
+
+  it.each([
+    ['oldestTurnNumber', -1],
+    ['oldestTurnNumber', 0.5],
+    ['oldestTurnNumber', Number.MAX_SAFE_INTEGER + 1],
+    ['latestTurnNumber', -1],
+    ['latestTurnNumber', 0.5],
+    ['latestTurnNumber', Number.MAX_SAFE_INTEGER + 1],
+    ['turn number', -1],
+    ['turn number', 0.5],
+    ['turn number', Number.MAX_SAFE_INTEGER + 1],
+  ])('rejects invalid %s values: %s', async (field, invalidValue) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          ...(field === 'oldestTurnNumber' ? { oldestTurnNumber: invalidValue } : {}),
+          ...(field === 'latestTurnNumber' ? { latestTurnNumber: invalidValue } : {}),
+          turns: [
+            {
+              number: field === 'turn number' ? invalidValue : 0,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).rejects.toThrow(/session messages response/)
+  })
+
   it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid message metadata counts: %s',
     async invalidCount => {

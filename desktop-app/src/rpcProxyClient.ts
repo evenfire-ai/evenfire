@@ -184,7 +184,7 @@ function parseSessionMessagesResult(
           oldestTurnNumber: wireSafeInteger(
             record.oldestTurnNumber,
             'session messages response.oldestTurnNumber',
-            1
+            0
           )!,
         }
       : {}),
@@ -193,7 +193,7 @@ function parseSessionMessagesResult(
           latestTurnNumber: wireSafeInteger(
             record.latestTurnNumber,
             'session messages response.latestTurnNumber',
-            1
+            0
           )!,
         }
       : {}),
@@ -241,7 +241,7 @@ function parseSessionMessagesResult(
         number: wireSafeInteger(
           entry.number,
           `session messages response.turns[${index}].number`,
-          1
+          0
         )!,
         user_input: wireString(
           entry.user_input,
