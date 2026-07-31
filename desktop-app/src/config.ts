@@ -498,7 +498,10 @@ const envRuntimeConfigured = Boolean(
 const envMatchesLocalhostOption = runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
 
 function shouldPreferLocalhostByDefault(): boolean {
-  return canUseEnvRuntimeConfig && envRuntimeConfigured && envMatchesLocalhostOption
+  const explicitDevelopmentLaunch = app?.isPackaged
+    ? desktopDevPackageRuntimeConfigEnabled
+    : Boolean(process.env.EVENFIRE_RENDERER_URL?.trim())
+  return explicitDevelopmentLaunch && envRuntimeConfigured && envMatchesLocalhostOption
 }
 const loadedProfilesState = loadStoredProfilesSync()
 let storedProfiles = loadedProfilesState.profiles

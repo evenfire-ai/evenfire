@@ -282,4 +282,56 @@ describe('desktop runtime config', () => {
       rpcProxyBaseUrl: 'http://127.0.0.1:8094',
     })
   })
+
+  it('keeps a saved remote profile when an unpackaged run lacks the renderer dev flag', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    const runtimeConfigDir = path.join(tempUserDataDir, 'runtime-configs')
+    await fsp.mkdir(runtimeConfigDir, { recursive: true })
+    await fsp.writeFile(
+      path.join(runtimeConfigDir, 'index.json'),
+      JSON.stringify({
+        version: 1,
+        activeProfileId: 'remote',
+        profiles: [
+          {
+            id: 'remote',
+            appName: 'Remote',
+            fileName: 'runtime-config-remote.json',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    )
+    await fsp.writeFile(
+      path.join(runtimeConfigDir, 'runtime-config-remote.json'),
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://api.remote.example.com',
+        rpcProxyBaseUrl: 'https://rpc.remote.example.com',
+        appName: 'Remote',
+      })
+    )
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    delete process.env.EVENFIRE_RENDERER_URL
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: false,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const { config, getDesktopRuntimeConfigState } = await import('../config.js')
+
+    expect(config.externalRestApiBaseUrl).toBe('https://api.remote.example.com')
+    expect(config.rpcProxyBaseUrl).toBe('https://rpc.remote.example.com')
+    expect(getDesktopRuntimeConfigState().activeOptionId).toBe('remote')
+  })
 })
