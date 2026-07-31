@@ -792,7 +792,14 @@ export function useAgentChatController({
       const switchRequest = Symbol(`${agentRef}:${chatId}`)
       activeChatSwitchRequestRef.current = switchRequest
       const key = makeTaskKey(agentRef, chatId)
-      reconcileChatRef.current!.supersede(key)
+      const visibleBeforeSwitch = activeChatVisibilityRef.current
+      const reopeningActiveChat =
+        visibleBeforeSwitch.selectedAgent === agentRef &&
+        visibleBeforeSwitch.activeChatId === chatId
+      // A same-chat click must coalesce onto an already-running loud recovery.
+      // Superseding it would discard the stream-loss caller that owns the Resend
+      // or durable-result UX. Genuine chat changes still cancel stale work.
+      if (!reopeningActiveChat) reconcileChatRef.current!.supersede(key)
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
         activeChatId: chatId,
