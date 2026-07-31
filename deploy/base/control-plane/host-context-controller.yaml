@@ -13,6 +13,16 @@ metadata:
     app: host-context-controller
 spec:
   replicas: 1
+  # HCC's safety model assumes a single NetworkPolicy writer: replicas:1 with no
+  # leader election (see statelessLifecycleExecutor.ts). RollingUpdate (the
+  # default) starts the new pod before terminating the old one, so every rollout
+  # would overlap two writers — during which the outgoing replica can win a
+  # conflict-retry replace and land its wider spec back over a policy the new
+  # replica just hardened and certified, with no NetworkPolicy resync to heal it
+  # and /ready still 200. Recreate terminates the old pod first, honouring the
+  # single-writer assumption through the rollout too.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: host-context-controller
