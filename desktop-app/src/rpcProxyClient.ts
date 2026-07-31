@@ -44,7 +44,7 @@ function wireString(value: unknown, label: string): string {
 }
 
 function optionalWireString(value: unknown, label: string): string | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || value === null) return undefined
   return wireString(value, label)
 }
 
@@ -54,7 +54,7 @@ function wireSafeInteger(
   minimum: number,
   optional = false
 ): number | undefined {
-  if (optional && value === undefined) return undefined
+  if (optional && (value === undefined || value === null)) return undefined
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
     throw new Error(`Invalid ${label}`)
   }
@@ -62,21 +62,20 @@ function wireSafeInteger(
 }
 
 function optionalWireBoolean(value: unknown, label: string): boolean | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || value === null) return undefined
   if (typeof value !== 'boolean') throw new Error(`Invalid ${label}`)
   return value
 }
 
 function parseSessionState(value: unknown, label: string): SessionLifecycleState | undefined {
-  if (value === undefined) return undefined
-  if (value !== 'idle' && value !== 'processing' && value !== 'awaiting_approval') {
-    throw new Error(`Invalid ${label}`)
-  }
-  return value
+  if (value === undefined || value === null) return undefined
+  if (value === 'idle' || value === 'processing' || value === 'awaiting_approval') return value
+  if (typeof value === 'string') return undefined
+  throw new Error(`Invalid ${label}`)
 }
 
 function parsePendingApproval(value: unknown, label: string): PendingApprovalLite | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || value === null) return undefined
   const record = wireObject(value, label)
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
@@ -85,7 +84,7 @@ function parsePendingApproval(value: unknown, label: string): PendingApprovalLit
 }
 
 function parseTokens(value: unknown, label: string): SessionTokensLite | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || value === null) return undefined
   const record = wireObject(value, label)
   return {
     input: wireSafeInteger(record.input, `${label}.input`, 0)!,
@@ -125,55 +124,64 @@ function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
 function parseSessionsListResult(value: unknown): SessionsListResult {
   const record = wireObject(value, 'sessions response')
   if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
-  return {
-    items: record.items.map((item, index) => {
+  let firstItemError: unknown
+  const items = record.items.flatMap((item, index): SessionsListResult['items'] => {
+    try {
       const entry = wireObject(item, `sessions response.items[${index}]`)
-      return {
-        agent: wireString(entry.agent, `sessions response.items[${index}].agent`),
-        chatId: wireString(entry.chatId, `sessions response.items[${index}].chatId`),
-        turnCount: wireSafeInteger(
-          entry.turnCount,
-          `sessions response.items[${index}].turnCount`,
-          0
-        )!,
-        ...(entry.messageCount !== undefined
-          ? {
-              messageCount: wireSafeInteger(
-                entry.messageCount,
-                `sessions response.items[${index}].messageCount`,
-                0
-              )!,
-            }
-          : {}),
-        lastActivityAt: wireString(
-          entry.lastActivityAt,
-          `sessions response.items[${index}].lastActivityAt`
-        ),
-        ...(entry.state !== undefined
-          ? { state: parseSessionState(entry.state, `sessions response.items[${index}].state`) }
-          : {}),
-        ...(entry.activeTaskId !== undefined
-          ? {
-              activeTaskId: optionalWireString(
-                entry.activeTaskId,
-                `sessions response.items[${index}].activeTaskId`
-              ),
-            }
-          : {}),
-        ...(entry.pendingApproval !== undefined
-          ? {
-              pendingApproval: parsePendingApproval(
-                entry.pendingApproval,
-                `sessions response.items[${index}].pendingApproval`
-              ),
-            }
-          : {}),
-        ...(entry.tokens !== undefined
-          ? { tokens: parseTokens(entry.tokens, `sessions response.items[${index}].tokens`) }
-          : {}),
-      }
-    }),
-    ...(record.nextCursor !== undefined
+      const state = parseSessionState(entry.state, `sessions response.items[${index}].state`)
+      return [
+        {
+          agent: wireString(entry.agent, `sessions response.items[${index}].agent`),
+          chatId: wireString(entry.chatId, `sessions response.items[${index}].chatId`),
+          turnCount: wireSafeInteger(
+            entry.turnCount,
+            `sessions response.items[${index}].turnCount`,
+            0
+          )!,
+          ...(entry.messageCount != null
+            ? {
+                messageCount: wireSafeInteger(
+                  entry.messageCount,
+                  `sessions response.items[${index}].messageCount`,
+                  0
+                )!,
+              }
+            : {}),
+          lastActivityAt: wireString(
+            entry.lastActivityAt,
+            `sessions response.items[${index}].lastActivityAt`
+          ),
+          ...(state !== undefined ? { state } : {}),
+          ...(entry.activeTaskId != null
+            ? {
+                activeTaskId: optionalWireString(
+                  entry.activeTaskId,
+                  `sessions response.items[${index}].activeTaskId`
+                ),
+              }
+            : {}),
+          ...(entry.pendingApproval != null
+            ? {
+                pendingApproval: parsePendingApproval(
+                  entry.pendingApproval,
+                  `sessions response.items[${index}].pendingApproval`
+                ),
+              }
+            : {}),
+          ...(entry.tokens != null
+            ? { tokens: parseTokens(entry.tokens, `sessions response.items[${index}].tokens`) }
+            : {}),
+        },
+      ]
+    } catch (error) {
+      firstItemError ??= error
+      return []
+    }
+  })
+  if (record.items.length > 0 && items.length === 0 && firstItemError) throw firstItemError
+  return {
+    items,
+    ...(record.nextCursor != null
       ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
       : {}),
   }
@@ -191,10 +199,11 @@ function parseSessionMessagesResult(
     throw new Error('Invalid session messages response identity')
   }
   if (!Array.isArray(record.turns)) throw new Error('Invalid session messages response.turns')
+  const state = parseSessionState(record.state, 'session messages response.state')
   return {
     agent,
     chatId,
-    ...(record.totalTurns !== undefined
+    ...(record.totalTurns != null
       ? {
           totalTurns: wireSafeInteger(
             record.totalTurns,
@@ -203,7 +212,7 @@ function parseSessionMessagesResult(
           )!,
         }
       : {}),
-    ...(record.oldestTurnNumber !== undefined
+    ...(record.oldestTurnNumber != null
       ? {
           oldestTurnNumber: wireSafeInteger(
             record.oldestTurnNumber,
@@ -212,7 +221,7 @@ function parseSessionMessagesResult(
           )!,
         }
       : {}),
-    ...(record.latestTurnNumber !== undefined
+    ...(record.latestTurnNumber != null
       ? {
           latestTurnNumber: wireSafeInteger(
             record.latestTurnNumber,
@@ -221,7 +230,7 @@ function parseSessionMessagesResult(
           )!,
         }
       : {}),
-    ...(record.hasMoreBefore !== undefined
+    ...(record.hasMoreBefore != null
       ? {
           hasMoreBefore: optionalWireBoolean(
             record.hasMoreBefore,
@@ -229,7 +238,7 @@ function parseSessionMessagesResult(
           ),
         }
       : {}),
-    ...(record.hasMoreAfter !== undefined
+    ...(record.hasMoreAfter != null
       ? {
           hasMoreAfter: optionalWireBoolean(
             record.hasMoreAfter,
@@ -237,10 +246,8 @@ function parseSessionMessagesResult(
           ),
         }
       : {}),
-    ...(record.state !== undefined
-      ? { state: parseSessionState(record.state, 'session messages response.state') }
-      : {}),
-    ...(record.activeTaskId !== undefined
+    ...(state !== undefined ? { state } : {}),
+    ...(record.activeTaskId != null
       ? {
           activeTaskId: optionalWireString(
             record.activeTaskId,
@@ -248,7 +255,7 @@ function parseSessionMessagesResult(
           ),
         }
       : {}),
-    ...(record.pendingApproval !== undefined
+    ...(record.pendingApproval != null
       ? {
           pendingApproval: parsePendingApproval(
             record.pendingApproval,
@@ -256,7 +263,7 @@ function parseSessionMessagesResult(
           ),
         }
       : {}),
-    ...(record.tokens !== undefined
+    ...(record.tokens != null
       ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
       : {}),
     turns: record.turns.map((turn, index) => {
@@ -271,7 +278,7 @@ function parseSessionMessagesResult(
           entry.user_input,
           `session messages response.turns[${index}].user_input`
         ),
-        ...(entry.response !== undefined
+        ...(entry.response != null
           ? {
               response: optionalWireString(
                 entry.response,
@@ -283,7 +290,7 @@ function parseSessionMessagesResult(
           entry.started_at,
           `session messages response.turns[${index}].started_at`
         ),
-        ...(entry.completed_at !== undefined
+        ...(entry.completed_at != null
           ? {
               completed_at: optionalWireString(
                 entry.completed_at,
@@ -291,12 +298,12 @@ function parseSessionMessagesResult(
               ),
             }
           : {}),
-        ...(entry.tokens !== undefined
+        ...(entry.tokens != null
           ? {
               tokens: parseTokens(entry.tokens, `session messages response.turns[${index}].tokens`),
             }
           : {}),
-        ...(entry.tool_steps !== undefined
+        ...(entry.tool_steps != null
           ? {
               tool_steps: parseToolSteps(
                 entry.tool_steps,

@@ -74,6 +74,74 @@ describe('RpcProxyClient.listSessions', () => {
     })
   })
 
+  it('treats nullable optional session metadata as absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              messageCount: null,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+              state: null,
+              activeTaskId: null,
+              pendingApproval: null,
+              tokens: null,
+            },
+          ],
+          nextCursor: null,
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turnCount: 1,
+          lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    })
+  })
+
+  it('keeps valid catalog entries when one item is malformed and omits unknown states', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            { chatId: 'malformed', turnCount: 1, lastActivityAt: '2026-01-01T00:00:00Z' },
+            {
+              agent: 'agent-a',
+              chatId: 'valid',
+              turnCount: 1,
+              lastActivityAt: '2026-01-02T00:00:00Z',
+              state: 'new_additive_state',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'valid',
+          turnCount: 1,
+          lastActivityAt: '2026-01-02T00:00:00Z',
+        },
+      ],
+    })
+  })
+
   it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid session catalog counts: %s',
     async invalidCount => {
@@ -131,6 +199,54 @@ describe('RpcProxyClient.listSessions', () => {
     ).resolves.toMatchObject({ agent: 'agent-a', chatId: 'chat-a', turns: [{ number: 1 }] })
   })
 
+  it('treats nullable optional message metadata as absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          totalTurns: null,
+          oldestTurnNumber: null,
+          latestTurnNumber: null,
+          hasMoreBefore: null,
+          hasMoreAfter: null,
+          state: null,
+          activeTaskId: null,
+          pendingApproval: null,
+          tokens: null,
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: null,
+              started_at: '2026-01-01T00:00:00.000Z',
+              completed_at: null,
+              tokens: null,
+              tool_steps: null,
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).resolves.toEqual(
+      {
+        agent: 'agent-a',
+        chatId: 'chat-a',
+        turns: [
+          {
+            number: 1,
+            user_input: 'hello',
+            started_at: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      }
+    )
+  })
+
   it('accepts zero-based turn metadata emitted by the session service', async () => {
     vi.stubGlobal(
       'fetch',
@@ -185,9 +301,9 @@ describe('RpcProxyClient.listSessions', () => {
       })
     )
 
-    await expect(
-      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
-    ).rejects.toThrow(/tool_steps/)
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /tool_steps/
+    )
   })
 
   it('accepts producer-shaped tool_steps and validates their optional fields', async () => {
@@ -271,9 +387,9 @@ describe('RpcProxyClient.listSessions', () => {
       })
     )
 
-    await expect(
-      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
-    ).rejects.toThrow(/session messages response/)
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /session messages response/
+    )
   })
 
   it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
