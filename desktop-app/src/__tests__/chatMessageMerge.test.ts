@@ -260,6 +260,51 @@ describe('mergeAuthoritativeServerMessages', () => {
     ])
   })
 
+  it('preserves a local message interleaved between authoritative slots of one turn', () => {
+    const local: ChatMessage[] = [
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'question',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'local-warning',
+        role: 'system',
+        content: 'local warning',
+        timestamp: 2,
+        preserveLocal: true,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'answer',
+        timestamp: 3,
+        serverTurnNumber: 1,
+      },
+    ]
+    const authoritative = turnsToChatMessages([
+      {
+        number: 1,
+        user_input: 'question',
+        response: 'answer',
+        started_at: new Date(1).toISOString(),
+        completed_at: new Date(3).toISOString(),
+      },
+    ])
+
+    const first = mergeAuthoritativeServerMessages(local, authoritative)
+    const second = mergeAuthoritativeServerMessages(first, authoritative)
+
+    expect(first.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'local-warning',
+      'turn-1-assistant',
+    ])
+    expect(second).toEqual(first)
+  })
+
   it('preserves durable turnless message positions between replaced turns', () => {
     const merged = mergeAuthoritativeServerMessages(
       [

@@ -260,10 +260,15 @@ export function mergeAuthoritativeServerMessages(
   let minimumAnchorIndex = 0
   for (const replacement of hydratedReplacements) {
     const replacementTurn = messageServerTurnNumber(replacement.message)!
+    const exactSlotAnchor = existing.findIndex(
+      message =>
+        messageServerTurnNumber(message) === replacementTurn &&
+        message.role === replacement.message.role
+    )
     const exactTurnAnchor = existing.findIndex(
       message => messageServerTurnNumber(message) === replacementTurn
     )
-    let anchorIndex = exactTurnAnchor
+    let anchorIndex = exactSlotAnchor >= 0 ? exactSlotAnchor : exactTurnAnchor
     if (anchorIndex < 0) {
       anchorIndex = replacementAnchorByTurn.get(replacementTurn) ?? -1
     }
