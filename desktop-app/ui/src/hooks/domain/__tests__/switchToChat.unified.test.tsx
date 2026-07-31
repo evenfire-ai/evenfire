@@ -44,6 +44,14 @@ const turn = (n: number, user: string, response?: string) => ({
   completed_at: response ? `2026-05-28T10:0${n}:05Z` : undefined,
 })
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 describe('switchToChat (unified, D.4)', () => {
   it('Phase 1 renders the cache, Phase 2 reconciles, and preserves the cache when there is no diff', async () => {
     const cached = [
@@ -158,6 +166,82 @@ describe('switchToChat (unified, D.4)', () => {
       'stale answer'
     )
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(3)
+  })
+
+  it('drops a superseded A reconcile parked inside hydration after A-B-A', async () => {
+    type Messages = Awaited<ReturnType<typeof clerum.chat.loadMessages>>
+    type SessionResult = Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>
+    const staleFetch = deferred<SessionResult>()
+    const staleHydration = deferred<Messages>()
+    clerum.chat.loadMessages
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => staleHydration.promise)
+      .mockResolvedValue([])
+    let agentAFetches = 0
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (_hostRef: string, _agentRef: string, chatId: string) => {
+        if (chatId === 'chat-b') {
+          return {
+            agent: 'agent-x',
+            chatId: 'chat-b',
+            state: 'idle' as const,
+            turns: [],
+          }
+        }
+        agentAFetches += 1
+        return agentAFetches === 1
+          ? staleFetch.promise
+          : {
+              agent: 'agent-x',
+              chatId: 'chat-a',
+              state: 'idle' as const,
+              turns: [turn(1, 'question', 'fresh answer')],
+            }
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+    let staleSwitch!: Promise<void>
+    await act(async () => {
+      staleSwitch = result.current.switchToChat('agent-x', 'chat-a')
+      await waitFor(() => expect(agentAFetches).toBe(1))
+    })
+    await act(async () => {
+      staleFetch.resolve({
+        agent: 'agent-x',
+        chatId: 'chat-a',
+        state: 'idle',
+        turns: [turn(1, 'question', 'stale answer')],
+      })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(clerum.chat.loadMessages).toHaveBeenCalledTimes(3))
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-b')
+      await result.current.switchToChat('agent-x', 'chat-a')
+    })
+    await waitFor(() =>
+      expect(result.current.chatMessages.map(message => message.content)).toContain('fresh answer')
+    )
+    const persistedBeforeStaleHydration = clerum.chat.replaceMessages.mock.calls.length
+
+    await act(async () => {
+      staleHydration.resolve([])
+      await staleSwitch
+    })
+
+    expect(result.current.chatMessages.map(message => message.content)).toContain('fresh answer')
+    expect(result.current.chatMessages.map(message => message.content)).not.toContain(
+      'stale answer'
+    )
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledTimes(persistedBeforeStaleHydration)
+    expect(
+      clerum.chat.replaceMessages.mock.calls.some(call =>
+        call[2].some(message => message.content === 'stale answer')
+      )
+    ).toBe(false)
   })
 
   it('does not overwrite a long chat whose cache already matches the server (no 50-cap false-stale)', async () => {

@@ -1414,8 +1414,14 @@ export function useAgentChatController({
     async (
       chatKey: TaskKey,
       resp: SessionMessagesResult,
-      taskIdHint: string | undefined
-    ): Promise<{ rendered: AgentChatMessage[]; replaced: boolean; cached: AgentChatMessage[] }> => {
+      taskIdHint: string | undefined,
+      stillRelevant: () => boolean
+    ): Promise<{
+      rendered: AgentChatMessage[]
+      replaced: boolean
+      cached: AgentChatMessage[]
+      stale: boolean
+    }> => {
       const { agentRef, chatId } = parseTaskKey(chatKey)
       const isActive = () => {
         const v = activeChatVisibilityRef.current
@@ -1438,12 +1444,19 @@ export function useAgentChatController({
         (resp as ReconciliationMessagesResult)[DELTA_RECONCILIATION_WINDOW] === true
       const hasOlderFromServer = !deltaWindow && Boolean(resp.hasMoreBefore)
       const localMessages = mergeUniqueMessages(visible, cached)
+      const staleResult = (rendered: AgentChatMessage[] = localMessages) => ({
+        rendered,
+        replaced: false,
+        cached: localMessages,
+        stale: true,
+      })
+      if (!stillRelevant()) return staleResult()
       if (!isActive() || tracker.get(chatKey)) {
-        return { rendered: localMessages, replaced: false, cached: localMessages }
+        return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
       }
       const hydrated = turnsToChatMessages(resp.turns) as AgentChatMessage[]
       if (!hydrated.length) {
-        return { rendered: localMessages, replaced: false, cached: localMessages }
+        return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
       }
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
@@ -1452,15 +1465,16 @@ export function useAgentChatController({
         const responseContainsAllTurns =
           resp.totalTurns === undefined || resp.totalTurns === resp.turns.length
         if (responseContainsAllTurns && hydrated.length <= localMessages.length) {
-          return { rendered: localMessages, replaced: false, cached: localMessages }
+          return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
         }
       }
       const hydratedWithAttachments = withResponseFileAttachments(
         hydrated,
         taskIdHint ? await loadTaskResultResponseFileAttachments(agentRef, taskIdHint) : []
       )
+      if (!stillRelevant()) return staleResult()
       if (!isActive() || tracker.get(chatKey)) {
-        return { rendered: localMessages, replaced: false, cached: localMessages }
+        return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
       }
       // Pre-paging caches have no server-turn identity, so ordinary local
       // user/assistant rows cannot be compared safely with an authoritative
@@ -1469,26 +1483,30 @@ export function useAgentChatController({
       // its optimistic bubbles remain visible until task-scoped reconciliation.
       const replaceSettledLegacyCache =
         localMessages.length > 0 && !localHasServerTurns && !resp.activeTaskId
-      const rendered = localMessages.length && !replaceSettledLegacyCache
-        ? mergeServerMessages(
-            localMessages,
-            hydratedWithAttachments,
-            resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined
-          )
-        : hydratedWithAttachments
+      const rendered =
+        localMessages.length && !replaceSettledLegacyCache
+          ? mergeServerMessages(
+              localMessages,
+              hydratedWithAttachments,
+              resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined
+            )
+          : hydratedWithAttachments
       const hasOlderAfterMerge =
         hasOlderFromServer || nextServerBackfillBeforeTurn(rendered) !== undefined
+      if (!stillRelevant()) return staleResult(rendered)
       if (latestPageFallback) {
         setHasOlderMessages(hasOlderAfterMerge)
       } else {
         setHasOlderMessages(previous => previous || hasOlderAfterMerge)
       }
       if (sameMessageSequence(rendered, localMessages)) {
-        return { rendered: localMessages, replaced: false, cached: localMessages }
+        return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
       }
+      if (!stillRelevant()) return staleResult(rendered)
       chatMessagesRef.current = rendered
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
+      if (!stillRelevant()) return staleResult(rendered)
       if (resp.activeTaskId) {
         await chatStore.replaceMessages(agentRef, chatId, rendered, {
           activeTaskIds: [resp.activeTaskId],
@@ -1496,7 +1514,10 @@ export function useAgentChatController({
       } else {
         await chatStore.replaceMessages(agentRef, chatId, rendered)
       }
-      if (!isActive()) return { rendered, replaced: true, cached: localMessages }
+      if (!stillRelevant()) return staleResult(rendered)
+      if (!isActive()) {
+        return { rendered, replaced: true, cached: localMessages, stale: false }
+      }
       loadedLocalMessageCountRef.current = rendered.length
       // Auto-title a fresh hydration (empty cache) from the first user turn, so a
       // server-only chat doesn't keep its "Chat <id>" placeholder (A.4.4 / S4).
@@ -1509,6 +1530,7 @@ export function useAgentChatController({
             : firstUserInput
         if (hydratedTitle) {
           await chatStore.renameChat(agentRef, chatId, hydratedTitle)
+          if (!stillRelevant()) return staleResult(rendered)
           title = hydratedTitle
           applyLatestTitle(agentRef, chatId, hydratedTitle)
         }
@@ -1516,7 +1538,7 @@ export function useAgentChatController({
       // S4: upsert into the sidebar. A chat opened via a notification for the
       // already-selected agent may not be in chatList yet; a bare `.map` drops it.
       upsertHydratedEntry(meta, title)
-      return { rendered, replaced: true, cached: localMessages }
+      return { rendered, replaced: true, cached: localMessages, stale: false }
     },
     [
       tracker,
@@ -1547,11 +1569,13 @@ export function useAgentChatController({
       // the chat to `awaiting_approval`, which — during hydrate's awaits — would
       // let the sticky re-seed effect race in a `'<unknown>'`-anchored rejoin
       // before this entry exists (P1-A regression).
-      const { rendered } = await hydrateActiveChatFromServer(
+      const { rendered, stale } = await hydrateActiveChatFromServer(
         chatKey as TaskKey,
         resp,
-        resp.activeTaskId
+        resp.activeTaskId,
+        stillRelevant
       )
+      if (stale) return 'stale_drop'
       // R-F13 / spec §4.5-3: the hydrate above yields (IPC round-trip). If a
       // `reset()` (logout / team-switch) or a switch-away landed during that
       // await, bail BEFORE re-opening a live stream — otherwise `tracker.attach`
@@ -1612,11 +1636,13 @@ export function useAgentChatController({
 
       // Active chat → reflect any newly-persisted server turns into the visible
       // view (replace-never-append parity with switchToChat Phase 2, A.4.4).
-      const { replaced, cached } = await hydrateActiveChatFromServer(
+      const { replaced, cached, stale } = await hydrateActiveChatFromServer(
         chatKey as TaskKey,
         resp,
-        taskIdHint
+        taskIdHint,
+        stillRelevant
       )
+      if (stale) return 'stale_drop'
       if (replaced) return 'reconcile_replaced'
 
       // GAP-H1 durable fallback (rama 4): a task whose result the server never
