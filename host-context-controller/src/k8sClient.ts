@@ -901,6 +901,14 @@ export class McpServerWatcher implements McpServerProvider {
       this.mcpServerCacheSynced &&
       this.contextCacheSynced &&
       this.hostCacheSynced &&
+      // The generation/revision equalities below prove no newer desired state
+      // is outstanding; they cannot prove the last pass actually revoked what
+      // it set out to revoke. Losing a delete fence bumps no generation and
+      // moves no revision, so it is invisible to every other term here while
+      // leaving live an allow the pass classified as stale. The reconciler
+      // degrades this fence at the point of loss; readiness reads it so the
+      // gate re-closes for the same reason it opened.
+      this.netPolReconciler.hasCertifiedSafetyInventory() &&
       this.networkPolicyRevocationContextGeneration === this.contextWatchGeneration &&
       this.networkPolicyRevocationServerGeneration === this.mcpWatchGeneration &&
       this.networkPolicyRevocationContextRevision === this.contextDesiredRevision &&

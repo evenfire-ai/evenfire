@@ -1056,6 +1056,54 @@ describe('McpServerWatcher startup', () => {
     expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
   })
 
+  it('withdraws readiness when the safety pass leaves its inventory uncertified', async () => {
+    // Losing a delete fence is the one doom cause that bumps no watch
+    // generation and moves no desired revision, so every equality below stays
+    // satisfied while an allow this pass classified as stale is still live.
+    // The reconciler already degrades its fence at the point of loss; readiness
+    // has to read it, or /ready keeps answering 200 over that allow until a
+    // retry lands (>=5s, and indefinitely against a persistent second writer —
+    // e.g. the two-replica overlap every rolling update opens, since the
+    // Deployment carries no leader election).
+    const watcher = newContextAuthoritativeWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+
+    try {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+    } finally {
+      // vi.clearAllMocks() clears calls, not implementations, so an escaped
+      // mockReturnValue would silently re-gate every later test in this file.
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+    }
+  })
+
+  it('restores readiness once a later safety pass certifies its inventory again', async () => {
+    // The withdrawal above must not be a one-way latch: a fence raised by a
+    // transient loss has to clear on the next completed pass, or the retry
+    // machinery would leave the controller permanently unready.
+    const watcher = newContextAuthoritativeWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    try {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    } finally {
+      // An assertion failure above must not escape a false implementation into
+      // the rest of the file — vi.clearAllMocks() would not undo it.
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+    }
+  })
+
   it('ignores a late McpServer callback from a retired watch generation', async () => {
     const callbacks: Array<(type: string, apiObj: any) => Promise<void>> = []
     mocks.watch.mockImplementation(async (path, _options, callback) => {
@@ -1440,14 +1488,17 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
       () => uncertifiedDelta.promise
     )
-    // The delta's own revocation completes, but the last authoritative pass left
-    // the namespace-wide inventory uncertified. A label-scoped delta cannot
-    // vouch for that namespace, so readiness must stay withheld.
-    mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
-
     try {
       await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
+      // Baseline: the inventory is still certified here, so readiness is
+      // genuinely green. Degrading the fence before this point would assert a
+      // 200 that only the missing readiness gate could produce.
       expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+
+      // The delta's own revocation completes, but the last authoritative pass left
+      // the namespace-wide inventory uncertified. A label-scoped delta cannot
+      // vouch for that namespace, so readiness must stay withheld.
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
 
       const delta = contextWatchCallback!('MODIFIED', {
         metadata: {
