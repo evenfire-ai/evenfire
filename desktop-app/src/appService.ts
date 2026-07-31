@@ -244,6 +244,7 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 // post-`waiting` connection is still caught here (and by the renderer's 30s
 // watchdog).
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
+const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -272,6 +273,7 @@ export class AppService {
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
+  private savedSessionRestoreAttemptedAtMs = 0
   private logoutInProgress = false
   private sessionGeneration = 0
   private workflowApprovalTeamById = new Map<string, string>()
@@ -566,6 +568,7 @@ export class AppService {
     const envKey = getActiveEnvKey()
     const legacyEnvKeys = getActiveLegacyEnvKeys()
     this.savedSessionRestoreAttemptedEnvKey = envKey
+    this.savedSessionRestoreAttemptedAtMs = Date.now()
     let token: string | null
     try {
       token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
@@ -1068,7 +1071,10 @@ export class AppService {
       // the renderer. Do not immediately repeat a failed 60-second network
       // attempt from the renderer bootstrap; a new app launch or environment
       // selection gets a fresh attempt because its service/env key is new.
-      if (this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey()) {
+      if (
+        this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
+        Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
+      ) {
         return { authenticated: false, me: null }
       }
       return this.restoreSavedSession()

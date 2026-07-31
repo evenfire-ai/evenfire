@@ -211,6 +211,8 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
+    let now = 1_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
     const { AppService } = await import('../appService.js')
     const getSessionToken = vi.fn().mockResolvedValue('stored-token')
     const clearSessionToken = vi.fn().mockResolvedValue(undefined)
@@ -226,7 +228,15 @@ describe('AppService invitation configuration lookup', () => {
     }
 
     service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new Error('fetch failed')),
+      getMe: vi.fn().mockRejectedValueOnce(new Error('fetch failed')).mockResolvedValue({
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId: null,
+        teamName: null,
+        role: null,
+      }),
     } as never
     service.tokenStore = {
       getSessionToken,
@@ -248,8 +258,17 @@ describe('AppService invitation configuration lookup', () => {
       })
       expect(getSessionToken).toHaveBeenCalledTimes(1)
       expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+
+      now += 5_001
+      await expect(service.getSessionState()).resolves.toMatchObject({
+        authenticated: true,
+        me: { id: 'user-1' },
+      })
+      expect(getSessionToken).toHaveBeenCalledTimes(2)
+      expect(service.authClient.getMe).toHaveBeenCalledTimes(2)
     } finally {
       warn.mockRestore()
+      nowSpy.mockRestore()
     }
   })
 
