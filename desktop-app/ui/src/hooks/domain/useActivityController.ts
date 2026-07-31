@@ -15,6 +15,11 @@ interface UseActivityControllerParams {
 const ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT = 20
 const ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT = 1000
 
+function sortableActivityTimestamp(value: string): number {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
 function activityCounterKey(agentRef: string, chatId: string): string {
   return `${agentRef}\u0000${chatId}`
 }
@@ -102,7 +107,10 @@ export function useActivityController({
           (chat.errorCount === undefined || chat.toolCallCount === undefined)
         )
       })
-      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+      .sort(
+        (left, right) =>
+          sortableActivityTimestamp(right.updatedAt) - sortableActivityTimestamp(left.updatedAt)
+      )
       .slice(0, ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT)
       .map(chat => chat.id)
   )

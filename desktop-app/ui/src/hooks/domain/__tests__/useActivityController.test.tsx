@@ -300,4 +300,48 @@ describe('useActivityController', () => {
       })
     )
   })
+
+  it('prioritizes valid recent activity dates when choosing chats to backfill', async () => {
+    const loadMessages = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        chat: {
+          getIndex: vi.fn(async () => ({ chats: [] })),
+          loadMessages,
+          backfillCounters: vi.fn().mockResolvedValue(undefined),
+        },
+      },
+    })
+    const invalidChats = Array.from({ length: 20 }, (_, index) => ({
+      id: `invalid-${index}`,
+      title: 'Invalid date',
+      createdAt: 'not-a-date',
+      updatedAt: 'not-a-date',
+      messageCount: 1,
+    }))
+
+    renderHook(() =>
+      useActivityController({
+        selectedAgent: 'agent-a',
+        isAuthenticated: true,
+        loadMenuData: true,
+        chatList: [
+          ...invalidChats,
+          {
+            id: 'valid-recent',
+            title: 'Recent',
+            createdAt: '2026-07-22T00:00:00.000Z',
+            updatedAt: '2026-07-22T00:00:00.000Z',
+            messageCount: 1,
+          },
+        ],
+        progressByAgentMessage: EMPTY_PROGRESS,
+        agentNames: AGENT_A,
+      })
+    )
+
+    await waitFor(() => expect(loadMessages).toHaveBeenCalledTimes(20))
+    expect(loadMessages).toHaveBeenCalledWith('agent-a', 'valid-recent', 1000, undefined)
+  })
 })
