@@ -1462,7 +1462,14 @@ export function useAgentChatController({
       if (!isActive() || tracker.get(chatKey)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
-      const rendered = localMessages.length
+      // Pre-paging caches have no server-turn identity, so ordinary local
+      // user/assistant rows cannot be compared safely with an authoritative
+      // window. Preserve the old replace behavior for settled sessions instead
+      // of persisting both copies. A reported live task keeps the merge path so
+      // its optimistic bubbles remain visible until task-scoped reconciliation.
+      const replaceSettledLegacyCache =
+        localMessages.length > 0 && !localHasServerTurns && !resp.activeTaskId
+      const rendered = localMessages.length && !replaceSettledLegacyCache
         ? mergeServerMessages(
             localMessages,
             hydratedWithAttachments,

@@ -191,6 +191,43 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages).toHaveLength(60)
   })
 
+  it('replaces a settled legacy turnless cache instead of persisting duplicate server history', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'legacy-q1', role: 'user', content: 'q1', timestamp: 1 },
+      { id: 'legacy-a1', role: 'assistant', content: 'a1', timestamp: 2 },
+      { id: 'legacy-q2', role: 'user', content: 'q2', timestamp: 3 },
+      { id: 'legacy-a2', role: 'assistant', content: 'a2', timestamp: 4 },
+    ])
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'legacy-cache',
+      state: 'idle',
+      totalTurns: 3,
+      turns: [turn(1, 'q1', 'a1'), turn(2, 'q2', 'a2'), turn(3, 'q3', 'a3')],
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'legacy-cache')
+    })
+
+    expect(result.current.chatMessages.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+      'turn-2-user',
+      'turn-2-assistant',
+      'turn-3-user',
+      'turn-3-assistant',
+    ])
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'legacy-cache',
+      expect.arrayContaining([expect.objectContaining({ id: 'turn-3-assistant' })])
+    )
+    expect(clerum.chat.replaceMessages.mock.calls.at(-1)?.[2]).toHaveLength(6)
+  })
+
   it('Phase 2 persists the merged server delta to a durable-ID cache', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
