@@ -11,27 +11,16 @@ import { registryEntryToEgressBindings } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
 import { buildPastedValue } from '@lib/pasteUtils'
-import { trustBgColor, trustColor } from '@lib/trustLevel'
 import { getEmbeddedCredentialSchema, getExternalEgressNotice } from '../registryInstallHelpers'
 import type { RegistryInstallFormProps } from './types'
 
-const STEPS = ['Package', 'Configure', 'Network', 'Install'] as const
+const STEPS = ['Package', 'Install'] as const
 
 const STEP_DETAILS = [
   {
     description: 'Review Marketplace entry',
     title: 'Marketplace package',
-    subtitle: 'Review trust, version, and egress notices for this connector.',
-  },
-  {
-    description: 'Name and credentials',
-    title: 'Installation settings',
-    subtitle: 'Set the server name, context, and credentials.',
-  },
-  {
-    description: 'Confirm egress',
-    title: 'Network egress',
-    subtitle: 'Review and adjust the egress contract that will be installed.',
+    subtitle: 'Review the package and optionally adjust its installation configuration.',
   },
   {
     description: 'Confirm install',
@@ -115,17 +104,11 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
     nameValid && contextRef.trim() !== '' && credComplete && egressValid && !installing
   const canContinue =
     step === 0
-      ? !loading
-      : step === 1
-        ? nameValid && contextRef.trim() !== '' && credComplete
-        : step === 2
-          ? egressValid
-          : true
+      ? !loading && nameValid && contextRef.trim() !== '' && credComplete && egressValid
+      : true
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    if (targetStep === 1) return !loading
-    if (targetStep === 2) return nameValid && contextRef.trim() !== '' && credComplete
     return nameValid && contextRef.trim() !== '' && credComplete && egressValid
   }
 
@@ -198,7 +181,7 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
     <>
       <CreateStepFlow
         ariaLabel="Install connector steps"
-        className="cu-create-step-flow--4"
+        className="cu-create-step-flow--2"
         currentStep={step}
         onStepChange={setStep}
         canSelectStep={canSelectStep}
@@ -266,15 +249,6 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
                 <div className="cu-registry-entry-card__head">
                   <strong className="cu-registry-name">{entry.name}</strong>
                   <span className="cu-muted">v{entry.version}</span>
-                  <span
-                    className="cu-registry-trust-chip"
-                    style={{
-                      background: trustBgColor(entry.trust_level),
-                      color: trustColor(entry.trust_level),
-                    }}
-                  >
-                    {entry.trust_level}
-                  </span>
                 </div>
                 {entry.description ? (
                   <p className="cu-registry-description">{entry.description}</p>
@@ -300,8 +274,10 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
             }}
             className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide"
           >
-            {step === 1 ? (
-              <>
+            {step === 0 ? (
+              <details className="cu-registry-install-configuration">
+                <summary>Configuration</summary>
+                <div className="cu-registry-install-configuration__body">
                 <div className="cu-field cu-field--compact">
                   <label htmlFor="ri-name">Server name</label>
                   <input
@@ -376,11 +352,6 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
                     ) : null}
                   </fieldset>
                 ) : null}
-              </>
-            ) : null}
-
-            {step === 2 ? (
-              <>
                 <EgressEditor
                   allowCidr
                   description="Review and adjust the egress contract that will be installed from this Marketplace entry. The final CRD is created from this selection, not from the Marketplace warning alone."
@@ -396,10 +367,11 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
                     Remote connectors must keep exact-host egress to the selected vendor endpoint.
                   </div>
                 ) : null}
-              </>
+                </div>
+              </details>
             ) : null}
 
-            {step === 3 ? (
+            {step === 1 ? (
               <div className="cu-agent-review">
                 Connector <b>{serverName || '-'}</b> will be installed into context{' '}
                 <b>{contextRef || '-'}</b> from <b>{entry.name}</b> v{entry.version}.

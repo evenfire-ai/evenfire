@@ -88,7 +88,7 @@ describe('RegistryInstallForm -- pending connector credentials', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByText('Configuration'))
 
     expect(
       await screen.findByText(/Leave all credential fields empty to install now/i)
@@ -111,13 +111,30 @@ describe('RegistryInstallForm -- server name default', () => {
     const scopedEntry = { ...MOCK_ENTRY, name: '@test-oss-jose/helloo' }
     render(<RegistryInstallForm entry={scopedEntry} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    // Advance from step 0 (review) to step 1 (name & credentials).
+    // Configuration is deliberately collapsed on the Package step.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByText('Configuration'))
 
     const nameInput = (await screen.findByLabelText('Server name')) as HTMLInputElement
     // `@test-oss-jose/helloo` sanitized to a valid RFC 1123 label — no manual fix.
     expect(nameInput.value).toBe('test-oss-jose-helloo')
     expect(screen.queryByText(/Must be a valid K8s name/i)).toBeNull()
+  })
+
+  it('keeps configuration collapsed and shows only Package and Install flow steps', async () => {
+    const { container } = render(
+      <RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />
+    )
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+
+    const configuration = container.querySelector('details.cu-registry-install-configuration')
+    expect(configuration).not.toBeNull()
+    expect(configuration).not.toHaveAttribute('open')
+    expect(screen.getByRole('button', { name: /Package/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Install/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Configure/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Network/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('high')).not.toBeInTheDocument()
   })
 })
