@@ -278,6 +278,9 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
   }) as ReconcileChat
   reconcile.isInFlight = (chatKey: string) => inFlight.has(chatKey)
   reconcile.supersede = (chatKey: string) => {
+    if (inFlight.has(chatKey)) {
+      deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+    }
     chatGenerations.set(chatKey, (chatGenerations.get(chatKey) ?? 0) + 1)
     inFlight.delete(chatKey)
     inFlightHint.delete(chatKey)

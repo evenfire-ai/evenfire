@@ -215,7 +215,9 @@ describe('reconcileChat — single-flight', () => {
     const reconcile = createReconcileChat(deps)
 
     const oldRun = reconcile(chatKey, { reason: 'first-open' })
+    expect(deps.fsm.getState(chatKey)?.syncing).toBe(true)
     reconcile.supersede(chatKey)
+    expect(deps.fsm.getState(chatKey)?.syncing).toBe(false)
     const freshRun = reconcile(chatKey, { reason: 'second-open' })
 
     await freshRun
