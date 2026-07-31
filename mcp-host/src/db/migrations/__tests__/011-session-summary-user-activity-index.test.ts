@@ -5,7 +5,7 @@ import * as m011 from '../011-session-summary-user-activity-index'
 import { migrations } from '../index'
 
 describe('migration 011 — session summary user/activity index', () => {
-  it('serves the production catalog query without a temporary sort', () => {
+  it('serves current rows by activity and legacy rows by session-key range', () => {
     const db = new Database(':memory:')
     for (const migration of migrations) migration.up(db)
 
@@ -33,7 +33,7 @@ describe('migration 011 — session summary user/activity index', () => {
     }) as Array<{ detail: string }>
 
     expect(plan.some(step => step.detail.includes('idx_sessions_summary_activity'))).toBe(true)
-    expect(plan.some(step => step.detail.includes('idx_sessions_session_key'))).toBe(false)
+    expect(plan.some(step => step.detail.includes('idx_sessions_session_key'))).toBe(true)
 
     m011.down(db)
     const downgraded = db

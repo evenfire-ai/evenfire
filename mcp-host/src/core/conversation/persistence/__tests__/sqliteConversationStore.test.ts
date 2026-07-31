@@ -384,7 +384,9 @@ describe('SqliteConversationStore — session summary listing', () => {
       const manager = new ConversationManager(handle.store)
       const userId = 'subject:rpc:embedded'
       const key = `${userId}:rpc:agent-x:chat-1`
-      const conversation = await manager.getOrCreate(key, { userId })
+      // Catalog visibility remains keyed by the authenticated prefix even when
+      // an older persistence path derived user_id differently.
+      const conversation = await manager.getOrCreate(key)
       await manager.startTurn(conversation, 'hello', 'task-1')
       await manager.completeTurn(conversation, 'done')
       await handle.persistQueue.drainSessionKey(key)
@@ -393,6 +395,14 @@ describe('SqliteConversationStore — session summary listing', () => {
       const summaries = await handle.store.listSessionSummariesByPrefix(`${userId}:rpc:`)
 
       expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
+
+      handle.worker.db.prepare('UPDATE sessions SET user_id = NULL WHERE id = ?').run(
+        conversation.id
+      )
+      const legacySummaries = await handle.store.listSessionSummariesByPrefix(`${userId}:rpc:`)
+      expect(legacySummaries.map(session => [session.agent, session.chatId])).toEqual([
         ['agent-x', 'chat-1'],
       ])
     } finally {

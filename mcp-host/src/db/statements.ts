@@ -236,13 +236,27 @@ export function prepareStatements(db: Database): PreparedStatements {
       SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
     `),
     selectSessionSummariesByPrefix: db.prepare(`
-      WITH scoped_sessions AS (
+      WITH candidate_sessions AS (
+        -- Current rows take the user/activity index fast path. The second arm
+        -- preserves catalog visibility for legacy rows whose nullable user_id
+        -- was absent or derived differently; the authenticated key range still
+        -- provides the tenant boundary for both arms.
         SELECT *
-         FROM sessions
+          FROM sessions
          WHERE user_id = @user_id
            AND session_key >= @prefix_start
            AND session_key < @prefix_end
-           AND (
+        UNION ALL
+        SELECT *
+          FROM sessions
+         WHERE (user_id IS NULL OR user_id <> @user_id)
+           AND session_key >= @prefix_start
+           AND session_key < @prefix_end
+      ),
+      scoped_sessions AS (
+        SELECT *
+         FROM candidate_sessions
+         WHERE (
              (@agent_scoped = 1 AND length(session_key) > length(@prefix_start))
              OR
              (
