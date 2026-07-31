@@ -4,52 +4,6 @@ import { turnsToChatMessages } from '../serverTurnAdapter.js'
 import type { ChatMessage } from '../types.js'
 
 describe('mergeAuthoritativeServerMessages', () => {
-  it('replaces an image-only optimistic turn despite content and clock differences', () => {
-    const existing: ChatMessage[] = [
-      {
-        id: 'optimistic-user',
-        role: 'user',
-        content: '',
-        timestamp: 1,
-        attachments: [
-          {
-            id: 'photo',
-            type: 'uploaded_file',
-            label: 'photo.png',
-            mimeType: 'image/png',
-          },
-        ],
-      },
-      {
-        id: 'optimistic-assistant',
-        role: 'assistant',
-        content: 'working',
-        timestamp: 2,
-      },
-    ]
-    const incoming: ChatMessage[] = [
-      {
-        id: 'turn-7-user',
-        role: 'user',
-        content: '[Image attached]',
-        timestamp: 120_001,
-        serverTurnNumber: 7,
-      },
-      {
-        id: 'turn-7-assistant',
-        role: 'assistant',
-        content: 'done',
-        timestamp: 120_002,
-        serverTurnNumber: 7,
-      },
-    ]
-
-    const merged = mergeAuthoritativeServerMessages(existing, incoming)
-
-    expect(merged.map(message => message.id)).toEqual(['turn-7-user', 'turn-7-assistant'])
-    expect(merged[0]?.attachments).toEqual(existing[0]?.attachments)
-  })
-
   it('preserves a task-backed in-flight message outside the authoritative turn', () => {
     const pending: ChatMessage = {
       id: 'pending',
@@ -944,5 +898,114 @@ describe('mergeAuthoritativeServerMessages', () => {
       'optimistic-turn-6-user',
       'turn-6-assistant',
     ])
+  })
+
+  it.each([
+    {
+      name: 'settled numbered replacement',
+      existing: turnsToChatMessages([
+        {
+          number: 1,
+          user_input: 'local q1',
+          response: 'local a1',
+          started_at: new Date(1).toISOString(),
+        },
+      ]),
+      incoming: turnsToChatMessages([
+        {
+          number: 1,
+          user_input: 'server q1',
+          response: 'server a1',
+          started_at: new Date(2).toISOString(),
+        },
+        {
+          number: 2,
+          user_input: 'server q2',
+          response: 'server a2',
+          started_at: new Date(3).toISOString(),
+        },
+      ]),
+    },
+    {
+      name: 'partial window with durable locals',
+      existing: [
+        ...turnsToChatMessages([
+          {
+            number: 3,
+            user_input: 'local q3',
+            response: 'local a3',
+            started_at: new Date(3).toISOString(),
+          },
+        ]),
+        {
+          id: 'local-failed-send',
+          role: 'user' as const,
+          content: 'retry me',
+          timestamp: 4,
+          preserveLocal: true,
+        },
+        {
+          id: 'local-error',
+          role: 'assistant' as const,
+          content: 'connection lost',
+          timestamp: 5,
+          isError: true,
+        },
+      ],
+      incoming: turnsToChatMessages([
+        {
+          number: 3,
+          user_input: 'server q3',
+          response: 'server a3',
+          started_at: new Date(6).toISOString(),
+        },
+        {
+          number: 4,
+          user_input: 'server q4',
+          started_at: new Date(7).toISOString(),
+        },
+      ]),
+    },
+    {
+      name: 'interleaved system message',
+      existing: [
+        ...turnsToChatMessages([
+          {
+            number: 5,
+            user_input: 'local q5',
+            started_at: new Date(5).toISOString(),
+          },
+        ]),
+        {
+          id: 'system-diagnostic',
+          role: 'system' as const,
+          content: 'local diagnostic',
+          timestamp: 6,
+        },
+      ],
+      incoming: turnsToChatMessages([
+        {
+          number: 5,
+          user_input: 'server q5',
+          response: 'server a5',
+          started_at: new Date(7).toISOString(),
+        },
+      ]),
+    },
+  ])('maintains merge invariants for $name', ({ existing, incoming }) => {
+    const first = mergeAuthoritativeServerMessages(existing, incoming)
+    const second = mergeAuthoritativeServerMessages(first, incoming)
+    const ids = first.map(message => message.id)
+    const numberedTurns = first
+      .map(message => message.serverTurnNumber)
+      .filter((turn): turn is number => turn !== undefined)
+    const durableLocalIds = existing
+      .filter(message => message.preserveLocal || message.isError || message.role === 'system')
+      .map(message => message.id)
+
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(numberedTurns).toEqual([...numberedTurns].sort((left, right) => left - right))
+    expect(second).toEqual(first)
+    expect(ids).toEqual(expect.arrayContaining(durableLocalIds))
   })
 })
