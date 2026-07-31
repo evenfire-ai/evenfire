@@ -486,6 +486,12 @@ export function isHostDrainingError(error: unknown): boolean {
   return upstream.status === 503 && String(upstream.bodySnippet || '').includes('host_draining')
 }
 
+/** Fetch uses AbortError for controller aborts and TimeoutError for
+ * AbortSignal.timeout(). Both represent the same sanitized 504 boundary. */
+export function isUpstreamTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
 /**
  * True for a network-level fetch failure against the upstream host (no HTTP
  * response at all — suspended pod, no endpoints). Excludes AbortError (today's
@@ -493,7 +499,7 @@ export function isHostDrainingError(error: unknown): boolean {
  */
 export function isHostDownNetworkError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  if (error.name === 'AbortError' || error.name === 'UpstreamHostError') return false
+  if (isUpstreamTimeoutError(error) || error.name === 'UpstreamHostError') return false
   const cause = (error as Error & { cause?: { code?: unknown } }).cause
   const details = `${error.message} ${String(cause?.code || '')}`.toLowerCase()
   return (

@@ -27,7 +27,11 @@ import {
   resolveServerConnectionForUser,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
-import { isWakeEligibleHostError, respondWithWakeAndHold } from '../services/wakeAndHold.js'
+import {
+  isUpstreamTimeoutError,
+  isWakeEligibleHostError,
+  respondWithWakeAndHold,
+} from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
@@ -54,7 +58,7 @@ function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
 }
 
 /**
- * Pre-wake host error mapping: AbortError → 504, everything else → 502.
+ * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
  *
  * Guards `res.headersSent` (§11.5): this is the terminal responder that
  * route-level outer catches invoke after a held request may already have
@@ -70,7 +74,7 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
     )
     return
   }
-  if (error instanceof Error && error.name === 'AbortError') {
+  if (isUpstreamTimeoutError(error)) {
     res.status(504).json({ error: 'Gateway Timeout' })
     return
   }

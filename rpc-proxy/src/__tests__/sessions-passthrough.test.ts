@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createApp } from '../app.js'
 import { createRpcRouter } from '../routes/rpc.js'
 
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
@@ -113,6 +114,23 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
 
     const [url] = fetchMock.mock.calls[0]
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?agent=chatllm&limit=100')
+  })
+
+  it('maps an upstream body timeout to a sanitized gateway timeout', async () => {
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => Promise.reject(timeout),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(createApp())
+      .get('/api/v1/rpc/hosts/chatllm/sessions')
+      .set('authorization', 'Bearer user-token')
+      .expect(504)
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
   })
 
   it.each([
