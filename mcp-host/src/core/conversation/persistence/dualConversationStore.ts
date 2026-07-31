@@ -171,15 +171,47 @@ export class DualConversationStore implements ConversationStore {
   ): Promise<ConversationSessionSummary[]> {
     const memList = await this.memory.listSessionSummariesByPrefix(prefix, query)
     let sqlList: ConversationSessionSummary[]
+    const durableByKey = new Map<string, ConversationSessionSummary>()
     try {
       sqlList = await this.sqlite.listSessionSummariesByPrefix(prefix, query)
+      let sqlPage = sqlList
+      while (true) {
+        for (const summary of sqlPage) {
+          if (!this.memory.has(summary.key)) durableByKey.set(summary.key, summary)
+        }
+        if (
+          query.limit === undefined ||
+          durableByKey.size >= query.limit ||
+          sqlPage.length < query.limit
+        ) {
+          break
+        }
+        const last = sqlPage.at(-1)
+        if (!last) break
+        const nextPage = await this.sqlite.listSessionSummariesByPrefix(prefix, {
+          ...query,
+          cursor: { updatedAt: last.lastActivityAt, key: last.key },
+        })
+        const nextLast = nextPage.at(-1)
+        if (
+          nextLast &&
+          nextLast.key === last.key &&
+          nextLast.lastActivityAt.getTime() === last.lastActivityAt.getTime()
+        ) {
+          break
+        }
+        sqlPage = nextPage
+      }
     } catch {
       this.recordParity('listSessionSummariesByPrefix', false)
       return memList
     }
 
     this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlList))
-    const byKey = new Map(sqlList.map(summary => [summary.key, summary]))
+    // A live memory copy is canonical even when its timestamp places it outside
+    // this page. Otherwise an older SQLite copy can cross a later cursor and
+    // repeat a key that an earlier page already emitted from memory.
+    const byKey = new Map(durableByKey)
     for (const summary of memList) byKey.set(summary.key, summary)
     const merged = Array.from(byKey.values()).sort(compareSummaries)
     return query.limit === undefined ? merged : merged.slice(0, query.limit)

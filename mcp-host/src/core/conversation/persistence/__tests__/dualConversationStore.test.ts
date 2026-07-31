@@ -173,6 +173,51 @@ describe('DualConversationStore — dual-write parity', () => {
     }
   })
 
+  it('does not repeat a memory-owned key when sqlite has an older copy', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const memoryManager = new ConversationManager(memory)
+      const sqliteManager = new ConversationManager(sqlite.store)
+      const keyA = 'u-1:rpc:a:chat-a'
+      const keyB = 'u-1:rpc:a:chat-b'
+      const keyC = 'u-1:rpc:a:chat-c'
+
+      const memoryA = await memoryManager.getOrCreate(keyA, { userId: 'u-1' })
+      const memoryB = await memoryManager.getOrCreate(keyB, { userId: 'u-1' })
+      memoryA.updated_at = new Date(400_000)
+      memoryB.updated_at = new Date(300_000)
+
+      const sqliteA = await sqliteManager.getOrCreate(keyA, { userId: 'u-1' })
+      const sqliteC = await sqliteManager.getOrCreate(keyC, { userId: 'u-1' })
+      await sqlite.persistQueue.drainSessionKey(keyA)
+      await sqlite.persistQueue.drainSessionKey(keyC)
+      sqlite.worker.db
+        .prepare('UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?')
+        .run(100, 250, sqliteA.id)
+      sqlite.worker.db
+        .prepare('UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?')
+        .run(100, 200, sqliteC.id)
+
+      const dual = new DualConversationStore(memory, sqlite.store)
+      const keys: string[] = []
+      let cursor: { updatedAt: Date; key: string } | undefined
+      for (let pageNumber = 0; pageNumber < 5; pageNumber += 1) {
+        const page = await dual.listSessionSummariesByPrefix('u-1:rpc:', {
+          limit: 1,
+          cursor,
+        })
+        if (page.length === 0) break
+        keys.push(page[0]!.key)
+        cursor = { updatedAt: page[0]!.lastActivityAt, key: page[0]!.key }
+      }
+
+      expect(keys).toEqual([keyA, keyB, keyC])
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
   it('keeps canonical memory reads available when sqlite parity probes fail', async () => {
     const sqlite = makeSqliteStore({ cacheSize: 4 })
     try {
