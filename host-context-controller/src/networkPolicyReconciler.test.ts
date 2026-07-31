@@ -4816,6 +4816,58 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('withdraws certification when an additive revocation loses the fence after certifying', async () => {
+      // The additive phase re-runs reconcileContext, which carries a second
+      // revocation lane over a fresh LIST. Losing the fence there happens after
+      // the pass already certified, and the outcome recorder is first-wins — so
+      // the duration sample stays 'completed', which is right, but the safety
+      // fence must still degrade. It is an assertion about live allows, and it
+      // may only ever move toward unsafe.
+      const additiveContext: ContextCRD = {
+        name: 'additive',
+        namespace: 'mcp-server',
+        spec: { contextId: 'additive', mcpServers: [] },
+      }
+      const additiveStalePolicy: k8s.V1NetworkPolicy = {
+        metadata: {
+          name: 'ctx-additive-alpha',
+          namespace: 'mcp-server',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/policy-type': 'context-allow',
+            'clerum.io/context': 'additive',
+            'clerum.io/mcpserver': 'alpha',
+          },
+        },
+        spec: { podSelector: {}, policyTypes: ['Ingress'] },
+      }
+      // Self-synchronising: the stale policy only becomes visible once the pass
+      // has already certified, so the safety phase is clean by construction and
+      // only the additive re-LIST finds work.
+      let certified = false
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace }: { namespace?: string }) => ({
+          items: certified && namespace === 'mcp-server' ? [additiveStalePolicy] : [],
+        })
+      )
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValue(lostFence)
+      const onAuthoritativeRevocationComplete = vi.fn(() => {
+        certified = true
+      })
+
+      await expect(
+        reconciler.fullReconcile([additiveContext], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow()
+
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
+    })
+
     it('marks the inventory uncertified the moment the authoritative pass loses the fence', async () => {
       // The doom must be visible mid-pass, not only after the unwind. A lost
       // fence is the one doom cause that does not bump a watch generation, so

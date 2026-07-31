@@ -1094,6 +1094,15 @@ export class NetworkPolicyReconciler {
      * every stale allow its inventory implied.
      */
     const recordSafetyPassOutcome = (outcome: 'completed' | 'failed'): void => {
+      // The fence is an assertion about live allows, so it only ever moves
+      // toward unsafe. The additive phase re-runs reconcileContext, which
+      // carries a second revocation lane over a fresh LIST; losing the fence
+      // there happens after this pass certified, and first-outcome-wins would
+      // otherwise leave the gate green over an allow that was not revoked.
+      if (outcome === 'failed') this.safetyPassLeftUncertified = true
+      // The duration sample describes the pass's primary outcome, so it stays
+      // first-wins: a certified pass that later fails an additive effect did
+      // complete its authoritative revocation.
       if (safetyPassOutcomeRecorded) return
       safetyPassOutcomeRecorded = true
       this.safetyPassLeftUncertified = outcome === 'failed'
@@ -1113,8 +1122,10 @@ export class NetworkPolicyReconciler {
       })
       // The pass returned without certifying: no exception, no certificate.
       // Operators alert on this exact condition, so it must produce a sample
-      // rather than the absence of one.
-      recordSafetyPassOutcome('failed')
+      // rather than the absence of one. Stated as a condition rather than
+      // leaning on first-outcome-wins to swallow it, because the fence below is
+      // deliberately not first-wins.
+      if (!safetyPassOutcomeRecorded) recordSafetyPassOutcome('failed')
     } catch (error) {
       recordSafetyPassOutcome('failed')
       throw error
