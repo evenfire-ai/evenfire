@@ -8,6 +8,7 @@ import {
   listAllCommunicationChannels,
   listAllGlobalFileSystems,
   listAllHosts,
+  listAllSharedFileSystems,
 } from './k8sClient'
 import { registry } from './metrics'
 import { ContextMapperServer } from './server'
@@ -131,6 +132,7 @@ const mocks = vi.hoisted(() => {
   const sfsFullReconcile = vi.fn().mockResolvedValue(undefined)
   const watch = vi.fn().mockResolvedValue({ abort: vi.fn() })
   const hostListCallOptions = vi.fn()
+  const sharedFileSystemListCallOptions = vi.fn()
   const createAdministrativeOutcomeReporter = vi.fn().mockReturnValue(undefined)
   return {
     hasCertifiedSafetyInventory,
@@ -144,6 +146,7 @@ const mocks = vi.hoisted(() => {
     sfsFullReconcile,
     watch,
     hostListCallOptions,
+    sharedFileSystemListCallOptions,
     createAdministrativeOutcomeReporter,
   }
 })
@@ -188,6 +191,8 @@ vi.mock('@kubernetes/client-node', () => {
         return {
           listNamespacedCustomObject: async (request: { plural?: string }, options?: unknown) => {
             if (request.plural === 'hosts') mocks.hostListCallOptions(options)
+            if (request.plural === 'sharedfilesystems')
+              mocks.sharedFileSystemListCallOptions(options)
             const response = await mocks.listNamespacedCustomObject(request)
             if (
               request.plural &&
@@ -432,6 +437,51 @@ describe('McpServerWatcher startup', () => {
       sharedFileSystemsListed.resolve({ items: [] })
       await start.catch(() => undefined)
       await watcher.stop()
+    }
+  })
+
+  it('lists the SharedFileSystem inventory through the deadline-bearing client', async () => {
+    // The cold-start Host fleet pass waits on this inventory. Bounding the wait
+    // is not enough: an unbounded request stays hung, so the socket leaks and
+    // `startSharedFileSystemWatch()` — which runs after this await — never
+    // starts. Only the deadline-bearing client aborts the request itself, and
+    // it is observable because it appends its deadline middleware to the call.
+    mocks.listNamespacedCustomObject.mockResolvedValue({ items: [] })
+
+    await listAllSharedFileSystems()
+
+    expect(mocks.sharedFileSystemListCallOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        middleware: [expect.objectContaining({ pre: expect.any(Function) })],
+        middlewareMergeStrategy: 'append',
+      })
+    )
+  })
+
+  it('schedules the first Host fleet pass when the SharedFileSystem watch never starts', async () => {
+    // `k8s.Watch` carries no transport deadline — client-node overwrites its own
+    // AbortSignal.timeout with a bare controller signal — so awaiting the watch
+    // start inside the inventory promise re-strands the cold-start fleet pass
+    // that bounding the LIST was meant to protect.
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'sfs-watch-stall-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    mocks.watch.mockImplementation(async (path: string) => {
+      if (path.endsWith('/sharedfilesystems')) return new Promise(() => undefined)
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    const start = watcher.start()
+
+    try {
+      await start
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+    } finally {
+      await watcher.stop()
+      await start.catch(() => undefined)
     }
   })
 

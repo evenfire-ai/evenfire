@@ -2492,12 +2492,16 @@ export class McpServerWatcher implements McpServerProvider {
         error
       )
     }
-    try {
-      await this.startSharedFileSystemWatch()
-    } catch (error) {
+    // The cold-start Host fleet pass gates on this promise, so it must settle on
+    // the inventory alone. `k8s.Watch` carries no transport deadline — the
+    // client builds `AbortSignal.any([controller, timeout])` and then overwrites
+    // it with the bare controller — so awaiting the watch start here would
+    // re-strand the fleet behind an already-certified readiness, which is the
+    // exact failure bounding the LIST was meant to close.
+    void this.startSharedFileSystemWatch().catch(error => {
       console.error('[K8s] SharedFileSystem background watch failed to start:', error)
       this.scheduleSharedFileSystemWatchRestart(5000)
-    }
+    })
     if (inventoryComplete && !this.stopped) {
       return true
     }
