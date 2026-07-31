@@ -390,7 +390,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(dialog).toHaveTextContent('"reports"')
     expect(dialog).toHaveTextContent('Permissions: read, write')
     expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    expect(screen.getByRole('button', { name: 'Grant access' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())

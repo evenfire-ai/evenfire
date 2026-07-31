@@ -140,6 +140,9 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
 
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
     expect(screen.getByText('+2 new')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Reload discovery review' })).toBeEnabled()
+    )
 
     resolveInitialStatus({
       ranAt: '2026-07-01T00:00:00.000Z',
@@ -151,5 +154,6 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
 
     await waitFor(() => expect(screen.getByText('+2 new')).toBeInTheDocument())
     expect(screen.queryByText('+99 new')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Reload discovery review' })).toBeEnabled()
   })
 })

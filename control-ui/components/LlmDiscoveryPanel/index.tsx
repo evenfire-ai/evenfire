@@ -228,6 +228,7 @@ export function LlmDiscoveryPanel({
       setError(message)
       showToast(message, { tone: 'error' })
     } finally {
+      if (generation === statusRequestGeneration.current) setStatusLoading(false)
       setSyncing(false)
     }
   }
