@@ -201,6 +201,23 @@ describe('handleSessionsListRoute', () => {
     expect(captured.statusCode).toBe(501)
   })
 
+  it('validates a malformed cursor before reporting an unavailable list handler', async () => {
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { cursor: 'not-json' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(
+      req,
+      captured.res,
+      makeHandlers({ sessionsListHandler: null })
+    )
+
+    expect(captured.statusCode).toBe(400)
+    expect(captured.jsonBody).toEqual({ error: 'Invalid sessions cursor' })
+  })
+
   it('returns 401 if req.auth is missing', async () => {
     const req = {} as Request
     const captured = makeRes()
@@ -418,6 +435,23 @@ describe('handleSessionMessagesRoute', () => {
     expect(captured.statusCode).toBe(501)
   })
 
+  it('validates malformed pagination before reporting an unavailable messages handler', async () => {
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { limit: '1.5' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(
+      req,
+      captured.res,
+      makeHandlers({ sessionMessagesHandler: null })
+    )
+
+    expect(captured.statusCode).toBe(400)
+    expect(captured.jsonBody).toEqual({ error: 'limit must be a positive integer' })
+  })
+
   it('returns 500 when sessionMessagesHandler throws', async () => {
     const sessionMessagesHandler: SessionMessagesHandler = vi
       .fn()
@@ -509,6 +543,7 @@ describe('handleContextBreakdownRoute (F1.5)', () => {
       makeHandlers({ contextBreakdownHandler: vi.fn() })
     )
     expect(captured.statusCode).toBe(400)
+    expect(captured.jsonBody).toEqual({ error: 'Invalid agent or chatId' })
   })
 
   it('rejects unsafe route segments', async () => {

@@ -1117,19 +1117,12 @@ export async function handleSessionsListRoute(
       json(res, 401, { error: 'Missing rpc edge caller context' })
       return
     }
-    if (!handlers.sessionsListHandler) {
-      json(res, 501, { error: 'Sessions handler not configured' })
-      return
-    }
     if (req.query.agent !== undefined && typeof req.query.agent !== 'string') {
       badRequest(res, 'Invalid session agent')
       return
     }
     const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : undefined
-    if (
-      agent !== undefined &&
-      (!isSafeRouteSegment(agent) || agent.length > 200 || agent.includes(':'))
-    ) {
+    if (agent !== undefined && !isSafeAgentRouteSegment(agent)) {
       badRequest(res, 'Invalid session agent')
       return
     }
@@ -1144,6 +1137,10 @@ export async function handleSessionsListRoute(
     const rawLimit = parseUnsignedIntegerParam(req.query.limit)
     if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
       badRequest(res, 'limit must be a positive integer')
+      return
+    }
+    if (!handlers.sessionsListHandler) {
+      json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
     const limit = rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(rawLimit, 100)
@@ -1229,10 +1226,6 @@ export async function handleSessionMessagesRoute(
       badRequest(res, 'Invalid agent or chatId')
       return
     }
-    if (!handlers.sessionMessagesHandler) {
-      json(res, 501, { error: 'Sessions handler not configured' })
-      return
-    }
     const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
       key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
     )
@@ -1257,6 +1250,10 @@ export async function handleSessionMessagesRoute(
     }
     if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
       badRequest(res, 'limit must be a positive integer')
+      return
+    }
+    if (!handlers.sessionMessagesHandler) {
+      json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
     const limit =
@@ -1302,7 +1299,7 @@ export async function handleContextBreakdownRoute(
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
     if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
-      badRequest(res, 'agent and chatId are required')
+      badRequest(res, 'Invalid agent or chatId')
       return
     }
     if (!handlers.contextBreakdownHandler) {
