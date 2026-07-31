@@ -77,6 +77,7 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions')
     expect((init as RequestInit).method).toBe('GET')
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
   it('forwards only supported session pagination query parameters', async () => {
@@ -181,8 +182,9 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
       .expect(200)
 
     expect(res.body).toEqual(upstream)
-    const [url] = fetchMock.mock.calls[0]
+    const [url, init] = fetchMock.mock.calls[0]
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages')
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
   it('forwards only supported message pagination query parameters', async () => {
@@ -365,6 +367,7 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions/chatllm/c1/context-breakdown')
     expect((init as RequestInit).method).toBe('GET')
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
   it('returns 404 (anti-enumeration) verbatim when the upstream returns 404', async () => {

@@ -697,6 +697,7 @@ export function createRpcRouter(): Router {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -797,6 +798,7 @@ export function createRpcRouter(): Router {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -868,7 +870,11 @@ export function createRpcRouter(): Router {
         const attempt = async () => {
           const response = await fetch(
             `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
-            { method: 'GET', headers: { ...host.headers } }
+            {
+              method: 'GET',
+              headers: { ...host.headers },
+              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            }
           )
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
