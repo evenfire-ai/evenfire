@@ -49,4 +49,15 @@ describe('host-context-controller Deployment strategy', () => {
     const strategy = deployment?.spec?.strategy as { rollingUpdate?: unknown } | undefined
     expect(strategy?.rollingUpdate).toBeUndefined()
   })
+
+  it('bounds rollout-stall detection above the worst legitimate startup', () => {
+    // Detection only, not recovery: Recreate + replicas:1 means a botched
+    // rollout is healed operationally (kubectl rollout undo), never by K8s.
+    // This deadline just flips Progressing=False / fails `kubectl rollout
+    // status` deterministically for observers without their own --timeout. It
+    // must exceed the worst legitimate startup — imagePullPolicy: Always pull +
+    // startupProbe budget (3s*40=120s) + the initial safety-inventory pass — so
+    // a slow pull never trips a false ProgressDeadlineExceeded.
+    expect(deployment?.spec?.progressDeadlineSeconds).toBe(300)
+  })
 })

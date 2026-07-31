@@ -23,6 +23,15 @@ spec:
   # single-writer assumption through the rollout too.
   strategy:
     type: Recreate
+  # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
+  # the control plane down until a manual `kubectl rollout undo` — the single-
+  # writer invariant forbids any overlap-based auto-recovery. This deadline is
+  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
+  # fails `kubectl rollout status` for callers without their own --timeout; it
+  # does not roll back. 300s > worst legitimate startup (imagePullPolicy: Always
+  # pull + startupProbe budget 3s*40=120s + initial safety-inventory pass), so a
+  # slow pull never trips a false positive.
+  progressDeadlineSeconds: 300
   selector:
     matchLabels:
       app: host-context-controller
