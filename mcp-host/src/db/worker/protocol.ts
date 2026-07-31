@@ -136,6 +136,7 @@ export interface PersistedSessionMessagePage {
 export interface LoadAllPendingApprovalsRow {
   approval: PendingApprovalRow
   session_key: string
+  ownership: Pick<SessionRow, 'user_id' | 'channel_type' | 'channel_id' | 'thread_id'>
 }
 
 /**

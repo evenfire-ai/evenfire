@@ -24,6 +24,7 @@ import type {
   SessionRow,
 } from '../../../db/worker/protocol'
 import { parseSessionKey } from '../../../session/types'
+import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
   type ChatMessage,
   type Conversation,
@@ -43,7 +44,11 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
-import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from '../sessionKeyParts'
+import {
+  sessionPartsFromPrefixedKey,
+  userIdFromRpcPrefix,
+  userIdFromStructuredSessionKey,
+} from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
@@ -489,6 +494,28 @@ export class SqliteConversationStore implements ConversationStore {
     const out: PersistedSessionListing[] = []
     for (const row of rows) {
       const sessionKey = row.session_key
+      const derivedOwner = userIdFromStructuredSessionKey({
+        sessionKey,
+        channelType: row.ownership.channel_type,
+        channelId: row.ownership.channel_id,
+        threadId: row.ownership.thread_id,
+      })
+      if (!derivedOwner || row.ownership.user_id !== derivedOwner) {
+        const error = new ConversationError(
+          'Pending approval session ownership could not be verified',
+          ConversationErrorCode.OwnershipMismatch
+        )
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'pending_approval_ownership_rejected',
+            code: error.code,
+            requestId: row.approval.request_id,
+            reason: derivedOwner ? 'owner_mismatch' : 'unverifiable_session_suffix',
+          })
+        )
+        continue
+      }
       let conv = this.cache.get(sessionKey)
       if (!conv) {
         // Chain after pending per-session writes (same rationale as getOrLoad).

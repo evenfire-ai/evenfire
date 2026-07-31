@@ -402,7 +402,12 @@ export function prepareStatements(db: Database): PreparedStatements {
       DELETE FROM pending_approvals WHERE request_id = ?
     `),
     selectPendingApprovalsAll: db.prepare(`
-      SELECT pa.*, s.session_key AS session_key
+      SELECT pa.*,
+             s.session_key AS session_key,
+             s.user_id AS session_user_id,
+             s.channel_type AS session_channel_type,
+             s.channel_id AS session_channel_id,
+             s.thread_id AS session_thread_id
         FROM pending_approvals pa
         JOIN sessions s
           ON s.id = pa.session_id

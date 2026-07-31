@@ -3,6 +3,32 @@ export interface AgentChatSessionParts {
   chatId: string
 }
 
+export interface StructuredSessionKeyParts {
+  sessionKey: string
+  channelType: string | null
+  channelId: string | null
+  threadId: string | null
+}
+
+/**
+ * Recover the owner only when persisted structured columns prove the complete
+ * serialized suffix. The owner prefix may contain any number of `:` characters;
+ * parsing from the front would therefore cross tenant boundaries.
+ */
+export function userIdFromStructuredSessionKey(
+  parts: StructuredSessionKeyParts
+): string | null {
+  if (!parts.channelType || !parts.channelType.trim()) return null
+  const channelId = parts.channelId || 'default'
+  const threadId = parts.threadId || 'default'
+  const suffix = `:${parts.channelType}:${channelId}:${threadId}`
+  if (parts.sessionKey.length <= suffix.length || !parts.sessionKey.endsWith(suffix)) {
+    return null
+  }
+  const userId = parts.sessionKey.slice(0, -suffix.length)
+  return userId.trim() ? userId : null
+}
+
 /**
  * Parse a key relative to the exact prefix used to fetch it.
  *

@@ -697,12 +697,34 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'load_all_pending_approvals': {
       const rows = s.selectPendingApprovalsAll.all() as Array<
-        PendingApprovalRow & { session_key: string }
+        PendingApprovalRow & {
+          session_key: string
+          session_user_id: string | null
+          session_channel_type: string | null
+          session_channel_id: string | null
+          session_thread_id: string | null
+        }
       >
       const out: LoadAllPendingApprovalsRow[] = []
       for (const row of rows) {
-        const { session_key, ...approval } = row
-        out.push({ approval: approval as PendingApprovalRow, session_key })
+        const {
+          session_key,
+          session_user_id,
+          session_channel_type,
+          session_channel_id,
+          session_thread_id,
+          ...approval
+        } = row
+        out.push({
+          approval: approval as PendingApprovalRow,
+          session_key,
+          ownership: {
+            user_id: session_user_id,
+            channel_type: session_channel_type,
+            channel_id: session_channel_id,
+            thread_id: session_thread_id,
+          },
+        })
       }
       return out
     }
