@@ -336,7 +336,7 @@ describe('chatStoreBinding', () => {
       expect(preserved.version).toBe(2)
     })
 
-    it('normalizes an earlier paging v3 index back to downgrade-compatible v2', async () => {
+    it('normalizes a v3 index through the store durable writer on ordinary RMW', async () => {
       const v3Index = JSON.stringify({
         version: 3,
         chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
@@ -350,49 +350,41 @@ describe('chatStoreBinding', () => {
           messages: [{ id: 'm1', role: 'user', content: 'keep me', timestamp: 1 }],
         }),
       })
+      const indexPath = path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'index.json')
+      const originalOpen = fs.open.bind(fs)
+      const syncedPaths: string[] = []
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const filePath = String(args[0])
+        const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+        return {
+          sync: async () => {
+            syncedPaths.push(filePath)
+            await handle.sync()
+          },
+          close: () => handle.close(),
+        } as Awaited<ReturnType<typeof fs.open>>
+      })
 
       await bindChatStoreForUser('user-v3', ENV_A)
 
-      const normalized = JSON.parse(
-        await fs.readFile(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'index.json'), 'utf-8')
-      ) as { version: number }
+      expect(JSON.parse(await fs.readFile(indexPath, 'utf-8')).version).toBe(3)
+      await requireChatStore().renameChat('agent-x', 'keep', 'Changed')
+
+      const normalized = JSON.parse(await fs.readFile(indexPath, 'utf-8')) as {
+        version: number
+        chats: Array<{ id: string; title: string }>
+      }
       expect(normalized.version).toBe(2)
+      expect(normalized.chats).toContainEqual({
+        id: 'keep',
+        title: 'Changed',
+        createdAt: 'x',
+        updatedAt: expect.any(String),
+        messageCount: 1,
+      })
+      expect(syncedPaths).toContain(`${indexPath}.tmp`)
+      expect(syncedPaths).toContain(path.dirname(indexPath))
       expect(await exists(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'keep.json'))).toBe(true)
-    })
-
-    it('preserves a valid v3 cache when its index normalization cannot be renamed', async () => {
-      const v3Index = JSON.stringify({
-        version: 3,
-        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
-        lastActiveChatId: 'keep',
-        onboardingDismissed: false,
-      })
-      await seedAgentDir(ENV_A, 'user-v3-failure', 'agent-x', v3Index, {
-        'keep.json': '{"version":2,"chatId":"keep","messages":[]}',
-      })
-      const originalRename = fs.rename.bind(fs)
-      vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-        if (String(from).endsWith('index.json.v2.tmp')) {
-          const error = new Error('read only') as NodeJS.ErrnoException
-          error.code = 'EACCES'
-          throw error
-        }
-        return originalRename(from, to)
-      })
-
-      await bindChatStoreForUser('user-v3-failure', ENV_A)
-
-      expect(
-        await exists(path.join(tmpBase, ENV_A, 'user-v3-failure', 'agent-x', 'keep.json'))
-      ).toBe(true)
-      expect(
-        JSON.parse(
-          await fs.readFile(
-            path.join(tmpBase, ENV_A, 'user-v3-failure', 'agent-x', 'index.json'),
-            'utf-8'
-          )
-        ).version
-      ).toBe(3)
     })
 
     it('does not delete a current cache after a transient index read failure', async () => {
