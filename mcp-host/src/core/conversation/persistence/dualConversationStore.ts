@@ -1,9 +1,9 @@
 /**
  * `DualConversationStore` — shadow-write to two stores for canary validation.
  *
- * User-visible reads come from `memory`, the canonical store during validation.
- * SQLite is still queried for parity so the canary can detect drift without
- * hiding memory-only live sessions from the sidebar or transcript endpoints.
+ * Hot user-visible reads prefer `memory`, the canonical store during validation.
+ * Durable catalog rows and cold transcripts remain visible when RAM is empty,
+ * while SQLite is also queried for parity so the canary can detect drift.
  * Writes apply to both; parity is recorded via the optional metrics callback.
  * Used when `CLERUM_SESSION_STORE=dual` to validate that the SQLite store
  * produces the same observable behavior as the in-memory store before we
@@ -40,8 +40,38 @@ export interface DualStoreMetrics {
   recordParity?: (op: string, match: boolean) => void
 }
 
+const TOKEN_COUNTER_KEYS = new Set([
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'cache_write_tokens',
+])
+
+function normalizeParityValue(value: unknown, key?: string): unknown {
+  if (value instanceof Date) return value.toISOString()
+  if (Array.isArray(value)) return value.map(entry => normalizeParityValue(entry))
+  if (key === 'cacheTokensReported' && value === false) return undefined
+  if (key && TOKEN_COUNTER_KEYS.has(key) && value === 0) return undefined
+  if (value === null || typeof value !== 'object') return value
+
+  const normalized: Record<string, unknown> = {}
+  for (const entryKey of Object.keys(value).sort()) {
+    const entryValue = normalizeParityValue((value as Record<string, unknown>)[entryKey], entryKey)
+    if (entryValue !== undefined) normalized[entryKey] = entryValue
+  }
+  return normalized
+}
+
 function pagesMatch(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right)
+  return JSON.stringify(normalizeParityValue(left)) === JSON.stringify(normalizeParityValue(right))
+}
+
+function compareSummaries(
+  left: ConversationSessionSummary,
+  right: ConversationSessionSummary
+): number {
+  const byUpdated = right.lastActivityAt.getTime() - left.lastActivityAt.getTime()
+  return byUpdated || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
 }
 
 export class DualConversationStore implements ConversationStore {
@@ -140,14 +170,19 @@ export class DualConversationStore implements ConversationStore {
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
     const memList = await this.memory.listSessionSummariesByPrefix(prefix, query)
-    queueMicrotask(() => {
-      this.sqlite.listSessionSummariesByPrefix(prefix, query).then(
-        sqlList =>
-          this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlList)),
-        () => this.recordParity('listSessionSummariesByPrefix', false)
-      )
-    })
-    return memList
+    let sqlList: ConversationSessionSummary[]
+    try {
+      sqlList = await this.sqlite.listSessionSummariesByPrefix(prefix, query)
+    } catch {
+      this.recordParity('listSessionSummariesByPrefix', false)
+      return memList
+    }
+
+    this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlList))
+    const byKey = new Map(sqlList.map(summary => [summary.key, summary]))
+    for (const summary of memList) byKey.set(summary.key, summary)
+    const merged = Array.from(byKey.values()).sort(compareSummaries)
+    return query.limit === undefined ? merged : merged.slice(0, query.limit)
   }
 
   async getSessionMessagesByKey(

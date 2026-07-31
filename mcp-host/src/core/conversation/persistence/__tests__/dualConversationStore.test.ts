@@ -131,6 +131,48 @@ describe('DualConversationStore — dual-write parity', () => {
     }
   })
 
+  it('returns cold sqlite summaries when memory has no sessions', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const seedManager = new ConversationManager(sqlite.store)
+      const seeded = await seedManager.getOrCreate('u-cold:rpc:a:chat-1')
+      await seedManager.startTurn(seeded, 'cold question', 'task-cold')
+      await seedManager.completeTurn(seeded, 'cold answer')
+      await sqlite.persistQueue.drainSessionKey('u-cold:rpc:a:chat-1')
+
+      const dual = new DualConversationStore(new InMemoryConversationStore(), sqlite.store)
+      const summaries = await dual.listSessionSummariesByPrefix('u-cold:rpc:', { limit: 10 })
+
+      expect(summaries.map(summary => summary.chatId)).toEqual(['chat-1'])
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
+  it('records matching parity for summaries written through both stores', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const parity: Array<{ op: string; match: boolean }> = []
+      const dual = new DualConversationStore(memory, sqlite.store, {
+        recordParity: (op, match) => parity.push({ op, match }),
+      })
+      const manager = new ConversationManager(dual)
+      const conversation = await manager.getOrCreate('u-1:rpc:a:chat-1', { userId: 'u-1' })
+      await manager.startTurn(conversation, 'question', 'task-1')
+      await manager.completeTurn(conversation, 'answer')
+
+      await dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 10 })
+      await dual.getSessionMessagesByKey('u-1:rpc:a:chat-1', 'u-1:rpc:', { limit: 10 })
+      await new Promise(resolve => setImmediate(resolve))
+
+      expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: true })
+      expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: true })
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
+
   it('keeps canonical memory reads available when sqlite parity probes fail', async () => {
     const sqlite = makeSqliteStore({ cacheSize: 4 })
     try {
