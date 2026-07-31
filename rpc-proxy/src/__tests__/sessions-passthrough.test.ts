@@ -135,6 +135,7 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
 
     await request(makeApp()).get(path).set('authorization', 'Bearer user-token').expect(400)
 
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -231,6 +232,26 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     )
   })
 
+  it('forwards the zero after-turn boundary under the correct parameter name', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ agent: 'chatllm', chatId: 'c1', turns: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=5&afterTurn=0')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=5&afterTurn=0'
+    )
+  })
+
   it.each([
     '?limit=1.5',
     '?limit=0x10',
@@ -241,6 +262,9 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     '?beforeTurn=1e2',
     '?beforeTurn=1&beforeTurn=2',
     '?afterTurn=1.5',
+    '?afterTurn=0x10',
+    '?afterTurn=1e2',
+    '?afterTurn=1&afterTurn=2',
     '?beforeTurn=2&afterTurn=1',
   ])('rejects malformed transcript pagination before forwarding upstream: %s', async query => {
     const fetchMock = vi.fn()
