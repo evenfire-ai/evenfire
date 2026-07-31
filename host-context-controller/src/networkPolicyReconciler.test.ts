@@ -2202,6 +2202,77 @@ describe('NetworkPolicyReconciler', () => {
     })
   })
 
+  describe('delete-context TOCTOU re-check', () => {
+    it('stops mid-inventory when the context is recreated between two deletes', async () => {
+      // deleteAllowed is a live GET, so its answer can change while the loop
+      // runs. Hoisting the check out of the loop would satisfy every existing
+      // test and still delete the recreated context's own policies.
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValueOnce({
+        items: [
+          { metadata: { name: 'ctx-allow-first' } },
+          { metadata: { name: 'ctx-allow-second' } },
+        ],
+      })
+      const deleteAllowed = vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false)
+
+      await reconciler.reconcileDeleteContext('dev', deleteAllowed)
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'ctx-allow-first' })
+      )
+      expect(deleteAllowed).toHaveBeenCalledTimes(2)
+    })
+
+    it('re-checks before every mcp-host egress delete', async () => {
+      mockApi.listNamespacedNetworkPolicy
+        .mockResolvedValueOnce({ items: [] }) // context-allow
+        .mockResolvedValueOnce({
+          items: [
+            { metadata: { name: 'host-egress-first' } },
+            { metadata: { name: 'host-egress-second' } },
+          ],
+        })
+      const deleteAllowed = vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false)
+
+      await reconciler.reconcileDeleteContext('dev', deleteAllowed)
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'host-egress-first' })
+      )
+    })
+
+    it('re-checks before every rpc-proxy egress delete', async () => {
+      mockApi.listNamespacedNetworkPolicy
+        .mockResolvedValueOnce({ items: [] }) // context-allow
+        .mockResolvedValueOnce({ items: [] }) // mcp-host egress
+        .mockResolvedValueOnce({
+          items: [
+            { metadata: { name: 'rpc-egress-first' } },
+            { metadata: { name: 'rpc-egress-second' } },
+          ],
+        })
+      const deleteAllowed = vi
+        .fn<() => Promise<boolean>>()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false)
+
+      await reconciler.reconcileDeleteContext('dev', deleteAllowed)
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'rpc-egress-first' })
+      )
+    })
+  })
+
   describe('startup fullReconcile', () => {
     it('discovers and revokes orphaned policies with one missing ownership marker in every safety lane', async () => {
       const partiallyLabelledByNamespace: Record<string, k8s.V1NetworkPolicy[]> = {

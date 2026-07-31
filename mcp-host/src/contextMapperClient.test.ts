@@ -73,6 +73,22 @@ describe('ContextMapperClient readiness and discovery', () => {
 
     await expect(client.listAllServers()).rejects.toBe(networkError)
   })
+
+  it('does not convert an unavailable controller into an authoritative empty fleet', async () => {
+    // The rejection case above never reaches the `!response.ok` branch, so a
+    // 503 from an unready controller was uncovered: swapping that throw for
+    // `return []` left the whole suite green while turning "I cannot tell you"
+    // into an authoritative "there are none".
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(new Response('', { status: 503, statusText: 'Service Unavailable' }))
+    )
+    const client = new ContextMapperClient('http://context-mapper.test')
+
+    await expect(client.listAllServers()).rejects.toThrow(/503/)
+  })
 })
 
 describe('ContextMapperClient.pollServers', () => {
