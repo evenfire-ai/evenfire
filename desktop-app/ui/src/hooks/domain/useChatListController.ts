@@ -414,6 +414,7 @@ export function useChatListController({
 
   /** Reset the selected agent's list (logout teardown / load failure). */
   const clearList = useCallback(() => {
+    pendingChatSelectionByAgentRef.current = {}
     chatListNextCursorByAgentRef.current = {}
     chatListLoadingMoreByAgentRef.current.clear()
     suppressAutoSelectionByAgentRef.current.clear()
