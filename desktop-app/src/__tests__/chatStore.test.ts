@@ -1586,6 +1586,60 @@ describe('onboarding', () => {
 // ── corrupt/missing files ────────────────────────────────────────────────────
 
 describe('corrupt/missing files', () => {
+  it('fails closed without quarantining or downgrading a valid future index', async () => {
+    const agentDir = join(tempDir, 'agent-1')
+    const preservedChatDir = join(agentDir, 'chats', 'future-chat')
+    await writePagedSnapshotDir('future-chat', preservedChatDir, [
+      { id: 'future-local', role: 'user', content: 'keep me', timestamp: 1 },
+    ])
+    const preservedMeta = await fs.readFile(join(preservedChatDir, 'meta.json'), 'utf8')
+    const preservedPage = await fs.readFile(join(preservedChatDir, 'pages', '000001.json'), 'utf8')
+    const indexPath = join(agentDir, 'index.json')
+    const futureIndex = JSON.stringify({
+      version: 4,
+      lastActiveChatId: 'future-chat',
+      onboardingDismissed: false,
+      chats: [
+        {
+          id: 'future-chat',
+          title: 'Future chat',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          messageCount: 1,
+        },
+      ],
+    })
+    await fs.writeFile(indexPath, futureIndex)
+
+    await expect(store.getIndex('agent-1')).rejects.toThrow(/unsupported chat index version 4/i)
+    await expect(store.createChat('agent-1', 'new-chat')).rejects.toThrow(
+      /unsupported chat index version 4/i
+    )
+    await expect(
+      store.appendMessages('agent-1', 'future-chat', [
+        { id: 'new-local', role: 'assistant', content: 'do not write', timestamp: 2 },
+      ])
+    ).rejects.toThrow(/unsupported chat index version 4/i)
+    await expect(
+      store.replaceMessages('agent-1', 'future-chat', [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'server',
+          timestamp: 3,
+          serverTurnNumber: 1,
+        },
+      ])
+    ).rejects.toThrow(/unsupported chat index version 4/i)
+
+    expect(await fs.readFile(indexPath, 'utf8')).toBe(futureIndex)
+    expect(await fs.readFile(join(preservedChatDir, 'meta.json'), 'utf8')).toBe(preservedMeta)
+    expect(await fs.readFile(join(preservedChatDir, 'pages', '000001.json'), 'utf8')).toBe(
+      preservedPage
+    )
+    await expect(fs.access(agentPath('.corrupt'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('quarantines a torn index once and preserves paged transcripts while writes recover', async () => {
     const originalMessage: ChatMessage = {
       id: 'local-only-message',

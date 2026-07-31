@@ -14,6 +14,7 @@ import type {
 // Keep the catalog at v2 while paged transcripts are dual-readable by the
 // pre-paging desktop build. The page layout has its own versioned metadata.
 const INDEX_VERSION = 2
+const MAX_READABLE_INDEX_VERSION = 3
 const PAGED_CHAT_VERSION = 1
 const DEFAULT_PAGE_SIZE = 100
 const MAX_COMPATIBILITY_WINDOWS = 100
@@ -155,6 +156,13 @@ function parseChatIndex(raw: string): ChatIndex {
   }
   const candidate = parsed as Record<string, unknown>
   if (
+    typeof candidate.version === 'number' &&
+    Number.isSafeInteger(candidate.version) &&
+    candidate.version > MAX_READABLE_INDEX_VERSION
+  ) {
+    throw new UnsupportedChatIndexVersionError(candidate.version)
+  }
+  if (
     (candidate.version !== 2 && candidate.version !== 3) ||
     (candidate.lastActiveChatId !== null && typeof candidate.lastActiveChatId !== 'string') ||
     typeof candidate.onboardingDismissed !== 'boolean' ||
@@ -180,6 +188,13 @@ function parseChatIndex(raw: string): ChatIndex {
     }
   }
   return { ...candidate, version: INDEX_VERSION } as unknown as ChatIndex
+}
+
+class UnsupportedChatIndexVersionError extends Error {
+  constructor(version: number) {
+    super(`Unsupported chat index version ${version}`)
+    this.name = 'UnsupportedChatIndexVersionError'
+  }
 }
 
 /**
@@ -1436,6 +1451,7 @@ export class ChatStore {
     try {
       return parseChatIndex(raw)
     } catch (error) {
+      if (error instanceof UnsupportedChatIndexVersionError) throw error
       // Preserve unreadable catalog bytes for bounded recovery/diagnostics, but
       // detach them from the writable path so a torn index cannot brick every
       // chat mutation. Paged transcripts live under chats/ and remain untouched;
@@ -1623,6 +1639,7 @@ export class ChatStore {
     options: { preserveExistingTotals?: boolean } = {}
   ): Promise<void> {
     return this.serializeChat(agentRef, chatId, async () => {
+      await this.getIndex(agentRef)
       const indexedCount = options.preserveExistingTotals
         ? await this.indexedMessageCount(agentRef, chatId)
         : undefined
@@ -1655,6 +1672,7 @@ export class ChatStore {
     options: ReplaceChatMessagesOptions = {}
   ): Promise<void> {
     await this.serializeChat(agentRef, chatId, async () => {
+      await this.getIndex(agentRef)
       const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
@@ -1695,6 +1713,7 @@ export class ChatStore {
     newMessages: ChatMessage[]
   ): Promise<void> {
     return this.serializeChat(agentRef, chatId, async () => {
+      await this.getIndex(agentRef)
       const existing =
         (await this.readOrMigratePagedChatUnlocked(agentRef, chatId)) ??
         (await this.writePagedChatUnlocked(agentRef, chatId, []))
