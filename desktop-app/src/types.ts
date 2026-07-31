@@ -1046,12 +1046,10 @@ export interface ChatMessage {
  * Controls how an authoritative server page is persisted locally.
  *
  * `activeTaskIds` lets the main process protect the same optimistic slots as
- * the renderer. `replaceLocalWindow` marks the bounded latest-page fallback;
- * it still merges into local history rather than truncating the whole chat.
+ * the renderer while merging the authoritative window into local history.
  */
 export interface ReplaceChatMessagesOptions {
   activeTaskIds?: string[]
-  replaceLocalWindow?: boolean
 }
 
 /**

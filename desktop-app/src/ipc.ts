@@ -1180,7 +1180,6 @@ export function registerIpcHandlers(service: AppService): void {
         messages as import('./types.js').ChatMessage[],
         {
           activeTaskIds,
-          replaceLocalWindow: payload?.options?.replaceLocalWindow === true,
         }
       )
     }

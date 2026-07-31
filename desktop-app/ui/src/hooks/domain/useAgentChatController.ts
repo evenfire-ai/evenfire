@@ -106,10 +106,10 @@ const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
-const REPLACE_LOCAL_RECONCILIATION_WINDOW = Symbol('replace-local-reconciliation-window')
+const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
-  [REPLACE_LOCAL_RECONCILIATION_WINDOW]?: true
+  [LATEST_PAGE_FALLBACK_WINDOW]?: true
   [DELTA_RECONCILIATION_WINDOW]?: true
 }
 
@@ -1432,8 +1432,8 @@ export function useAgentChatController({
           return []
         })) as AgentChatMessage[]
       const visible = isActive() ? chatMessagesRef.current : []
-      const replaceLocalWindow =
-        (resp as ReconciliationMessagesResult)[REPLACE_LOCAL_RECONCILIATION_WINDOW] === true
+      const latestPageFallback =
+        (resp as ReconciliationMessagesResult)[LATEST_PAGE_FALLBACK_WINDOW] === true
       const deltaWindow =
         (resp as ReconciliationMessagesResult)[DELTA_RECONCILIATION_WINDOW] === true
       const hasOlderFromServer = !deltaWindow && Boolean(resp.hasMoreBefore)
@@ -1471,7 +1471,7 @@ export function useAgentChatController({
         : hydratedWithAttachments
       const hasOlderAfterMerge =
         hasOlderFromServer || nextServerBackfillBeforeTurn(rendered) !== undefined
-      if (replaceLocalWindow) {
+      if (latestPageFallback) {
         setHasOlderMessages(hasOlderAfterMerge)
       } else {
         setHasOlderMessages(previous => previous || hasOlderAfterMerge)
@@ -1482,10 +1482,9 @@ export function useAgentChatController({
       chatMessagesRef.current = rendered
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
-      if (resp.activeTaskId || replaceLocalWindow) {
+      if (resp.activeTaskId) {
         await chatStore.replaceMessages(agentRef, chatId, rendered, {
-          activeTaskIds: resp.activeTaskId ? [resp.activeTaskId] : undefined,
-          replaceLocalWindow,
+          activeTaskIds: [resp.activeTaskId],
         })
       } else {
         await chatStore.replaceMessages(agentRef, chatId, rendered)
@@ -1788,7 +1787,7 @@ export function useAgentChatController({
             turns: combinedTurns,
             oldestTurnNumber: combinedTurns[0]?.number ?? latest.oldestTurnNumber,
             latestTurnNumber: combinedTurns.at(-1)?.number ?? latest.latestTurnNumber,
-            [REPLACE_LOCAL_RECONCILIATION_WINDOW]: true,
+            [LATEST_PAGE_FALLBACK_WINDOW]: true,
           } satisfies ReconciliationMessagesResult
         }
         return {

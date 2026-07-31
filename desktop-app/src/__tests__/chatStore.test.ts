@@ -880,20 +880,15 @@ describe('messages', () => {
       },
     ])
 
-    await store.replaceMessages(
-      'agent-1',
-      'bounded-window',
-      [
-        {
-          id: 'turn-999-user',
-          role: 'user',
-          content: 'newest',
-          timestamp: 999,
-          serverTurnNumber: 999,
-        },
-      ],
-      { replaceLocalWindow: true }
-    )
+    await store.replaceMessages('agent-1', 'bounded-window', [
+      {
+        id: 'turn-999-user',
+        role: 'user',
+        content: 'newest',
+        timestamp: 999,
+        serverTurnNumber: 999,
+      },
+    ])
 
     expect(
       (await store.loadMessages('agent-1', 'bounded-window')).map(message => message.id)

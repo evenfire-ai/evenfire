@@ -403,11 +403,7 @@ describe('switchToChat (unified, D.4)', () => {
       expect.arrayContaining([
         expect.objectContaining({ id: 'turn-2-user' }),
         expect.objectContaining({ id: 'turn-999-assistant' }),
-      ]),
-      {
-        activeTaskIds: undefined,
-        replaceLocalWindow: true,
-      }
+      ])
     )
   })
 
@@ -1111,7 +1107,6 @@ describe('switchToChat (unified, D.4)', () => {
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-user' })]),
       {
         activeTaskIds: ['task-p1a'],
-        replaceLocalWindow: false,
       }
     )
   })
