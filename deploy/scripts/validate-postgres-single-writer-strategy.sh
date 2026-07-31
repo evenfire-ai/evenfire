@@ -2,14 +2,23 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OVERLAYS=(
-  "deploy/overlays/minikube"
-  "deploy/overlays/gcp-dev"
-  "deploy/overlays/gcp-prod"
-)
+# Overlays to render. Defaults to the full production set; the gcp-* overlays
+# live in keyper-labs/evenfire-infra, so this script's full coverage runs there.
+# Override (space-separated) to validate only the overlays present in a given
+# checkout — e.g. SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" in this repo.
+read -r -a OVERLAYS <<<"${SINGLE_WRITER_OVERLAYS:-deploy/overlays/minikube deploy/overlays/gcp-dev deploy/overlays/gcp-prod}"
 DATABASE_DEPLOYS=(
   "control-plane/control-postgres"
   "registry/registry-postgres"
+)
+# Deployments whose safety model assumes a single writer with NO leader election
+# (see host-context-controller/src/statelessLifecycleExecutor.ts). For these the
+# RENDERED manifest — not just deploy/base — must keep replicas<=1 and
+# strategy=Recreate with no rollingUpdate residue, or a rollout reopens the
+# two-writer NetworkPolicy overlap closed in PR #205. Unlike DATABASE_DEPLOYS
+# these mount no PVC, so they need their own list rather than the PVC heuristic.
+SINGLE_WRITER_DEPLOYS=(
+  "control-plane/host-context-controller"
 )
 
 fail() {
@@ -54,6 +63,30 @@ for overlay in "${OVERLAYS[@]}"; do
       fail "${overlay}: Deployment ${id} uses Recreate and must not render spec.strategy.rollingUpdate"
     fi
   done
+
+  for id in "${SINGLE_WRITER_DEPLOYS[@]}"; do
+    namespace="${id%%/*}"
+    name="${id#*/}"
+    deployment="$(
+      jq -e --arg namespace "${namespace}" --arg name "${name}" \
+        'first(.[] | select(.kind == "Deployment" and .metadata.namespace == $namespace and .metadata.name == $name))' \
+        <<<"${rendered_json}"
+    )" || fail "${overlay}: missing Deployment ${id}"
+
+    replicas="$(jq -r '.spec.replicas // 1' <<<"${deployment}")"
+    if [ "${replicas}" -gt 1 ]; then
+      fail "${overlay}: single-writer Deployment ${id} must keep replicas<=1 (no leader election), got ${replicas}"
+    fi
+
+    strategy="$(jq -r '.spec.strategy.type // "RollingUpdate"' <<<"${deployment}")"
+    if [ "${strategy}" != "Recreate" ]; then
+      fail "${overlay}: single-writer Deployment ${id} must use strategy.type=Recreate, got ${strategy}"
+    fi
+
+    if jq -e '.spec.strategy.rollingUpdate != null' >/dev/null <<<"${deployment}"; then
+      fail "${overlay}: single-writer Deployment ${id} uses Recreate and must not render spec.strategy.rollingUpdate"
+    fi
+  done
 done
 
-echo "Postgres single-writer rollout strategy validation passed"
+echo "Single-writer rollout strategy validation passed"

@@ -42,4 +42,11 @@ describe('host-context-controller Deployment strategy', () => {
     const strategy = deployment?.spec?.strategy as { type?: string } | undefined
     expect(strategy?.type).toBe('Recreate')
   })
+
+  it('carries no rollingUpdate block under Recreate', () => {
+    // A leftover spec.strategy.rollingUpdate is invalid under Recreate and, if a
+    // future edit flipped only `type` back, would quietly reintroduce surge.
+    const strategy = deployment?.spec?.strategy as { rollingUpdate?: unknown } | undefined
+    expect(strategy?.rollingUpdate).toBeUndefined()
+  })
 })
