@@ -30,9 +30,17 @@ FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476
 
 WORKDIR /app
 
-# System tools
+# System tools.
+#
+# ca-certificates is required, not optional: node:*-slim installs it to fetch
+# Node and then purges it, leaving /etc/ssl/certs empty, and
+# --no-install-recommends stops apt pulling it back in via git/curl/wget. Drop
+# it and every TLS call from a shipped tool fails verification (git "CAfile:
+# none", curl exit 000) while mcp-host's own fetch keeps working — Node carries
+# its own CA store — so the image looks healthy until an agent uses shell_exec.
+# Guarded by scripts/check-dockerfile-ca-certificates.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash git curl wget jq \
+    bash ca-certificates git curl wget jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the shared package + package files, install production dependencies only
