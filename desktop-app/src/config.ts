@@ -722,6 +722,25 @@ export function getActiveLegacyRestOnlyEnvKey(): string {
   return resolveEnvKey(config.externalRestApiBaseUrl)
 }
 
+/**
+ * Return the pre-RPC-origin namespace only when it maps to one configured
+ * environment. Two profiles sharing REST but using different RPC origins
+ * cannot safely claim the same legacy token or chat tree.
+ */
+export function getActiveLegacyEnvKeys(): string[] {
+  hydrateDesktopRuntimeConfig()
+  const envKey = getActiveEnvKey()
+  const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
+  if (legacyEnvKey === envKey) return []
+
+  const matchingEnvironmentKeys = new Set(
+    buildRuntimeConfigOptions(storedProfiles, localhostRuntimeConfig, true)
+      .filter(option => resolveEnvKey(option.externalRestApiBaseUrl) === legacyEnvKey)
+      .map(option => resolveEnvKey(option.externalRestApiBaseUrl, option.rpcProxyBaseUrl))
+  )
+  return matchingEnvironmentKeys.size > 1 ? [] : [legacyEnvKey]
+}
+
 export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
   hydrateDesktopRuntimeConfig()
   const current = currentRuntimeConfig()

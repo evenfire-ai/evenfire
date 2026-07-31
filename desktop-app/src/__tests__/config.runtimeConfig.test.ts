@@ -300,6 +300,13 @@ describe('desktop runtime config', () => {
             createdAt: '2026-01-01T00:00:00.000Z',
             updatedAt: '2026-01-01T00:00:00.000Z',
           },
+          {
+            id: 'remote-other-rpc',
+            appName: 'Remote Other RPC',
+            fileName: 'runtime-config-remote-other-rpc.json',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
         ],
       })
     )
@@ -309,6 +316,14 @@ describe('desktop runtime config', () => {
         externalRestApiBaseUrl: 'https://api.remote.example.com',
         rpcProxyBaseUrl: 'https://rpc.remote.example.com',
         appName: 'Remote',
+      })
+    )
+    await fsp.writeFile(
+      path.join(runtimeConfigDir, 'runtime-config-remote-other-rpc.json'),
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://api.remote.example.com',
+        rpcProxyBaseUrl: 'https://rpc-alt.remote.example.com',
+        appName: 'Remote Other RPC',
       })
     )
     delete process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -328,10 +343,12 @@ describe('desktop runtime config', () => {
       },
     }))
 
-    const { config, getDesktopRuntimeConfigState } = await import('../config.js')
+    const { config, getActiveLegacyEnvKeys, getDesktopRuntimeConfigState } =
+      await import('../config.js')
 
     expect(config.externalRestApiBaseUrl).toBe('https://api.remote.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.remote.example.com')
     expect(getDesktopRuntimeConfigState().activeOptionId).toBe('remote')
+    expect(getActiveLegacyEnvKeys()).toEqual([])
   })
 })

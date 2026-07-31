@@ -7,7 +7,7 @@ import {
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
-  getActiveLegacyRestOnlyEnvKey,
+  getActiveLegacyEnvKeys,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -384,6 +384,12 @@ export class AppService {
     }
   }
 
+  private async bindCurrentChatStore(userId: string): Promise<void> {
+    await bindChatStoreForUser(userId, getActiveEnvKey(), {
+      legacyEnvKeys: getActiveLegacyEnvKeys(),
+    })
+  }
+
   private async commitSessionToken(
     token: string,
     options: { refreshMe?: boolean } = {}
@@ -403,7 +409,7 @@ export class AppService {
         unbindChatStore()
         throw error
       }
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      await this.bindCurrentChatStore(this.me.id)
       this.updateCachedCurrentTeam(this.me.teamId)
     }
   }
@@ -411,7 +417,7 @@ export class AppService {
   private async getCurrentSessionTeamId(token: string): Promise<string> {
     if (this.me?.teamId) return this.me.teamId
     this.me = await this.authClient.getMe(token)
-    await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(this.me.id)
     this.updateCachedCurrentTeam(this.me.teamId)
     return this.me.teamId || ''
   }
@@ -558,8 +564,7 @@ export class AppService {
     const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
-    const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
-    const legacyEnvKeys = legacyEnvKey !== envKey ? [legacyEnvKey] : []
+    const legacyEnvKeys = getActiveLegacyEnvKeys()
     this.savedSessionRestoreAttemptedEnvKey = envKey
     let token: string | null
     try {
@@ -591,7 +596,7 @@ export class AppService {
       await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         if (this.me) {
-          await bindChatStoreForUser(this.me.id, getActiveEnvKey(), { legacyEnvKeys })
+          await this.bindCurrentChatStore(this.me.id)
         } else {
           unbindChatStore()
         }
@@ -653,7 +658,7 @@ export class AppService {
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -724,7 +729,7 @@ export class AppService {
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -909,8 +914,7 @@ export class AppService {
     this.logoutInProgress = true
     try {
       const envKey = getActiveEnvKey()
-      const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
-      const legacyEnvKeys = legacyEnvKey !== envKey ? [legacyEnvKey] : []
+      const legacyEnvKeys = getActiveLegacyEnvKeys()
       this.clearAuthenticatedSessionState()
       await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
     } finally {
@@ -1507,7 +1511,7 @@ export class AppService {
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
-    await bindChatStoreForUser(me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(me.id)
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([

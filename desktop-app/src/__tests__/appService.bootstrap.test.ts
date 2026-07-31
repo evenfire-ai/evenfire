@@ -61,8 +61,10 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
-    const [{ AppService }, { config, isDesktopRuntimeConfigured, resolveEnvKey }] =
-      await Promise.all([import('../appService.js'), import('../config.js')])
+    const [
+      { AppService },
+      { config, getActiveLegacyRestOnlyEnvKey, isDesktopRuntimeConfigured, resolveEnvKey },
+    ] = await Promise.all([import('../appService.js'), import('../config.js')])
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
     const service = new AppService() as unknown as {
@@ -129,7 +131,8 @@ describe('AppService invitation configuration lookup', () => {
     // chat:* IPC throws "Not authenticated" until something else re-binds.
     expect(bindChatStoreForUser).toHaveBeenCalledWith(
       'user-1',
-      resolveEnvKey('https://api.example.com', 'https://rpc.example.com')
+      resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
+      { legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()] }
     )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
