@@ -129,8 +129,9 @@ describe('ConversationManager.getSessionByKey', () => {
 
     await expect(manager.getSessionByKeyForUserAsync(key, ownerUserId)).resolves.toBe(conv)
     await expect(manager.getSessionByKeyForUserAsync(key, 'subject')).resolves.toBeUndefined()
-    await expect(manager.getOrCreate(key, { userId: 'subject' })).rejects.toThrow(
-      'Session ownership mismatch'
-    )
+    await expect(manager.getOrCreate(key, { userId: 'subject' })).rejects.toMatchObject({
+      name: 'ConversationError',
+      code: 'CONV_OWNERSHIP_MISMATCH',
+    })
   })
 })

@@ -89,6 +89,7 @@ export enum ConversationErrorCode {
   InvalidTransition = 'CONV_INVALID_TRANSITION',
   NotFound = 'CONV_NOT_FOUND',
   ConcurrentMutation = 'CONV_CONCURRENT_MUTATION',
+  OwnershipMismatch = 'CONV_OWNERSHIP_MISMATCH',
 }
 
 export class ConversationError extends AgentError {

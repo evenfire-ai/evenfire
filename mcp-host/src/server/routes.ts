@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express'
+import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
 import { getRuntimeCallerContext } from './edgeRuntimeAuth'
@@ -62,6 +63,13 @@ export type RouteHandlers = {
   compactionHandler?: CompactionHandler | null
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
+}
+
+function isSessionOwnershipError(error: unknown): boolean {
+  return (
+    error instanceof ConversationError &&
+    error.code === ConversationErrorCode.OwnershipMismatch
+  )
 }
 
 function parseSessionsCursorParam(
@@ -339,6 +347,10 @@ export async function handleMessageRoute(
     json(res, 200, response)
   } catch (error) {
     console.error('[Server] Error processing message:', error)
+    if (isSessionOwnershipError(error)) {
+      json(res, 403, { success: false, error: 'session access denied' })
+      return
+    }
     json(res, 500, {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -1405,6 +1417,10 @@ export async function handleSetModelRoute(
     json(res, 200, { effective: 'next-task', provider: result.provider, model: result.model })
   } catch (error) {
     console.error('[Server] Error setting model:', error)
+    if (isSessionOwnershipError(error)) {
+      json(res, 403, { error: 'session access denied' })
+      return
+    }
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }

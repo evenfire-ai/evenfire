@@ -73,6 +73,7 @@ describe('migration 008 — active trace context', () => {
         '009-session-summary-indexes',
         '010-materialized-session-summaries',
         '011-session-summary-user-activity-index',
+        '012-session-ownership-backfill',
       ],
       pending: [],
     })
