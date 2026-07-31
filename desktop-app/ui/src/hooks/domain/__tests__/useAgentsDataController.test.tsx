@@ -8,11 +8,14 @@ import { useAgentsDataController } from '../useAgentsDataController'
 
 function catalog(agentNames: string[]): AccessCatalog {
   return {
+    userId: 'user-1',
+    teamId: null,
+    userContextIds: [],
     agentNames,
     userAgentNames: agentNames,
+    teamContextIds: [],
     teamAgentNames: [],
-    mcpServerNames: [],
-    contextNames: [],
+    contextIds: [],
     mcpServersByAgent: {},
     agentContextByName: {},
     agentProviderByName: {},

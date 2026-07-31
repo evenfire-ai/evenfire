@@ -174,7 +174,9 @@ describe('useActivityController', () => {
       updatedAt: '2026-07-22T00:00:00.000Z',
       messageCount: 1,
     }
-    const initialProps = { chatList: [localChat] }
+    const initialProps = {
+      chatList: [localChat as typeof localChat & { remote?: boolean }],
+    }
     const { result, rerender } = renderHook(
       ({ chatList }: typeof initialProps) =>
         useActivityController({

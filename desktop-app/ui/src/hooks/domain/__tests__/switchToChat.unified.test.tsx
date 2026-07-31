@@ -239,7 +239,7 @@ describe('switchToChat (unified, D.4)', () => {
     expect(clerum.chat.replaceMessages).toHaveBeenCalledTimes(persistedBeforeStaleHydration)
     expect(
       clerum.chat.replaceMessages.mock.calls.some(call =>
-        call[2].some(message => message.content === 'stale answer')
+        call[2].some((message: { content?: string }) => message.content === 'stale answer')
       )
     ).toBe(false)
   })
