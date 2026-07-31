@@ -218,6 +218,7 @@ export function mergeAuthoritativeServerMessages(
 
     const authoritativeCandidates = authoritative.filter(
       serverMessage =>
+        !suppressedServerMessages.has(serverMessage) &&
         serverMessage.role === message.role &&
         serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )

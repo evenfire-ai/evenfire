@@ -754,6 +754,52 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(persisted.map(message => message.id)).toContain('turn-6-assistant')
   })
 
+  it('preserves a completed local echo when a live task suppresses its server slot', () => {
+    const serverMessages = turnsToChatMessages([
+      {
+        number: 2,
+        user_input: 'question A',
+        response: 'answer A',
+        started_at: new Date(2).toISOString(),
+      },
+    ])
+    const localMessages: ChatMessage[] = [
+      serverMessages[0]!,
+      {
+        id: 'echo-answer-A',
+        role: 'assistant',
+        content: 'answer A',
+        timestamp: 3,
+        task_id: 'task-A',
+      },
+      {
+        id: 'optimistic-user-B',
+        role: 'user',
+        content: 'question B',
+        timestamp: 4,
+        task_id: 'task-B',
+      },
+      {
+        id: 'optimistic-assistant-B',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 5,
+        task_id: 'task-B',
+      },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(localMessages, serverMessages, {
+      activeTaskIds: new Set(['task-B']),
+    })
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-2-user',
+      'echo-answer-A',
+      'optimistic-user-B',
+      'optimistic-assistant-B',
+    ])
+  })
+
   it('reinjects turnless incoming messages that are present only in the replacement window', () => {
     const merged = mergeAuthoritativeServerMessages(
       [
