@@ -400,6 +400,27 @@ describe('SqliteConversationStore — session summary listing', () => {
     }
   })
 
+  it('preserves a trailing colon in a chat id under an unscoped prefix', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const key = 'u-1:rpc:agent-x:chat-trailing:'
+      const conversation = await manager.getOrCreate(key)
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(key)
+      handle.store['cache'].clear()
+
+      const summaries = await handle.store.listSessionSummariesByPrefix('u-1:rpc:')
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-trailing:'],
+      ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('fails closed instead of treating unsafe limits as unbounded reads', async () => {
     const handle = await freshStore({ cacheSize: 4 })
     try {

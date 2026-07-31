@@ -248,7 +248,8 @@ export function prepareStatements(db: Database): PreparedStatements {
              (
                @agent_scoped = 0
                AND instr(substr(session_key, length(@prefix_start) + 1), ':') > 1
-               AND substr(session_key, -1) <> ':'
+               AND instr(substr(session_key, length(@prefix_start) + 1), ':')
+                 < length(substr(session_key, length(@prefix_start) + 1))
              )
            )
            AND (

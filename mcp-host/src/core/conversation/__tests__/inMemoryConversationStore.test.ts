@@ -161,6 +161,16 @@ describe('InMemoryConversationStore', () => {
       ])
     })
 
+    it('preserves a trailing colon in a chat id under an unscoped prefix', async () => {
+      store.set('u-1:rpc:agent-x:chat-trailing:', makeConversation('u-1'))
+
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:')
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-trailing:'],
+      ])
+    })
+
     it('supports an agent literally named rpc when the scoped agent is explicit', async () => {
       store.set('u-1:rpc:rpc:chat-1', makeConversation('u-1'))
 
