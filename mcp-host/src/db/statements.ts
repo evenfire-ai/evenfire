@@ -208,9 +208,12 @@ export function prepareStatements(db: Database): PreparedStatements {
     `),
     recomputeSessionMessageSummary: db.prepare(`
       UPDATE sessions
-         SET last_activity_at = COALESCE(
-               (SELECT MAX(timestamp) FROM messages WHERE session_id = @id),
-               started_at
+         SET last_activity_at = MAX(
+               started_at,
+               COALESCE(
+                 (SELECT MAX(timestamp) FROM messages WHERE session_id = @id),
+                 started_at
+               )
              ),
              turn_count = (
                SELECT COUNT(DISTINCT turn_number)

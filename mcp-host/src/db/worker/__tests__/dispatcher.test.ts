@@ -185,7 +185,7 @@ describe('dbWorker dispatcher', () => {
     const deps = createDispatcher(db)
     const session = {
       ...makeSession('conv-summary', 'u-summary:rpc:agent:default'),
-      started_at: 5,
+      started_at: 100,
     }
     await dispatch({ kind: 'insert_session', payload: session }, deps)
 
@@ -301,7 +301,7 @@ describe('dbWorker dispatcher', () => {
         .get(session.id)
     const incrementalSummary = readSummary()
     expect(incrementalSummary).toEqual({
-      last_activity_at: 20,
+      last_activity_at: 100,
       turn_count: 2,
       message_count: 3,
     })
