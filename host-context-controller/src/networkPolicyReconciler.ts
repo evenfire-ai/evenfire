@@ -53,6 +53,13 @@ type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
   existingPolicies?: k8s.V1NetworkPolicy[]
   onRevoked?: () => void
+  /**
+   * Set only by a caller that reads the returned boolean and withholds
+   * readiness on false. It downgrades a lost delete fence from a throw to a
+   * reported outcome; a caller that discards the boolean must not set it, or a
+   * stale allow survives while the pass is recorded as a success.
+   */
+  honorsLostFence?: boolean
 }
 
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
@@ -823,7 +830,13 @@ export class NetworkPolicyReconciler {
 
     // Re-LIST every lane after writes so a same-name policy that was just
     // replaced is compared in its new form and cannot delete itself.
-    return await this.revokeStaleContextAllows(context, isCurrent)
+    return await this.revokeStaleContextAllows(
+      context,
+      isCurrent,
+      undefined,
+      undefined,
+      options.honorsLostFence === true
+    )
   }
 
   /**
@@ -846,13 +859,20 @@ export class NetworkPolicyReconciler {
       hostEgress?: k8s.V1NetworkPolicy[]
       rpcProxyEgress?: k8s.V1NetworkPolicy[]
     },
-    onRevoked?: () => void
+    onRevoked?: () => void,
+    callerHonorsLostFence = false
   ): Promise<boolean> {
     if (!isCurrent()) return false
     const safetySnapshotProvided = listedPolicies !== undefined
     // A delete whose uid/resourceVersion preconditions were rejected revoked
-    // nothing. The scoped lane has no second source of truth to reclassify
-    // from, so it finishes its remaining work and then declines to certify.
+    // nothing. Reporting it instead of throwing is only safe for a caller that
+    // reads the returned boolean: the authoritative snapshot lane aborts its
+    // pass on it, and the scoped delta lane declines to certify. Every other
+    // caller discards the boolean, so for them a swallowed 409 would leave a
+    // stale allow live while the pass is recorded as a success — they keep the
+    // loud default and let the failure reach the retry policy.
+    const lostFenceOutcome =
+      safetySnapshotProvided || callerHonorsLostFence ? ('report' as const) : ('throw' as const)
     let lostDeleteFence = false
     /**
      * Revoke one orphaned policy in any lane. Returns false only when the
@@ -869,7 +889,7 @@ export class NetworkPolicyReconciler {
         existing,
         isCurrent,
         undefined,
-        'report'
+        lostFenceOutcome
       )
       if (deleted) return true
       if (safetySnapshotProvided) return false

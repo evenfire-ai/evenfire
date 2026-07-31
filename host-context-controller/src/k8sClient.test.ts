@@ -2433,7 +2433,7 @@ describe('McpServerWatcher startup', () => {
     await flushMicrotasks()
     expect(netPol.reconcileContext).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'current-context' }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
 
     releaseFullReconcile.resolve(undefined)
@@ -2442,7 +2442,7 @@ describe('McpServerWatcher startup', () => {
     expect(reconciliationOrder).toEqual(['watch', 'initial'])
     expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
       expect.objectContaining({ name: 'current-context' }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
     await watcher.stop()
   })
@@ -2508,7 +2508,7 @@ describe('McpServerWatcher startup', () => {
         name: contextName,
         spec: expect.objectContaining({ contextId, description: 'recreated' }),
       }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
     await watcher.stop()
   })
@@ -2676,7 +2676,7 @@ describe('McpServerWatcher startup', () => {
       expect.objectContaining({
         spec: expect.objectContaining({ description: 'new' }),
       }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
     await watcher.stop()
   })
@@ -2779,7 +2779,7 @@ describe('McpServerWatcher startup', () => {
     await flushMicrotasks()
     expect(netPol.reconcileContext).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'live-context' }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
 
     releaseResync.resolve(undefined)
@@ -4334,7 +4334,7 @@ describe('McpServerWatcher external egress retries', () => {
       expect.objectContaining({
         spec: expect.objectContaining({ contextId: 'context1' }),
       }),
-      { isCurrent: expect.any(Function) }
+      expect.objectContaining({ isCurrent: expect.any(Function) })
     )
 
     watcher.stop()

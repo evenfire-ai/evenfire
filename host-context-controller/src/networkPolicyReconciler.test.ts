@@ -4807,10 +4807,37 @@ describe('NetworkPolicyReconciler', () => {
       // the one this pass classified. Nothing was revoked, so the delta must
       // decline to certify — and it must not blow up the caller, which would
       // only force a spurious full re-convergence.
-      expect(await reconciler.reconcileContext(staleContext)).toBe(false)
+      // The scoped delta lane reads this boolean and withholds the certificate,
+      // so it is the one caller allowed to take the lost fence as an outcome
+      // rather than a throw.
+      expect(await reconciler.reconcileContext(staleContext, { honorsLostFence: true })).toBe(false)
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'ctx-default-alpha', namespace: 'mcp-server' })
       )
+    })
+
+    it('fails the additive phase when it loses the delete fence', async () => {
+      listOnlyTheStalePolicy()
+      // Safety phase revokes cleanly and certifies; the additive phase then
+      // races another writer and loses the fence. The additive caller discards
+      // reconcileContext's boolean, so swallowing the 409 there would record
+      // the pass as a success, disarm the convergence retry, and leave a stale
+      // allow live with no NetworkPolicy resync to recover it.
+      mockApi.deleteNamespacedNetworkPolicy
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(lostFence)
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await expect(
+        reconciler.fullReconcile([staleContext], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow()
+
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
     })
 
     it('refuses to certify the safety pass instead of throwing the lost fence', async () => {
