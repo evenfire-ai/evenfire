@@ -20,7 +20,10 @@ export function sessionPartsFromPrefixedKey(
   const rest = key.slice(prefix.length)
   if (!rest) return null
 
-  if (scopedAgent) return { agent: scopedAgent, chatId: rest }
+  if (scopedAgent) {
+    if (!prefix.endsWith(`:rpc:${scopedAgent}:`)) return null
+    return { agent: scopedAgent, chatId: rest }
+  }
 
   const colonIndex = rest.indexOf(':')
   if (colonIndex <= 0 || colonIndex === rest.length - 1) return null
