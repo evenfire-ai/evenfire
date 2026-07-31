@@ -1502,21 +1502,59 @@ describe('onboarding', () => {
 // ── corrupt/missing files ────────────────────────────────────────────────────
 
 describe('corrupt/missing files', () => {
-  it('fails closed and preserves a corrupt index during later mutations', async () => {
+  it('quarantines a torn index once and preserves paged transcripts while writes recover', async () => {
+    const originalMessage: ChatMessage = {
+      id: 'local-only-message',
+      role: 'user',
+      content: 'keep me',
+      timestamp: 1,
+      preserveLocal: true,
+    }
+    await store.createChat('agent-1', 'kept-chat')
+    await store.appendMessages('agent-1', 'kept-chat', [originalMessage])
+
     const agentDir = join(tempDir, 'agent-1')
-    await fs.mkdir(agentDir, { recursive: true })
     const indexPath = join(agentDir, 'index.json')
-    const corrupt = 'NOT VALID JSON{{{'
+    const corrupt = '{"version":2,"chats":[{"id":"kept-chat"'
     await fs.writeFile(indexPath, corrupt)
 
-    await expect(store.getIndex('agent-1')).rejects.toThrow(/Unable to read chat index/)
-    await expect(store.createChat('agent-1', 'new-chat')).rejects.toThrow(
-      /Unable to read chat index/
+    await expect(store.getIndex('agent-1')).resolves.toEqual({
+      version: 2,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    await expect(store.getIndex('agent-1')).resolves.toEqual({
+      version: 2,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    const quarantinedIndexes = (await fs.readdir(agentPath('.corrupt'))).filter(name =>
+      name.startsWith('index-')
     )
-    expect(await fs.readFile(indexPath, 'utf8')).toBe(corrupt)
+    expect(quarantinedIndexes).toHaveLength(1)
+    expect(await fs.readFile(agentPath('.corrupt', quarantinedIndexes[0]!), 'utf8')).toBe(corrupt)
+
+    await expect(
+      store.appendMessages('agent-1', 'kept-chat', [
+        {
+          id: 'new-message',
+          role: 'assistant',
+          content: 'still writable',
+          timestamp: 2,
+        },
+      ])
+    ).resolves.toBeUndefined()
+    expect((await store.loadMessages('agent-1', 'kept-chat')).map(message => message.id)).toEqual([
+      'local-only-message',
+      'new-message',
+    ])
+    await expect(store.createChat('agent-1', 'new-chat')).resolves.toMatchObject({ id: 'new-chat' })
+    await expect(fs.access(chatCacheDir('kept-chat'))).resolves.toBeUndefined()
   })
 
-  it('keeps a v3 index readable but refuses to normalize it during ordinary RMW', async () => {
+  it('normalizes a readable v3 index during the next ordinary RMW', async () => {
     const agentDir = join(tempDir, 'agent-1')
     await fs.mkdir(agentDir, { recursive: true })
     const indexPath = join(agentDir, 'index.json')
@@ -1536,14 +1574,18 @@ describe('corrupt/missing files', () => {
     })
     await fs.writeFile(indexPath, future)
 
-    expect((await store.getIndex('agent-1')).chats[0]?.id).toBe('kept')
-    await expect(store.renameChat('agent-1', 'kept', 'Changed')).rejects.toThrow(
-      /unsupported chat index version 3/
-    )
-    expect(await fs.readFile(indexPath, 'utf8')).toBe(future)
+    expect(await store.getIndex('agent-1')).toMatchObject({
+      version: 2,
+      chats: [expect.objectContaining({ id: 'kept' })],
+    })
+    await expect(store.renameChat('agent-1', 'kept', 'Changed')).resolves.toBeUndefined()
+    expect(await readJsonFile(indexPath)).toMatchObject({
+      version: 2,
+      chats: [expect.objectContaining({ id: 'kept', title: 'Changed' })],
+    })
   })
 
-  it('rejects structurally invalid index counters before an RMW can normalize them', async () => {
+  it('quarantines a structurally invalid index before rebuilding the catalog', async () => {
     const agentDir = join(tempDir, 'agent-1')
     await fs.mkdir(agentDir, { recursive: true })
     const indexPath = join(agentDir, 'index.json')
@@ -1563,10 +1605,16 @@ describe('corrupt/missing files', () => {
     })
     await fs.writeFile(indexPath, invalid)
 
-    await expect(store.renameChat('agent-1', 'kept', 'Changed')).rejects.toThrow(
-      /Unable to read chat index/
+    await expect(store.createChat('agent-1', 'new-chat')).resolves.toMatchObject({ id: 'new-chat' })
+    const quarantinedIndexes = (await fs.readdir(agentPath('.corrupt'))).filter(name =>
+      name.startsWith('index-')
     )
-    expect(await fs.readFile(indexPath, 'utf8')).toBe(invalid)
+    expect(quarantinedIndexes).toHaveLength(1)
+    expect(await fs.readFile(agentPath('.corrupt', quarantinedIndexes[0]!), 'utf8')).toBe(invalid)
+    expect(await readJsonFile(indexPath)).toMatchObject({
+      version: 2,
+      chats: [expect.objectContaining({ id: 'new-chat' })],
+    })
   })
 
   it('does not overwrite an index after a transient read failure', async () => {

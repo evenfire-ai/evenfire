@@ -179,7 +179,7 @@ function parseChatIndex(raw: string): ChatIndex {
       throw new Error('Invalid chat index entry')
     }
   }
-  return candidate as unknown as ChatIndex
+  return { ...candidate, version: INDEX_VERSION } as unknown as ChatIndex
 }
 
 /**
@@ -356,6 +356,10 @@ export class ChatStore {
 
   private indexPath(agentRef: string): string {
     return join(this.agentDir(agentRef), 'index.json')
+  }
+
+  private corruptIndexPath(agentRef: string): string {
+    return join(this.agentDir(agentRef), '.corrupt', `index-${randomUUID()}.json`)
   }
 
   private chatFilePath(agentRef: string, chatId: string): string {
@@ -1424,11 +1428,25 @@ export class ChatStore {
     try {
       return parseChatIndex(raw)
     } catch (error) {
-      // Bind-time migration deliberately preserves malformed and future catalogs
-      // because their paged transcripts may contain local-only work. Fail closed:
-      // treating those bytes as an empty writable index would let the next RMW
-      // silently orphan the preserved chats.
-      throw new Error(`Unable to read chat index for ${agentRef}`, { cause: error })
+      // Preserve unreadable catalog bytes for bounded recovery/diagnostics, but
+      // detach them from the writable path so a torn index cannot brick every
+      // chat mutation. Paged transcripts live under chats/ and remain untouched;
+      // the catalog can be repopulated by the server as normal writes resume.
+      const source = this.indexPath(agentRef)
+      const target = this.corruptIndexPath(agentRef)
+      await fs.mkdir(dirname(target), { recursive: true, mode: 0o700 })
+      try {
+        await fs.rename(source, target)
+        await this.syncRenamedEntry(source, target)
+        console.warn(`[chatStore] Quarantined unreadable chat index for "${agentRef}"`)
+      } catch (renameError) {
+        if (!isNotFoundError(renameError)) {
+          throw new Error(`Unable to quarantine chat index for ${agentRef}`, {
+            cause: renameError,
+          })
+        }
+      }
+      return emptyIndex()
     }
   }
 
