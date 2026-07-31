@@ -359,12 +359,19 @@ export class TokenStore {
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = await loadKeytar()
     if (keytar) {
+      const deleteKeychainPassword = async (account: string) => {
+        try {
+          await keytar.deletePassword(SERVICE, account)
+        } catch {
+          // Keychain cleanup is best-effort; continue through the scoped files.
+        }
+      }
       for (const scopedEnvKey of scopedEnvKeys) {
-        await keytar.deletePassword(SERVICE, accountFor(scopedEnvKey)).catch(() => {})
+        await deleteKeychainPassword(accountFor(scopedEnvKey))
       }
       // Best-effort cleanup of the legacy global slot so it can't be migrated
       // into another environment later.
-      await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
+      await deleteKeychainPassword(LEGACY_ACCOUNT)
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.

@@ -70,6 +70,17 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     expect(await store.getSessionToken(ENV_B)).toBe('tok-b')
   })
 
+  it('continues scoped cleanup when keytar deletePassword throws synchronously', async () => {
+    const keytar = await import('keytar')
+    vi.mocked(keytar.deletePassword).mockImplementationOnce(() => {
+      throw new Error('synchronous keychain failure')
+    })
+    const store = new TokenStore()
+
+    await expect(store.clearSessionToken(ENV_A)).resolves.toBeUndefined()
+    expect(keytar.deletePassword).toHaveBeenCalledWith(SERVICE, LEGACY_ACCOUNT)
+  })
+
   it('clear removes explicitly supported legacy environment alias slots', async () => {
     const store = new TokenStore()
     await store.setSessionToken('legacy-token', ENV_A)
