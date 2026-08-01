@@ -132,107 +132,110 @@ export default function RegistryApiKeysPanel() {
 
   const isReady = view.kind === 'ready'
 
+  const content = (
+    <>
+      <TablePanelHeader
+        title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
+        actions={
+          isReady ? (
+            <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
+              + Create key
+            </Button>
+          ) : null
+        }
+      />
+
+      <div className="cu-card__body">
+        {view.kind === 'loading' ? <p>Loading…</p> : null}
+        {view.kind === 'not-owner' ? (
+          <p className="cu-banner cu-banner--warn">
+            You must be an org owner to manage API keys
+            {view.org ? ` for @${view.org}` : ''}.
+          </p>
+        ) : null}
+        {view.kind === 'no-org' ? (
+          <p className="cu-banner cu-banner--warn">
+            This deployment is not bound to a registry org, so there are no org API keys to
+            manage.
+          </p>
+        ) : null}
+        {view.kind === 'auth-disabled' ? (
+          <p className="cu-banner cu-banner--info">
+            {connectionMode === 'managed' ? (
+              <>
+                Registry authentication for this deployment is controlled by{' '}
+                <code>CLERUM_REGISTRY_AUTH_ENABLED</code>. An operator must enable it and restart
+                control-api before API keys can be created here.
+              </>
+            ) : (
+              <>
+                API keys become available once this deployment is connected to the registry.{' '}
+                <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+              </>
+            )}
+          </p>
+        ) : null}
+        {view.kind === 'url-not-configured' ? (
+          <p className="cu-banner cu-banner--warn">
+            This deployment still holds registry credentials, but <code>CLERUM_REGISTRY_URL</code>{' '}
+            is not configured. Restore the registry URL or disconnect the stale connection before
+            managing API keys.
+          </p>
+        ) : null}
+        {view.kind === 'error' ? (
+          <p className="cu-banner cu-banner--warn">
+            Could not load API keys.{' '}
+            <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
+              Retry
+            </Button>
+          </p>
+        ) : null}
+
+        {view.kind === 'ready' ? (
+          view.keys.length === 0 ? (
+            <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
+          ) : (
+            <div className="cu-table-wrap">
+              <table className="cu-table">
+                <thead>
+                  <TableHeaderRow columns={API_KEYS_COLUMNS} />
+                </thead>
+                <tbody>
+                  {view.keys.map(k => (
+                    <tr key={k.id}>
+                      <td>
+                        <code>{k.key_prefix}</code>
+                      </td>
+                      <td>{k.description || '—'}</td>
+                      <td>{k.scopes.join(', ')}</td>
+                      <td>{k.created_by_username}</td>
+                      <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
+                      <td>{fmtExpiry(k.expires_at)}</td>
+                      <td>{fmtTime(k.last_used_at, 'Never used')}</td>
+                      <td>
+                        <Button
+                          type="button"
+                          variant="danger"
+                          size="sm"
+                          onClick={() => void handleRevoke(k)}
+                        >
+                          Revoke
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
+      </div>
+    </>
+  )
+
   return (
     <section>
-      <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader
-          title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
-          actions={
-            isReady ? (
-              <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
-                + Create key
-              </Button>
-            ) : null
-          }
-        />
-
-        <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading…</p> : null}
-          {view.kind === 'not-owner' ? (
-            <p className="cu-banner cu-banner--warn">
-              You must be an org owner to manage API keys
-              {view.org ? ` for @${view.org}` : ''}.
-            </p>
-          ) : null}
-          {view.kind === 'no-org' ? (
-            <p className="cu-banner cu-banner--warn">
-              This deployment is not bound to a registry org, so there are no org API keys to
-              manage.
-            </p>
-          ) : null}
-          {view.kind === 'auth-disabled' ? (
-            <p className="cu-banner cu-banner--info">
-              {connectionMode === 'managed' ? (
-                <>
-                  Registry authentication for this deployment is controlled by{' '}
-                  <code>CLERUM_REGISTRY_AUTH_ENABLED</code>. An operator must enable it and restart
-                  control-api before API keys can be created here.
-                </>
-              ) : (
-                <>
-                  API keys become available once this deployment is connected to the registry.{' '}
-                  <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
-                </>
-              )}
-            </p>
-          ) : null}
-          {view.kind === 'url-not-configured' ? (
-            <p className="cu-banner cu-banner--warn">
-              This deployment still holds registry credentials, but <code>CLERUM_REGISTRY_URL</code>{' '}
-              is not configured. Restore the registry URL or disconnect the stale connection before
-              managing API keys.
-            </p>
-          ) : null}
-          {view.kind === 'error' ? (
-            <p className="cu-banner cu-banner--warn">
-              Could not load API keys.{' '}
-              <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
-                Retry
-              </Button>
-            </p>
-          ) : null}
-
-          {view.kind === 'ready' ? (
-            view.keys.length === 0 ? (
-              <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
-            ) : (
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <thead>
-                    <TableHeaderRow columns={API_KEYS_COLUMNS} />
-                  </thead>
-                  <tbody>
-                    {view.keys.map(k => (
-                      <tr key={k.id}>
-                        <td>
-                          <code>{k.key_prefix}</code>
-                        </td>
-                        <td>{k.description || '—'}</td>
-                        <td>{k.scopes.join(', ')}</td>
-                        <td>{k.created_by_username}</td>
-                        <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
-                        <td>{fmtExpiry(k.expires_at)}</td>
-                        <td>{fmtTime(k.last_used_at, 'Never used')}</td>
-                        <td>
-                          <Button
-                            type="button"
-                            variant="danger"
-                            size="sm"
-                            onClick={() => void handleRevoke(k)}
-                          >
-                            Revoke
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : null}
-        </div>
-      </div>
-
+      <div className="cu-card cu-card--viewport-fill">{content}</div>
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}

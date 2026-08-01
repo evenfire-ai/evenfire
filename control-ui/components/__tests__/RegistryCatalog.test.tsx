@@ -129,7 +129,7 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(await screen.findByText('brave-search')).toBeInTheDocument()
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
-    expect(screen.getByText('1 of 1 entries')).toBeInTheDocument()
+    expect(screen.getByText('Marketplace (1)')).toBeInTheDocument()
   })
 
   it('shows only plugin entries on the plugins route', async () => {
@@ -159,7 +159,7 @@ describe('RegistryCatalog tabs and columns', () => {
     }
   })
 
-  it('provides canonical tabs for connectors and plugins', async () => {
+  it('shows only the connectors Marketplace tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
@@ -168,10 +168,7 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
-      'href',
-      '/marketplace/plugins'
-    )
+    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
   })
 
   it('links entry names to their shareable detail routes', async () => {
@@ -191,11 +188,11 @@ describe('RegistryCatalog expansion and actions', () => {
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
     const installCell = within(row).getByRole('button', { name: 'Install' }).closest('td')
-    const editCell = within(row)
-      .getByRole('button', { name: 'Edit Marketplace metadata for brave-search v1.0.0' })
+    const actionsCell = within(row)
+      .getByRole('button', { name: 'Actions for brave-search v1.0.0' })
       .closest('td')
 
-    expect(installCell).not.toBe(editCell)
+    expect(installCell).not.toBe(actionsCell)
     expect(within(row).queryByRole('button', { name: 'View details' })).not.toBeInTheDocument()
   })
 
@@ -262,9 +259,8 @@ describe('RegistryCatalog expansion and actions', () => {
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    fireEvent.click(
-      within(row).getByRole('button', { name: 'Remove brave-search v1.0.0 from Marketplace' })
-    )
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for brave-search v1.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Marketplace' }))
     const dialog = screen.getByRole('dialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }))
 
@@ -307,9 +303,8 @@ describe('RegistryCatalog controls', () => {
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by mode' }), {
-      target: { value: 'remote' },
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by mode' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Remote' }))
     expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
     expect(screen.getByText('remote-db')).toBeInTheDocument()
   })
@@ -324,13 +319,16 @@ describe('RegistryCatalog controls', () => {
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/publish?type=recipe')
   })
 
-  it('routes to canonical API-key management', async () => {
+  it('opens API-key management from the Marketplace title menu', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /manage api keys/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Marketplace actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage API keys' }))
+
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/keys')
   })
+
 })
 
 describe('RegistryCatalog state handling', () => {

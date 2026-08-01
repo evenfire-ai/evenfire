@@ -6,7 +6,7 @@ import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', () => ({
   getOwnedRegistryEntries: vi.fn(),
-  // ShareAccessPanel deps (rendered lazily on expand):
+  // GrantAccessModal deps (mounted lazily when Share access is clicked):
   listOrgGrants: vi.fn().mockResolvedValue({ grants: [] }),
   createOrgGrant: vi.fn(),
   revokeOrgGrant: vi.fn(),
@@ -92,13 +92,29 @@ describe('OwnedEntries', () => {
     expect(screen.getByText(/no grant needed/i)).toBeInTheDocument()
   })
 
-  it('expanding Share access mounts the grants panel', async () => {
+  it('clicking Share access opens the Grant access modal', async () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
+    })
+    render(<OwnedEntries orgScope="acme" />)
+    // Modal is not in the DOM until the button is clicked.
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
+    expect(await screen.findByLabelText(/grantee org/i)).toBeInTheDocument()
+    expect(api.listOrgGrants).toHaveBeenCalledWith('@acme/db')
+  })
+
+  it('closing the modal unmounts it from the DOM', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
     })
     render(<OwnedEntries orgScope="acme" />)
     fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
-    expect(await screen.findByLabelText(/grantee org/i)).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
+    // Disambiguate from the icon close button (aria-label="Close") using text.
+    fireEvent.click(screen.getByText('Close', { selector: 'button' }))
+    expect(screen.queryByRole('dialog', { name: /grant access/i })).toBeNull()
   })
 
   it('empty state when no owned entries', async () => {
