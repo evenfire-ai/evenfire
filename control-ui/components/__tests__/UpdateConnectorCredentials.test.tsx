@@ -366,6 +366,9 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
+        // Pin the TERMINAL reason explicitly: this test asserts failure IS
+        // reported, so it must not silently inherit the helper's default reason.
+        reason: 'RolloutIncomplete',
         message: 'pod CrashLoopBackOff: 0/1 ready',
         lastTransitionTime: '2026-01-01T00:00:03.000Z',
       })
@@ -382,6 +385,42 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
       screen.getByText(/Rotation failed: pod CrashLoopBackOff: 0\/1 ready/)
     ).toBeInTheDocument()
     expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
+  })
+
+  it('counts a fresh True inside the clock-skew tolerance window as this rotation (M3)', async () => {
+    // Regression guard for CLOCK_SKEW_TOLERANCE_MS. The cutoff is stamped from
+    // the browser clock; lastTransitionTime from the cluster clock. When the
+    // browser runs slightly AHEAD, a genuinely fresh condition can carry a
+    // timestamp a few seconds BEFORE the raw cutoff — the tolerance backs the
+    // cutoff off so it still counts. System time is 00:00:00Z, so the tolerant
+    // cutoff is 23:59:55Z and a condition at 23:59:58Z is inside the window and
+    // fresh. Remove `- CLOCK_SKEW_TOLERANCE_MS` and the cutoff becomes 00:00:00Z,
+    // this condition is judged stale, the rotation wedges until timeout, and
+    // this assertion goes red — which the pre-existing success test (whose
+    // timestamp sits AFTER system time) could not detect.
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'ready',
+        // 2s before system time (00:00:00Z): inside the 5s skew window, but
+        // stale the instant the tolerance is removed.
+        lastTransitionTime: '2025-12-31T23:59:58.000Z',
+      })
+    )
+
+    await renderPanel(ENV_SECRET)
+    await submitRotation({ 'api-key': 'new-key-value' })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+    expect(screen.getByText(/Credentials rotated\./i)).toBeInTheDocument()
   })
 
   it('reports a bounded timeout — never success — when the condition never transitions', async () => {
