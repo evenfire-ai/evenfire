@@ -352,8 +352,8 @@ export class WorkflowService {
    * workflow readiness: stepless SDK traffic resolves credentials per attempt
    * through the WRC broker rather than loading them into this service.
    */
-  configurePluginWorkloadSdkBootstrap(req: PluginWorkloadSdkBootstrapRequest): ConfigureResponse {
-    if (!req.provider) {
+  configurePluginWorkloadSdkBootstrap(req?: PluginWorkloadSdkBootstrapRequest): ConfigureResponse {
+    if (!req?.provider) {
       return { configured: false, message: 'provider is required' }
     }
     if (!isLlmProvider(req.provider)) {
