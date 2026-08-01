@@ -295,9 +295,13 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // transitory DeploymentReady=False/WaitingForReplicas as a failure (the
       // B1 defect). Accepting it (as this spec used to) let the bug pass in
       // green; asserting its absence makes the test catch a regression.
+      // Must exceed the UI's own POLL_TIMEOUT_MS (180s): the "did not finish
+      // within" terminal message is only emitted at 180s, so a 150s assertion
+      // timeout would expire in the dead window (150s–180s) and fail spuriously
+      // on a slow-but-valid rollout. 185s clears it.
       await expect(
         page.getByText(/Credentials rotated\./).or(page.getByText(/did not finish within/))
-      ).toBeVisible({ timeout: 150_000 })
+      ).toBeVisible({ timeout: 185_000 })
       await expect(page.getByText(/Rotation failed:/)).toHaveCount(0)
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-credential-rotation')
