@@ -51,7 +51,6 @@ type JsonPatchOperation = {
 
 type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
-  existingPolicies?: k8s.V1NetworkPolicy[]
   onRevoked?: () => void
   /**
    * Set only by a caller that reads the returned boolean and withholds
@@ -1785,25 +1784,23 @@ export class NetworkPolicyReconciler {
   ): Promise<void> {
     const isCurrent = options.isCurrent ?? (() => true)
     if (!isCurrent()) return
-    let existingPolicies = options.existingPolicies
-    if (!existingPolicies) {
-      try {
-        existingPolicies = await this.listExternalEgressPoliciesForServer(
-          server.name,
-          server.namespace
-        )
-      } catch (error) {
-        if (!isCurrent()) return
-        await this.writeExternalEgressStatus(
-          server,
-          [],
-          'False',
-          'InventoryListFailed',
-          `Failed to list existing external egress policies: ${this.errorMessage(error)}`,
-          isCurrent
-        )
-        throw error
-      }
+    let existingPolicies: k8s.V1NetworkPolicy[]
+    try {
+      existingPolicies = await this.listExternalEgressPoliciesForServer(
+        server.name,
+        server.namespace
+      )
+    } catch (error) {
+      if (!isCurrent()) return
+      await this.writeExternalEgressStatus(
+        server,
+        [],
+        'False',
+        'InventoryListFailed',
+        `Failed to list existing external egress policies: ${this.errorMessage(error)}`,
+        isCurrent
+      )
+      throw error
     }
     if (!isCurrent()) return
 
