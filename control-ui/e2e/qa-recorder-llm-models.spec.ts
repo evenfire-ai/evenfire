@@ -22,18 +22,14 @@ test.describe('optional QA recorder: Control UI LLM models and secrets', () => {
 
     const mainNav = page.getByRole('navigation', { name: 'Main sections' })
 
-    // (1) LLM Models catalog. The sidebar entry may be a direct link or an
-    // expandable group (button -> 'Catalog' child); click the label, then follow
-    // the Catalog child link if it appears. Assert the canonical URL and that the
-    // models table rendered (the 'Context window' column header is a stable shell
-    // marker that renders regardless of row count).
-    await mainNav.getByText('LLM Models', { exact: true }).click()
-    const catalogLink = mainNav.getByRole('link', { name: 'Catalog', exact: true })
-    if (await catalogLink.isVisible().catch(() => false)) {
-      await catalogLink.click()
-    }
+    // (1) Unified LLM Models surface. Catalog and Discovery Review use
+    // route-backed tabs under the same direct sidebar destination.
+    await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
     await expect(page.getByText('Context window').first()).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByRole('tab', { name: 'Discovery review' })).toBeVisible({
+      timeout: 20_000,
+    })
     await screenshotAndLog(page, testInfo, 'control-ui-llm-models')
 
     // (2) Secrets management (LLM scope). 'Secrets' is a direct sidebar link to

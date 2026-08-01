@@ -1606,9 +1606,10 @@ export async function deleteLlmModel(id: string) {
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
 // Discovery pulls the public models.dev catalog into `llm_allowed_models` as
 // `source='discovery', enabled=false`. The operator reviews and enables from a
-// fresh catalog. These wrappers drive the /llm-models/discovery review surface;
-// enable/disable/delete of the discovered rows reuse the existing update/delete
-// routes above (no dedicated discovery mutation endpoint).
+// fresh catalog. These wrappers drive the Discovery Review section on the
+// unified /llm-models surface; enable/disable/delete of discovered rows reuse
+// the existing update/delete routes above (no dedicated discovery mutation
+// endpoint).
 
 // `live` = fetched from the upstream catalog; `vendored` = served from the
 // bundled snapshot fallback (upstream unreachable).
@@ -2879,7 +2880,7 @@ export type GrantedToMeItem = {
 // tests, so normalize defensively here — accept camelCase OR snake_case — and
 // hand components one canonical camelCase shape. This keeps the mocked→live
 // transition safe regardless of which the registry emits, and avoids silent
-// empty lists (ShareAccessPanel filters on pluginName) or "@undefined" rows.
+// empty lists (GrantAccessModal filters on pluginName) or "@undefined" rows.
 type RawOrgGrant = {
   id?: string
   pluginName?: string
