@@ -109,17 +109,19 @@ describe('SecretService — write ops return names-only summaries (no secret val
     ])
   })
 
-  it('removeSecretKey returns names-only', async () => {
-    const { svc } = makeService()
+  it('removeSecretKey returns names-only (post-removal keyset, value never surfaced)', async () => {
+    const { svc, core } = makeService()
+    // Realistic post-removal merge-patch response: the removed key is gone; only
+    // the surviving key remains (still base64 in the raw k8s response).
+    core.patchNamespacedSecret.mockResolvedValueOnce(
+      fullSecret('cc-foo-credentials', 'channels', { 'slack-bot-token': OTHER_VALUE })
+    )
     const result = await svc.removeSecretKey({
       name: 'cc-foo-credentials',
       namespace: 'channels',
       key: 'telegram-bot-token',
     })
-    expectNamesOnly(result, 'cc-foo-credentials', 'channels', [
-      'slack-bot-token',
-      'telegram-bot-token',
-    ])
+    expectNamesOnly(result, 'cc-foo-credentials', 'channels', ['slack-bot-token'])
   })
 
   it('deleteSecret returns {name, namespace, deleted:true}, never a Secret body', async () => {

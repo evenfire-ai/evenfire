@@ -128,8 +128,9 @@ describe('SECURITY (integration): admin secret-write responses are names-only', 
       .send({ name: 'r1', data: { TOKEN: LEAK } })
       .expect(200)
 
-    expect(res.body).toMatchObject({ name: 'r1' })
-    expect(Array.isArray(res.body.keys)).toBe(true)
+    // Names-only, and the resulting keyset includes the pre-existing key by NAME
+    // only (never its value) — proving the merge response was trimmed.
+    expect(res.body).toMatchObject({ name: 'r1', keys: ['EXISTING', 'TOKEN'] })
     expectNoSecretValues(res.body)
   })
 

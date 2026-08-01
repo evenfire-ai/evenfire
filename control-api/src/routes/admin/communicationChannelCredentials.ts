@@ -104,9 +104,8 @@ export function registerCommunicationChannelCredentialsRoutes(
       }
       await gateway.updateResource('communicationchannels', name, { spec: nextSpec }, ns)
       // Names-only for consistency with the rotated:true branch and the #223
-      // policy. `updated` is the CommunicationChannel CRD (only
-      // credentialsSecretRef, no secret values), but we still avoid echoing the
-      // raw CRD and return only the written key NAMES.
+      // policy. The updateResource result (the CommunicationChannel CRD) is not
+      // echoed — respond with only the written key NAMES.
       res.status(200).json({
         name,
         secretName,

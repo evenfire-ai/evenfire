@@ -391,8 +391,8 @@ export class K8sGateway {
   }
 
   // Write ops return a names-only summary (never the k8s Secret's `.data`), so no
-  // route can leak secret values by echoing the return — and a future cast to
-  // V1Secret is now a compile error. Reads (getSecret) stay full-fat.
+  // route can leak secret values by echoing the return — and reading `.data` off
+  // the returned summary is now a compile error. Reads (getSecret) stay full-fat.
   async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.createSecret(req)
   }
