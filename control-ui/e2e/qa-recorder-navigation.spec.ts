@@ -65,17 +65,13 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     ).toBeVisible({ timeout: 20_000 })
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-external-channels')
 
-    // 5) LLM Models — this is an expandable sidebar GROUP rendered as a <button>
-    //    (not a link), so clicking it only toggles its subnav. Expand the group,
-    //    then follow the 'Catalog' child link (href = CONTROL_ROUTES.llmModels.root
-    //    = /llm-models) into the model catalog page. Scope to the sidebar nav so
-    //    the 'Catalog' match is unambiguous.
-    await mainNav.getByRole('button', { name: 'LLM Models', exact: true }).click()
-    await mainNav.getByRole('link', { name: 'Catalog', exact: true }).click()
+    // 5) LLM Models — Catalog and Discovery Review share one tabbed operator
+    //    surface, so the sidebar uses one direct link.
+    await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
     // The subtitle is long; anchor on a unique leading substring.
     await expect(
-      page.getByText('Operator-declared allowlist of usable models per provider')
+      page.getByText('The authoritative allowlist of manual and discovered models')
     ).toBeVisible({ timeout: 20_000 })
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-llm-models')
 

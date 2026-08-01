@@ -111,7 +111,6 @@ export function GfsBrowser(): React.JSX.Element {
   const [renameName, setRenameName] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
   const manageUploadInputRef = useRef<HTMLInputElement | null>(null)
-  const manageReplaceInputRef = useRef<HTMLInputElement | null>(null)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -493,12 +492,24 @@ export function GfsBrowser(): React.JSX.Element {
                 <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
                   {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
                   <button
-                    className="cu-gfs-breadcrumb__button"
+                    className={`cu-gfs-breadcrumb__button${
+                      crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                    }`}
                     type="button"
                     onClick={() => goToCrumb(index)}
                     aria-current={index === crumbs.length - 1 ? 'page' : undefined}
                   >
-                    {crumb.name === '/' ? DRIVE : crumb.name}
+                    {crumb.name === '/' ? (
+                      <>
+                        <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                          <IconFolder />
+                        </span>
+                        <span className="cu-gfs-breadcrumb__drive-label">Drive</span>
+                        <span>{DRIVE}</span>
+                      </>
+                    ) : (
+                      crumb.name
+                    )}
                   </button>
                 </span>
               ))}
@@ -717,6 +728,11 @@ export function GfsBrowser(): React.JSX.Element {
                         setRenameOpen(true)
                         setDeleteOpen(false)
                       }}
+                      onReplace={
+                        selected.kind !== 'directory'
+                          ? file => void replaceFile(selected, file)
+                          : undefined
+                      }
                       onDelete={() => {
                         setDeleteOpen(true)
                         setRenameOpen(false)
@@ -730,11 +746,7 @@ export function GfsBrowser(): React.JSX.Element {
                   <Button size="sm" onClick={() => manageUploadInputRef.current?.click()}>
                     Upload file
                   </Button>
-                ) : (
-                  <Button size="sm" onClick={() => manageReplaceInputRef.current?.click()}>
-                    Replace file
-                  </Button>
-                )}
+                ) : null}
                 <Button
                   autoFocus
                   className="cu-gfs-manage-dialog__close"
@@ -759,19 +771,7 @@ export function GfsBrowser(): React.JSX.Element {
                   void uploadFileToFolder(selected, file)
                 }}
               />
-            ) : (
-              <input
-                aria-label={`Replace ${selected.name}`}
-                className="sr-only"
-                ref={manageReplaceInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void replaceFile(selected, file)
-                }}
-              />
-            )}
+            ) : null}
 
             <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">

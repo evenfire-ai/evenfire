@@ -9,11 +9,15 @@ export function TablePanelHeader({
   actionsClassName,
   subtitle,
   title,
+  titleActions,
 }: TablePanelHeaderProps) {
   return (
     <div className="cu-table-panel__head">
       <div className="cu-table-panel__heading">
-        <span className="cu-panel-title">{title}</span>
+        <div className="cu-table-panel__title-row">
+          <span className="cu-panel-title">{title}</span>
+          {titleActions}
+        </div>
         {subtitle ? <p className="cu-table-panel__subtitle">{subtitle}</p> : null}
       </div>
       {actions ? (

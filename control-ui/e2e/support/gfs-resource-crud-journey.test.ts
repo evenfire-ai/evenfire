@@ -176,7 +176,7 @@ export async function exerciseGfsResourceCrudJourney({
 
     await page
       .getByRole('navigation', { name: 'Breadcrumb' })
-      .getByRole('button', { name: 'main', exact: true })
+      .getByRole('button', { name: 'Drive main', exact: true })
       .click()
     await expect(folderRow(fixture.name)).toBeVisible({ timeout: 20_000 })
     await folderRow(fixture.name)
