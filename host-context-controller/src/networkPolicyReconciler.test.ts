@@ -933,13 +933,25 @@ describe('NetworkPolicyReconciler', () => {
           return {}
         }
       )
+      // The delete mock MUST remove from livePolicies, or the port-4000
+      // assertion below survives a spurious deletion and the test passes with
+      // the bug reinjected (R3-H7).
+      mockApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ namespace, name }) => {
+        livePolicies.delete(`${namespace}/${name}`)
+        return {}
+      })
 
       await rec.reconcileContext(context)
 
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: 'ctx-dev-mongo',
-        namespace: 'mcp-server',
-      })
+      // Filter the real calls by name+namespace: the production delete always
+      // carries `preconditions`, so `not.toHaveBeenCalledWith({name,namespace})`
+      // never matched any call and was vacuously true (R3-H7).
+      const deletedCtxDevMongo = mockApi.deleteNamespacedNetworkPolicy.mock.calls.some(
+        call =>
+          (call[0] as { name?: string; namespace?: string })?.name === 'ctx-dev-mongo' &&
+          (call[0] as { name?: string; namespace?: string })?.namespace === 'mcp-server'
+      )
+      expect(deletedCtxDevMongo).toBe(false)
       const ingress = livePolicies.get('mcp-server/ctx-dev-mongo')
       expect(ingress?.spec?.ingress?.[0]?.ports).toEqual([expect.objectContaining({ port: 4000 })])
     })
