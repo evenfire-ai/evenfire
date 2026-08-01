@@ -791,6 +791,46 @@ probe_new_hcc_ready_endpoint() {
   return 1
 }
 
+# Third, independent signal of the safety contract (M6): the authoritative pass
+# must actually have MEASURED and REVOKED. The unit tests assert the readiness
+# predicate over vi.fn() mocks, so a metric rename would leave them green; these
+# family-name literals live in the gate, so a rename turns the REAL gate red.
+# Pure adjudication over a /metrics scrape — unit-testable without a cluster.
+safety_pass_metrics_are_certified() {
+  local metrics=$1
+  grep -Fq -- 'clerum_hcc_networkpolicy_safety_pass_duration_seconds' <<<"$metrics" || return 1
+  # At least one policy revoked by an authoritative pass ($NF is the sample
+  # value; tolerant of extra/reordered labels).
+  awk '$0 ~ /^clerum_hcc_networkpolicy_safety_pass_policies_total\{/ && /operation="revoked"/ { if ($NF + 0 >= 1) found = 1 } END { exit(found ? 0 : 1) }' <<<"$metrics"
+}
+
+# Scrapes the running replacement pod's /metrics over the same in-pod node/http
+# channel the /ready probes use, then adjudicates. The sub-0.5s window B4 leaves
+# unobservable on /ready is covered here: the counter is monotonic.
+safety_pass_metrics_certify() {
+  local metrics
+  metrics="$(kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
+    env "HCC_E2E_PORT=${HCC_PORT}" \
+    node -e '
+      const http = require("node:http");
+      const request = http.get(
+        {host: "127.0.0.1", port: Number(process.env.HCC_E2E_PORT), path: "/metrics"},
+        response => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", chunk => { body += chunk; });
+          response.on("end", () => {
+            process.stdout.write(body);
+            process.exit(response.statusCode === 200 ? 0 : 1);
+          });
+        }
+      );
+      request.setTimeout(2000, () => { request.destroy(); process.exit(1); });
+      request.on("error", () => process.exit(1));
+    ')" || return 1
+  safety_pass_metrics_are_certified "$metrics"
+}
+
 hcc_ready_after_stale_policy_revoked() {
   # A single poll that sees 200 WHILE the stale policy is still present is a
   # safety-contract violation and must be FATAL, never retried: retrying lets a
@@ -1499,7 +1539,11 @@ baseline_policies_unchanged ||
   die "baseline safety NetworkPolicy ownership or specs changed during safety convergence"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
+wait_until_fast 30 "authoritative safety pass metrics to certify the revocation" \
+  safety_pass_metrics_certify ||
+  die "safety_pass_* metrics did not corroborate the stale-policy revocation (families renamed or pass never measured?)"
 ok "/ready is 200 while the divergent stale policy and affected runtime remain absent"
+ok "safety_pass_* metrics corroborate an authoritative pass revoked the stale policy"
 ok "baseline NetworkPolicies remain present throughout fail-closed safety convergence"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"

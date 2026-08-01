@@ -912,6 +912,47 @@ if (
 else
   fail "wait_until_fast retried past a fatal ordering violation to a later clean poll"
 fi
+
+# M6: the third contract signal adjudicates a real /metrics scrape. Extract the
+# PURE predicate (the wrapper does kctl exec, untestable here) and feed it
+# synthetic scrapes. The family-name literals are exactly what a metric rename
+# would break — a rename leaves the vi.fn() unit tests green but must turn this
+# and the real gate red.
+safety_pass_metrics_predicate="$(
+  sed -n '/^safety_pass_metrics_are_certified() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+[ -n "$safety_pass_metrics_predicate" ] ||
+  fail "could not extract safety_pass_metrics_are_certified from the readiness gate"
+metrics_with_revocation='clerum_hcc_networkpolicy_safety_pass_duration_seconds_count 1
+clerum_hcc_networkpolicy_safety_pass_policies_total{operation="listed"} 5
+clerum_hcc_networkpolicy_safety_pass_policies_total{operation="revoked"} 1'
+metrics_without_family='clerum_hcc_some_other_family_total 3'
+metrics_zero_revoked='clerum_hcc_networkpolicy_safety_pass_duration_seconds_count 1
+clerum_hcc_networkpolicy_safety_pass_policies_total{operation="revoked"} 0'
+if (
+  eval "$safety_pass_metrics_predicate"
+  safety_pass_metrics_are_certified "$metrics_with_revocation"
+); then
+  pass "safety_pass metrics predicate certifies a scrape with >=1 revoked policy"
+else
+  fail "safety_pass metrics predicate rejected a valid certifying scrape"
+fi
+if (
+  eval "$safety_pass_metrics_predicate"
+  ! safety_pass_metrics_are_certified "$metrics_without_family"
+); then
+  pass "safety_pass metrics predicate rejects a scrape missing the duration family (rename guard)"
+else
+  fail "safety_pass metrics predicate passed with the safety_pass family absent"
+fi
+if (
+  eval "$safety_pass_metrics_predicate"
+  ! safety_pass_metrics_are_certified "$metrics_zero_revoked"
+); then
+  pass "safety_pass metrics predicate rejects a scrape with zero revoked policies"
+else
+  fail "safety_pass metrics predicate passed with zero policies revoked"
+fi
 if (
   probe_new_hcc_ready_endpoint() { return 1; }
   external_egress_policy_absent() { return 0; }
@@ -1458,7 +1499,7 @@ if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' \
    grep -Fq 'hcc_pods_absent' "$MCP_READINESS_GATE" &&
    ! grep -Fq -- '--for=delete' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'port: 8081' "$MCP_READINESS_GATE" &&
-   [ "$mcp_port_probe_count" = 3 ] &&
+   [ "$mcp_port_probe_count" = 4 ] &&
    [ "$mcp_pod_absence_count" = 4 ]; then
   pass "MCP readiness gate shares exact-head ownership and uses bounded portable runtime probes"
 else
