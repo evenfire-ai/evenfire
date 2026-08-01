@@ -192,6 +192,17 @@ export class ExternalEgressConvergenceCoordinator {
           return ready
         })
         .then(result => result ?? false)
+      // Side-attach a logger so a rejection is never *unhandled* (which crashes
+      // the process on modern Node) if fullReconcile aborts before waitFor
+      // awaits this gate. This does NOT swallow the failure: gates.set stores
+      // the original `gate`, so the awaited path in fullReconcile still rejects
+      // and fails the pass loudly — this only covers the unawaited case.
+      gate.catch(error => {
+        console.error(
+          `[K8s] External egress startup gate for ${key} rejected before it was awaited:`,
+          error
+        )
+      })
       gates.set(key, gate)
     }
 
