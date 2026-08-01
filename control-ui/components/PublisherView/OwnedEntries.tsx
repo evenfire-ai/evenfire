@@ -19,6 +19,11 @@ import { Button } from '../ui'
 import { GrantAccessModal } from './GrantAccessModal'
 import { RetryBanner } from './RetryBanner'
 
+type GrantTarget = {
+  entryName: string
+  opener: HTMLButtonElement
+}
+
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'expand', ariaLabel: 'Expand versions' },
   { key: 'name', label: 'Name' },
@@ -99,7 +104,7 @@ export function OwnedEntries({
   const [entries, setEntries] = useState<OwnedRegistryEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [grantTarget, setGrantTarget] = useState<string | null>(null)
+  const [grantTarget, setGrantTarget] = useState<GrantTarget | null>(null)
   const [expandedNames, setExpandedNames] = useState<Set<string>>(new Set())
   // Installed cluster resources (same source the catalog uses to show
   // "Installed"). Best-effort: a catalog fetch failure just means no entry is
@@ -221,7 +226,7 @@ export function OwnedEntries({
           <tbody>
             {grouped.map(({ latest: e, versions }) => {
               const isPrivate = e.visibility === 'private'
-              const isGranting = grantTarget === e.name
+              const isGranting = grantTarget?.entryName === e.name
               const expanded = expandedNames.has(e.name)
               const hasPrevious = versions.length > 1
               const rowActions: RowAction[] = [
@@ -301,7 +306,9 @@ export function OwnedEntries({
                               size="sm"
                               aria-haspopup="dialog"
                               aria-expanded={isGranting}
-                              onClick={() => setGrantTarget(e.name)}
+                              onClick={event =>
+                                setGrantTarget({ entryName: e.name, opener: event.currentTarget })
+                              }
                             >
                               Share access
                             </Button>
@@ -350,8 +357,9 @@ export function OwnedEntries({
       </div>
       {grantTarget ? (
         <GrantAccessModal
-          entryName={grantTarget}
+          entryName={grantTarget.entryName}
           orgScope={orgScope}
+          opener={grantTarget.opener}
           onClose={() => setGrantTarget(null)}
         />
       ) : null}

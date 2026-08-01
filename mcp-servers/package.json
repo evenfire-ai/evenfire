@@ -1,6 +1,6 @@
 {
   "name": "@clerum/mcp-servers",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "MCP servers for Clerum testing",
   "type": "module",
   "main": "index.ts",

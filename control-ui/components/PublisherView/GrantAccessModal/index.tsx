@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { IconX } from '@components/icons'
 import { type OrgGrant, createOrgGrant, listOrgGrants, revokeOrgGrant } from '@lib/api'
 import { useConfirmDialog } from '../../ConfirmDialog'
@@ -26,12 +26,14 @@ function grantErrorMessage(err: unknown): string {
 export function GrantAccessModal({
   entryName,
   orgScope,
+  opener,
   onClose,
 }: GrantAccessModalProps): React.JSX.Element {
   const pluginName = entryName.startsWith('@') ? entryName : `@${orgScope}/${entryName}`
   const titleId = useId()
   const descriptionId = useId()
   const inputId = useId()
+  const openerRef = useRef<HTMLElement | null>(opener ?? null)
 
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -40,6 +42,7 @@ export function GrantAccessModal({
   const [loadError, setLoadError] = useState(false)
   const [granteeOrg, setGranteeOrg] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false)
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [formError, setFormError] = useState('')
 
@@ -61,19 +64,20 @@ export function GrantAccessModal({
   }, [load])
 
   useEffect(() => {
-    const previousActiveElement =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !submitting && !revokingId) onClose()
+      if (event.key === 'Escape' && !submitting && !revokingId && !confirmingRevoke) onClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
-      previousActiveElement?.focus()
     }
-  }, [onClose, submitting, revokingId])
+  }, [confirmingRevoke, onClose, revokingId, submitting])
 
-  const busy = submitting || revokingId != null
+  useEffect(() => {
+    return () => openerRef.current?.focus()
+  }, [])
+
+  const busy = submitting || revokingId != null || confirmingRevoke
   const trimmed = granteeOrg.trim()
   const canSubmit = trimmed.length > 0 && !busy
 
@@ -94,12 +98,18 @@ export function GrantAccessModal({
   }
 
   async function handleRevoke(grant: OrgGrant) {
-    const ok = await confirm({
-      title: 'Revoke access',
-      message: `Revoke @${grant.granteeOrg}\u2019s access to ${grant.pluginName}? They will no longer be able to install it.`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
+    setConfirmingRevoke(true)
+    let ok = false
+    try {
+      ok = await confirm({
+        title: 'Revoke access',
+        message: `Revoke @${grant.granteeOrg}\u2019s access to ${grant.pluginName}? They will no longer be able to install it.`,
+        confirmLabel: 'Revoke',
+        tone: 'danger',
+      })
+    } finally {
+      setConfirmingRevoke(false)
+    }
     if (!ok) return
     setRevokingId(grant.id)
     try {

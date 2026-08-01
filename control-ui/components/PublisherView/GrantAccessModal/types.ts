@@ -3,6 +3,8 @@ export interface GrantAccessModalProps {
   entryName: string
   /** Owning org slug (used to normalize {@link entryName} into `@scope/name`). */
   orgScope: string
+  /** The control that opened the dialog, restored when the dialog closes. */
+  opener?: HTMLElement | null
   /** Called when the operator dismisses the modal (Escape / backdrop / Close). */
   onClose: () => void
 }
