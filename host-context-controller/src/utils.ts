@@ -190,3 +190,18 @@ export async function applyNetworkPolicy(
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
   })
 }
+
+/**
+ * Stable JSON for hashing: object keys are emitted in sorted order, so the
+ * digest of a Secret's data depends on its content and not on the order the
+ * API server happened to return the keys in.
+ *
+ * Shared by the Host channel-reader credentials revision and the McpServer
+ * connector credentials revision (issue #223): both hash Secret content into a
+ * pod-template annotation, and a divergence between the two canonical forms
+ * would be invisible until a rollout silently stopped happening.
+ */
+export function canonicalStringify(obj: Record<string, unknown>): string {
+  const sorted = Object.keys(obj).sort()
+  return JSON.stringify(sorted.map(k => [k, obj[k]]))
+}

@@ -11,6 +11,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
+import { createHash } from 'crypto'
 import { classifyPluginImage } from '@clerum/image-policy'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
@@ -18,6 +19,7 @@ import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants
 import { mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
+  canonicalStringify,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
@@ -30,7 +32,20 @@ import {
  * classifies the failure so the caller can surface it via status conditions.
  */
 export type SecretValidationResult =
-  | { ok: true }
+  | {
+      ok: true
+      /**
+       * sha256 of the validated Secret's content (issue #223). Empty when the
+       * McpServer has no envSecret. Travels into the pod template as the
+       * credentials-revision annotation, which is what makes a credential
+       * rotation roll the pod: env vars come from `secretKeyRef` and Kubernetes
+       * only injects those when the container starts.
+       *
+       * It is derived from the very Secret this validation read, so the digest
+       * can never describe a different revision than the one that was checked.
+       */
+      revision: string
+    }
   | {
       ok: false
       reason: 'SecretNotFound' | 'SecretMissingKey' | 'SecretAccessDenied' | 'ReadError'
@@ -60,6 +75,12 @@ type McpServerReconcilerDeps = {
 const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
 const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
 
+// Issue #223: sha256 of the envSecret content, carried on the POD TEMPLATE (not
+// the Deployment object) so that changing it changes the pod template hash and
+// Kubernetes performs a rolling restart on its own. Same mechanism the per-Host
+// channel-readers use in hostReconciler.ts.
+const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
+
 // Codex P0 fix (PR #101): sanitization constants for remote.authHeaders.
 // Only standard HTTP header token chars — letters, digits, and '-'. Rejecting
 // anything else prevents smuggling headers like `X: foo\r\nAuthorization`.
@@ -74,6 +95,59 @@ function throwCleanupFailures(failures: unknown[], message: string): void {
   }
 }
 
+/**
+ * State of the readiness poll window for one McpServer (issue #223).
+ *
+ * A "window" is one bounded observation of a single Deployment rollout:
+ * maxAttempts ticks of intervalMs each. The window survives repeated
+ * reconciles — see `readinessPolls` below for why that is load-bearing.
+ */
+interface ReadinessPollState {
+  /**
+   * Timer for the next tick; undefined while a tick is executing its awaits
+   * (the handle is consumed the moment the callback fires) and once the
+   * window reached a terminal verdict.
+   */
+  timer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * True while a tick is executing. `timer` alone cannot distinguish "tick
+   * running RIGHT NOW" from "window ended", and the difference is
+   * load-bearing for pollReadiness() re-entrancy (see `recheckRequested`).
+   */
+  ticking: boolean
+  /**
+   * Set by pollReadiness() when it is called while a tick is in flight. The
+   * caller (a reconcile) may have JUST rewritten the Deployment — e.g. a
+   * corrected credential rotation bumping the generation — and the in-flight
+   * tick's read, started earlier, cannot have seen that write. While this
+   * flag is set the tick must NOT commit a terminal verdict (ready or
+   * exhausted): it defers one interval so the next read, which starts after
+   * that Deployment write, observes the new generation and resets the
+   * window. Without this, the exhausting tick could publish RolloutIncomplete
+   * with the SUPERSEDED generation's numbers and — since McpServer has no
+   * periodic resync or Deployment watch — nothing would ever re-arm the poll
+   * for the new rollout (issue #223).
+   */
+  recheckRequested: boolean
+  /**
+   * Deployment generation the current window is watching; null until the
+   * first tick reads it. A change means a NEW rollout (e.g. another
+   * credential rotation), which resets the window so the new rollout gets
+   * its own full budget.
+   */
+  generation: number | null
+  /** Ticks consumed by the current window. */
+  attempts: number
+  /** True once the terminal RolloutIncomplete verdict was written for `generation`. */
+  exhausted: boolean
+  /**
+   * Rollout numbers from the exhausting tick. reconcile() re-writes them so
+   * the terminal condition stays sticky instead of being downgraded to
+   * WaitingForReplicas by the very reconcile the terminal write triggers.
+   */
+  detail: string
+}
+
 export class McpServerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
@@ -86,8 +160,20 @@ export class McpServerReconciler {
   /** G7: Tracks the initial `managed` value per McpServer to enforce immutability. */
   private readonly managedSnapshot: Map<string, boolean> = new Map()
 
-  /** Active readiness poll timers — keyed by server name so they can be cancelled. */
-  private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  /**
+   * Readiness poll state per server name (issue #223, E2 status-update-loop).
+   *
+   * Entries outlive individual reconciles ON PURPOSE. Every status write this
+   * reconciler makes fires a MODIFIED watch event on the McpServer, which
+   * fires another reconcile, which calls pollReadiness() again. When that
+   * call cancelled and re-armed the poll (the pre-fix behavior), the attempt
+   * budget restarted on every status write, so a rollout that never converges
+   * NEVER exhausted its budget and the terminal RolloutIncomplete verdict was
+   * never written to the CRD. This map lets pollReadiness() detect a live
+   * window and leave it alone, and lets reconcile() keep an exhausted verdict
+   * sticky for the same Deployment generation.
+   */
+  private readonly readinessPolls: Map<string, ReadinessPollState> = new Map()
 
   /**
    * Tail promise of the in-flight reconcile chain per server name. Serializes
@@ -131,71 +217,214 @@ export class McpServerReconciler {
   private clearStatus(name: string): void {
     this.statusMap.delete(name)
     this.managedSnapshot.delete(name)
-    const timer = this.readinessTimers.get(name)
-    if (timer) {
-      clearTimeout(timer)
-      this.readinessTimers.delete(name)
+    const poll = this.readinessPolls.get(name)
+    if (poll) {
+      if (poll.timer !== undefined) clearTimeout(poll.timer)
+      this.readinessPolls.delete(name)
     }
   }
 
   /**
-   * Check deployment readiness by inspecting replicas.
+   * Read a Deployment's rollout state, generation-aware.
+   *
+   * `readyReplicas > 0` is NOT enough (issue #223): during a rolling update the
+   * OLD pod is still Ready, so a new pod that never starts would be reported as
+   * healthy. A rollout has actually converged only when the controller has
+   * observed the current generation AND every replica is updated, ready, and
+   * available.
+   *
+   * `totalReplicas === updatedReplicas` is the part that catches a FAILED
+   * rollout of a credential rotation (issue #223, E2): with replicas=1 and the
+   * default RollingUpdate (maxSurge=1, maxUnavailable=0), a new pod that
+   * crash-loops on a bad credential never becomes Ready, so Kubernetes keeps
+   * the OLD pod. That old pod holds readyReplicas=1 and availableReplicas=1, so
+   * unavailableReplicas stays 0 and updatedReplicas reaches 1 — every other
+   * signal looks converged. Only `status.replicas` (total managed pods) reveals
+   * the leftover: it stays at 2 while the new pod crash-loops, and drops to 1
+   * only once the rollout truly completes. Without this check the poll would
+   * report a failed rotation as healthy and never write RolloutIncomplete.
+   *
+   * `detail` carries the numbers into status conditions so a stuck rollout says
+   * what is stuck instead of just "not ready".
+   *
+   * `generation` is the Deployment's `metadata.generation`, exposed so the
+   * readiness poll can tell "same rollout, keep counting" apart from "NEW
+   * rollout, fresh window" (issue #223, E2). It plays no part in the
+   * readiness verdict above. null when the Deployment could not be read.
    */
-  private async checkDeploymentReady(name: string, namespace: string): Promise<boolean> {
+  private async readDeploymentRollout(
+    name: string,
+    namespace: string
+  ): Promise<{ ready: boolean; detail: string; generation: number | null }> {
     try {
       const deployment = await this.appsApi.readNamespacedDeployment({ name, namespace })
-      const ready = (deployment.status?.readyReplicas ?? 0) > 0
-      return ready
-    } catch {
-      return false
+      const desired = deployment.spec?.replicas ?? 1
+      const generation = deployment.metadata?.generation ?? 0
+      const observedGeneration = deployment.status?.observedGeneration ?? 0
+      const updatedReplicas = deployment.status?.updatedReplicas ?? 0
+      const readyReplicas = deployment.status?.readyReplicas ?? 0
+      const totalReplicas = deployment.status?.replicas ?? 0
+      const unavailableReplicas = deployment.status?.unavailableReplicas ?? 0
+
+      const ready =
+        observedGeneration >= generation &&
+        updatedReplicas === desired &&
+        readyReplicas === desired &&
+        totalReplicas === updatedReplicas &&
+        unavailableReplicas === 0
+
+      return {
+        ready,
+        generation,
+        detail:
+          `generation ${observedGeneration}/${generation}, ` +
+          `updated ${updatedReplicas}/${desired}, ready ${readyReplicas}/${desired}, ` +
+          `total ${totalReplicas}, unavailable ${unavailableReplicas}`,
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ready: false, generation: null, detail: `Deployment read failed: ${message}` }
     }
   }
 
   /**
    * Poll deployment readiness until ready or maxAttempts reached.
-   * Cancels any existing poll for the same server name.
+   *
+   * Re-entrancy is the whole point (issue #223, E2 status-update-loop):
+   * reconcile() runs after every MODIFIED watch event — including the events
+   * caused by our OWN status writes — and calls this on every pass where the
+   * Deployment is not ready yet. A live window is therefore NEVER cancelled
+   * or re-armed here; it keeps counting toward its budget so a rollout that
+   * never converges reaches the terminal RolloutIncomplete verdict after
+   * maxAttempts × intervalMs. A NEW rollout (bumped Deployment generation,
+   * e.g. another credential rotation) is detected inside the poll tick
+   * itself, which resets the window so the new rollout gets its own budget.
+   *
+   * A call that lands while a tick is EXECUTING (mid-await) is not silently
+   * dropped either: it flags `recheckRequested` so the tick defers any
+   * terminal verdict until a read taken AFTER the caller's Deployment write
+   * confirms the generation — otherwise the exhausting tick could seal the
+   * window with a superseded generation's numbers and the new rollout would
+   * never be observed (see ReadinessPollState.recheckRequested).
    */
-  private pollReadiness(
-    name: string,
-    namespace: string,
-    intervalMs = 5000,
-    maxAttempts = 12
-  ): void {
-    // Cancel any existing poll for this server
-    const existing = this.readinessTimers.get(name)
-    if (existing) {
-      clearTimeout(existing)
-      this.readinessTimers.delete(name)
+  private pollReadiness(server: McpServerCRD, intervalMs = 5000, maxAttempts = 24): void {
+    const { name, namespace } = server
+
+    const previous = this.readinessPolls.get(name)
+    if (previous !== undefined && (previous.timer !== undefined || previous.ticking)) {
+      // A window is already running for this server — leave it alone
+      // (re-arming would reset the attempt budget: the E2 status-update-loop).
+      // But if its tick is executing RIGHT NOW, the tick's Deployment read may
+      // predate the Deployment write that triggered THIS call (a new
+      // generation), so a silent no-op could let the tick end the window on
+      // stale data. Record that a re-check is owed; the tick honors it before
+      // committing any terminal verdict.
+      if (previous.ticking) {
+        previous.recheckRequested = true
+      }
+      return
     }
 
-    let attempts = 0
+    // Fresh window. Carry over the generation and terminal verdict of a
+    // previous exhausted window: if the Deployment has NOT changed since,
+    // the new window must not mistake it for a new rollout, and reconcile()
+    // keeps reporting the sticky RolloutIncomplete meanwhile.
+    const state: ReadinessPollState = {
+      timer: undefined,
+      ticking: false,
+      recheckRequested: false,
+      generation: previous?.generation ?? null,
+      attempts: 0,
+      exhausted: previous?.exhausted ?? false,
+      detail: previous?.detail ?? '',
+    }
+    this.readinessPolls.set(name, state)
 
-    const poll = async () => {
-      attempts++
-      const ready = await this.checkDeploymentReady(name, namespace)
+    const poll = async (): Promise<void> => {
+      // The timer handle was consumed the moment this callback fired; reflect
+      // that, and mark the tick as in flight so a concurrent pollReadiness()
+      // can tell "tick running" apart from "window ended" during our awaits.
+      state.timer = undefined
+      state.ticking = true
+      const rollout = await this.readDeploymentRollout(name, namespace)
 
-      if (ready) {
+      // The McpServer may have been deleted (clearStatus) while we were
+      // reading. A cancelled window must not keep ticking or write status
+      // for a CRD that is gone.
+      if (this.readinessPolls.get(name) !== state) return
+
+      // Generation change ⇒ a NEW rollout: it deserves its own full budget,
+      // and any terminal verdict for the old generation no longer applies.
+      // A failed read (generation null) never resets the window — otherwise
+      // a flapping API server would grant infinite budget.
+      if (rollout.generation !== null && rollout.generation !== state.generation) {
+        state.generation = rollout.generation
+        state.attempts = 0
+        state.exhausted = false
+        state.detail = ''
+      }
+      state.attempts++
+
+      // A pollReadiness() call landed while this tick was mid-await: the
+      // Deployment may have been rewritten AFTER our read (that reconcile
+      // writes the Deployment BEFORE calling pollReadiness()), so a terminal
+      // verdict from this tick's data could blame a superseded generation —
+      // and nothing else would ever re-arm the poll for the new one. Defer
+      // the verdict one interval: the next read starts after that Deployment
+      // write, so it MUST observe the new generation and reset the window
+      // above. A same-generation echo merely delays the verdict by one tick;
+      // the budget is NOT reset, so the E2 status-update-loop stays fixed.
+      if (state.recheckRequested) {
+        state.recheckRequested = false
+        if (rollout.ready || state.attempts >= maxAttempts) {
+          state.ticking = false
+          state.timer = setTimeout(poll, intervalMs)
+          return
+        }
+      }
+
+      if (rollout.ready) {
+        state.ticking = false
         this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
-        this.readinessTimers.delete(name)
-        console.log(`[Reconciler] McpServer "${name}" is now ready (after ${attempts} poll(s))`)
+        this.readinessPolls.delete(name)
+        console.log(
+          `[Reconciler] McpServer "${name}" is now ready (after ${state.attempts} poll(s))`
+        )
+        // The poll MUST write the CRD, not just in-memory status (issue #223).
+        // With generation-aware readiness the check right after a replace is
+        // always false, so this is the ONLY place a converged rollout is ever
+        // recorded — without it every successful credential rotation would sit
+        // at DeploymentReady=False forever and the UI would report a timeout.
+        await this.updateStatusConditions(server, true)
         return
       }
 
-      if (attempts >= maxAttempts) {
-        this.readinessTimers.delete(name)
+      if (state.attempts >= maxAttempts) {
+        // Terminal verdict for THIS generation. The entry stays in the map
+        // (timer undefined since tick start, ticking cleared here — BEFORE
+        // the status write below, so a reconcile arriving during that await
+        // opens a fresh observation window instead of flagging a re-check
+        // this dying tick would never honor) so reconcile() keeps the verdict
+        // sticky and a later pollReadiness() call may re-observe.
+        state.ticking = false
+        state.exhausted = true
+        state.detail = rollout.detail
         console.warn(
-          `[Reconciler] McpServer "${name}" not ready after ${maxAttempts} polls — giving up`
+          `[Reconciler] McpServer "${name}" not ready after ${maxAttempts} polls — giving up (${rollout.detail})`
         )
+        // Give up loudly, on the CRD: a stuck rollout must be visible to the
+        // operator with the numbers that prove it, never left as a stale
+        // condition or a silent Unknown.
+        await this.updateStatusConditions(server, false, rollout.detail)
         return
       }
 
       // Schedule next poll
-      const timer = setTimeout(poll, intervalMs)
-      this.readinessTimers.set(name, timer)
+      state.ticking = false
+      state.timer = setTimeout(poll, intervalMs)
     }
 
-    const timer = setTimeout(poll, intervalMs)
-    this.readinessTimers.set(name, timer)
+    state.timer = setTimeout(poll, intervalMs)
   }
 
   // ─── Secret Validation ──────────────────────────────────────────────
@@ -205,7 +434,8 @@ export class McpServerReconciler {
    * Returns a discriminated result describing success or the exact failure mode.
    */
   async validateSecret(server: McpServerCRD): Promise<SecretValidationResult> {
-    if (!server.spec.envSecret) return { ok: true }
+    // No envSecret: nothing to hash, and no credentials annotation is written.
+    if (!server.spec.envSecret) return { ok: true, revision: '' }
 
     const secretName = server.spec.envSecret.name
 
@@ -216,6 +446,9 @@ export class McpServerReconciler {
       })
 
       const data = secret.data || {}
+      const revision = createHash('sha256')
+        .update(canonicalStringify(data as Record<string, unknown>))
+        .digest('hex')
 
       for (const keyMapping of server.spec.envSecret.keys) {
         if (!(keyMapping.secretKey in data)) {
@@ -228,7 +461,7 @@ export class McpServerReconciler {
       }
 
       console.log(`[Reconciler] Secret "${secretName}" validated for McpServer ${server.name}`)
-      return { ok: true }
+      return { ok: true, revision }
     } catch (error: unknown) {
       const code = getErrorCode(error)
       if (code === 404) {
@@ -576,7 +809,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private buildDeployment(server: McpServerCRD): k8s.V1Deployment {
+  private buildDeployment(server: McpServerCRD, credentialsRevision = ''): k8s.V1Deployment {
     // ── Platform hardening: sanitize CRD before building PodSpec ──
     this.sanitizeCrdSpec(server)
 
@@ -734,7 +967,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           matchLabels: { app: server.name },
         },
         template: {
-          metadata: { labels },
+          metadata: {
+            labels,
+            // Issue #223: rotating a credential changes this digest, which
+            // changes the pod template, which is what makes Kubernetes roll the
+            // pod. Omitted when there is no envSecret — an annotation with an
+            // empty value would be one more field to drift on for connectors
+            // that have no credentials at all.
+            ...(credentialsRevision && {
+              annotations: { [CREDENTIALS_REVISION_ANNOTATION]: credentialsRevision },
+            }),
+          },
           spec: {
             automountServiceAccountToken: false,
             enableServiceLinks: false,
@@ -963,8 +1206,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   /**
    * Ensure a Deployment exists and is up to date.
    */
-  private async ensureDeployment(server: McpServerCRD): Promise<void> {
-    const deployment = this.buildDeployment(server)
+  private async ensureDeployment(server: McpServerCRD, credentialsRevision = ''): Promise<void> {
+    const deployment = this.buildDeployment(server, credentialsRevision)
 
     try {
       await this.appsApi.createNamespacedDeployment({
@@ -1341,7 +1584,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    */
   private async updateStatusConditions(
     server: McpServerCRD,
-    deploymentReady: boolean
+    deploymentReady: boolean,
+    /**
+     * Rollout numbers from readDeploymentRollout, appended to the failure
+     * message so a stuck rollout reports WHAT is stuck (issue #223). Callers
+     * that only know the verdict omit it.
+     */
+    rolloutDetail?: string
   ): Promise<void> {
     try {
       await this.writeStatusCondition(server, {
@@ -1353,10 +1602,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       await this.writeStatusCondition(server, {
         type: 'DeploymentReady',
         status: deploymentReady ? 'True' : 'False',
-        reason: deploymentReady ? 'ReplicasAvailable' : 'WaitingForReplicas',
-        message: deploymentReady
-          ? 'Deployment has ready replicas'
-          : 'Waiting for pods to become ready',
+        reason: deploymentReady
+          ? 'ReplicasAvailable'
+          : rolloutDetail
+            ? 'RolloutIncomplete'
+            : 'WaitingForReplicas',
+        message: rolloutDetail
+          ? `Rollout did not converge — ${rolloutDetail}`
+          : deploymentReady
+            ? 'Deployment has ready replicas'
+            : 'Waiting for pods to become ready',
       })
       console.log(
         `[Reconciler] Updated status conditions on "${server.name}" (DeploymentReady=${deploymentReady})`
@@ -1388,103 +1643,140 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     server: McpServerCRD,
     condition: Omit<McpServerCondition, 'lastTransitionTime'>
   ): Promise<void> {
-    const now = new Date().toISOString()
+    // Optimistic-concurrency loop (M2). The patch REPLACES the whole
+    // /status/conditions array with a value built from a snapshot read just
+    // before. Without a version guard, a concurrent writer — the readiness poll
+    // and a reconcile can both write status for the same server, and the poll
+    // timer is NOT serialized through `inFlight` — would be silently clobbered
+    // by whichever patch lands second, dropping the other's condition. A `test`
+    // op on metadata.resourceVersion makes the API server reject the patch (422)
+    // if anything changed since our read; we then re-read and retry, so no
+    // writer's condition is lost.
+    const MAX_ATTEMPTS = 4
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const now = new Date().toISOString()
 
-    // Fetch current status to preserve existing conditions.
-    let existingConditions: McpServerCondition[] = []
-    let hasStatusObject = false
-    try {
-      const current = (await this.customApi.getNamespacedCustomObjectStatus({
-        group: 'clerum.io',
-        version: 'v1alpha1',
-        namespace: server.namespace,
-        plural: 'mcpservers',
-        name: server.name,
-      })) as { status?: { conditions?: McpServerCondition[] } }
-      hasStatusObject = typeof current.status === 'object' && current.status !== null
-      existingConditions = current.status?.conditions ?? []
-    } catch (error) {
-      if (getErrorCode(error) === 404) {
+      // Fetch current status (and its resourceVersion) to preserve existing
+      // conditions and to fence the write below.
+      let existingConditions: McpServerCondition[] = []
+      let hasStatusObject = false
+      let resourceVersion: string | undefined
+      try {
+        const current = (await this.customApi.getNamespacedCustomObjectStatus({
+          group: 'clerum.io',
+          version: 'v1alpha1',
+          namespace: server.namespace,
+          plural: 'mcpservers',
+          name: server.name,
+        })) as {
+          metadata?: { resourceVersion?: string }
+          status?: { conditions?: McpServerCondition[] }
+        }
+        resourceVersion = current.metadata?.resourceVersion
+        hasStatusObject = typeof current.status === 'object' && current.status !== null
+        existingConditions = current.status?.conditions ?? []
+      } catch (error) {
+        if (getErrorCode(error) === 404) {
+          console.warn(
+            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
+          )
+          return
+        }
         console.warn(
-          `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
+          `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
+          error
         )
         return
       }
-      console.warn(
-        `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
-        error
-      )
-      return
-    }
 
-    const prior = existingConditions.find(c => c.type === condition.type)
-    const unchanged =
-      prior !== undefined &&
-      prior.status === condition.status &&
-      prior.reason === condition.reason &&
-      prior.message === condition.message
+      const prior = existingConditions.find(c => c.type === condition.type)
+      const unchanged =
+        prior !== undefined &&
+        prior.status === condition.status &&
+        prior.reason === condition.reason &&
+        prior.message === condition.message
 
-    // Update the missing-secret gauge for SecretResolved conditions.
-    // Do this BEFORE the no-op short-circuit so the gauge stays current
-    // across reconciles even when we skip the API patch.
-    if (condition.type === 'SecretResolved' && server.spec.envSecret) {
-      const labels = {
-        namespace: server.namespace,
-        name: server.name,
-        secret_name: server.spec.envSecret.name,
+      // Update the missing-secret gauge for SecretResolved conditions. Do this
+      // BEFORE the no-op short-circuit so the gauge stays current across
+      // reconciles even when we skip the API patch. Idempotent, so a retry
+      // re-running it is harmless.
+      if (condition.type === 'SecretResolved' && server.spec.envSecret) {
+        const labels = {
+          namespace: server.namespace,
+          name: server.name,
+          secret_name: server.spec.envSecret.name,
+        }
+        mcpserverMissingSecret.set(labels, condition.status === 'False' ? 1 : 0)
       }
-      mcpserverMissingSecret.set(labels, condition.status === 'False' ? 1 : 0)
-    }
 
-    // Skip the patch when the condition is identical to what's already on
-    // the CRD. Without this, every reconcile bumps the McpServer's
-    // resourceVersion, fires another watch event, triggers another
-    // reconcile — a tight self-loop that also amplifies NetworkPolicy
-    // optimistic-lock contention downstream.
-    if (unchanged) {
-      return
-    }
+      // Skip the patch when the condition is identical to what's already on
+      // the CRD. Without this, every reconcile bumps the McpServer's
+      // resourceVersion, fires another watch event, triggers another
+      // reconcile — a tight self-loop that also amplifies NetworkPolicy
+      // optimistic-lock contention downstream.
+      if (unchanged) {
+        return
+      }
 
-    const lastTransitionTime =
-      prior && prior.status === condition.status ? prior.lastTransitionTime : now
+      const lastTransitionTime =
+        prior && prior.status === condition.status ? prior.lastTransitionTime : now
 
-    const merged: McpServerCondition = {
-      type: condition.type,
-      status: condition.status,
-      reason: condition.reason,
-      message: condition.message,
-      lastTransitionTime,
-    }
+      const merged: McpServerCondition = {
+        type: condition.type,
+        status: condition.status,
+        reason: condition.reason,
+        message: condition.message,
+        lastTransitionTime,
+      }
 
-    const nextConditions = [...existingConditions.filter(c => c.type !== condition.type), merged]
+      const nextConditions = [...existingConditions.filter(c => c.type !== condition.type), merged]
 
-    const statusPatch = hasStatusObject
-      ? [{ op: 'add', path: '/status/conditions', value: nextConditions }]
-      : [{ op: 'add', path: '/status', value: { conditions: nextConditions } }]
+      // The `test` op fences the write to the exact revision we read. If a
+      // concurrent writer bumped resourceVersion in between, the API server
+      // fails the patch (422) and we retry with a fresh read.
+      const statusPatch = [
+        ...(resourceVersion
+          ? [{ op: 'test', path: '/metadata/resourceVersion', value: resourceVersion }]
+          : []),
+        hasStatusObject
+          ? { op: 'add', path: '/status/conditions', value: nextConditions }
+          : { op: 'add', path: '/status', value: { conditions: nextConditions } },
+      ]
 
-    try {
-      // The generated client prefers JSON Patch for this endpoint. Send an
-      // actual patch document so status writes keep working across client
-      // upgrades instead of relying on merge-patch object bodies.
-      await this.customApi.patchNamespacedCustomObjectStatus({
-        group: 'clerum.io',
-        version: 'v1alpha1',
-        namespace: server.namespace,
-        plural: 'mcpservers',
-        name: server.name,
-        body: statusPatch,
-      })
-    } catch (error) {
-      if (getErrorCode(error) === 404) {
+      try {
+        // The generated client prefers JSON Patch for this endpoint. Send an
+        // actual patch document so status writes keep working across client
+        // upgrades instead of relying on merge-patch object bodies.
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: 'clerum.io',
+          version: 'v1alpha1',
+          namespace: server.namespace,
+          plural: 'mcpservers',
+          name: server.name,
+          body: statusPatch,
+        })
+        return
+      } catch (error) {
+        if (getErrorCode(error) === 404) {
+          console.warn(
+            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
+          )
+          return
+        }
+        // 409 (Conflict) or 422 (the resourceVersion `test` op failed) mean a
+        // concurrent writer won the race. Re-read and retry rather than lose
+        // our condition. Any other error, or the last attempt, falls through to
+        // the best-effort log-and-swallow below.
+        const code = getErrorCode(error)
+        if ((code === 409 || code === 422) && attempt < MAX_ATTEMPTS) {
+          continue
+        }
         console.warn(
-          `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
+          `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${MAX_ATTEMPTS}):`,
+          error
         )
         return
       }
-      console.warn(
-        `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}":`,
-        error
-      )
     }
   }
 
@@ -1623,7 +1915,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         }
       }
       await this.ensureService(server)
-      await this.ensureDeployment(server)
+      await this.ensureDeployment(server, secretResult.revision)
     } catch (err) {
       this.setStatus(server.name, {
         deployed: false,
@@ -1653,15 +1945,32 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // Check readiness after reconciliation
-    const ready = await this.checkDeploymentReady(server.name, server.namespace)
+    const rollout = await this.readDeploymentRollout(server.name, server.namespace)
+    const ready = rollout.ready
     this.setStatus(server.name, {
       deployed: true,
       ready,
       message: ready ? 'Running' : 'Deployment created, waiting for pods to become ready',
     })
 
-    // G11: Update status conditions on McpServer CRD
-    await this.updateStatusConditions(server, ready)
+    // G11: Update status conditions on McpServer CRD. If the readiness poll
+    // already exhausted its budget for THIS Deployment generation, keep the
+    // terminal RolloutIncomplete verdict sticky: the terminal status write
+    // itself fires a MODIFIED watch event and thus this very code path, and
+    // writing a bare "waiting" condition here would downgrade the verdict
+    // milliseconds after it was published — the operator (and the E2
+    // scenario) would never observe the rollout failure. A NEW rollout
+    // (different generation) drops the stickiness and reports fresh.
+    const pollState = this.readinessPolls.get(server.name)
+    const exhaustedDetail =
+      !ready &&
+      pollState !== undefined &&
+      pollState.exhausted &&
+      rollout.generation !== null &&
+      pollState.generation === rollout.generation
+        ? pollState.detail
+        : undefined
+    await this.updateStatusConditions(server, ready, exhaustedDetail)
 
     // PR-B B1: record SecretResolved=True + Ready=True after a successful
     // reconcile. This is additive to updateStatusConditions (NetworkReady /
@@ -1684,9 +1993,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         : 'Deployment created, waiting for pods to become ready',
     })
 
-    // If not ready yet, poll until it becomes ready
+    // If not ready yet, poll until it becomes ready. With generation-aware
+    // readiness this is the normal path right after any Deployment write —
+    // including a credential rotation — so the poll owns the terminal verdict
+    // on the CRD.
     if (!ready) {
-      this.pollReadiness(server.name, server.namespace)
+      this.pollReadiness(server)
     }
   }
 

@@ -19,6 +19,17 @@ DEFAULT_VITEST_SUITES=(
   integration/mcp-proxy-routing.test.ts
   integration/network-policies.test.ts
   integration/profiles-chain.test.ts
+  # Connector credential rotation (issue #223). This list is explicit, not a
+  # glob over tests/e2e/ — a suite that is not named here simply never runs,
+  # and a gate that never ran a test proves nothing.
+  integration/mcp-secret-rotation-failure.test.ts
+  integration/mcp-secret-rotation-preservation.test.ts
+  integration/mcp-secret-rotation-isolation.test.ts
+  integration/mcp-secret-rotation-shared.test.ts
+  integration/mcp-secret-rotation-remote.test.ts
+  integration/mcp-hcc-upgrade-rollout.test.ts
+  integration/mcp-server-readiness-regression.test.ts
+  integration/mcp-secrets-access-guard.test.ts
   mcp-host/approval-endpoints.test.ts
   mcp-host/artifacts.e2e.test.ts
   mcp-host/crd.test.ts
