@@ -32,6 +32,7 @@ clerum_hcc_host_delete_cleanup_total{outcome="confirmed"} 0
 clerum_hcc_host_delete_cleanup_total{outcome="completed"} 0
 clerum_hcc_host_delete_cleanup_total{outcome="retried"} 0
 clerum_hcc_host_delete_cleanup_total{outcome="superseded"} 0
+# TYPE clerum_hcc_host_fleet_requests_total counter
 clerum_hcc_host_fleet_requests_total{result="started"} ${fleet_started}
 clerum_hcc_host_fleet_requests_total{result="coalesced"} ${fleet_coalesced}
 clerum_hcc_host_fleet_requests_total{result="trailing"} ${fleet_trailing}
@@ -125,6 +126,21 @@ write_metrics "${WORK_DIR}/c2.prom" 0 0 0 0 2 1 2
 UNBOUNDED_TRAILING_OUTPUT="$(run_adjudicator "${WORK_DIR}/wake_healthy.prom")"
 grep -Fq 'VERDICT|A7-fleet-recovery-bounded|FAIL|' <<<"$UNBOUNDED_TRAILING_OUTPUT" ||
   fail "A7 false-passed trailing fleet work without a matching coalesced request"
+
+# M8: without the FLEET_METRIC family registered on the running image, counter()
+# returns 0 for every result label and A7 would pass vacuously (all-zero looks
+# like "no failures"). Strip the family's # TYPE line so it drops out of
+# c2_types (mirrors a metric rename / an image that never registered it) and
+# assert A7 FAILs on the presence check, not vacuously passes.
+write_metrics "${WORK_DIR}/c2.prom" 0 0 0 0 0
+grep -v '^# TYPE clerum_hcc_host_fleet_requests_total ' "${WORK_DIR}/c2.prom" \
+  >"${WORK_DIR}/c2.nofleet.prom"
+mv "${WORK_DIR}/c2.nofleet.prom" "${WORK_DIR}/c2.prom"
+MISSING_FAMILY_OUTPUT="$(run_adjudicator "${WORK_DIR}/wake_healthy.prom")"
+grep -Fq 'VERDICT|A7-fleet-recovery-bounded|FAIL|' <<<"$MISSING_FAMILY_OUTPUT" ||
+  fail "A7 vacuously passed with the FLEET_METRIC family absent from the scrape"
+grep -Fq 'not registered on the running image' <<<"$MISSING_FAMILY_OUTPUT" ||
+  fail "A7 failed for the wrong reason when the FLEET_METRIC family was absent"
 
 WAKE_EVIDENCE_FUNCTION="$(
   sed -n '/^_wake_urgent_evidence_recorded() {$/,/^}$/p' "$GATE"

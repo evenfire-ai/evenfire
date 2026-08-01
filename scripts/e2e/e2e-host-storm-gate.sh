@@ -1451,26 +1451,34 @@ else:
 
 # ── A7: recovered fleet convergence remains bounded (settled C2) ─────
 fm = os.environ["FLEET_METRIC"]
-pre_failed = counter(b, fm, "result", "failed") - counter(a, fm, "result", "failed")
-post_started = counter(c2, fm, "result", "started")
-post_coalesced = counter(c2, fm, "result", "coalesced")
-post_trailing = counter(c2, fm, "result", "trailing")
-post_failed = counter(c2, fm, "result", "failed")
-problems = []
-if pre_failed != 0 or post_failed > 0:
-    problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
-if os.environ.get("FLEET_COMPLETION_PROVEN") != "1":
-    problems.append("replacement-pod initial fleet completion was not causally proven")
-if post_trailing > post_coalesced:
-    problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
-detail = (f"completion-proven={os.environ.get('FLEET_COMPLETION_PROVEN', 'missing')} "
-          f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
-          f"trailing={post_trailing:.0f} failed={post_failed:.0f} "
-          f"(replacement pod; A4 recovery-success fenced; pre-kill failed delta={pre_failed:.0f})")
-if problems:
-    verdicts.append(("A7-fleet-recovery-bounded", False, "; ".join(problems) + f" [{detail}]"))
+# Presence check (A6 pattern): counter() returns 0 for an absent family, so
+# without this a renamed/unregistered FLEET_METRIC makes every count 0 and A7
+# passes vacuously. The causal leg (FLEET_COMPLETION_PROVEN) alone cannot catch
+# a metric rename — the metric itself must be registered on the running image.
+if fm not in c2_types:
+    verdicts.append(("A7-fleet-recovery-bounded", False,
+                     f"{fm} not registered on the running image — is the branch HCC image deployed?"))
 else:
-    verdicts.append(("A7-fleet-recovery-bounded", True, detail))
+    pre_failed = counter(b, fm, "result", "failed") - counter(a, fm, "result", "failed")
+    post_started = counter(c2, fm, "result", "started")
+    post_coalesced = counter(c2, fm, "result", "coalesced")
+    post_trailing = counter(c2, fm, "result", "trailing")
+    post_failed = counter(c2, fm, "result", "failed")
+    problems = []
+    if pre_failed != 0 or post_failed > 0:
+        problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
+    if os.environ.get("FLEET_COMPLETION_PROVEN") != "1":
+        problems.append("replacement-pod initial fleet completion was not causally proven")
+    if post_trailing > post_coalesced:
+        problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
+    detail = (f"completion-proven={os.environ.get('FLEET_COMPLETION_PROVEN', 'missing')} "
+              f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
+              f"trailing={post_trailing:.0f} failed={post_failed:.0f} "
+              f"(replacement pod; A4 recovery-success fenced; pre-kill failed delta={pre_failed:.0f})")
+    if problems:
+        verdicts.append(("A7-fleet-recovery-bounded", False, "; ".join(problems) + f" [{detail}]"))
+    else:
+        verdicts.append(("A7-fleet-recovery-bounded", True, detail))
 
 # ── A6: delete-cleanup counters consistent (settled window C2) ────────
 dm = os.environ["DELETE_CLEANUP_METRIC"]
