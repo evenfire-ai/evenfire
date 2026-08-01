@@ -29,6 +29,12 @@ fail() {
 command -v kubectl >/dev/null 2>&1 || fail "kubectl is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
+# Zero overlays means the loop below runs zero iterations and the script exits 0
+# having validated nothing — a fail-open. An empty or whitespace-only
+# SINGLE_WRITER_OVERLAYS must fail loudly, not pass vacuously.
+[ "${#OVERLAYS[@]}" -gt 0 ] ||
+  fail "SINGLE_WRITER_OVERLAYS resolved to zero overlays — refusing to pass vacuously"
+
 for overlay in "${OVERLAYS[@]}"; do
   rendered_json="$(
     cd "${ROOT_DIR}" &&

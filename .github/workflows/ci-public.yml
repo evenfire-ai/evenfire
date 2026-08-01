@@ -349,6 +349,18 @@ jobs:
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
 
+      - name: Validate single-writer rollout invariant on rendered overlays
+        run: |
+          # The k8s-api-ip patch is rendered from a gitignored template at setup
+          # time; render it with a dummy IP so `kubectl kustomize` can build the
+          # minikube overlay here. The gcp-* overlays live in evenfire-infra, so
+          # this repo validates only the minikube overlay it actually ships.
+          sed 's#__K8S_API_IP__#10.96.0.1#g' \
+            deploy/overlays/minikube/patches/k8s-api-ip.yaml.template \
+            > deploy/overlays/minikube/patches/k8s-api-ip.yaml
+          SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" \
+            bash deploy/scripts/validate-postgres-single-writer-strategy.sh
+
   # ─── Platform NGINX image guard (CVE baseline) ────────────────────────────
   nginx-image-guard:
     name: Validate platform NGINX images
