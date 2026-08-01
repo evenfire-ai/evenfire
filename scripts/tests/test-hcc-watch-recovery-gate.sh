@@ -876,12 +876,41 @@ if (
   probe_new_hcc_ready_endpoint() { return 0; }
   external_egress_policy_absent() { return 1; }
   eval "$hcc_ready_after_revoke_function"
-  ! hcc_ready_after_stale_policy_revoked &&
-    [ "$HCC_READY_PROBE_DIAGNOSTIC" = 'HCC_READY_PROBE category=stale-policy-present' ]
+  rc=0
+  hcc_ready_after_stale_policy_revoked || rc=$?
+  # A 200 observed WITH the stale policy present is a fatal ordering violation
+  # (rc=2), not a benign retryable "not ready" (rc=1).
+  [ "$rc" -eq 2 ] &&
+    [ "$HCC_READY_PROBE_DIAGNOSTIC" = 'HCC_READY_PROBE category=ready-200-with-stale-policy-present' ]
 ); then
-  pass "global readiness evidence rejects a surviving divergent policy"
+  pass "global readiness evidence flags a surviving divergent policy as a fatal rc=2 ordering violation"
 else
-  fail "global readiness can self-confirm while a divergent policy survives"
+  fail "global readiness can self-confirm (or only soft-fail) while a divergent policy survives"
+fi
+# The loop must PROPAGATE the fatal rc=2 immediately, not retry until a later
+# clean poll turns the violation into a false PASS (the round-2 bug).
+wait_until_fast_function="$(
+  sed -n '/^wait_until_fast() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+if (
+  HCC_READY_PROBE_DIAGNOSTIC=""
+  POLL=0
+  probe_new_hcc_ready_endpoint() { return 0; }
+  # Stale policy present for the first polls, revoked only later. The buggy
+  # retry loop would poll past the fatal first observation and PASS here.
+  external_egress_policy_absent() { POLL=$((POLL + 1)); [ "$POLL" -gt 4 ]; }
+  eval "$hcc_ready_after_revoke_function"
+  eval "$wait_until_fast_function"
+  rc=0
+  wait_until_fast 10 "rc=2 propagation" hcc_ready_after_stale_policy_revoked || rc=$?
+  # rc must be the fatal 2, and it must have stopped inside the first predicate
+  # poll (which calls external_egress_policy_absent twice) — POLL<3 proves no
+  # retry occurred.
+  [ "$rc" -eq 2 ] && [ "$POLL" -lt 3 ]
+); then
+  pass "wait_until_fast propagates a fatal rc=2 on the first poll instead of retrying to a false PASS"
+else
+  fail "wait_until_fast retried past a fatal ordering violation to a later clean poll"
 fi
 if (
   probe_new_hcc_ready_endpoint() { return 1; }

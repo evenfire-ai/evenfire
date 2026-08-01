@@ -145,10 +145,18 @@ wait_until() {
 wait_until_fast() {
   local timeout=$1 description=$2
   shift 2
-  local deadline now
+  local deadline now rc
   deadline=$(( $(date +%s) + timeout ))
   while :; do
     "$@" && return 0
+    rc=$?
+    # rc=2 is a fatal, non-retryable ordering violation (e.g. 200 observed with
+    # a stale policy still present): stop polling immediately so a later clean
+    # poll cannot mask it. rc=1 is benign "not ready yet".
+    if [ "$rc" -eq 2 ]; then
+      echo "FATAL ordering violation while waiting for ${description}: ${HCC_READY_PROBE_DIAGNOSTIC:-unset}" >&2
+      return 2
+    fi
     now="$(date +%s)"
     [ "$now" -lt "$deadline" ] || break
     sleep 0.5
@@ -784,12 +792,24 @@ probe_new_hcc_ready_endpoint() {
 }
 
 hcc_ready_after_stale_policy_revoked() {
+  # A single poll that sees 200 WHILE the stale policy is still present is a
+  # safety-contract violation and must be FATAL, never retried: retrying lets a
+  # later poll (policy already revoked) turn the violation into a false PASS.
+  # rc=2 signals that fatal ordering violation to wait_until_fast; rc=1 is a
+  # benign "not ready yet, keep polling". The sub-0.5s window where revocation
+  # races the probe inside one poll stays unobservable on THIS signal — the
+  # third signal (M6, /metrics) covers it.
+  local policy_absent_before=0
+  external_egress_policy_absent && policy_absent_before=1
   probe_new_hcc_ready_endpoint || return 1
   if external_egress_policy_absent; then
-    return 0
+    [ "$policy_absent_before" -eq 1 ] && return 0
+    # Revocation raced the probe inside this poll: the final state is clean but
+    # this poll cannot adjudicate the order. Retry to adjudicate cleanly.
+    return 1
   fi
-  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=stale-policy-present"
-  return 1
+  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=ready-200-with-stale-policy-present"
+  return 2
 }
 
 hcc_restore_is_verified() {
