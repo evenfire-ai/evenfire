@@ -21,6 +21,7 @@ import {
   getRegistryCatalog,
   installRecipeFromRegistry,
 } from '@lib/api'
+import { useRegistryCapability } from '@lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
 
 export const dynamic = 'force-dynamic'
@@ -30,11 +31,13 @@ function RegistryEntryActionsMenu({
   onRemove,
   removing,
   sourceRepoUrl,
+  canManage,
 }: {
   onEdit: () => void
   onRemove: () => void
   removing: boolean
   sourceRepoUrl: string | null
+  canManage: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -54,6 +57,10 @@ function RegistryEntryActionsMenu({
       document.removeEventListener('keydown', handleEsc)
     }
   }, [open])
+
+  // Non-owners see management removed entirely (design spec §5.4); the source
+  // repo link is discovery, so it stays. With neither, there is no menu.
+  if (!canManage && !sourceRepoUrl) return null
 
   return (
     <div ref={ref} className="cu-kebab">
@@ -81,29 +88,33 @@ function RegistryEntryActionsMenu({
               Source repo
             </a>
           ) : null}
-          <button
-            type="button"
-            className="cu-kebab__item"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false)
-              onEdit()
-            }}
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            className="cu-kebab__item cu-kebab__item--danger"
-            role="menuitem"
-            disabled={removing}
-            onClick={() => {
-              setOpen(false)
-              onRemove()
-            }}
-          >
-            {removing ? 'Removing...' : 'Remove'}
-          </button>
+          {canManage ? (
+            <>
+              <button
+                type="button"
+                className="cu-kebab__item"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false)
+                  onEdit()
+                }}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className="cu-kebab__item cu-kebab__item--danger"
+                role="menuitem"
+                disabled={removing}
+                onClick={() => {
+                  setOpen(false)
+                  onRemove()
+                }}
+              >
+                {removing ? 'Removing...' : 'Remove'}
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -133,6 +144,14 @@ function RegistryEntryDetailContent() {
   const [actionError, setActionError] = useState('')
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
+  const { capability } = useRegistryCapability()
+  // Management (edit/remove) belongs to the entry's owner, or to a curator who
+  // administers the shared catalog (design spec §5.4). Ownership is derived from
+  // the org-scope prefix on the entry name (publishes are stored as `@org/name`).
+  const orgScope = capability?.scope ?? null
+  const canManageEntry =
+    !!entry &&
+    (capability?.isCurator === true || (!!orgScope && entry.name.startsWith(`${orgScope}/`)))
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -271,6 +290,7 @@ function RegistryEntryDetailContent() {
                       onRemove={() => void handleRemove()}
                       removing={removing}
                       sourceRepoUrl={sourceRepoUrl}
+                      canManage={canManageEntry}
                     />
                   </>
                 ) : undefined

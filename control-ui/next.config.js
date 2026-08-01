@@ -88,6 +88,22 @@ const nextConfig = {
       },
       { source: '/registry', destination: '/marketplace/connectors', permanent: true },
       { source: '/registry/:path*', destination: '/marketplace/:path*', permanent: true },
+      // The Publisher console folded into the org-named Marketplace tab (§4).
+      // Keep old bookmarks working. Specific routes precede the catch-all.
+      { source: '/publisher/api-keys', destination: '/marketplace/keys', permanent: true },
+      {
+        source: '/publisher/credentials',
+        destination: '/marketplace/org/credentials',
+        permanent: true,
+      },
+      {
+        source: '/publisher/shared-with-me',
+        destination: '/marketplace/org/entries',
+        permanent: true,
+      },
+      { source: '/publisher/entries', destination: '/marketplace/org/entries', permanent: true },
+      { source: '/publisher', destination: '/marketplace/org/entries', permanent: true },
+      { source: '/publisher/:path*', destination: '/marketplace/org/entries', permanent: true },
       { source: '/cost', destination: '/cost-and-usage/usage', permanent: true },
       { source: '/cost/:path*', destination: '/cost-and-usage/:path*', permanent: true },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },

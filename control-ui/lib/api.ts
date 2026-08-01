@@ -3376,6 +3376,21 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
 }
 
+// ─── Org container images (real repos + tags from the registry) ────────────
+export type OrgImage = {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
+export async function listOrgImages(): Promise<{ org: string; images: OrgImage[] }> {
+  const raw = (await registryCodedRequest('GET', '/api/v1/admin/registry/images')) as {
+    org?: string
+    images?: OrgImage[]
+  }
+  return { org: raw?.org ?? '', images: raw?.images ?? [] }
+}
+
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
 // Drives control-api's /api/v1/admin/registry/connect endpoints
 // (control-api/src/routes/admin/registryConnect.ts). GET is READ-ONLY and polls

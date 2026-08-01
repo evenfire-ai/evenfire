@@ -167,14 +167,20 @@ describe('RegistryConnectPanel', () => {
     expect(screen.queryByText(/Try again shortly/i)).toBeNull()
   })
 
-  it('shows connected + Disconnect when already connected', async () => {
+  it('connected view has no Disconnect control and states the connection is permanent', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connected',
       deploymentId: 'd',
       org: 'acme',
     })
     render(<RegistryConnectPanel />)
-    await waitFor(() => expect(screen.getByText('Disconnect')).toBeInTheDocument())
+    await waitFor(() =>
+      expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
+    )
+    // Disconnect was removed (design spec §5.6): a claim is permanent, so no
+    // self-service teardown control is offered — the copy states this instead.
+    expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
+    expect(screen.getByText(/connection is permanent/i)).toBeInTheDocument()
   })
 
   // Regression guard: the panel used to render an env-var banner

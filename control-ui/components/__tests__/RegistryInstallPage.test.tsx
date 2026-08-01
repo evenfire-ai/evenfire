@@ -136,6 +136,70 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(mockPush).toHaveBeenCalledWith('/plugins/sandbox-recipes/recipe-market-report')
   })
 
+  it('prompts for an agent and injects spec.agent when the recipe uses promptBridge', async () => {
+    const promptBridgeEntry: RegistryEntry = {
+      ...RECIPE_ENTRY,
+      recipe_meta: {
+        recipeYaml: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'market-report' },
+            spec: {
+              triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
+              pluginWorkloadSdk: {
+                allowedCallers: ['orchestrator'],
+                promptBridge: {
+                  allowedModels: ['gpt-4o-mini', 'claude-3-5-sonnet'],
+                  maxOutputTokens: 4096,
+                },
+              },
+              workloads: [
+                {
+                  id: 'web-search',
+                  type: 'deployment',
+                  image: 'clerum/web-search:test',
+                  port: 3000,
+                  transport: { type: 'streamableHttp', path: '/mcp' },
+                },
+              ],
+              steps: [
+                {
+                  id: 'research',
+                  run: { type: 'snippet', language: 'typescript', code: 'return { ok: true }' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    }
+    vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(promptBridgeEntry)
+    vi.mocked(installRecipeFromRegistry).mockResolvedValueOnce({
+      recipeName: 'recipe-market-report',
+      registryEntry: 'market-report',
+      registryVersion: '1.0.0',
+      correlationId: 'corr-1',
+    })
+
+    render(<RegistryInstallPage />)
+
+    // Agent picker appears with the recipe's allowedModels + derived provider.
+    expect(await screen.findByLabelText('Model')).toHaveValue('gpt-4o-mini')
+    expect(screen.getByLabelText('Provider')).toHaveValue('openai')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // Package -> Security
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' })) // Security -> Install
+    fireEvent.click(await screen.findByRole('button', { name: 'Install plugin' }))
+
+    await waitFor(() => expect(installRecipeFromRegistry).toHaveBeenCalledTimes(1))
+    const payload = vi.mocked(installRecipeFromRegistry).mock.calls[0][0]
+    const manifest = JSON.parse(payload.recipeManifest as string)
+    expect(manifest.spec.agent).toEqual({ provider: 'openai', model: 'gpt-4o-mini' })
+  })
+
   it('blocks registry recipe install when edited egress exceeds CRD cardinality', async () => {
     vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(RECIPE_ENTRY)
     render(<RegistryInstallPage />)

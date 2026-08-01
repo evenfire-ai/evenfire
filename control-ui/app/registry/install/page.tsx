@@ -13,6 +13,7 @@ import { EgressEditor } from '@components/EgressEditor'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { SelectInput } from '@components/ui'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
@@ -113,6 +114,87 @@ function applyWorkflowWorkloadEgress(
   return JSON.stringify(next, null, 2)
 }
 
+// spec.agent.provider enum (WorkflowRecipe CRD).
+const AGENT_PROVIDERS = [
+  'openai',
+  'claude',
+  'zai',
+  'bailian',
+  'vertex',
+  'openrouter',
+  'gemini',
+  'deepseek',
+  'groq',
+  'together',
+  'fireworks',
+  'mistral',
+  'xai',
+  'cerebras',
+  'deepinfra',
+  'perplexity',
+  'moonshot',
+  'nebius',
+  'novita',
+] as const
+
+// Best-effort provider guess from a model id; the user can override it.
+function providerForModel(model: string): string {
+  const m = model.toLowerCase()
+  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('chatgpt'))
+    return 'openai'
+  if (m.includes('claude')) return 'claude'
+  if (m.includes('glm')) return 'zai'
+  if (m.includes('gemini')) return 'gemini'
+  if (m.includes('deepseek')) return 'deepseek'
+  if (m.includes('grok')) return 'xai'
+  if (m.includes('mistral') || m.includes('mixtral')) return 'mistral'
+  return 'openai'
+}
+
+// A recipe whose plugin SDK enables promptBridge must resolve an agent
+// (spec.agent or a step agent with provider + model) or it fails after install.
+function recipeAgentRequirement(parsed: Record<string, unknown> | null): {
+  needsAgent: boolean
+  allowedModels: string[]
+} {
+  if (!isPlainObject(parsed) || !isPlainObject(parsed.spec)) {
+    return { needsAgent: false, allowedModels: [] }
+  }
+  const spec = parsed.spec
+  const sdk = isPlainObject(spec.pluginWorkloadSdk) ? spec.pluginWorkloadSdk : null
+  const promptBridge = sdk && isPlainObject(sdk.promptBridge) ? sdk.promptBridge : null
+  if (!promptBridge) return { needsAgent: false, allowedModels: [] }
+  const agent = isPlainObject(spec.agent) ? spec.agent : null
+  const hasSpecAgent =
+    !!agent && typeof agent.provider === 'string' && typeof agent.model === 'string'
+  const steps =
+    isPlainObject(spec.workflow) && Array.isArray(spec.workflow.steps) ? spec.workflow.steps : []
+  const hasStepAgent = steps.some(
+    s =>
+      isPlainObject(s) &&
+      isPlainObject(s.agent) &&
+      typeof s.agent.provider === 'string' &&
+      typeof s.agent.model === 'string'
+  )
+  const allowedModels = Array.isArray(promptBridge.allowedModels)
+    ? promptBridge.allowedModels.filter((m): m is string => typeof m === 'string')
+    : []
+  return { needsAgent: !(hasSpecAgent || hasStepAgent), allowedModels }
+}
+
+// Inject spec.agent into the parsed recipe, returning the JSON manifest (same
+// serialization the egress editor uses).
+function applyRecipeAgent(
+  parsed: Record<string, unknown>,
+  provider: string,
+  model: string
+): string {
+  const next = JSON.parse(JSON.stringify(parsed)) as Record<string, unknown>
+  if (!isPlainObject(next.spec)) throw new Error('Recipe spec must be an object')
+  next.spec.agent = { provider, model }
+  return JSON.stringify(next, null, 2)
+}
+
 function RegistryRecipeInstallPreview({
   entry,
   onCancel,
@@ -130,6 +212,9 @@ function RegistryRecipeInstallPreview({
   const [recipeText, setRecipeText] = useState(
     typeof entry.recipe_meta?.recipeYaml === 'string' ? entry.recipe_meta.recipeYaml : ''
   )
+  // Agent to inject when the recipe's promptBridge needs one (provider + model).
+  const [agentModel, setAgentModel] = useState('')
+  const [agentProvider, setAgentProvider] = useState('')
 
   useEffect(() => {
     setRecipeText(
@@ -145,6 +230,22 @@ function RegistryRecipeInstallPreview({
     [parseResult.parsed]
   )
   const parsedRecipe = validation?.parsed ?? parseResult.parsed
+  const agentReq = useMemo(
+    () => recipeAgentRequirement((parsedRecipe as Record<string, unknown> | null) ?? null),
+    [parsedRecipe]
+  )
+  const allowedModelsKey = agentReq.allowedModels.join('\n')
+  useEffect(() => {
+    if (agentReq.needsAgent && agentReq.allowedModels.length > 0) {
+      const first = agentReq.allowedModels[0]
+      setAgentModel(first)
+      setAgentProvider(providerForModel(first))
+    } else {
+      setAgentModel('')
+      setAgentProvider('')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentReq.needsAgent, allowedModelsKey])
   const transportEgressTargets = useMemo(
     () => workflowTransportWorkloads(parsedRecipe as Record<string, unknown> | null),
     [parsedRecipe]
@@ -190,10 +291,15 @@ function RegistryRecipeInstallPreview({
     setSubmitting(true)
     setSubmitError('')
     try {
+      // Inject the chosen agent when the recipe's promptBridge requires one.
+      const manifest =
+        agentReq.needsAgent && agentProvider && agentModel && isPlainObject(parsedRecipe)
+          ? applyRecipeAgent(parsedRecipe, agentProvider, agentModel)
+          : recipeText
       const result = await installRecipeFromRegistry({
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
-        recipeManifest: recipeText,
+        recipeManifest: manifest,
       })
       showToast(`Installed ${entry.name} v${entry.version}.`, { tone: 'success' })
       onInstalled(result.recipeName)
@@ -229,15 +335,73 @@ function RegistryRecipeInstallPreview({
 
               <div className="cu-card">
                 <div className="cu-card__body">
-                  <strong>
-                    {entry.name} v{entry.version}
-                  </strong>
+                  <div className="cu-table-actions" style={{ justifyContent: 'flex-start' }}>
+                    <strong>
+                      {entry.name} v{entry.version}
+                    </strong>
+                    {entry.visibility ? (
+                      <span
+                        className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
+                      >
+                        {entry.visibility === 'private' ? 'Private' : 'Public'}
+                      </span>
+                    ) : null}
+                  </div>
                   <p className="cu-muted" style={{ margin: '6px 0 0' }}>
                     {entry.description}
                   </p>
                 </div>
               </div>
             </div>
+
+            {agentReq.needsAgent ? (
+              <div className="cu-form-section">
+                <div className="cu-form-section__header">
+                  <h3 className="cu-form-section__title">Agent</h3>
+                  <p className="cu-form-section__description">
+                    This plugin uses the prompt bridge, so it needs an LLM agent (provider + model).
+                  </p>
+                </div>
+                <p className="cu-banner cu-banner--warn" role="status">
+                  Pick an agent for this plugin — without one it will fail after install.
+                </p>
+                <div className="cu-field">
+                  <label htmlFor="install-agent-model">Model</label>
+                  <SelectInput
+                    id="install-agent-model"
+                    value={agentModel}
+                    onChange={e => {
+                      const m = e.target.value
+                      setAgentModel(m)
+                      setAgentProvider(providerForModel(m))
+                    }}
+                  >
+                    {agentReq.allowedModels.length === 0 ? (
+                      <option value="">(no models listed)</option>
+                    ) : null}
+                    {agentReq.allowedModels.map(m => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </div>
+                <div className="cu-field">
+                  <label htmlFor="install-agent-provider">Provider</label>
+                  <SelectInput
+                    id="install-agent-provider"
+                    value={agentProvider}
+                    onChange={e => setAgentProvider(e.target.value)}
+                  >
+                    {AGENT_PROVIDERS.map(p => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -326,6 +490,14 @@ function RegistryRecipeInstallPreview({
                     <div style={{ marginTop: 4 }}>
                       Bindings: {finding.bindingCount}. Mode: {finding.mode}.
                     </div>
+                    {finding.targets && finding.targets.length > 0 ? (
+                      <div style={{ marginTop: 4 }}>
+                        Hosts: {finding.targets.join(', ')}
+                        {finding.ports && finding.ports.length > 0
+                          ? ` · Ports: ${finding.ports.join(', ')}`
+                          : ''}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -428,6 +600,17 @@ function RegistryInstallPageContent() {
     void loadEntry()
   }, [entryName, entryVersion])
 
+  const isPrivate = entry?.visibility === 'private'
+  const kindLabel = entry?.entry_type === 'recipe' ? 'plugin' : 'connector'
+  // Scoped names are stored as `@org/name`; surface the org for a private entry.
+  const orgScope = entry ? (entry.name.match(/^(@[^/]+)\//)?.[1] ?? null) : null
+  const headerTitle = isPrivate ? `Install a private ${kindLabel}` : 'Install from Marketplace'
+  const headerSubtitle = isPrivate
+    ? `Install ${entry?.name}, a private ${kindLabel} from your organization${
+        orgScope ? ` ${orgScope}` : ''
+      }, into your cluster and bind it to a context.`
+    : 'Install a Marketplace entry into your cluster and bind it to a context.'
+
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -442,8 +625,8 @@ function RegistryInstallPageContent() {
             header={
               <CreatePageHeader
                 icon={<IconStore />}
-                title="Install from Marketplace"
-                subtitle="Install a Marketplace entry into your cluster and bind it to a context."
+                title={headerTitle}
+                subtitle={headerSubtitle}
                 backLabel="Back to Marketplace"
                 onBack={() => router.push(CONTROL_ROUTES.marketplace.root)}
               />
