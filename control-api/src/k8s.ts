@@ -7,7 +7,7 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
-import { SecretService } from './services/secretService.js'
+import { SecretService, type SecretSummary } from './services/secretService.js'
 import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
 
 /**
@@ -390,23 +390,33 @@ export class K8sGateway {
     return this.secrets.getSecret(name, namespace)
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  // Write ops return a names-only summary (never the k8s Secret's `.data`), so no
+  // route can leak secret values by echoing the return — and a future cast to
+  // V1Secret is now a compile error. Reads (getSecret) stay full-fat.
+  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.createSecret(req)
   }
 
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async updateSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.updateSecret(req)
   }
 
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.mergeSecret(req)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSummary> {
     return this.secrets.removeSecretKey(req)
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
+  async deleteSecret(
+    name: string,
+    namespace?: string
+  ): Promise<{ name: string; namespace: string; deleted: true }> {
     return this.secrets.deleteSecret(name, namespace)
   }
 

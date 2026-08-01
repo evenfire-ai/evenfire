@@ -1,6 +1,29 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
 
+// A write-side summary of a Secret — NEVER carries `.data` values. Every admin
+// secret-write route echoes this, so secret values cannot leave the Secret store
+// via an HTTP response body (mirrors the names-only policy in
+// routes/admin/secrets.ts). Reads that legitimately need values use `getSecret`,
+// which deliberately stays full-fat.
+export interface SecretSummary {
+  name: string
+  namespace: string
+  keys: string[]
+}
+
+// Trim a k8s write response to a names-only summary. `name`/`namespace` come from
+// the request (always defined); `keys` from the returned Secret's data — for a
+// merge-patch this is the merged WHOLE keyset, but still only NAMES, never values.
+function summarizeSecret(result: unknown, name: string, namespace: string): SecretSummary {
+  const data = (result as k8s.V1Secret | undefined)?.data
+  return {
+    name,
+    namespace,
+    keys: Object.keys(data ?? {}).sort((a, b) => a.localeCompare(b)),
+  }
+}
+
 export class SecretService {
   constructor(
     private readonly coreApi: k8s.CoreV1Api,
@@ -29,13 +52,14 @@ export class SecretService {
     return this.coreApi.readNamespacedSecret({ namespace, name })
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+    const ns = req.namespace || this.defaultNamespace
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
       kind: 'Secret',
       metadata: {
         name: req.name,
-        namespace: req.namespace || this.defaultNamespace,
+        namespace: ns,
         labels: req.labels,
         annotations: req.annotations,
       },
@@ -44,10 +68,9 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.createNamespacedSecret({
-      namespace: req.namespace || this.defaultNamespace,
-      body,
-    })
+    // Names-only return: never surface the created Secret's `.data` to callers.
+    const created = await this.coreApi.createNamespacedSecret({ namespace: ns, body })
+    return summarizeSecret(created, req.name, ns)
   }
 
   /**
@@ -61,7 +84,7 @@ export class SecretService {
    * inter-service token rotation. For multi-owner Secrets where individual
    * keys must survive a partial update, use `mergeSecret` instead.
    */
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async updateSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
@@ -80,7 +103,13 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.replaceNamespacedSecret({ namespace: ns, name: req.name, body })
+    // Names-only return: never surface the replaced Secret's `.data` to callers.
+    const updated = await this.coreApi.replaceNamespacedSecret({
+      namespace: ns,
+      name: req.name,
+      body,
+    })
+    return summarizeSecret(updated, req.name, ns)
   }
 
   /**
@@ -100,7 +129,7 @@ export class SecretService {
    * `control-api-communication-channels` Role. Do NOT call this from
    * routes that target other namespaces unless their Role has been updated.
    */
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     const ns = req.namespace || this.defaultNamespace
 
     const body: Partial<k8s.V1Secret> = {}
@@ -112,7 +141,9 @@ export class SecretService {
     if (req.labels !== undefined) body.metadata = { labels: req.labels }
     if (req.type !== undefined) body.type = req.type
 
-    return this.coreApi.patchNamespacedSecret(
+    // Names-only return: the patch response is the merged WHOLE Secret (all keys,
+    // including ones the caller did not send) — return only the key NAMES.
+    const merged = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -122,13 +153,19 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return summarizeSecret(merged, req.name, ns)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSummary> {
     const ns = req.namespace || this.defaultNamespace
     const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
 
-    return this.coreApi.patchNamespacedSecret(
+    // Names-only return: never surface the patched Secret's remaining `.data`.
+    const patched = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -138,12 +175,15 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return summarizeSecret(patched, req.name, ns)
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
-    return this.coreApi.deleteNamespacedSecret({
-      namespace: namespace || this.defaultNamespace,
-      name,
-    })
+  async deleteSecret(
+    name: string,
+    namespace?: string
+  ): Promise<{ name: string; namespace: string; deleted: true }> {
+    const ns = namespace || this.defaultNamespace
+    await this.coreApi.deleteNamespacedSecret({ namespace: ns, name })
+    return { name, namespace: ns, deleted: true }
   }
 }

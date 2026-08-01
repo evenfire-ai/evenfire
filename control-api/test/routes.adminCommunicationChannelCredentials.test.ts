@@ -238,19 +238,96 @@ describe('admin communicationchannels — credentials cascade', () => {
     expect(gatewayMock.updateResource).not.toHaveBeenCalled()
   })
 
+  it('SECURITY: PUT credentials (rotated:true) response is names-only and leaks no secret VALUE', async () => {
+    // Regression for a pre-existing confidentiality leak (blame 5d663a4): the
+    // rotated:true branch used to respond `result: merged`, and `merged` is the
+    // full k8s Secret returned by patchNamespacedSecret — its `.data` carries
+    // the base64 VALUES of every stored key, INCLUDING keys the caller never
+    // sent. Those values then travel in the HTTP response body into surfaces
+    // that don't protect secrets (access logs, proxies, error trackers,
+    // DevTools). The route must mirror the #223 policy (secrets.ts): names-only.
+    //
+    // Mutation guard: mock mergeSecret to return exactly such a populated Secret
+    // and assert NO secret value appears at any depth. This test goes RED if the
+    // handler ever echoes the Secret object again (e.g. `result: merged`).
+    gatewayMock.getResource.mockResolvedValue({
+      metadata: { name: 'foo', namespace: 'channels' },
+      spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
+    })
+    const NEW_TOKEN_PLAIN = 'tg-new-token'
+    const SLACK_TOKEN_PLAIN = 'xoxb-super-secret'
+    const EMAIL_PW_PLAIN = 'hunter2'
+    const NEW_TOKEN_B64 = Buffer.from(NEW_TOKEN_PLAIN, 'utf8').toString('base64')
+    const SLACK_TOKEN_B64 = Buffer.from(SLACK_TOKEN_PLAIN, 'utf8').toString('base64')
+    const EMAIL_PW_B64 = Buffer.from(EMAIL_PW_PLAIN, 'utf8').toString('base64')
+    gatewayMock.mergeSecret.mockResolvedValue({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'cc-foo-credentials', namespace: 'channels' },
+      type: 'Opaque',
+      data: {
+        'telegram-bot-token': NEW_TOKEN_B64,
+        // Keys the caller did NOT send — over-return must never bring these back.
+        'slack-bot-token': SLACK_TOKEN_B64,
+        'email-password': EMAIL_PW_B64,
+      },
+    })
+
+    const res = await request(makeApp())
+      .put('/admin/communication-channels/foo/credentials')
+      .send({ 'telegram-bot-token': NEW_TOKEN_PLAIN })
+
+    expect(res.status).toBe(200)
+    // Names-only contract: metadata + the rotated key NAMES the caller sent.
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: true,
+      rotatedKeys: ['telegram-bot-token'],
+    })
+    expect(res.body).not.toHaveProperty('result')
+    // Belt-and-suspenders: no secret value (base64 or plaintext) at ANY depth,
+    // including the caller-sent token in either encoding.
+    const serialized = JSON.stringify(res.body)
+    for (const needle of [
+      NEW_TOKEN_B64,
+      NEW_TOKEN_PLAIN,
+      SLACK_TOKEN_B64,
+      EMAIL_PW_B64,
+      SLACK_TOKEN_PLAIN,
+      EMAIL_PW_PLAIN,
+    ]) {
+      expect(serialized).not.toContain(needle)
+    }
+  })
+
   it('PUT credentials on CC without credentialsSecretRef creates Secret + patches CC', async () => {
     gatewayMock.getResource.mockResolvedValue({
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1' },
     })
     gatewayMock.createSecret.mockResolvedValue({})
-    gatewayMock.updateResource.mockResolvedValue({})
+    gatewayMock.updateResource.mockResolvedValue({
+      metadata: { name: 'foo', namespace: 'channels' },
+      spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
+    })
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
       .send({ 'telegram-bot-token': 'tok' })
 
     expect(res.status).toBe(200)
+    // Names-only for the rotated:false branch too: return the written key NAMES,
+    // never the raw CRD object.
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: false,
+      rotatedKeys: ['telegram-bot-token'],
+    })
+    expect(res.body).not.toHaveProperty('result')
     expect(gatewayMock.createSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',
