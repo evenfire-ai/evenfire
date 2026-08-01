@@ -600,6 +600,22 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(gateway.mergeSecret).not.toHaveBeenCalled()
   })
 
+  it('rejects an invalid Secret key name with a 400, not an opaque apiserver 500', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    // A key with a space (or any char outside [-._a-zA-Z0-9]) can never be a
+    // valid Secret data key. Catching it here returns an actionable 400 rather
+    // than letting the apiserver reject the merge as a 500 the operator can't act on.
+    const res = await request(app)
+      .put('/admin/mcp-secrets/linear-credentials')
+      .send({ data: { 'bad key': 'value' } })
+      .expect(400)
+
+    expect(res.body.error).toContain('not a valid Secret key')
+    expect(gateway.mergeSecret).not.toHaveBeenCalled()
+  })
+
   // ── Gateway failure ──────────────────────────────────────────────────────
 
   it('still returns 200 when listing connectors fails AFTER a successful merge (M1)', async () => {
