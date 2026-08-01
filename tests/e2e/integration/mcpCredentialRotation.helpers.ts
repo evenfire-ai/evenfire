@@ -22,7 +22,7 @@
  *     deletes are allowed to swallow errors — that mirrors existing
  *     convention and never masks a test's own assertions.
  */
-import { execSync, spawn } from 'child_process'
+import { execFileSync, execSync, spawn } from 'child_process'
 import { createHash, randomBytes } from 'crypto'
 import {
   CONTROL_API_URL,
@@ -37,9 +37,35 @@ export { CONTROL_API_URL, deleteJson, fetchJson, isServiceUp, postJson, putJson 
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-export const KUBECTL_CONTEXT = process.env.KUBECTL_CONTEXT ?? 'clerum-test'
-export const MCP_SERVERS_NAMESPACE = process.env.TEST_MCP_SERVERS_NAMESPACE ?? 'mcp-server'
-export const TEST_CONTEXT_REF = process.env.TEST_CONTEXT_REF ?? 'context1'
+// These test-config env vars flow into the kubectl command line built by
+// `kubectl()` (which shells out via execSync). A k8s context/namespace/ref name
+// is DNS-ish — letters, digits, dot, dash, underscore — so anything outside that
+// set is either a misconfiguration or a shell-injection attempt. Validate at the
+// source: this is the single choke point where external input reaches the
+// command line, so one guard here removes the injection vector for every caller
+// (CodeQL #827/#828, "indirect uncontrolled command line").
+function requireSafeName(envName: string, value: string): string {
+  if (!/^[A-Za-z0-9_.-]+$/.test(value)) {
+    throw new Error(
+      `Unsafe ${envName}=${JSON.stringify(value)}: only [A-Za-z0-9_.-] is allowed ` +
+        '(a kubectl context/namespace/ref name), to keep it off the shell command line.'
+    )
+  }
+  return value
+}
+
+export const KUBECTL_CONTEXT = requireSafeName(
+  'KUBECTL_CONTEXT',
+  process.env.KUBECTL_CONTEXT ?? 'clerum-test'
+)
+export const MCP_SERVERS_NAMESPACE = requireSafeName(
+  'TEST_MCP_SERVERS_NAMESPACE',
+  process.env.TEST_MCP_SERVERS_NAMESPACE ?? 'mcp-server'
+)
+export const TEST_CONTEXT_REF = requireSafeName(
+  'TEST_CONTEXT_REF',
+  process.env.TEST_CONTEXT_REF ?? 'context1'
+)
 export const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
 
 // Must match the identically-named constants in
@@ -69,6 +95,12 @@ export function randomSuffix(): string {
 // ─── kubectl ────────────────────────────────────────────────────────────────
 
 export function kubectl(args: string): string {
+  // KUBECTL_CONTEXT is validated at the source (requireSafeName) so it carries no
+  // shell metacharacters; `args` is composed by callers from literals, hex
+  // suffixes (randomBytes) and the validated namespace — no raw external input
+  // reaches this command line. Kept as execSync because callers pass a single
+  // pre-joined arg string (with quoted jsonpath); the injection source, the env
+  // vars, is what CodeQL #827 flags and what the source guard neutralizes.
   return execSync(`kubectl --context=${KUBECTL_CONTEXT} ${args}`, {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -84,7 +116,10 @@ export function kubectlSafe(args: string): string | null {
 }
 
 export function kubectlApply(yaml: string): string {
-  return execSync(`kubectl --context=${KUBECTL_CONTEXT} apply -f -`, {
+  // execFileSync (no shell): the YAML goes in via stdin and the context via an
+  // argv element, so nothing is interpolated into a command line at all.
+  // Closes CodeQL #828.
+  return execFileSync('kubectl', ['--context', KUBECTL_CONTEXT, 'apply', '-f', '-'], {
     encoding: 'utf-8',
     input: yaml,
   }).trim()
