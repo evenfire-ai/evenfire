@@ -25,7 +25,7 @@ import {
   resolveExistingArtifactFile,
 } from './artifactPaths'
 import { getOutputDir } from './internalTools'
-import { ConfigureRequest, ExecuteStepRequest } from './types'
+import { ConfigureRequest, ExecuteStepRequest, PluginWorkloadSdkBootstrapRequest } from './types'
 import { WorkflowService } from './workflowService'
 
 // ─── V1 fix: JWT auth middleware for workflow endpoints ──────────────────
@@ -235,6 +235,27 @@ export function createWorkflowRouter(service: WorkflowService): Router {
     const result = service.configure(body)
     res.json(result)
   })
+
+  // POST /plugin-workload-sdk/bootstrap — publish only the public
+  // provider/model binding for a stepless SDK host. No API key is accepted or
+  // resolved here; prompt credentials are brokered per attempt by WRC.
+  router.post(
+    '/plugin-workload-sdk/bootstrap',
+    requireWorkflowAuth('configure'),
+    (req: Request, res: Response) => {
+      if (!validateWorkflowBinding(req, res, { expectedSub: 'wrc' })) return
+      const raw = req.body as PluginWorkloadSdkBootstrapRequest
+      // Deliberately project the request to the identity-only contract. Any
+      // apiKey/secret-shaped field supplied by a caller is ignored before the
+      // service boundary and can never reach the SDK context holder.
+      const body: PluginWorkloadSdkBootstrapRequest = {
+        provider: raw?.provider,
+        model: raw?.model,
+      }
+      const result = service.configurePluginWorkloadSdkBootstrap(body)
+      res.status(result.configured ? 200 : 400).json(result)
+    }
+  )
 
   // GET /mode — workflow mode status (requires valid workflow token)
   router.get('/mode', requireWorkflowAuth('mode_read'), (req: Request, res: Response) => {

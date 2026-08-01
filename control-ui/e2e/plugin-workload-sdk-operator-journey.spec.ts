@@ -5,10 +5,10 @@
  *   1. Publish the SDK recipe to the Marketplace (registry-api).
  *   2. Instantiate it from the Marketplace UI  → POST /admin/registry/install-recipe
  *      → a versioned WorkflowRecipe CRD in sandbox-recipes.
- *   3. Wait for the eager mcp-host to validate the SDK capability
+ *   3. Wait for the stepless eager mcp-host to validate the SDK capability
  *      (status.pluginWorkloadSdk.state === 'validated'). This is the path that
  *      regressed (configure readiness race) — the operator journey must observe
- *      it self-validate without manual intervention.
+ *      it self-validate without a keepalive step or manual intervention.
  *   4. Configure the two SDK grants (promptBridge + clientNotifications) from
  *      the grant page UI so an allowed user can receive notifications.
  *   5. Verify both grants are listed and bound to the installed recipe.
@@ -128,9 +128,7 @@ function recipeManifest(name: string, userRef: string): Record<string, unknown> 
     kind: 'WorkflowRecipe',
     metadata: { name },
     spec: {
-      triggers: { onDemand: {} },
       agent: { provider: PROVIDER, model: MODEL },
-      steps: [{ id: 'keepalive', instruction: 'Acknowledge in one word.', toolChoice: 'none' }],
       workloads: [
         {
           id: 'sdk-caller',
@@ -145,7 +143,11 @@ function recipeManifest(name: string, userRef: string): Record<string, unknown> 
         },
       ],
       pluginWorkloadSdk: {
-        promptBridge: { allowedModels: [], maxRequestsPerRun: 10, maxInvocationsPerMinute: 60 },
+        promptBridge: {
+          allowedModels: [MODEL],
+          maxRequestsPerRun: 10,
+          maxInvocationsPerMinute: 60,
+        },
         clientNotifications: {
           allowedEventTypes: [EVENT_TYPE],
           allowedUserRefs: true,
@@ -236,7 +238,16 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       await waitForSdkValidated(token, installedRecipeName)
 
       // 4. promptBridge grant — configured through the grant page UI.
-      await page.goto('/plugin-workload-sdk')
+      // Navigate through the visible application shell so this test proves the
+      // operator journey rather than jumping directly to the grant route.
+      await page.getByRole('link', { name: 'Plugins', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Plugins SDK' })).toBeVisible({
+        timeout: 15_000,
+      })
+      await page.getByRole('button', { name: 'Plugins SDK' }).click()
+      await expect(page.getByRole('button', { name: 'New grant' })).toBeVisible({
+        timeout: 15_000,
+      })
       await dismissAdminEmailReminder(page)
       await page.getByRole('button', { name: 'New grant' }).click()
       await page
@@ -245,12 +256,10 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       await expect(page.locator('#sdk-family')).toHaveValue('promptBridge')
       await page.locator('#sdk-callers').fill('sdk-caller')
       const saveGrantButton = page.getByRole('button', { name: 'Save grant' })
-      await expect(page.getByText('Select at least one model for promptBridge.')).toBeVisible()
-      await expect(saveGrantButton).toBeDisabled()
-      const modelsDropdown = page.locator('#sdk-models')
-      await modelsDropdown.click()
-      await page.getByPlaceholder('Search models...').fill(MODEL)
-      await page.getByRole('option', { name: MODEL }).click()
+      await expect(page.locator('#sdk-target-model')).toHaveValue(MODEL)
+      await page.locator('#sdk-credential-slot').selectOption(`${PROVIDER}-api-key`)
+      await page.locator('#sdk-target-ref').fill(`primary-${PROVIDER}`)
+      await page.getByRole('button', { name: 'Add target' }).click()
       await expect(saveGrantButton).toBeEnabled()
       await saveGrantButton.click()
       const promptRow = page.locator('tr', { hasText: installedRecipeName }).filter({

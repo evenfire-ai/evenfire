@@ -20,6 +20,7 @@ const EVENT_TYPE = 'e2e.test.notification'
 const MODEL_PROVIDER =
   process.env.E2E_WORKFLOW_MODEL_PROVIDER || process.env.CLURUM_MODEL_PROVIDER || 'zai'
 const MODEL_NAME = process.env.E2E_WORKFLOW_MODEL_NAME || process.env.CLURUM_MODEL_NAME || 'glm-5.1'
+const CREDENTIAL_SLOT = process.env.E2E_WORKFLOW_CREDENTIAL_SLOT || `${MODEL_PROVIDER}-api-key`
 
 function requireAdminPassword(): string {
   const password =
@@ -101,7 +102,17 @@ export async function createSdkWorkloadGrants(recipeName: string, userRef: strin
       recipeNamespace: RECIPE_NS,
       recipeName,
       capabilityFamily: 'promptBridge',
-      allowedModels: [],
+      provider: MODEL_PROVIDER,
+      allowedModels: [MODEL_NAME],
+      promptTargets: [
+        {
+          targetRef: `primary-${MODEL_PROVIDER}`,
+          provider: MODEL_PROVIDER,
+          model: MODEL_NAME,
+          credentialSlot: CREDENTIAL_SLOT,
+        },
+      ],
+      defaultTargetRef: `primary-${MODEL_PROVIDER}`,
       allowedCallers: [WORKLOAD_ID],
       quotaLimits: { maxRequestsPerRun: 3 },
     }),

@@ -2887,7 +2887,6 @@ async function main(): Promise<void> {
     // WorkflowService.configure() — never a public getter, so the apiKey
     // stays unreachable through the service's public API surface.
     let pluginSdkLlmContext: {
-      keys: ApiKeys
       provider: LlmProvider
       defaultModel: string
     } | null = null
@@ -2897,6 +2896,9 @@ async function main(): Promise<void> {
       runtimeAuth,
       usageReporter,
       onLlmConfigured: context => {
+        pluginSdkLlmContext = context
+      },
+      onPluginWorkloadSdkBootstrapConfigured: context => {
         pluginSdkLlmContext = context
       },
     })

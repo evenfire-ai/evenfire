@@ -16,8 +16,12 @@ import { registry } from '../metrics'
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
-import { ModelConfigHandler } from '../workflow/modelConfigHandler'
+import { ModelConfigHandler, type PluginSdkCredentialTarget } from '../workflow/modelConfigHandler'
 import { createWorkflowEndpointHandlers, verifyIncomingToken } from '../workflow/restEndpoints'
+import {
+  verifyPluginSdkBrokerCallerToken,
+  verifyPluginSdkCredentialTicket,
+} from '../workflow/workflowAuth'
 import {
   CallerIdentity,
   handleDeleteRecipe,
@@ -35,6 +39,41 @@ const MAX_SESSIONS = 100
 // Previous 64KB limit caused `req.destroy()` → coordinator received `socket hang up`
 // instead of a proper 413 response, triggering false step retries.
 const MAX_BODY_BYTES = 512 * 1024 // 512KB
+const CONTROL_API_BASE_URL =
+  process.env.CONTROL_API_BASE_URL || 'http://control-api.control-plane.svc.cluster.local:8090'
+
+export async function revalidatePluginSdkCredentialTicket(input: {
+  runtimeToken: string
+  credentialTicket: string
+  invocationId: string
+  targetRef: string
+  fetchImpl?: typeof fetch
+  controlApiBaseUrl?: string
+}): Promise<boolean> {
+  const fetchImpl = input.fetchImpl ?? fetch
+  try {
+    const response = await fetchImpl(
+      `${(input.controlApiBaseUrl ?? CONTROL_API_BASE_URL).replace(/\/+$/, '')}/api/v1/mcp-host/plugin-workload-sdk/credential-ticket/introspect`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${input.runtimeToken}`,
+        },
+        body: JSON.stringify({
+          credentialTicket: input.credentialTicket,
+          invocationId: input.invocationId,
+          targetRef: input.targetRef,
+        }),
+      }
+    )
+    if (!response.ok) return false
+    const body = (await response.json().catch(() => null)) as { active?: unknown } | null
+    return body?.active === true
+  } catch {
+    return false
+  }
+}
 
 type ParseResult =
   | { ok: true; body: Record<string, unknown> }
@@ -77,6 +116,8 @@ function parseJsonBody(req: http.IncomingMessage): Promise<ParseResult> {
 export class ClerumMcpServer {
   private httpServer: http.Server | null = null
   private sessions: Map<string, StreamableHTTPServerTransport> = new Map()
+  /** One-shot broker redemption cache; tickets are short-lived (60s). */
+  private readonly consumedPluginSdkTicketJtis = new Map<string, number>()
   private provider: WorkflowRecipeProvider
   private port: number
   private customApi: k8s.CustomObjectsApi
@@ -108,6 +149,23 @@ export class ClerumMcpServer {
     const mcpHostClient = new HttpMcpHostClient()
     // Handler requires K8sSecretReader; if unavailable (dev mode), configureModel returns 501
     this.modelConfigHandler = k8sReader ? new ModelConfigHandler(k8sReader, mcpHostClient) : null
+  }
+
+  private consumePluginSdkTicket(jti: string): boolean {
+    const now = Date.now()
+    for (const [entry, expiresAt] of this.consumedPluginSdkTicketJtis) {
+      if (expiresAt <= now) this.consumedPluginSdkTicketJtis.delete(entry)
+    }
+    const existing = this.consumedPluginSdkTicketJtis.get(jti)
+    if (existing !== undefined && existing > now) return false
+    // Keep the cache bounded even if a compromised host floods distinct
+    // signed tickets within their TTL.
+    if (this.consumedPluginSdkTicketJtis.size >= 10_000) {
+      const oldest = this.consumedPluginSdkTicketJtis.keys().next().value
+      if (typeof oldest === 'string') this.consumedPluginSdkTicketJtis.delete(oldest)
+    }
+    this.consumedPluginSdkTicketJtis.set(jti, now + 60_000)
+    return true
   }
 
   private createMcpServer(): McpServer {
@@ -316,6 +374,124 @@ export class ClerumMcpServer {
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(recipeName)) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Invalid recipe name format' }))
+        return
+      }
+
+      // Plugin Workload SDK credential broker. This route deliberately uses a
+      // different audience from the workflow REST API: an mcp-host runtime JWT
+      // authenticates the caller and a second short-lived signed ticket binds
+      // the exact target that control-api already authorized.
+      if (req.method === 'POST' && subPath === '/plugin-workload-sdk/credentials') {
+        const authHeader = req.headers.authorization
+        const runtimeToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
+        let callerClaims
+        try {
+          callerClaims = await verifyPluginSdkBrokerCallerToken(runtimeToken)
+        } catch {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Unauthorized' }))
+          return
+        }
+        if (
+          callerClaims.recipeName !== recipeName ||
+          callerClaims.recipeNamespace !== this.sandboxNamespace ||
+          !callerClaims.workflowControlScopes.includes('plugin-workload-sdk')
+        ) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Credential broker scope denied' }))
+          return
+        }
+
+        const parseResult = await parseJsonBody(req)
+        if (!parseResult.ok) {
+          res.writeHead(parseResult.reason === 'too_large' ? 413 : 400, {
+            'Content-Type': 'application/json',
+          })
+          res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
+          return
+        }
+        const body = parseResult.body
+        const target = body.target as PluginSdkCredentialTarget | undefined
+        if (
+          body.recipeNamespace !== this.sandboxNamespace ||
+          typeof body.invocationId !== 'string' ||
+          !target ||
+          typeof target.targetRef !== 'string' ||
+          typeof target.provider !== 'string' ||
+          typeof target.model !== 'string' ||
+          typeof target.credentialSlot !== 'string' ||
+          typeof body.credentialTicket !== 'string'
+        ) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
+          return
+        }
+
+        let ticket
+        try {
+          ticket = await verifyPluginSdkCredentialTicket(body.credentialTicket)
+        } catch {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+          return
+        }
+        const ticketMatches =
+          ticket.recipeName === recipeName &&
+          ticket.recipeNamespace === this.sandboxNamespace &&
+          ticket.invocationId === body.invocationId &&
+          ticket.targetRef === target.targetRef &&
+          ticket.provider === target.provider &&
+          ticket.model === target.model &&
+          ticket.credentialSlot === target.credentialSlot
+        if (!ticketMatches) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+          return
+        }
+        // TOCTOU gate: ticket signature proves what was authorized, while this
+        // control-api read proves that the invocation and policy revision/hash
+        // are still current immediately before the Secret lookup.
+        const ticketStillActive = await revalidatePluginSdkCredentialTicket({
+          runtimeToken,
+          credentialTicket: body.credentialTicket,
+          invocationId: body.invocationId,
+          targetRef: target.targetRef,
+        })
+        if (!ticketStillActive) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+          return
+        }
+        if (!this.modelConfigHandler) {
+          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Credential broker unavailable' }))
+          return
+        }
+        const result = await this.modelConfigHandler.resolvePluginSdkCredential(target)
+        // Re-check after the Secret read as well as before it.  Control API
+        // and the WRC Secret store are separate systems, so a single remote
+        // check cannot be atomic with the read; the post-read gate ensures a
+        // revocation observed during resolution never returns credentials.
+        if (result.status === 200) {
+          const ticketStillActiveAfterResolve = await revalidatePluginSdkCredentialTicket({
+            runtimeToken,
+            credentialTicket: body.credentialTicket,
+            invocationId: body.invocationId,
+            targetRef: target.targetRef,
+          })
+          if (!ticketStillActiveAfterResolve) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+            return
+          }
+          if (!this.consumePluginSdkTicket(ticket.jti)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+            return
+          }
+        }
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
         return
       }
 

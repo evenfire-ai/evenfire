@@ -10,6 +10,7 @@ import {
   authorizeListRecipients,
   authorizePromptBridge,
 } from '../../services/pluginWorkloadSdkAuthorizer.js'
+import { verifyPluginWorkloadSdkCredentialTicket } from '../../services/pluginWorkloadSdkCredentialTicket.js'
 import {
   DEFAULT_IDEMPOTENCY_KEY_PATTERN,
   DEFAULT_MAX_BODY_BYTES,
@@ -22,7 +23,9 @@ import {
   type PluginWorkloadSdkErrorCode,
 } from '../../services/pluginWorkloadSdkDb.js'
 import {
+  findGrant,
   getInvocationById,
+  hashPromptTargetPolicy,
   listInvocations,
   resolveRecipientProfiles,
 } from '../../services/pluginWorkloadSdkDb.js'
@@ -50,9 +53,11 @@ const AUTHZ_HTTP_STATUS: Record<PluginWorkloadSdkErrorCode, number> = {
   caller_not_allowed: 403,
   scope_denied: 403,
   target_not_allowed: 403,
+  ambiguous_model: 409,
   event_type_not_allowed: 403,
   quota_exceeded: 429,
   provider_policy_denied: 403,
+  provider_unavailable: 503,
   payload_too_large: 413,
   idempotency_conflict: 422,
   recipe_binding_mismatch: 400,
@@ -113,11 +118,16 @@ function validateCallerRef(value: unknown, res: Response): string | null {
 
 interface ParsedPromptBridgeBody {
   callerRef: string
+  bootstrapProvider: string
+  bootstrapModel: string
   model?: string
+  provider?: string
+  targetRef?: string
   modelPolicyRef?: string
   purpose: string
   idempotencyKey: string
   messages: Array<{ role: string; content: string }>
+  metadata?: Record<string, unknown>
   correlationId?: string
 }
 
@@ -127,6 +137,16 @@ function parsePromptBridgeBody(
 ): ParsedPromptBridgeBody | null {
   const callerRef = validateCallerRef(body.callerRef, res)
   if (!callerRef) return null
+
+  // These fields are supplied only by the recipe-bound mcp-host.  They carry
+  // the public provider/model identity from spec.agent, never credentials.
+  const bootstrapProvider =
+    typeof body.bootstrapProvider === 'string' ? body.bootstrapProvider.trim() : ''
+  const bootstrapModel = typeof body.bootstrapModel === 'string' ? body.bootstrapModel.trim() : ''
+  if (!bootstrapProvider || !bootstrapModel) {
+    res.status(400).json({ error: 'bootstrap_binding_required' })
+    return null
+  }
 
   const idempotencyKey = validateIdempotencyKey(body.idempotencyKey, res)
   if (!idempotencyKey) return null
@@ -166,7 +186,37 @@ function parsePromptBridgeBody(
     return null
   }
 
+  let metadata: Record<string, unknown> | undefined
+  if (body.metadata !== undefined) {
+    if (!isPlainObject(body.metadata)) {
+      res.status(400).json({ error: 'metadata must be an object' })
+      return null
+    }
+    try {
+      if (Buffer.byteLength(JSON.stringify(body.metadata), 'utf8') > 16 * 1024) {
+        res.status(413).json({ error: 'metadata_too_large', retryable: false })
+        return null
+      }
+      metadata = body.metadata as Record<string, unknown>
+    } catch {
+      res.status(400).json({ error: 'metadata must be JSON-serializable' })
+      return null
+    }
+  }
+
   const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined
+  const provider =
+    typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined
+  const targetRef =
+    typeof body.targetRef === 'string' && body.targetRef.trim() ? body.targetRef.trim() : undefined
+  if (targetRef && targetRef.length > MAX_TARGET_REF_LENGTH) {
+    res.status(400).json({ error: `targetRef exceeds maximum length of ${MAX_TARGET_REF_LENGTH}` })
+    return null
+  }
+  if (provider && !model && !targetRef) {
+    res.status(400).json({ error: 'provider requires model or targetRef' })
+    return null
+  }
   const modelPolicyRef =
     typeof body.modelPolicyRef === 'string' && body.modelPolicyRef.trim()
       ? body.modelPolicyRef.trim()
@@ -178,11 +228,16 @@ function parsePromptBridgeBody(
 
   return {
     callerRef,
+    bootstrapProvider,
+    bootstrapModel,
     model,
+    provider,
+    targetRef,
     modelPolicyRef,
     purpose: body.purpose,
     idempotencyKey,
     messages,
+    ...(metadata ? { metadata } : {}),
     correlationId,
   }
 }
@@ -350,14 +405,22 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       const result = await authorizePromptBridge({
         claims,
         callerRef: parsed.callerRef,
+        bootstrapProvider: parsed.bootstrapProvider,
+        bootstrapModel: parsed.bootstrapModel,
         model: parsed.model,
+        provider: parsed.provider,
+        targetRef: parsed.targetRef,
         modelPolicyRef: parsed.modelPolicyRef,
         purpose: parsed.purpose,
         idempotencyKey: parsed.idempotencyKey,
         payload: {
           messages: parsed.messages,
           model: parsed.model ?? null,
+          provider: parsed.provider ?? null,
+          targetRef: parsed.targetRef ?? null,
+          modelPolicyRef: parsed.modelPolicyRef ?? null,
           purpose: parsed.purpose,
+          ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
         },
         correlationId: parsed.correlationId,
       })
@@ -372,6 +435,11 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         status: result.value.status,
         model: result.value.model,
         modelPolicy: result.value.modelPolicy,
+        selectedTarget: result.value.selectedTarget,
+        authorizedTargets: result.value.authorizedTargets,
+        policyRevision: result.value.policyRevision,
+        policyHash: result.value.policyHash,
+        authorizedTargetTickets: result.value.authorizedTargetTickets,
         maxOutputTokens: result.value.maxOutputTokens,
       })
     })
@@ -473,6 +541,63 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
 
       const recipients = await resolveRecipientProfiles(result.value.allowedUserRefs)
       res.status(200).json({ recipients })
+    })
+  )
+
+  // TOCTOU guard for cross-provider credential resolution. The mcp-host must
+  // re-check a short-lived signed target ticket immediately before reading its
+  // credential slot. This endpoint returns no target data and never redeems a
+  // secret; it only attests that the ticket still matches the current policy.
+  router.post(
+    '/mcp-host/plugin-workload-sdk/credential-ticket/introspect',
+    requireMcpHostJwt,
+    asyncHandler(async (req, res) => {
+      const claims = req.mcpHostJwt!
+      const body = isPlainObject(req.body) ? req.body : {}
+      const ticket = typeof body.credentialTicket === 'string' ? body.credentialTicket : ''
+      const invocationId = typeof body.invocationId === 'string' ? body.invocationId : ''
+      const targetRef = typeof body.targetRef === 'string' ? body.targetRef : ''
+      if (!ticket || !invocationId || !targetRef) {
+        res.status(400).json({ error: 'credentialTicket, invocationId and targetRef are required' })
+        return
+      }
+      const ticketClaims = verifyPluginWorkloadSdkCredentialTicket(ticket)
+      if (
+        !ticketClaims ||
+        ticketClaims.recipeNamespace !== claims.recipeNamespace ||
+        ticketClaims.recipeName !== claims.recipeName ||
+        ticketClaims.sub !== `${claims.recipeNamespace}/${claims.recipeName}` ||
+        ticketClaims.invocationId !== invocationId ||
+        ticketClaims.targetRef !== targetRef
+      ) {
+        res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+        return
+      }
+      const invocation = await getInvocationById(invocationId)
+      if (
+        !invocation ||
+        invocation.recipeNamespace !== claims.recipeNamespace ||
+        invocation.recipeName !== claims.recipeName ||
+        invocation.method !== 'promptBridge'
+      ) {
+        res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+        return
+      }
+      const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
+      const target = grant?.promptTargets.find(candidate => candidate.targetRef === targetRef)
+      if (
+        !grant ||
+        !target ||
+        grant.policyRevision !== ticketClaims.policyRevision ||
+        hashPromptTargetPolicy(grant) !== ticketClaims.policyHash ||
+        target.provider !== ticketClaims.provider ||
+        target.model !== ticketClaims.model ||
+        target.credentialSlot !== ticketClaims.credentialSlot
+      ) {
+        res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+        return
+      }
+      res.status(200).json({ active: true })
     })
   )
 

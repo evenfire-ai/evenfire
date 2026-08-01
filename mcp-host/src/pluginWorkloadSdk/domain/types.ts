@@ -25,6 +25,8 @@ export const DEFAULT_MAX_BODY_BYTES = 4096
 
 export interface PromptBridgeRequest {
   model?: string
+  provider?: string
+  targetRef?: string
   modelPolicyRef?: string
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
@@ -34,9 +36,19 @@ export interface PromptBridgeRequest {
   metadata?: Record<string, unknown>
 }
 
+export interface PromptBridgeTarget {
+  targetRef: string
+  provider: string
+  model: string
+  credentialSlot: string
+}
+
 export interface PromptBridgeResult {
   invocationId: string
   model: string
+  servedTarget: PromptBridgeTarget
+  fallbackUsed: boolean
+  policyRevision: number
   usage: { inputTokens: number; outputTokens: number }
   content: string
   finishReason: 'complete' | 'length' | 'content_filter'

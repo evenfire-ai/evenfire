@@ -7,6 +7,7 @@ import {
   PLUGIN_WORKLOAD_SDK_PURPOSES,
   type PromptBridgeRequest,
   type PromptBridgeResult,
+  type PromptBridgeTarget,
 } from '../domain/types'
 import {
   pluginSdkPromptBridgeDurationSeconds,
@@ -30,6 +31,7 @@ import type { LlmBridge } from './llmBridge'
 
 const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
 const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
+const MAX_METADATA_BYTES = 16 * 1024
 
 export interface PromptBridgeHandlerDeps {
   controlApiClient: PluginWorkloadSdkControlApiClient
@@ -38,9 +40,14 @@ export interface PromptBridgeHandlerDeps {
   recipeName: string
   promptTimeoutMs: number
   maxRequestContentBytes?: number
-  resolveDefaultModel?: () => string | null
+  /** Public provider/model identity from the live spec.agent binding. */
+  getBootstrapTarget?: () => { provider: string; model: string } | null
   onUsage?: (usage: {
+    provider: string
     model: string
+    servedTarget: PromptBridgeTarget
+    fallbackUsed: boolean
+    llmSecretName: string
     inputTokens: number
     outputTokens: number
     callerRef: string
@@ -93,6 +100,12 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
   if (body.model !== undefined && typeof body.model !== 'string') {
     throw new PluginWorkloadError('invalid_request', 'model must be a string')
   }
+  if (body.provider !== undefined && typeof body.provider !== 'string') {
+    throw new PluginWorkloadError('invalid_request', 'provider must be a string')
+  }
+  if (body.targetRef !== undefined && typeof body.targetRef !== 'string') {
+    throw new PluginWorkloadError('invalid_request', 'targetRef must be a string')
+  }
   if (body.modelPolicyRef !== undefined && typeof body.modelPolicyRef !== 'string') {
     throw new PluginWorkloadError('invalid_request', 'modelPolicyRef must be a string')
   }
@@ -108,12 +121,25 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
   ) {
     throw new PluginWorkloadError('invalid_request', 'metadata must be an object')
   }
+  if (body.metadata !== undefined) {
+    let metadataBytes: number
+    try {
+      metadataBytes = Buffer.byteLength(JSON.stringify(body.metadata), 'utf8')
+    } catch {
+      throw new PluginWorkloadError('invalid_request', 'metadata must be JSON-serializable')
+    }
+    if (metadataBytes > MAX_METADATA_BYTES) {
+      throw new PluginWorkloadError('payload_too_large', 'metadata exceeds size limit')
+    }
+  }
 
   return {
     idempotencyKey: body.idempotencyKey as string,
     purpose: body.purpose as string,
     messages,
     model: typeof body.model === 'string' ? body.model : undefined,
+    provider: typeof body.provider === 'string' ? body.provider : undefined,
+    targetRef: typeof body.targetRef === 'string' ? body.targetRef : undefined,
     modelPolicyRef: typeof body.modelPolicyRef === 'string' ? body.modelPolicyRef : undefined,
     maxTokens: typeof body.maxTokens === 'number' ? body.maxTokens : undefined,
     temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
@@ -171,37 +197,79 @@ export class PromptBridgeHandler {
     }
 
     const correlationId = randomUUID()
-    const fallbackModel =
-      request.model === undefined && request.modelPolicyRef === undefined
-        ? this.deps.resolveDefaultModel?.()?.trim() || undefined
-        : undefined
-
+    const bootstrapTarget = this.deps.getBootstrapTarget?.()
+    if (this.deps.getBootstrapTarget && !bootstrapTarget) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'mcp-host LLM bootstrap is not ready',
+        true
+      )
+    }
     const authorized = await this.deps.controlApiClient.authorizePromptBridge({
       recipeNamespace: this.deps.recipeNamespace,
       recipeName: this.deps.recipeName,
       callerRef,
-      model: request.model ?? fallbackModel,
+      ...(bootstrapTarget
+        ? {
+            bootstrapProvider: bootstrapTarget.provider,
+            bootstrapModel: bootstrapTarget.model,
+          }
+        : {}),
+      model: request.model,
+      provider: request.provider,
+      targetRef: request.targetRef,
       modelPolicyRef: request.modelPolicyRef,
       purpose: request.purpose,
       idempotencyKey: request.idempotencyKey,
       messages: request.messages,
+      ...(request.metadata ? { metadata: request.metadata } : {}),
       correlationId,
     })
 
+    // A successful replay is never sent to a provider again. The current
+    // audit API does not persist completion content, so surface a stable
+    // conflict instead of creating a duplicate billable call.
+    if (authorized.replay && authorized.status !== 'failed') {
+      throw new PluginWorkloadError(
+        'idempotency_conflict',
+        'idempotent invocation already exists; no provider call was repeated',
+        false
+      )
+    }
+
+    const selected = authorized.authorizedTargets[0]
+    if (!selected || !sameTarget(selected, authorized.selectedTarget)) {
+      throw unexpectedAuthorizationResponse()
+    }
+    const ticketByTarget = new Map(
+      authorized.authorizedTargetTickets.map(ticket => [ticket.targetRef, ticket.credentialTicket])
+    )
+    if (
+      ticketByTarget.size !== authorized.authorizedTargets.length ||
+      authorized.authorizedTargets.some(target => !ticketByTarget.has(target.targetRef))
+    ) {
+      throw unexpectedAuthorizationResponse()
+    }
+
     try {
       const completion = await this.deps.llmBridge.complete({
-        model: authorized.model,
+        invocationId: authorized.invocationId,
+        targets: authorized.authorizedTargets.map(target => ({
+          target,
+          credentialTicket: ticketByTarget.get(target.targetRef)!,
+        })),
         messages: request.messages,
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
-        // R5 F6 — same-provider failover gated by the grant's allowed models.
-        // The bridge never switches provider, so these stay inside the grant.
-        fallbackModels: authorized.allowedModels?.filter(m => m !== authorized.model),
       })
 
       this.deps.onUsage?.({
+        provider: completion.servedTarget.provider,
         model: completion.model,
+        servedTarget: completion.servedTarget,
+        fallbackUsed: completion.fallbackUsed,
+        llmSecretName: completion.llmSecretName,
         inputTokens: completion.usage.inputTokens,
         outputTokens: completion.usage.outputTokens,
         callerRef,
@@ -218,6 +286,9 @@ export class PromptBridgeHandler {
       return {
         invocationId: authorized.invocationId,
         model: completion.model,
+        servedTarget: completion.servedTarget,
+        fallbackUsed: completion.fallbackUsed,
+        policyRevision: authorized.policyRevision,
         usage: completion.usage,
         content: completion.content,
         finishReason: completion.finishReason,
@@ -238,6 +309,23 @@ export class PromptBridgeHandler {
       throw err
     }
   }
+}
+
+function sameTarget(a: PromptBridgeTarget, b: PromptBridgeTarget): boolean {
+  return (
+    a.targetRef === b.targetRef &&
+    a.provider === b.provider &&
+    a.model === b.model &&
+    a.credentialSlot === b.credentialSlot
+  )
+}
+
+function unexpectedAuthorizationResponse(): PluginWorkloadError {
+  return new PluginWorkloadError(
+    'provider_unavailable',
+    'control-api returned an inconsistent authorized target set',
+    false
+  )
 }
 
 function clampMaxTokens(

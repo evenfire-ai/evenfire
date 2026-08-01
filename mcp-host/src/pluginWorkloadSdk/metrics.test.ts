@@ -18,6 +18,12 @@ const validBody = {
 }
 
 function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
+  const target = {
+    targetRef: 'primary-zai',
+    provider: 'zai',
+    model: 'glm-4.7',
+    credentialSlot: 'zai-api-key',
+  }
   const controlApiClient = {
     authorizePromptBridge: vi.fn().mockResolvedValue({
       invocationId: 'inv-1',
@@ -25,6 +31,11 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       status: 'in_progress',
       model: 'glm-4.7',
       modelPolicy: null,
+      selectedTarget: target,
+      authorizedTargets: [target],
+      authorizedTargetTickets: [{ targetRef: target.targetRef, credentialTicket: 'ticket' }],
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
       maxOutputTokens: null,
     }),
     reportInvocationStatus: vi.fn().mockResolvedValue(undefined),
@@ -34,6 +45,9 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       complete ??
       vi.fn().mockResolvedValue({
         model: 'glm-4.7',
+        servedTarget: target,
+        fallbackUsed: false,
+        llmSecretName: 'zai-secret',
         content: 'ok',
         usage: { inputTokens: 7, outputTokens: 3 },
         finishReason: 'complete',

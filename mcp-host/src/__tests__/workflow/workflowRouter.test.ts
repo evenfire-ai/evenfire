@@ -66,6 +66,7 @@ async function createTestApp(
   serviceOverride?: {
     executeStep?: ReturnType<typeof vi.fn>
     configure?: ReturnType<typeof vi.fn>
+    configurePluginWorkloadSdkBootstrap?: ReturnType<typeof vi.fn>
     getStatus?: ReturnType<typeof vi.fn>
   }
 ): Promise<{ baseUrl: string; server: http.Server }> {
@@ -83,6 +84,11 @@ async function createTestApp(
   const service = {
     executeStep: vi.fn().mockResolvedValue({ stepId: 's1', status: 'completed' }),
     configure: vi.fn().mockReturnValue({ configured: true }),
+    configurePluginWorkloadSdkBootstrap: vi.fn().mockReturnValue({
+      configured: true,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+    }),
     getStatus: vi.fn().mockReturnValue({ ready: true, configured: true }),
     ...serviceOverride,
   }
@@ -353,6 +359,33 @@ describe('workflowRouter — JWT auth middleware', () => {
       expect(res.status).toBe(403)
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/Endpoint requires sub: wrc/)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('POST /plugin-workload-sdk/bootstrap accepts only public identity and forwards no credential', async () => {
+    const token = await signWorkflowToken({ sub: 'wrc', scopes: ['configure'] })
+    const bootstrap = vi.fn().mockReturnValue({
+      configured: true,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+    })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true, {
+      configurePluginWorkloadSdkBootstrap: bootstrap,
+    })
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          apiKey: 'must-not-pass',
+        }),
+      })
+      expect(res.status).toBe(200)
+      expect(bootstrap).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
     } finally {
       server.close()
     }

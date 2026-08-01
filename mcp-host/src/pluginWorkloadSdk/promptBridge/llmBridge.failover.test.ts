@@ -1,139 +1,250 @@
 import { describe, expect, it, vi } from 'vitest'
+import { register } from 'prom-client'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider, createLLMProvider } from '../../llm'
 import type { ApiKeys, ModelConfig } from '../../types'
+import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
-import { LlmBridge, type LlmBridgeContext } from './llmBridge'
-
-/**
- * Provider-fallback (R5 F6) — promptBridge `LlmBridge`.
- *
- * The bridge switches only among the caller-supplied `fallbackModels` (which
- * the handler derives from the grant's `allowedModels`) and NEVER switches
- * provider — so a fallback model is, by construction, always inside the grant.
- */
+import type { PromptBridgeTarget } from '../domain/types'
+import { recordCircuitBreakerState } from '../metrics'
+import { LlmBridge, type PromptBridgeCredentialResolver } from './llmBridge'
 
 const OK = {
   content: 'ok',
   usage: { input_tokens: 3, output_tokens: 4, total_tokens: 7 },
   finish_reason: FinishReason.Stop,
 }
+const primary: PromptBridgeTarget = {
+  targetRef: 'primary-zai',
+  provider: 'zai',
+  model: 'glm-5.1',
+  credentialSlot: 'zai-api-key',
+}
+const fallback: PromptBridgeTarget = {
+  targetRef: 'fallback-openai',
+  provider: 'openai',
+  model: 'gpt-5.4-mini',
+  credentialSlot: 'openai-api-key',
+}
 
 class FakeProvider implements Partial<SingleTurnProvider> {
   constructor(
     private readonly behavior: () => Promise<typeof OK>,
-    private readonly classify: { code: LlmErrorCode; retryable: boolean } = {
+    private readonly classification: { code: LlmErrorCode; retryable: boolean } = {
       code: LlmErrorCode.RateLimited,
       retryable: true,
     }
   ) {}
 
   completeSingleTurn = vi.fn(async () => this.behavior())
-
-  classifyError(_err: unknown) {
-    return { code: this.classify.code, retryable: this.classify.retryable, message: 'x' }
+  classifyError() {
+    return { ...this.classification, message: 'redacted' }
   }
 }
 
-function makeContext(): LlmBridgeContext {
-  const keys: ApiKeys = { openai: { 'openai-api-key': 'sk-test' } } as unknown as ApiKeys
-  return { keys, provider: 'openai' as ModelConfig['provider'], defaultModel: 'gpt-primary' }
-}
-
-/** Build a bridge whose per-model provider behavior is driven by `byModel`. */
-function makeBridge(byModel: Record<string, FakeProvider>) {
-  const calls: string[] = []
-  const createProvider = ((_keys: ApiKeys, modelConfig: ModelConfig) => {
-    calls.push(modelConfig.name)
-    return (byModel[modelConfig.name] ?? null) as unknown as SingleTurnProvider | null
+function makeBridge(
+  providers: Record<string, FakeProvider>,
+  resolve?: PromptBridgeCredentialResolver['resolve'],
+  createBreaker?: (target: PromptBridgeTarget) => CircuitBreaker
+) {
+  const providerCalls: string[] = []
+  const credentialCalls: string[] = []
+  const resolver: PromptBridgeCredentialResolver = {
+    resolve:
+      resolve ??
+      vi.fn(async ({ target }) => {
+        credentialCalls.push(target.targetRef)
+        const key = `${target.provider}-api-key`
+        return {
+          target,
+          keys: { [target.provider]: { [key]: `secret-${target.targetRef}` } } as ApiKeys,
+          llmSecretName: `${target.provider}-secret`,
+        }
+      }),
+  }
+  const createProvider = ((_keys: ApiKeys, model: ModelConfig) => {
+    providerCalls.push(`${model.provider}/${model.name}`)
+    return (providers[model.name] ?? null) as unknown as SingleTurnProvider | null
   }) as typeof createLLMProvider
-  const bridge = new LlmBridge(() => makeContext(), { createProvider })
-  return { bridge, calls }
+  return {
+    bridge: new LlmBridge(resolver, { createProvider, createBreaker }),
+    providerCalls,
+    credentialCalls,
+    resolver,
+  }
 }
 
-const baseReq = {
+const request = {
+  invocationId: 'inv-1',
+  targets: [
+    { target: primary, credentialTicket: 'ticket-primary' },
+    { target: fallback, credentialTicket: 'ticket-fallback' },
+  ],
   messages: [{ role: 'user' as const, content: 'hi' }],
   timeoutMs: 5_000,
 }
 
-describe('LlmBridge provider-fallback (R5 F6)', () => {
-  it('switches to a fallback model within the grant on an eligible failure', async () => {
-    const primary = new FakeProvider(() => Promise.reject(new Error('429')), {
-      code: LlmErrorCode.RateLimited,
-      retryable: true,
-    })
-    const fallback = new FakeProvider(() => Promise.resolve(OK))
-    const { bridge, calls } = makeBridge({ 'gpt-primary': primary, 'gpt-fallback': fallback })
-
-    const result = await bridge.complete({
-      ...baseReq,
-      model: 'gpt-primary',
-      fallbackModels: ['gpt-fallback'],
+describe('LlmBridge authorized multi-provider fallback', () => {
+  it('redeems credentials per attempt and serves the next authorized provider', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('provider response')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls, credentialCalls } = makeBridge({
+      [primary.model]: first,
+      [fallback.model]: second,
     })
 
-    // The winning (served) pair is the fallback, and only it is returned.
-    expect(result.model).toBe('gpt-fallback')
-    expect(result.content).toBe('ok')
-    expect(calls).toEqual(['gpt-primary', 'gpt-fallback'])
-    expect(primary.completeSingleTurn).toHaveBeenCalledTimes(1)
-    expect(fallback.completeSingleTurn).toHaveBeenCalledTimes(1)
+    const result = await bridge.complete(request)
+
+    expect(credentialCalls).toEqual([primary.targetRef, fallback.targetRef])
+    expect(providerCalls).toEqual([
+      `${primary.provider}/${primary.model}`,
+      `${fallback.provider}/${fallback.model}`,
+    ])
+    expect(result).toMatchObject({
+      servedTarget: fallback,
+      fallbackUsed: true,
+      model: fallback.model,
+      usage: { inputTokens: 3, outputTokens: 4 },
+    })
   })
 
-  it('does NOT switch when no fallbackModels are provided — original error propagates', async () => {
-    const primary = new FakeProvider(() => Promise.reject(new Error('429')), {
-      code: LlmErrorCode.RateLimited,
-      retryable: true,
+  it('treats credential resolution failure as terminal and never redeems a fallback', async () => {
+    const resolve = vi.fn(async () => {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'authorized provider credentials are unavailable',
+        false
+      )
     })
-    const { bridge, calls } = makeBridge({ 'gpt-primary': primary })
+    const { bridge, providerCalls } = makeBridge({}, resolve)
 
-    await expect(bridge.complete({ ...baseReq, model: 'gpt-primary' })).rejects.toMatchObject({
+    await expect(bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+    })
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(providerCalls).toEqual([])
+  })
+
+  it('does not fallback on a provider error outside triggerOn', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('429')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      [primary.model]: first,
+      [fallback.model]: second,
+    })
+
+    await expect(bridge.complete({ ...request, triggerOn: ['auth'] })).rejects.toMatchObject({
       code: 'provider_unavailable',
     })
-    expect(calls).toEqual(['gpt-primary'])
+    expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
   })
 
-  it('does NOT switch on a non-eligible (400/validation) failure — propagates immediately', async () => {
-    const primary = new FakeProvider(() => Promise.reject(new Error('bad request')), {
-      code: LlmErrorCode.ApiCallFailed,
-      retryable: false, // 400 → not eligible
+  it('fails terminally when an authorized target cannot construct its provider', async () => {
+    const { bridge } = makeBridge({})
+    await expect(bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
     })
-    const fallback = new FakeProvider(() => Promise.resolve(OK))
-    const { bridge, calls } = makeBridge({ 'gpt-primary': primary, 'gpt-fallback': fallback })
-
-    await expect(
-      bridge.complete({ ...baseReq, model: 'gpt-primary', fallbackModels: ['gpt-fallback'] })
-    ).rejects.toBeInstanceOf(PluginWorkloadError)
-    // The fallback is never attempted.
-    expect(calls).toEqual(['gpt-primary'])
-    expect(fallback.completeSingleTurn).not.toHaveBeenCalled()
   })
 
-  it('returns exactly one result (only the winner) so the handler meters once', async () => {
-    const primary = new FakeProvider(() => Promise.reject(new Error('429')))
-    const fallback = new FakeProvider(() =>
-      Promise.resolve({ ...OK, usage: { input_tokens: 11, output_tokens: 22, total_tokens: 33 } })
-    )
-    const { bridge } = makeBridge({ 'gpt-primary': primary, 'gpt-fallback': fallback })
-
-    const result = await bridge.complete({
-      ...baseReq,
-      model: 'gpt-primary',
-      fallbackModels: ['gpt-primary', 'gpt-fallback'], // primary deduped out
-    })
-
-    expect(result.model).toBe('gpt-fallback')
-    expect(result.usage).toEqual({ inputTokens: 11, outputTokens: 22 })
-  })
-
-  it('propagates the last error when every fallback also fails', async () => {
-    const primary = new FakeProvider(() => Promise.reject(new Error('429')))
-    const fallback = new FakeProvider(() => Promise.reject(new Error('429 again')))
-    const { bridge, calls } = makeBridge({ 'gpt-primary': primary, 'gpt-fallback': fallback })
-
+  it('never attempts a target outside the exact authorized list', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('429')))
+    const { bridge, providerCalls } = makeBridge({ [primary.model]: first })
     await expect(
-      bridge.complete({ ...baseReq, model: 'gpt-primary', fallbackModels: ['gpt-fallback'] })
+      bridge.complete({ ...request, targets: [request.targets[0]] })
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
-    expect(calls).toEqual(['gpt-primary', 'gpt-fallback'])
+    expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+  })
+
+  it('isolates target breakers so a failing primary still reaches a healthy fallback', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('429')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const breakers = new Map<string, CircuitBreaker>()
+    const { bridge } = makeBridge(
+      { [primary.model]: first, [fallback.model]: second },
+      undefined,
+      target => {
+        const breaker = new CircuitBreaker({ minSamples: 4 })
+        breakers.set(target.targetRef, breaker)
+        return breaker
+      }
+    )
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await bridge.complete({ ...request, invocationId: `inv-${attempt}` })
+      expect(result.servedTarget).toEqual(fallback)
+    }
+    expect(breakers.get(primary.targetRef)?.isOpen()).toBe(false)
+
+    const fourth = await bridge.complete({ ...request, invocationId: 'inv-4' })
+    expect(fourth.servedTarget).toEqual(fallback)
+    expect(fourth.fallbackUsed).toBe(true)
+    expect(breakers.get(primary.targetRef)?.isOpen()).toBe(true)
+    expect(first.completeSingleTurn).toHaveBeenCalledTimes(4)
+    expect(second.completeSingleTurn).toHaveBeenCalledTimes(4)
+  })
+
+  it('skips credential redemption for an open primary and isolates the fallback target', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('429')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const breakers = new Map<string, CircuitBreaker>()
+    const { bridge, credentialCalls } = makeBridge(
+      { [primary.model]: first, [fallback.model]: second },
+      undefined,
+      target => {
+        const breaker = new CircuitBreaker({ minSamples: 4 })
+        if (target.targetRef === primary.targetRef) {
+          for (let attempt = 0; attempt < 4; attempt += 1) breaker.record(false)
+        }
+        breakers.set(target.targetRef, breaker)
+        return breaker
+      }
+    )
+
+    const result = await bridge.complete(request)
+
+    expect(result.servedTarget).toEqual(fallback)
+    expect(credentialCalls).toEqual([fallback.targetRef])
+    expect(first.completeSingleTurn).not.toHaveBeenCalled()
+    expect(second.completeSingleTurn).toHaveBeenCalledOnce()
+    expect(breakers.get(primary.targetRef)?.isOpen()).toBe(true)
+    expect(breakers.get(fallback.targetRef)?.isOpen()).toBe(false)
+  })
+
+  it('publishes circuit state under the effective target label', async () => {
+    const target = { ...primary, targetRef: `metric-${Date.now()}` }
+    const failing = new FakeProvider(() => Promise.reject(new Error('429')))
+    const { bridge } = makeBridge(
+      { [target.model]: failing },
+      undefined,
+      effectiveTarget =>
+        new CircuitBreaker({
+          minSamples: 4,
+          onStateChange: open =>
+            recordCircuitBreakerState(`llm-provider:${effectiveTarget.targetRef}`, open),
+        })
+    )
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(
+        bridge.complete({
+          ...request,
+          invocationId: `metric-${attempt}`,
+          targets: [{ target, credentialTicket: `ticket-${attempt}` }],
+        })
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    }
+
+    const metric = register.getSingleMetric('clerum_plugin_workload_sdk_circuit_breaker_state')
+    const data = await metric?.get()
+    expect(
+      data?.values.find(
+        value =>
+          value.labels.gateway === `llm-provider:${target.targetRef}` &&
+          value.labels.state === 'open'
+      )?.value
+    ).toBe(1)
   })
 })

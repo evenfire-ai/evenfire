@@ -7,7 +7,7 @@ describe('assertDbReady', () => {
 
     await expect(assertDbReady({ query })).resolves.toBeUndefined()
     expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'), [
-      '0074_gfs_runtime_role_exact_contract',
+      '0075_plugin_workload_sdk_prompt_target_policy',
     ])
   })
 
@@ -15,7 +15,7 @@ describe('assertDbReady', () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ ready: false }], rowCount: 1 })
 
     await expect(assertDbReady({ query })).rejects.toThrow(
-      'migration 0074_gfs_runtime_role_exact_contract is required'
+      'migration 0075_plugin_workload_sdk_prompt_target_policy is required'
     )
   })
 })

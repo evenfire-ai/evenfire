@@ -1023,7 +1023,7 @@ spec:
 
 **What gets rejected**
 
-- **CEL R1** — `agent requires steps: cannot define agent without workflow steps`. There is no "agent for a workloads-only recipe".
+- **CEL R1** — `agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge`. An agent remains invalid for an ordinary workloads-only recipe, but a stepless `promptBridge` recipe uses `spec.agent` as the eager mcp-host bootstrap binding rather than as a workflow agent.
 - A `provider` outside the four-value enum.
 - An `instruction` step with no resolvable agent: _"step requires an agent configuration"_.
 
@@ -1360,7 +1360,8 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 - **CEL PS1** — at least one of `promptBridge` / `clientNotifications`.
 - **CEL PS2 / PS3** — no wildcards in `allowedEventTypes` or `allowedModels`. Only explicit admin grants (control-api) may use wildcards.
 - **PS4** (reconciler) — `allowedCallers` entries must reference existing `workloads[].id`.
-- `promptBridge` needs a resolvable agent — and since CEL R1 forbids `spec.agent` without `spec.steps`, a workloads-only recipe cannot supply one. A `clientNotifications`-only recipe needs no agent.
+- `promptBridge` needs a resolvable agent. A stepless SDK recipe may provide the complete provider/model binding in `spec.agent`; it is not a workflow and creates no coordinator, run, step graph, or workflow output PVC. A `clientNotifications`-only recipe needs no agent.
+- A stepless SDK recipe must not declare `triggers`, `scheduling`, or `coordinatorImage`; these are workflow-only fields and fail closed at admission and in WRC defence in depth.
 
 ### 3.20 Global File System (`spec.gfs`)
 
@@ -2840,7 +2841,8 @@ The spec-level rules in the shipped CRD are numbered in comments (R1-R18, W1, O1
 
 | ID  | Message                                                                                                                                                                 |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | `agent requires steps: cannot define agent without workflow steps`                                                                                                      |
+| R1  | `agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge`                                                                                                 |
+| R1a | `spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage`                                                                 |
 | R2  | `recipe must define at least workloads or steps`                                                                                                                        |
 | R3  | `duplicate step IDs are not allowed`                                                                                                                                    |
 | R4  | `spec.scheduling requires spec.steps to be non-empty`                                                                                                                   |

@@ -600,6 +600,34 @@ export function buildWorkflowNetworkPolicies(
             ],
           },
         } as k8s.V1NetworkPolicy,
+        {
+          apiVersion: 'networking.k8s.io/v1',
+          kind: 'NetworkPolicy',
+          metadata: {
+            name: `${config.recipeName}-mcp-host-to-wrc-sdk-broker`,
+            namespace: config.sandboxNamespace,
+            labels: commonLabels,
+          },
+          spec: {
+            podSelector: mcpHostPodSelector,
+            policyTypes: ['Egress'],
+            egress: [
+              {
+                to: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': config.controlPlaneNamespace,
+                      },
+                    },
+                    podSelector: { matchLabels: { app: 'workflow-recipes' } },
+                  },
+                ],
+                ports: [{ port: config.wrcPort, protocol: 'TCP' }],
+              },
+            ],
+          },
+        } as k8s.V1NetworkPolicy,
       ]
     : []
 
@@ -920,9 +948,9 @@ export function buildWorkflowNetworkPolicies(
         ],
       },
     },
-    // 8. Plugin Workload SDK (plan §6.1, OQ-4): same-recipe workloads <-> mcp-host
-    // on the SDK port. Empty unless the recipe declares the capability and the
-    // feature flag is on (config.pluginWorkloadSdkSandboxAccess).
+    // 8. Plugin Workload SDK: same-recipe workloads <-> mcp-host on the SDK
+    // port plus mcp-host -> WRC for per-attempt credential ticket redemption.
+    // Empty unless the capability and feature flag are both enabled.
     ...pluginWorkloadSdkPolicies,
   ]
 }

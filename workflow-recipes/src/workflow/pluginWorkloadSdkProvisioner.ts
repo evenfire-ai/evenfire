@@ -33,7 +33,7 @@ import type { WorkflowConfig } from './types'
 export type EagerSdkMcpHostStatus = 'ready' | 'deploying' | 'failed' | 'provider_unavailable'
 
 /**
- * Consecutive eager `/configure` failures tolerated before the provider is
+ * Consecutive eager SDK bootstrap failures tolerated before the provider is
  * surfaced as unavailable instead of an indefinite `deploying`. Mirrors the
  * crash-recovery MAX_ATTEMPTS bound so a permanently-failing provider broker
  * (e.g. a bad secretRef) is not indistinguishable from "still booting".
@@ -77,24 +77,24 @@ export type PluginWorkloadSdkProvisionerDeps = {
  */
 export class PluginWorkloadSdkProvisioner {
   /**
-   * In-memory record of the last successful eager-SDK provider configure, keyed
+   * In-memory record of the last successful eager-SDK provider bootstrap, keyed
    * by recipe name. The value is `<podUid>:<provider>:<model>` — when it matches
-   * the current mcp-host pod and agent, the (idempotent) /configure is skipped to
-   * avoid a ConfigMap read + Secret read + RS256 sign + HTTP POST on every
-   * level-triggered reconcile. Lost on WRC restart, which just re-configures
-   * once (still idempotent); a pod restart changes the UID and forces a refresh.
+   * the current mcp-host pod and agent, the identity-only bootstrap is skipped
+   * to avoid an RS256 sign + HTTP POST on every level-triggered reconcile. Lost
+   * on WRC restart, which just bootstraps once (still idempotent); a pod restart
+   * changes the UID and forces a refresh.
    */
   private readonly eagerSdkConfiguredByRecipe = new Map<string, string>()
 
   /**
-   * Consecutive eager `/configure` failures per recipe and stable configure
+   * Consecutive eager SDK bootstrap failures per recipe and stable bootstrap
    * identity. The budget counts only repeated failures for the same
    * `<podUid>:<provider>:<model>`; a pod replacement or agent model/provider
    * change starts from one without needing WRC to observe the roll directly.
-   * Reset on a successful configure (and on recipe cleanup). Once the matching
+   * Reset on a successful bootstrap (and on recipe cleanup). Once the matching
    * key reaches MAX_EAGER_CONFIGURE_ATTEMPTS the provisioner projects
    * `provider_unavailable` instead of an indefinite `deploying`. Lost on WRC
-   * restart, which just re-attempts from zero (configure is idempotent).
+   * restart, which just re-attempts from zero (bootstrap is idempotent).
    */
   private readonly eagerSdkConfigureFailuresByRecipe = new Map<
     string,
@@ -110,7 +110,7 @@ export class PluginWorkloadSdkProvisioner {
 
   /**
    * Deletes the eager mcp-host pod (wedge recovery or image-drift roll) and
-   * clears the per-recipe `/configure` failure budget. The failure map is also
+   * clears the per-recipe bootstrap failure budget. The failure map is also
    * identity-keyed, but explicit WRC rolls are a clear boundary where the prior
    * pod's broker state is no longer relevant.
    */
@@ -128,13 +128,13 @@ export class PluginWorkloadSdkProvisioner {
    *
    * Creates the recipe mcp-host before any run is triggered so the always-on
    * SDK server (:8099) is reachable, then — only when the recipe declares the
-   * promptBridge family — brokers the provider API key into it via POST
-   * /configure. clientNotifications-only recipes need no provider, so the
-   * configure step is skipped for them.
+   * promptBridge family — publishes the public provider/model bootstrap binding
+   * via a credential-free endpoint. Credentials stay behind the per-attempt
+   * WRC broker; clientNotifications-only recipes need no provider bootstrap.
    *
-   * Idempotent: safe to call on every reconcile. The mcp-host /configure is a
-   * hot-swap, so re-delivering the same provider/model after a pod restart
-   * simply re-arms the SDK LLM binding.
+   * Idempotent: safe to call on every reconcile. The mcp-host bootstrap is an
+   * identity-only handshake, so re-delivering the same provider/model after a
+   * pod restart simply re-arms the SDK LLM binding.
    */
   async ensureEagerSdkMcpHost(
     recipeName: string,
@@ -218,7 +218,7 @@ export class PluginWorkloadSdkProvisioner {
         // Requeue: the pod is recreated from the platform image on a later
         // reconcile once the prior pod has terminated. Returning here avoids
         // racing createIfNotExists against the still-terminating pod and
-        // avoids brokering /configure into a pod that is about to be replaced.
+        // avoids bootstrapping a pod that is about to be replaced.
         return 'deploying'
       }
     }
@@ -259,7 +259,7 @@ export class PluginWorkloadSdkProvisioner {
 
     if (!readiness.uid) {
       log.warn(
-        'Plugin Workload SDK eager mcp-host reported Ready without a pod UID; waiting for stable configure identity'
+        'Plugin Workload SDK eager mcp-host reported Ready without a pod UID; waiting for stable bootstrap identity'
       )
       return 'deploying'
     }
@@ -276,19 +276,16 @@ export class PluginWorkloadSdkProvisioner {
         namespace
       )
       const mcpHostEndpoint = buildMcpHostUrl(recipeName, this.deps.config.sandboxNamespace)
-      const result = await this.deps.modelConfigHandler.handle(
-        {
-          stepId: 'plugin-workload-sdk-bootstrap',
-          provider: mcpHostAgent.provider,
-          model: mcpHostAgent.model,
-        },
+      const result = await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+        mcpHostAgent.provider,
+        mcpHostAgent.model,
         mcpHostEndpoint,
         wrcConfigureToken
       )
       if (result.status >= 400) {
         this.eagerSdkConfiguredByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
-          reason: 'Plugin Workload SDK eager mcp-host configure returned an error',
+          reason: 'Plugin Workload SDK eager mcp-host bootstrap returned an error',
           detail: { status: result.status },
         })
       }
@@ -297,11 +294,11 @@ export class PluginWorkloadSdkProvisioner {
     } catch (err) {
       this.eagerSdkConfiguredByRecipe.delete(recipeName)
       return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
-        reason: 'Plugin Workload SDK eager mcp-host configure failed',
+        reason: 'Plugin Workload SDK eager mcp-host bootstrap failed',
         detail: { error: err instanceof Error ? err.message : String(err) },
       })
     }
-    // Reuse the readiness captured above: configure does not recreate the pod,
+    // Reuse the readiness captured above: bootstrap does not recreate the pod,
     // and we already gated on readiness.status === 'ready', so a second K8s
     // readiness GET would return the same status. Avoid the extra round-trip.
     return readiness.status
@@ -330,7 +327,7 @@ export class PluginWorkloadSdkProvisioner {
   }
 
   /**
-   * Records a consecutive eager `/configure` failure and decides the projected
+   * Records a consecutive eager SDK bootstrap failure and decides the projected
    * status. Below MAX_EAGER_CONFIGURE_ATTEMPTS the recipe stays `deploying` so
    * the level-triggered reconcile keeps retrying (a transient mcp-host blip or
    * slow boot recovers on its own). Once the bound is reached, the failure is a
@@ -366,7 +363,7 @@ export class PluginWorkloadSdkProvisioner {
       maxAttempts: MAX_EAGER_CONFIGURE_ATTEMPTS,
     })
     // Not ready until the provider is brokered; stay pending so the
-    // level-triggered reconcile retries the configure.
+    // level-triggered reconcile retries the bootstrap.
     return 'deploying'
   }
 

@@ -1,13 +1,15 @@
 /**
- * Model Config Handler — WRC-side Secret Broker for model hot-swap.
+ * Model Config Handler — WRC-side Secret Broker for workflow model hot-swap.
  *
  * The coordinator sends { provider, model, stepId } (never apiKey).
  * WRC resolves the API key from K8s Secrets and forwards to mcp_host.
  *
- * Security invariant: model credentials travel only on the WRC→mcp_host
- * configure request and are never returned to the coordinator.
+ * Security invariant: workflow model credentials travel only on the WRC→mcp_host
+ * configure request and are never returned to the coordinator. Plugin Workload
+ * SDK bootstrap is identity-only; its prompt credentials stay behind the
+ * per-attempt broker.
  */
-import { isLlmProviderId } from '@clerum/llm-providers'
+import { PROVIDER_CREDENTIAL_SLOTS, isLlmProviderId } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -49,6 +51,13 @@ export interface ConfigureModelResult {
   body: Record<string, unknown>
 }
 
+export interface PluginSdkCredentialTarget {
+  targetRef: string
+  provider: string
+  model: string
+  credentialSlot: string
+}
+
 /**
  * Result of a presence-aware ConfigMap read. Distinguishes "the CM does not
  * exist" (404) from "the CM exists but its `data` is empty/omitted" — a
@@ -75,6 +84,12 @@ export interface McpHostClient {
     endpoint: string,
     token: string,
     body: Record<string, unknown>
+  ): Promise<{ status: number; body: Record<string, unknown> }>
+  /** Publish only the public provider/model bootstrap identity for SDK mode. */
+  configurePluginWorkloadSdkBootstrap?(
+    endpoint: string,
+    token: string,
+    body: { provider: string; model: string }
   ): Promise<{ status: number; body: Record<string, unknown> }>
 }
 
@@ -163,6 +178,129 @@ export class ModelConfigHandler {
     private readonly mcpHost: McpHostClient,
     private readonly objectStorage?: ObjectStorageReader
   ) {}
+
+  /**
+   * Publish an SDK host's public bootstrap binding without resolving a Secret.
+   * Prompt credentials are resolved by the per-attempt broker instead; using
+   * the normal workflow `handle()` path here would load and forward a provider
+   * key into the eager mcp-host.
+   */
+  async configurePluginWorkloadSdkBootstrap(
+    provider: string,
+    model: string,
+    mcpHostEndpoint: string,
+    wrcConfigureToken: string
+  ): Promise<ConfigureModelResult> {
+    const MODEL_PATTERN = /^[a-zA-Z0-9._:/-]{1,128}$/
+    if (!isLlmProviderId(provider) || !MODEL_PATTERN.test(model)) {
+      return { status: 400, body: { error: 'Invalid Plugin Workload SDK bootstrap target' } }
+    }
+    if (!this.mcpHost.configurePluginWorkloadSdkBootstrap) {
+      return { status: 503, body: { error: 'Plugin Workload SDK bootstrap unavailable' } }
+    }
+    try {
+      const result = await this.mcpHost.configurePluginWorkloadSdkBootstrap(
+        mcpHostEndpoint,
+        wrcConfigureToken,
+        { provider, model }
+      )
+      if (result.status >= 400) {
+        return { status: 502, body: { error: 'mcp_host bootstrap failed' } }
+      }
+      return { status: 202, body: { configured: true, provider, model } }
+    } catch {
+      return { status: 502, body: { error: 'mcp_host bootstrap unreachable' } }
+    }
+  }
+
+  /**
+   * Resolve exactly one ticket-authorized Plugin Workload SDK target. Unlike
+   * workflow `/configure`, this path has no degraded mode and never skips a
+   * missing slot: configuration failures are terminal for the current attempt.
+   */
+  async resolvePluginSdkCredential(
+    target: PluginSdkCredentialTarget
+  ): Promise<ConfigureModelResult> {
+    const MODEL_PATTERN = /^[a-zA-Z0-9._:/-]{1,128}$/
+    const SECRET_KEY_PATTERN = /^[A-Za-z0-9._-]{1,253}$/
+    if (
+      !isLlmProviderId(target.provider) ||
+      !MODEL_PATTERN.test(target.model) ||
+      !SECRET_KEY_PATTERN.test(target.credentialSlot)
+    ) {
+      return { status: 400, body: { error: 'Invalid credential target' } }
+    }
+
+    const slots = PROVIDER_CREDENTIAL_SLOTS[target.provider]
+    const canonicalDataKeys = slots.map(slot => slot.dataKey)
+    const singleSlotProvider = slots.length === 1
+    const slotBelongsToProvider = canonicalDataKeys.some(
+      dataKey =>
+        target.credentialSlot === dataKey || target.credentialSlot.startsWith(`${dataKey}-`)
+    )
+    if (
+      !slotBelongsToProvider ||
+      (!singleSlotProvider && !canonicalDataKeys.includes(target.credentialSlot))
+    ) {
+      return { status: 400, body: { error: 'Invalid credential target' } }
+    }
+
+    // SDK prompt targets are reviewed operator policy. Absence of the global
+    // allowlist must fail closed here; workflow degraded-mode semantics do not
+    // apply to a cross-provider SDK request.
+    const allowlistCm = await this.k8s.readConfigMapWithPresence(
+      CONFIGMAP_NAMESPACE,
+      ALLOWLIST_CONFIGMAP_NAME
+    )
+    if (!allowlistCm.exists) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const allowed = parseAllowedModels(allowlistCm.data[target.provider], target.provider)
+    if (!allowed.has(target.model)) {
+      return { status: 403, body: { error: 'Provider target is not enabled' } }
+    }
+
+    const configMap = await this.k8s.readConfigMap(CONFIGMAP_NAMESPACE, CONFIGMAP_NAME)
+    if (!configMap) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const mapping = configMap[target.provider] ?? configMap[`${target.provider}__${target.model}`]
+    if (!mapping) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const slash = mapping.indexOf('/')
+    if (slash <= 0 || slash === mapping.length - 1) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const secretName = mapping.slice(0, slash)
+    const secret = await this.k8s.readSecret(CONFIGMAP_NAMESPACE, secretName)
+    if (!secret) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+
+    const credentials: Record<string, string> = {}
+    for (const [index, slot] of slots.entries()) {
+      const sourceKey = singleSlotProvider && index === 0 ? target.credentialSlot : slot.dataKey
+      const value = Object.prototype.hasOwnProperty.call(secret, sourceKey)
+        ? secret[sourceKey]
+        : undefined
+      if (typeof value !== 'string' || value.length === 0) {
+        return { status: 503, body: { error: 'Provider configuration unavailable' } }
+      }
+      credentials[slot.dataKey] = value
+    }
+
+    return {
+      status: 200,
+      body: {
+        provider: target.provider,
+        model: target.model,
+        credentialSlot: target.credentialSlot,
+        credentials,
+        llmSecretName: secretName,
+      },
+    }
+  }
 
   async handle(
     req: ConfigureModelRequest,

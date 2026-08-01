@@ -91,7 +91,10 @@ export function GrantsView({
           {grants.map(grant => {
             const allowlist =
               grant.capabilityFamily === 'promptBridge'
-                ? grant.allowedModels
+                ? (grant.promptTargets ?? []).map(
+                    (target, index) =>
+                      `${index === 0 ? 'default' : `fallback ${index}`}: ${target.provider}/${target.model} (${target.credentialSlot})`
+                  )
                 : grant.allowedEventTypes
             const quotaParts: string[] = []
             if (grant.quotaLimits.maxRequestsPerRun)
@@ -116,7 +119,7 @@ export function GrantsView({
                   <span className="cu-badge">{grant.capabilityFamily}</span>
                 </td>
                 <td>
-                  {allowlist.length === 0 ? '- (any declared)' : allowlist.join(', ')}
+                  {allowlist.length === 0 ? '- (migration required)' : allowlist.join(', ')}
                   {userRefsDisplay ? (
                     <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
                   ) : null}

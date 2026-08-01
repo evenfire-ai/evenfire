@@ -157,6 +157,62 @@ describe('upsertGrant — provider column (R1)', () => {
     )
     expect(grant.provider).toBeNull()
   })
+
+  it('writes ordered targets and default atomically while incrementing the policy revision', async () => {
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [
+        {
+          ...grantRow,
+          prompt_targets: [
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+          default_target_ref: 'primary-zai',
+          policy_revision: 2,
+        },
+      ],
+      rowCount: 1,
+    } as never)
+    const grant = await upsertGrant(
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        capabilityFamily: 'promptBridge',
+        provider: 'zai',
+        allowedCallers: ['api'],
+        promptTargets: [
+          {
+            targetRef: 'primary-zai',
+            provider: 'zai',
+            model: 'glm-4.7',
+            credentialSlot: 'zai-api-key',
+          },
+        ],
+        defaultTargetRef: 'primary-zai',
+      },
+      'operator-1'
+    )
+    const [sql, params] = vi
+      .mocked(pool.query)
+      .mock.calls.find(([statement]) =>
+        String(statement).includes('INSERT INTO plugin_workload_sdk_grants')
+      ) as unknown as [string, unknown[]]
+    expect(sql).toContain('prompt_targets, default_target_ref')
+    expect(sql).toContain('policy_revision = plugin_workload_sdk_grants.policy_revision + 1')
+    expect(JSON.parse(params[11] as string)).toEqual([
+      expect.objectContaining({ targetRef: 'primary-zai', credentialSlot: 'zai-api-key' }),
+    ])
+    expect(params[12]).toBe('primary-zai')
+    expect(grant).toMatchObject({
+      defaultTargetRef: 'primary-zai',
+      policyRevision: 2,
+      promptTargets: [{ targetRef: 'primary-zai', provider: 'zai' }],
+    })
+  })
 })
 
 describe('resolveRecipientProfiles', () => {

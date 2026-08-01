@@ -32,6 +32,7 @@ import {
   ConfigureResponse,
   ExecuteStepRequest,
   ExecuteStepResponse,
+  PluginWorkloadSdkBootstrapRequest,
   ToolCallRecord,
 } from './types'
 import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userApprovalRequester'
@@ -294,6 +295,11 @@ export class WorkflowService {
         provider: import('../types').ModelConfig['provider']
         defaultModel: string
       }) => void
+      /** Public identity-only callback for stepless Plugin Workload SDK mode. */
+      onPluginWorkloadSdkBootstrapConfigured?: (context: {
+        provider: import('../types').ModelConfig['provider']
+        defaultModel: string
+      }) => void
     }
   ) {
     this.recipeName = recipeName
@@ -310,11 +316,20 @@ export class WorkflowService {
     this.injectedBudgetClient = opts?.budgetClient
     this.workflowMaxOutputTokens = opts?.workflowMaxOutputTokens ?? resolveWorkflowMaxOutputTokens()
     this.onLlmConfigured = opts?.onLlmConfigured ?? null
+    this.onPluginWorkloadSdkBootstrapConfigured =
+      opts?.onPluginWorkloadSdkBootstrapConfigured ?? null
   }
 
   private readonly onLlmConfigured:
     | ((context: {
         keys: import('../types').ApiKeys
+        provider: import('../types').ModelConfig['provider']
+        defaultModel: string
+      }) => void)
+    | null = null
+
+  private readonly onPluginWorkloadSdkBootstrapConfigured:
+    | ((context: {
         provider: import('../types').ModelConfig['provider']
         defaultModel: string
       }) => void)
@@ -329,6 +344,30 @@ export class WorkflowService {
       provider: provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
     })
+  }
+
+  /**
+   * Accept only the public provider/model identity for the eager SDK host.
+   * This intentionally does not touch `currentApiKey`, `currentProvider`, or
+   * workflow readiness: stepless SDK traffic resolves credentials per attempt
+   * through the WRC broker rather than loading them into this service.
+   */
+  configurePluginWorkloadSdkBootstrap(req: PluginWorkloadSdkBootstrapRequest): ConfigureResponse {
+    if (!req.provider) {
+      return { configured: false, message: 'provider is required' }
+    }
+    if (!isLlmProvider(req.provider)) {
+      return { configured: false, message: `Unknown provider: ${req.provider}` }
+    }
+    const model = typeof req.model === 'string' ? req.model.trim() : ''
+    if (!/^[a-zA-Z0-9._:/-]{1,128}$/.test(model)) {
+      return { configured: false, message: 'model is required and has an invalid format' }
+    }
+    this.onPluginWorkloadSdkBootstrapConfigured?.({
+      provider: req.provider as import('../types').ModelConfig['provider'],
+      defaultModel: model,
+    })
+    return { configured: true, provider: req.provider, model }
   }
 
   isReady(): boolean {

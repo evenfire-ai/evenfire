@@ -46,6 +46,15 @@ const validGrantBody = {
   capabilityFamily: 'promptBridge',
   provider: 'zai',
   allowedModels: ['glm-4.7'],
+  promptTargets: [
+    {
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+    },
+  ],
+  defaultTargetRef: 'primary-zai',
   allowedCallers: ['api'],
 }
 
@@ -121,13 +130,58 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(400)
   })
 
-  it('requires non-empty allowedModels for promptBridge grants', async () => {
+  it('requires an explicit ordered target policy for promptBridge grants', async () => {
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, allowedModels: [] })
+      .send({ ...validGrantBody, promptTargets: [] })
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('allowedModels must be non-empty for promptBridge grants')
+    expect(res.body.error).toBe('promptTargets must be a non-empty array for promptBridge grants')
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  it('rejects a default that is not the first operator-authored target', async () => {
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({ ...validGrantBody, defaultTargetRef: 'another-target' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('defaultTargetRef')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  it('persists an ordered multiprovider policy without exposing a credential value', async () => {
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'multiprovider' } as never)
+    vi.mocked(pool.query).mockImplementation(((_sql: string, values?: unknown[]) => {
+      const provider = values?.[0]
+      return Promise.resolve({
+        rows: [{ model: provider === 'openai' ? 'gpt-5.4' : 'glm-4.7' }],
+        rowCount: 1,
+      })
+    }) as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        promptTargets: [
+          ...validGrantBody.promptTargets,
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'gpt-5.4',
+            credentialSlot: 'openai-api-key-fb1',
+          },
+        ],
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultTargetRef: 'primary-zai',
+        promptTargets: expect.arrayContaining([
+          expect.objectContaining({ targetRef: 'openai-fallback', provider: 'openai' }),
+        ]),
+      }),
+      '11111111-1111-4111-8111-111111111111'
+    )
+    expect(JSON.stringify(vi.mocked(sdkDb.upsertGrant).mock.calls)).not.toContain('secret-value')
   })
 
   it('requires an explicit provider for promptBridge grants (R1)', async () => {
@@ -167,7 +221,20 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     } as never)
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, provider: 'vertex', allowedModels: ['gemini-2.5-pro'] })
+      .send({
+        ...validGrantBody,
+        provider: 'vertex',
+        allowedModels: ['gemini-2.5-pro'],
+        promptTargets: [
+          {
+            targetRef: 'primary-vertex',
+            provider: 'vertex',
+            model: 'gemini-2.5-pro',
+            credentialSlot: 'vertex-service-account-json',
+          },
+        ],
+        defaultTargetRef: 'primary-vertex',
+      })
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'vertex' }),
@@ -240,13 +307,24 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     )
   })
 
-  it('rejects promptBridge allowedModels outside the provider allowlist (R3)', async () => {
+  it('rejects promptBridge targets outside the provider allowlist', async () => {
     // Allowlist for provider `zai` enables only glm-4.7; the request asks for a
     // model that is not enabled → 400 model_not_allowed listing the offenders.
     vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, allowedModels: ['glm-4.7', 'glm-9-not-allowed'] })
+      .send({
+        ...validGrantBody,
+        promptTargets: [
+          ...validGrantBody.promptTargets,
+          {
+            targetRef: 'not-allowed',
+            provider: 'zai',
+            model: 'glm-9-not-allowed',
+            credentialSlot: 'zai-api-key-fb1',
+          },
+        ],
+      })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('model_not_allowed')
     expect(res.body.provider).toBe('zai')

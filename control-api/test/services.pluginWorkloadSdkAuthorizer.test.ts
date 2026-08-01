@@ -55,6 +55,7 @@ function grant(
     recipeNamespace: NS,
     recipeName: RECIPE,
     capabilityFamily: 'promptBridge',
+    provider: 'zai',
     allowedModels: ['glm-4.7'],
     allowedEventTypes: [],
     allowedTargetRefs: [],
@@ -62,6 +63,16 @@ function grant(
     allowedCallers: ['api'],
     quotaLimits: {},
     modelPolicies: {},
+    promptTargets: [
+      {
+        targetRef: 'primary-zai',
+        provider: 'zai',
+        model: 'glm-4.7',
+        credentialSlot: 'zai-api-key',
+      },
+    ],
+    defaultTargetRef: 'primary-zai',
+    policyRevision: 1,
     createdAt: '2026-06-09T00:00:00.000Z',
     updatedAt: '2026-06-09T00:00:00.000Z',
     ...overrides,
@@ -146,24 +157,26 @@ describe('authorizePromptBridge', () => {
     expect(result).toMatchObject({ ok: false, error: 'caller_not_allowed' })
   })
 
-  it('returns provider_policy_denied for a model outside allowedModels', async () => {
+  it('returns target_not_allowed for a model outside the ordered policy', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: ['glm-4.7'] }))
     const result = await authorizePromptBridge({
       claims: claims(),
       ...basePromptParams,
       model: 'gpt-4o',
     })
-    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
   })
 
-  it('fails closed when a promptBridge grant has no allowedModels', async () => {
-    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: [] }))
+  it('fails closed when a legacy promptBridge grant has no ordered policy', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ promptTargets: [], defaultTargetRef: null, policyRevision: 0 })
+    )
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
   })
 
-  it('fails closed when the request has no concrete model', async () => {
+  it('uses the ordered default when the request omits a selector', async () => {
     const paramsWithoutModel = {
       callerRef: basePromptParams.callerRef,
       purpose: basePromptParams.purpose,
@@ -172,18 +185,87 @@ describe('authorizePromptBridge', () => {
     }
     vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
     const result = await authorizePromptBridge({ claims: claims(), ...paramsWithoutModel })
-    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { selectedTarget: { targetRef: 'primary-zai', model: 'glm-4.7' } },
+    })
+  })
+
+  it('returns an explicit approved target and only its fallback suffix', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        promptTargets: [
+          {
+            targetRef: 'zai-primary',
+            provider: 'zai',
+            model: 'glm-4.7',
+            credentialSlot: 'zai-api-key',
+          },
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'gpt-5.4',
+            credentialSlot: 'openai-api-key',
+          },
+        ],
+        defaultTargetRef: 'zai-primary',
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      callerRef: basePromptParams.callerRef,
+      purpose: basePromptParams.purpose,
+      idempotencyKey: basePromptParams.idempotencyKey,
+      payload: basePromptParams.payload,
+      targetRef: 'openai-fallback',
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        selectedTarget: { targetRef: 'openai-fallback', provider: 'openai' },
+        authorizedTargets: [{ targetRef: 'openai-fallback' }],
+        policyRevision: 1,
+      },
+    })
+  })
+
+  it('rejects a bare model shared by two authorized providers before recording an invocation', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        promptTargets: [
+          {
+            targetRef: 'zai-primary',
+            provider: 'zai',
+            model: 'shared',
+            credentialSlot: 'zai-api-key',
+          },
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'shared',
+            credentialSlot: 'openai-api-key',
+          },
+        ],
+        defaultTargetRef: 'zai-primary',
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'shared',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'ambiguous_model' })
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
   })
 
-  it('rejects wildcard allowedModels entries', async () => {
+  it('does not treat a legacy wildcard allowedModels entry as routing authority', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: ['*'] }))
     const result = await authorizePromptBridge({
       claims: claims(),
       ...basePromptParams,
       model: 'gpt-4o',
     })
-    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
   })
 
   it('returns provider_policy_denied for an unresolvable modelPolicyRef', async () => {
@@ -194,6 +276,19 @@ describe('authorizePromptBridge', () => {
       modelPolicyRef: 'missing-policy',
     })
     expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+  })
+
+  it('rejects bootstrap/default drift before recording an invocation', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      bootstrapProvider: 'openai',
+      bootstrapModel: 'gpt-5.4-mini',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect((result as { ok: false; message: string }).message).toContain('bootstrap binding')
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
   })
 
   it('denies a request model that does not match the referenced model policy', async () => {
@@ -233,6 +328,55 @@ describe('authorizePromptBridge', () => {
     expect(result).toMatchObject({
       ok: true,
       value: { model: 'glm-4.7', modelPolicy: { provider: 'zai', model: 'glm-4.7' } },
+    })
+  })
+
+  it('rejects inconsistent targetRef and modelPolicyRef before recording an invocation', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        modelPolicies: { 'support-summary-v1': { provider: 'zai', model: 'glm-4.7' } },
+        promptTargets: [
+          {
+            targetRef: 'zai-primary',
+            provider: 'zai',
+            model: 'glm-4.7',
+            credentialSlot: 'zai-api-key',
+          },
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'gpt-5.4',
+            credentialSlot: 'openai-api-key',
+          },
+        ],
+        defaultTargetRef: 'zai-primary',
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      targetRef: 'openai-fallback',
+      modelPolicyRef: 'support-summary-v1',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
+  it('accepts targetRef and modelPolicyRef only when they resolve to the same target', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        modelPolicies: { 'support-summary-v1': { provider: 'zai', model: 'glm-4.7' } },
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      targetRef: 'primary-zai',
+      modelPolicyRef: 'support-summary-v1',
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { selectedTarget: { targetRef: 'primary-zai' } },
     })
   })
 
@@ -313,7 +457,18 @@ describe('authorizePromptBridge', () => {
 
   it('authorizes an explicitly approved non-default model', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(
-      grant({ allowedModels: ['glm-5.1'], quotaLimits: { maxRequestsPerRun: 10 } })
+      grant({
+        promptTargets: [
+          {
+            targetRef: 'zai-glm-5-1',
+            provider: 'zai',
+            model: 'glm-5.1',
+            credentialSlot: 'zai-api-key',
+          },
+        ],
+        defaultTargetRef: 'zai-glm-5-1',
+        quotaLimits: { maxRequestsPerRun: 10 },
+      })
     )
     const result = await authorizePromptBridge({
       claims: claims(),

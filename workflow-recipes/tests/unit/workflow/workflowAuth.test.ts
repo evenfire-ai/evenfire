@@ -44,6 +44,86 @@ describe('workflow auth token verification', () => {
     await expect(auth.verifyIncomingToken(token)).rejects.toThrow(/aud/i)
   })
 
+  it('separates the SDK broker caller audience from the workflow REST audience', async () => {
+    const auth = await freshAuthModule()
+    const controlApiKey = await createSigningPair()
+    await auth.initializeControlApiPublicKey(controlApiKey.publicKeyPem)
+    const token = await new SignJWT({
+      recipeName: 'recipe-one',
+      recipeNamespace: 'sandbox-recipes',
+      scope: 'workflow:approval:request',
+      workflowControlScopes: ['plugin-workload-sdk'],
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer(auth.CONTROL_API_ISSUER)
+      .setAudience('workflow-approvals')
+      .setSubject('sandbox-recipes/recipe-one')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(controlApiKey.privateKey)
+
+    await expect(auth.verifyPluginSdkBrokerCallerToken(token)).resolves.toMatchObject({
+      recipeName: 'recipe-one',
+      workflowControlScopes: ['plugin-workload-sdk'],
+    })
+    await expect(auth.verifyIncomingToken(token)).rejects.toThrow(/aud/i)
+  })
+
+  it('rejects a refresh JWT from the SDK credential broker audience', async () => {
+    const auth = await freshAuthModule()
+    const controlApiKey = await createSigningPair()
+    await auth.initializeControlApiPublicKey(controlApiKey.publicKeyPem)
+    const token = await new SignJWT({
+      recipeName: 'recipe-one',
+      recipeNamespace: 'sandbox-recipes',
+      scope: 'workflow:approval:refresh',
+      workflowControlScopes: ['plugin-workload-sdk'],
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer(auth.CONTROL_API_ISSUER)
+      .setAudience('workflow-approvals')
+      .setSubject('sandbox-recipes/recipe-one')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(controlApiKey.privateKey)
+
+    await expect(auth.verifyPluginSdkBrokerCallerToken(token)).rejects.toThrow(/broker claims/i)
+  })
+
+  it('verifies the exact short-lived SDK credential ticket binding', async () => {
+    const auth = await freshAuthModule()
+    const controlApiKey = await createSigningPair()
+    await auth.initializeControlApiPublicKey(controlApiKey.publicKeyPem)
+    const ticket = await new SignJWT({
+      typ: 'plugin-sdk-credential-ticket',
+      recipeName: 'recipe-one',
+      recipeNamespace: 'sandbox-recipes',
+      invocationId: 'inv-1',
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-5.1',
+      credentialSlot: 'zai-api-key',
+      policyRevision: 4,
+      policyHash: 'a'.repeat(64),
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer(auth.CONTROL_API_ISSUER)
+      .setAudience('plugin-sdk-credential-broker')
+      .setSubject('sandbox-recipes/recipe-one')
+      .setJti('ticket-jti')
+      .setIssuedAt()
+      .setExpirationTime('60s')
+      .sign(controlApiKey.privateKey)
+
+    await expect(auth.verifyPluginSdkCredentialTicket(ticket)).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      targetRef: 'primary-zai',
+      policyRevision: 4,
+      policyHash: 'a'.repeat(64),
+    })
+    await expect(auth.verifyPluginSdkBrokerCallerToken(ticket)).rejects.toThrow(/aud/i)
+  })
+
   it('rejects a control-api token signed with the WRC key', async () => {
     const auth = await freshAuthModule()
     const wrcKey = await createSigningPair()

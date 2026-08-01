@@ -55,6 +55,23 @@ describe('POST /configure — JWT scope', () => {
     expect(result.configured).toBe(true)
     expect(result.provider).toBe('openai')
   })
+
+  it('publishes SDK bootstrap identity without making the workflow service ready or receiving a key', () => {
+    const onBootstrap = vi.fn()
+    const svc = new WorkflowService('test', {
+      llmFactory: mockLlmFactory(),
+      onPluginWorkloadSdkBootstrapConfigured: onBootstrap,
+    })
+    const result = svc.configurePluginWorkloadSdkBootstrap({
+      provider: 'openai',
+      model: 'gpt-4',
+      // @ts-expect-error the public bootstrap contract intentionally has no apiKey
+      apiKey: 'must-not-be-consumed',
+    })
+    expect(result).toEqual({ configured: true, provider: 'openai', model: 'gpt-4' })
+    expect(onBootstrap).toHaveBeenCalledWith({ provider: 'openai', defaultModel: 'gpt-4' })
+    expect(svc.isReady()).toBe(false)
+  })
 })
 
 describe('POST /configure — provider hot-swap', () => {

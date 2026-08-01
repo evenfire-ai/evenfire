@@ -108,6 +108,12 @@ export interface ConfigureResponse {
   message?: string
 }
 
+/** Public identity handshake for a stepless Plugin Workload SDK host. */
+export interface PluginWorkloadSdkBootstrapRequest {
+  provider?: LlmProvider
+  model?: string
+}
+
 // ─── Internal Tools (clerum__*) ──────────────────────────────────────
 
 export interface ArtifactMetadata {

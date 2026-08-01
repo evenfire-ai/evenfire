@@ -859,6 +859,107 @@ export class WorkflowReconciler {
     return undefined
   }
 
+  /**
+   * Reconcile the always-on Plugin Workload SDK host for a recipe that has no
+   * executable workflow steps. This deliberately does not call `reconcile()`:
+   * SDK-only workloads must not acquire coordinator, run, step, or output-PVC
+   * lifecycle merely because they share the WorkflowRecipe CRD.
+   */
+  async reconcilePluginWorkloadSdkOnly(
+    recipeName: string,
+    recipeUid: string,
+    namespace: string,
+    spec: WorkflowRecipeSpec,
+    runtimeScopeRecipeName = recipeName
+  ): Promise<{
+    phase: 'active' | 'deploying' | 'failed' | 'provider_unavailable'
+    message: string
+  }> {
+    if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
+      return { phase: 'active', message: 'Plugin Workload SDK runtime disabled' }
+    }
+    if ((spec.steps?.length ?? 0) > 0) {
+      throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
+    }
+
+    const runtime = deriveWorkflowRuntimePlan(spec, {
+      recipeName,
+      runtimeScopeRecipeName,
+      pluginWorkloadSdkEnabled: true,
+    })
+    const mcpHostPhase = await getPodPhase(
+      this.deps.coreApi,
+      `${recipeName}-mcp-host`,
+      this.deps.config.sandboxNamespace
+    )
+    const status = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+      recipeName,
+      recipeUid,
+      namespace,
+      runtimeScopeRecipeName,
+      spec,
+      runtime,
+      { mcpHostPhase }
+    )
+    switch (status) {
+      case 'ready':
+        return { phase: 'active', message: 'Plugin Workload SDK mcp-host registered' }
+      case 'deploying':
+        return { phase: 'deploying', message: 'Plugin Workload SDK mcp-host starting' }
+      case 'provider_unavailable':
+        return {
+          phase: 'provider_unavailable',
+          message: 'Plugin Workload SDK mcp-host provider unavailable',
+        }
+      case 'failed':
+        return { phase: 'failed', message: 'Plugin Workload SDK mcp-host could not start' }
+    }
+  }
+
+  /**
+   * Remove resources owned exclusively by the SDK-only eager host. This is
+   * intentionally narrower than workflow deletion so dropping the capability
+   * cannot create or tear down workflow execution state.
+   */
+  async cleanupPluginWorkloadSdkOnly(recipeName: string): Promise<void> {
+    const ns = this.deps.config.sandboxNamespace
+    this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
+    const networkPolicyNames = [
+      `${recipeName}-workload-to-mcp-host-sdk-ingress`,
+      `${recipeName}-workload-to-mcp-host-sdk-egress`,
+      `${recipeName}-mcp-host-to-wrc-sdk-broker`,
+      `${recipeName}-mcp-host-to-servers`,
+      `${recipeName}-mcp-host-to-llm-api`,
+      `${recipeName}-mcp-host-to-gfs`,
+      `${recipeName}-mcp-host-to-approval-gateway`,
+    ]
+    await Promise.all([
+      deletePodIfExists(this.deps.coreApi, `${recipeName}-mcp-host`, ns),
+      this.pluginWorkloadSdkProvisioner.deletePluginWorkloadSdkTokenSecret(recipeName),
+      // The runtime JWT Secret is created for eager SDK hosts as well as
+      // workflow hosts.  A capability removal must revoke it with the host;
+      // leaving it behind would allow a deleted workload to replay broker
+      // requests until token expiry.
+      this.safeDelete(() =>
+        this.deps.coreApi.deleteNamespacedSecret({
+          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+          namespace: ns,
+        })
+      ),
+      this.safeDelete(() =>
+        this.deps.coreApi.deleteNamespacedService({
+          name: buildMcpHostServiceName(recipeName),
+          namespace: ns,
+        })
+      ),
+      ...networkPolicyNames.map(name =>
+        this.safeDelete(() =>
+          this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+        )
+      ),
+    ])
+  }
+
   async reconcile(
     recipeName: string,
     recipeUid: string,

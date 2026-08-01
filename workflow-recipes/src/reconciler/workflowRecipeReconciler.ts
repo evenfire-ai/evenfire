@@ -1839,6 +1839,14 @@ export class WorkflowRecipeReconciler {
       // Step 2: Validate spec
       this.validateSpec(recipe)
 
+      // A removed SDK declaration must release the resources that were owned
+      // by the SDK-only runtime before this recipe settles as a plain workload.
+      // The status marker is durable across the spec edit; no workflow path is
+      // involved in this cleanup.
+      if (!isWorkflow && !recipe.spec.pluginWorkloadSdk && recipe.status?.pluginWorkloadSdk) {
+        await this.workflowReconciler?.cleanupPluginWorkloadSdkOnly(name)
+      }
+
       // Step 2.5: Policy enforcement already ran at the top of reconcile()
       // so both workflow and non-workflow recipes are gated uniformly. No
       // duplicate check here.
@@ -2282,9 +2290,42 @@ export class WorkflowRecipeReconciler {
       const webhookOutcome = await this.reconcileWebhookGateway(recipe)
       const webhookHealthy = webhookOutcome.handled === false || webhookOutcome.ready
 
-      const allReady = workloadStatuses.every(ws => ws.ready) && webhookHealthy
+      // SDK-only recipes are capability runtimes. Provision the eager host only
+      // after workloads and their resources exist, and never route this case
+      // through WorkflowReconciler.reconcile() (which owns coordinator/run
+      // lifecycle). The adapter owns the same host/token/network/configure
+      // semantics as the existing workflow eager path.
+      const isSdkOnly =
+        !isWorkflow &&
+        this.config.pluginWorkloadSdkEnabled &&
+        recipe.spec.pluginWorkloadSdk !== undefined
+      const sdkOnlyRuntime = isSdkOnly
+        ? await this.reconcilePluginWorkloadSdkOnly(recipe)
+        : undefined
+      if (sdkOnlyRuntime?.phase === 'failed') {
+        return {
+          phase: 'failed',
+          message: sdkOnlyRuntime.message,
+          workloadStatuses,
+          webhookConditions: webhookOutcome.conditions,
+          internalDependencyConditions,
+          secretOwnershipConditions: secretOwnership.conditions,
+          workloadConditions,
+        }
+      }
+
+      const allReady =
+        workloadStatuses.every(ws => ws.ready) &&
+        webhookHealthy &&
+        sdkOnlyRuntime?.phase !== 'deploying' &&
+        sdkOnlyRuntime?.phase !== 'provider_unavailable'
       let finalPhase: RecipePhase
-      if (allReady) {
+      if (sdkOnlyRuntime?.phase === 'deploying') {
+        // A level-triggered SDK host must stay in a progress phase until it is
+        // Ready so the watcher requeues provider configuration. `degraded`
+        // would incorrectly describe a normal first boot as workload failure.
+        finalPhase = 'deploying'
+      } else if (allReady) {
         // Advance through valid state machine transitions to reach "active".
         // deploying → test-pass → testing → success → active
         // degraded  → recover  → active
@@ -2298,13 +2339,17 @@ export class WorkflowRecipeReconciler {
         finalPhase = 'degraded'
       }
       const message =
-        !allReady && !webhookHealthy
-          ? (webhookOutcome.message ?? 'Webhook gateway not ready')
-          : allReady
-            ? 'All workloads deployed'
-            : workloadStatuses.some(ws => ws.phase === 'failed')
-              ? 'Some workloads failed'
-              : 'Some workloads not ready'
+        sdkOnlyRuntime?.phase === 'provider_unavailable'
+          ? sdkOnlyRuntime.message
+          : sdkOnlyRuntime?.phase === 'deploying'
+            ? sdkOnlyRuntime.message
+            : !allReady && !webhookHealthy
+              ? (webhookOutcome.message ?? 'Webhook gateway not ready')
+              : allReady
+                ? 'All workloads deployed'
+                : workloadStatuses.some(ws => ws.phase === 'failed')
+                  ? 'Some workloads failed'
+                  : 'Some workloads not ready'
       return {
         phase: finalPhase,
         message,
@@ -2316,7 +2361,12 @@ export class WorkflowRecipeReconciler {
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
         requeueAfterMs:
-          legacyRawCleanupPending || deniedTeardownFailed ? TRANSIENT_REQUEUE_BASE_MS : undefined,
+          legacyRawCleanupPending ||
+          deniedTeardownFailed ||
+          sdkOnlyRuntime?.phase === 'deploying' ||
+          sdkOnlyRuntime?.phase === 'provider_unavailable'
+            ? TRANSIENT_REQUEUE_BASE_MS
+            : undefined,
       }
     } catch (error) {
       // Transient failures must not brick a healthy recipe at the terminal,
@@ -2380,6 +2430,24 @@ export class WorkflowRecipeReconciler {
         workloadStatuses: [],
       }
     }
+  }
+
+  private async reconcilePluginWorkloadSdkOnly(recipe: WorkflowRecipeCRD): Promise<{
+    phase: 'active' | 'deploying' | 'failed' | 'provider_unavailable'
+    message: string
+  }> {
+    if (!this.workflowReconciler) {
+      return {
+        phase: 'failed',
+        message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
+      }
+    }
+    return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
+      recipe.metadata.name,
+      recipe.metadata.uid ?? '',
+      recipe.metadata.namespace,
+      recipe.spec
+    )
   }
 
   // ─── Webhook Gateway Reconcile ─────────────────────────────────────
@@ -3036,6 +3104,16 @@ export class WorkflowRecipeReconciler {
       await this.cleanupDelegationIfNeeded(recipe)
       await this.cleanupDeclaredRuntimeResources(recipe)
       return
+    }
+
+    // Use the durable validated status marker as well as the current spec:
+    // a capability may have been removed in an update before Kubernetes emits
+    // the final delete event, and cleanup must still revoke its host tokens.
+    if (
+      (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) &&
+      this.workflowReconciler
+    ) {
+      await this.workflowReconciler.cleanupPluginWorkloadSdkOnly(name)
     }
 
     await this.cleanupDelegationIfNeeded(recipe)

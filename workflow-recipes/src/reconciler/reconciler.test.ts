@@ -254,6 +254,114 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.workloadStatuses[0].ready).toBe(true)
   })
 
+  it('uses the SDK-only runtime adapter without invoking workflow reconciliation', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Plugin Workload SDK mcp-host registered',
+    })
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, reconcilePluginWorkloadSdkOnly }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.phase).toBe('active')
+    expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalledWith(
+      'test-recipe',
+      'uid-123',
+      'sandbox-recipes',
+      recipe.spec
+    )
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('keeps an SDK-only recipe deploying and requeues while the eager host boots', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK mcp-host starting',
+    })
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+      })
+    )
+
+    expect(result).toMatchObject({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK mcp-host starting',
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
+  })
+
+  it('cleans SDK-only runtime resources after the capability is removed without invoking workflow reconciliation', async () => {
+    const cleanupPluginWorkloadSdkOnly = vi.fn().mockResolvedValue(undefined)
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          cleanupPluginWorkloadSdkOnly: typeof cleanupPluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdkOnly }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        },
+      })
+    )
+
+    expect(result.phase).toBe('active')
+    expect(cleanupPluginWorkloadSdkOnly).toHaveBeenCalledWith('test-recipe')
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
   it('degrades an active recipe when observed child Deployment readiness drifts', async () => {
     mockAppsApi.readNamespacedDeployment.mockResolvedValue({
       metadata: { resourceVersion: '1', generation: 1 },

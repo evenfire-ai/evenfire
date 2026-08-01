@@ -79,6 +79,8 @@ const validPromptBody = {
   recipeNamespace: NS,
   recipeName: RECIPE,
   callerRef: 'api',
+  bootstrapProvider: 'zai',
+  bootstrapModel: 'glm-4.7',
   purpose: 'summarization',
   idempotencyKey: 'key-1',
   messages: [{ role: 'user', content: 'summarize this' }],
@@ -111,6 +113,23 @@ beforeEach(() => {
       status: 'in_progress',
       model: 'glm-4.7',
       modelPolicy: null,
+      selectedTarget: {
+        targetRef: 'primary-zai',
+        provider: 'zai',
+        model: 'glm-4.7',
+        credentialSlot: 'zai-api-key',
+      },
+      authorizedTargets: [
+        {
+          targetRef: 'primary-zai',
+          provider: 'zai',
+          model: 'glm-4.7',
+          credentialSlot: 'zai-api-key',
+        },
+      ],
+      policyRevision: 1,
+      policyHash: 'policy-hash',
+      authorizedTargetTickets: [{ targetRef: 'primary-zai', credentialTicket: 'signed-ticket' }],
       maxOutputTokens: null,
     },
   })
@@ -225,6 +244,39 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
       .send(validPromptBody)
     expect(res.status).toBe(201)
     expect(res.body).toMatchObject({ invocationId: 'inv-1', replay: false, model: 'glm-4.7' })
+    expect(res.body).toMatchObject({
+      selectedTarget: { targetRef: 'primary-zai', credentialSlot: 'zai-api-key' },
+      authorizedTargetTickets: [{ targetRef: 'primary-zai' }],
+    })
+  })
+
+  it('forwards an exact provider/model selector without accepting a raw credential', async () => {
+    await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ ...validPromptBody, provider: 'openai', model: 'gpt-5.4' })
+      .expect(201)
+    expect(authorizer.authorizePromptBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'openai', model: 'gpt-5.4', targetRef: undefined })
+    )
+    expect(authorizer.authorizePromptBridge).not.toHaveBeenCalledWith(
+      expect.objectContaining({ credentialSlot: expect.anything() })
+    )
+  })
+
+  it('includes caller metadata in the canonical payload used for idempotency', async () => {
+    await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ ...validPromptBody, metadata: { traceId: 'trace-1', source: 'sandbox-ui' } })
+
+    expect(authorizer.authorizePromptBridge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          metadata: { traceId: 'trace-1', source: 'sandbox-ui' },
+        }),
+      })
+    )
   })
 
   it('returns 200 on idempotent replay', async () => {
@@ -236,6 +288,23 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
         status: 'complete',
         model: 'glm-4.7',
         modelPolicy: null,
+        selectedTarget: {
+          targetRef: 'primary-zai',
+          provider: 'zai',
+          model: 'glm-4.7',
+          credentialSlot: 'zai-api-key',
+        },
+        authorizedTargets: [
+          {
+            targetRef: 'primary-zai',
+            provider: 'zai',
+            model: 'glm-4.7',
+            credentialSlot: 'zai-api-key',
+          },
+        ],
+        policyRevision: 1,
+        policyHash: 'policy-hash',
+        authorizedTargetTickets: [{ targetRef: 'primary-zai', credentialTicket: 'signed-ticket' }],
         maxOutputTokens: null,
       },
     })
@@ -554,5 +623,17 @@ describe('GET /mcp-host/plugin-workload-sdk/invocations/:recipeRef', () => {
       recipeName: RECIPE,
       limit: 100,
     })
+  })
+})
+
+describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () => {
+  it('fails closed for an invalid ticket and never returns credential metadata', async () => {
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ credentialTicket: 'not-a-ticket', invocationId: 'inv-1', targetRef: 'primary-zai' })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'provider_policy_denied', retryable: false })
+    expect(JSON.stringify(res.body)).not.toContain('credentialSlot')
   })
 })

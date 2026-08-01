@@ -219,6 +219,8 @@ export interface Config {
   podNamespace: string
   /** Overrides mcpHostGatewayUrl for SDK → control-api calls when set. */
   pluginWorkloadSdkGatewayUrl?: string
+  /** WRC endpoint that redeems one signed prompt target ticket per attempt. */
+  pluginWorkloadSdkCredentialBrokerUrl: string
   /** Recipe-scoped shared token workloads present to the SDK server. @deprecated use tokensDir */
   pluginWorkloadSdkWorkloadToken?: string
   /** Dev-only caller binding when using a single legacy workload token env var. */
@@ -747,6 +749,7 @@ export const config: Config = {
   pluginWorkloadSdkPort: parseInt(getEnv('MCP_HOST_PLUGIN_SDK_PORT', '8099')!, 10),
   podNamespace: getEnv('MCP_HOST_POD_NAMESPACE', '')!,
   pluginWorkloadSdkGatewayUrl: getEnv('CONTROL_API_GATEWAY_URL', ''),
+  pluginWorkloadSdkCredentialBrokerUrl: getEnv('CLERUM_WRC_URL', '') ?? '',
   pluginWorkloadSdkWorkloadToken: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKEN', ''),
   pluginWorkloadSdkBoundCallerRef: getEnv('PLUGIN_WORKLOAD_SDK_BOUND_CALLER_REF', ''),
   pluginWorkloadSdkWorkloadTokensDir: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR', ''),

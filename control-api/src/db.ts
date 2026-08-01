@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkPromptTargetPolicyColumns,
   addPluginWorkloadSdkProviderColumn,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
@@ -5023,6 +5024,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
           TO gfs_controller, gfs_controller_reader;
       `)
     },
+  },
+  {
+    version: '0075_plugin_workload_sdk_prompt_target_policy',
+    apply: addPluginWorkloadSdkPromptTargetPolicyColumns,
   },
 ]
 

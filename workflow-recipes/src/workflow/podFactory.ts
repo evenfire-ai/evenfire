@@ -682,6 +682,9 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_GATEWAY_URL',
               value: 'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092',
             },
+            // PromptBridge resolves exactly one signed target credential per
+            // attempt through WRC; no provider key is preloaded for this lane.
+            { name: 'CLERUM_WRC_URL', value: config.wrcEndpoint },
             {
               name: 'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
               value: MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE_PATH,

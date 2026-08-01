@@ -1301,6 +1301,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     createNamespacedPod: vi.fn().mockResolvedValue({}),
     patchNamespacedSecret: vi.fn().mockResolvedValue({}),
     deleteNamespacedPod: vi.fn().mockResolvedValue({}),
+    deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
+    deleteNamespacedService: vi.fn().mockResolvedValue({}),
   }
   const mockCustomApi = {
     patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
@@ -1314,7 +1316,9 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
   }
   const mockModelConfigHandler = {
-    handle: vi.fn().mockResolvedValue({ status: 202, body: { configured: true } }),
+    configurePluginWorkloadSdkBootstrap: vi
+      .fn()
+      .mockResolvedValue({ status: 202, body: { configured: true } }),
   }
   const mockTokenFactory = {
     signWrcConfigureToken: vi.fn().mockResolvedValue('wrc-configure-token'),
@@ -1354,7 +1358,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     crashRecoveryMocks.evaluateCrashRecovery.mockReturnValue({ action: 'none', message: 'healthy' })
     mockCoreApi.createNamespacedPod.mockResolvedValue({})
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 202, body: { configured: true } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: { configured: true },
+    })
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, status: 204 } as unknown as Response)
@@ -1445,15 +1452,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
   it('creates eager mcp-host for SDK-only recipes without agentic steps', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
 
-    await reconciler.reconcile(
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
       'sdk-only',
       'uid-sdk-only',
       sandboxNamespace,
-      sdkSpec({ steps: [] }),
-      { workflowExecution: { phase: 'initializing' } },
-      undefined,
-      'sdk-only',
-      undefined
+      sdkSpec({ steps: undefined })
     )
 
     const podNames = mockCoreApi.createNamespacedPod.mock.calls.map(
@@ -1461,6 +1464,38 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     )
     expect(podNames).toContain('sdk-only-mcp-host')
     expect(podNames).not.toContain('sdk-only-coordinator')
+    expect(result.phase).toBe('active')
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'zai',
+      'glm-4.7',
+      expect.any(String),
+      'wrc-configure-token'
+    )
+  })
+
+  it('cleans SDK-only host resources idempotently without creating workflow resources', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(reconciler.cleanupPluginWorkloadSdkOnly('sdk-only')).resolves.toBeUndefined()
+    await expect(reconciler.cleanupPluginWorkloadSdkOnly('sdk-only')).resolves.toBeUndefined()
+
+    expect(mockCoreApi.deleteNamespacedService).toHaveBeenCalledWith({
+      name: 'wf-sdk-only-mcp-host',
+      namespace: sandboxNamespace,
+    })
+    expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+      name: 'wf-sdk-only-plugin-workload-sdk-token',
+      namespace: sandboxNamespace,
+    })
+    expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+      name: 'wf-sdk-only-mcp-host-runtime-tokens',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'sdk-only-workload-to-mcp-host-sdk-ingress',
+      namespace: sandboxNamespace,
+    })
+    expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
   })
 
   it('brokers the provider into the eager mcp-host for promptBridge recipes', async () => {
@@ -1477,13 +1512,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       undefined
     )
 
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledTimes(1)
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledWith(
-      expect.objectContaining({
-        stepId: 'plugin-workload-sdk-bootstrap',
-        provider: 'zai',
-        model: 'glm-4.7',
-      }),
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(1)
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'zai',
+      'glm-4.7',
       expect.any(String),
       'wrc-configure-token'
     )
@@ -1512,7 +1544,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       call => call[0].body.metadata.name
     )
     expect(podNames).toContain('notif-recipe-mcp-host')
-    expect(mockModelConfigHandler.handle).not.toHaveBeenCalled()
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).not.toHaveBeenCalled()
   })
 
   it('skips the provider broker while the eager mcp-host is not ready', async () => {
@@ -1530,7 +1562,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       undefined
     )
 
-    expect(mockModelConfigHandler.handle).not.toHaveBeenCalled()
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).not.toHaveBeenCalled()
   })
 
   it('returns phase=deploying while the eager mcp-host boots so the watcher requeues the configure', async () => {
@@ -1584,7 +1616,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
     expect(result.phase).toBe('active')
     expect(result.message).toContain('registered')
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledTimes(1)
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(1)
   })
 
   it('does not re-broker the provider on a second reconcile of the same ready pod', async () => {
@@ -1610,7 +1642,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     await run()
 
     // Same pod + provider/model → second pass is gated, configure runs once.
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledTimes(1)
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(1)
   })
 
   it('stays pending (not registered) and retries when the provider broker fails', async () => {
@@ -1619,7 +1651,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       phase: 'Running',
       uid: 'pod-uid-1',
     })
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 500, body: { error: 'boom' } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 500,
+      body: { error: 'boom' },
+    })
     const reconciler = new WorkflowReconciler(makeDeps())
     const run = () =>
       reconciler.reconcile(
@@ -1639,9 +1674,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(first.message).not.toContain('registered')
 
     // Failure must not poison the configure cache: the next reconcile retries.
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 202, body: { configured: true } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: { configured: true },
+    })
     const second = await run()
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledTimes(2)
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(2)
     expect(second.message).toContain('registered')
   })
 
@@ -1652,7 +1690,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       uid: 'pod-uid-1',
     })
     // Provider broker is permanently broken (e.g. bad secretRef).
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 500, body: { error: 'boom' } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 500,
+      body: { error: 'boom' },
+    })
     const reconciler = new WorkflowReconciler(makeDeps())
     const run = () =>
       reconciler.reconcile(
@@ -1690,7 +1731,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
     // It keeps retrying — recovers as soon as the broker config is fixed, and
     // the unavailable condition is no longer projected.
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 202, body: { configured: true } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: { configured: true },
+    })
     const recovered = await run()
     expect(recovered.message).toContain('registered')
     expect(recovered.workflowConditions ?? []).not.toEqual(
@@ -1708,7 +1752,10 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       }
       return { ready: true, phase: 'Running' }
     })
-    mockModelConfigHandler.handle.mockResolvedValue({ status: 500, body: { error: 'boom' } })
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 500,
+      body: { error: 'boom' },
+    })
     const reconciler = new WorkflowReconciler(makeDeps())
     const run = () =>
       reconciler.reconcile(
@@ -1771,7 +1818,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       undefined
     )
 
-    expect(mockModelConfigHandler.handle).toHaveBeenCalledTimes(2)
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(2)
   })
 
   it('recreates a wedged (CrashLoopBackOff) eager mcp-host pod', async () => {

@@ -1,10 +1,13 @@
 import { pluginWorkloadSdkAuthDecisionsTotal } from '../observability/metrics.js'
 import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
+import { issuePluginWorkloadSdkCredentialTicket } from './pluginWorkloadSdkCredentialTicket.js'
 import {
   type PluginWorkloadSdkErrorCode,
   type PluginWorkloadSdkGrant,
   type PluginWorkloadSdkModelPolicy,
+  type PluginWorkloadSdkPromptTarget,
   findGrant,
+  hashPromptTargetPolicy,
 } from './pluginWorkloadSdkDb.js'
 import { markInvocationStatus, recordInvocation } from './pluginWorkloadSdkInvocationAuditor.js'
 import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js'
@@ -73,7 +76,17 @@ function checkCaller(
 export interface AuthorizePromptBridgeParams {
   claims: McpHostAccessClaims
   callerRef: string
+  /**
+   * Internal mcp-host bootstrap binding.  This is deliberately separate from
+   * the workload selector: the first ordered target must be the same provider
+   * and model that the recipe-bound host was configured with.  The check keeps
+   * CRD/admin policy drift from reaching the credential broker.
+   */
+  bootstrapProvider?: string
+  bootstrapModel?: string
   model?: string
+  provider?: string
+  targetRef?: string
   modelPolicyRef?: string
   purpose: string
   idempotencyKey: string
@@ -89,7 +102,154 @@ export interface AuthorizedPromptBridge {
   status: string
   model: string | null
   modelPolicy: PluginWorkloadSdkModelPolicy | null
+  /** Operator-selected attempt; credentialSlot is an identity, never a value. */
+  selectedTarget: PluginWorkloadSdkPromptTarget
+  /** Selected target plus its strictly ordered authorized fallback suffix. */
+  authorizedTargets: PluginWorkloadSdkPromptTarget[]
+  policyRevision: number
+  policyHash: string
+  /** One short-lived signed authorization artifact per eligible target. */
+  authorizedTargetTickets: Array<{ targetRef: string; credentialTicket: string }>
   maxOutputTokens: number | null
+}
+
+function issueTargetTickets(
+  claims: McpHostAccessClaims,
+  invocationId: string,
+  targets: PluginWorkloadSdkPromptTarget[],
+  policyRevision: number,
+  policyHash: string
+): Array<{ targetRef: string; credentialTicket: string }> {
+  return targets.map(target => ({
+    targetRef: target.targetRef,
+    credentialTicket: issuePluginWorkloadSdkCredentialTicket({
+      recipeNamespace: claims.recipeNamespace,
+      recipeName: claims.recipeName,
+      invocationId,
+      target,
+      policyRevision,
+      policyHash,
+    }),
+  }))
+}
+
+type PromptTargetResolution =
+  | { ok: true; selectedIndex: number; modelPolicy: PluginWorkloadSdkModelPolicy | null }
+  | { ok: false; error: PluginWorkloadSdkAuthzError }
+
+/**
+ * Pure selector resolution. It deliberately runs before idempotency/audit,
+ * quotas and all credential/provider seams so a denied selector cannot probe
+ * which credentials happen to exist in the environment.
+ */
+function resolvePromptTarget(
+  grant: PluginWorkloadSdkGrant,
+  params: AuthorizePromptBridgeParams
+): PromptTargetResolution {
+  if (
+    grant.promptTargets.length === 0 ||
+    !grant.defaultTargetRef ||
+    grant.promptTargets[0]?.targetRef !== grant.defaultTargetRef ||
+    grant.policyRevision < 1
+  ) {
+    return {
+      ok: false,
+      error: deny(
+        'provider_policy_denied',
+        'promptBridge grant has no reviewed ordered target policy; migrate and re-save it'
+      ),
+    }
+  }
+
+  let candidates: Array<{ target: PluginWorkloadSdkPromptTarget; index: number }> =
+    grant.promptTargets.map((target, index) => ({ target, index }))
+  let modelPolicy: PluginWorkloadSdkModelPolicy | null = null
+  if (params.modelPolicyRef !== undefined) {
+    modelPolicy = grant.modelPolicies[params.modelPolicyRef] ?? null
+    if (!modelPolicy) {
+      return {
+        ok: false,
+        error: deny(
+          'provider_policy_denied',
+          'modelPolicyRef does not resolve to this grant policy'
+        ),
+      }
+    }
+    if (
+      (params.model !== undefined && params.model !== modelPolicy.model) ||
+      (params.provider !== undefined && params.provider !== modelPolicy.provider)
+    ) {
+      return {
+        ok: false,
+        error: deny('provider_policy_denied', 'selector does not match modelPolicyRef'),
+      }
+    }
+    // A policy ref and target ref are two names for the same concrete target,
+    // not independent selectors.  Intersect them explicitly: otherwise the
+    // policy-ref branch would silently ignore targetRef and authorize a target
+    // different from the caller's declared intent.
+    if (params.targetRef !== undefined) {
+      const target = candidates.find(candidate => candidate.target.targetRef === params.targetRef)
+      if (
+        !target ||
+        target.target.provider !== modelPolicy.provider ||
+        target.target.model !== modelPolicy.model
+      ) {
+        return {
+          ok: false,
+          error: deny('provider_policy_denied', 'targetRef does not match modelPolicyRef'),
+        }
+      }
+      candidates = [target]
+    }
+    candidates = candidates.filter(
+      candidate =>
+        candidate.target.provider === modelPolicy!.provider &&
+        candidate.target.model === modelPolicy!.model
+    )
+  } else if (params.targetRef !== undefined) {
+    candidates = candidates.filter(candidate => candidate.target.targetRef === params.targetRef)
+    if (
+      candidates.length === 1 &&
+      ((params.model !== undefined && params.model !== candidates[0]!.target.model) ||
+        (params.provider !== undefined && params.provider !== candidates[0]!.target.provider))
+    ) {
+      return {
+        ok: false,
+        error: deny('provider_policy_denied', 'selector fields are inconsistent'),
+      }
+    }
+  } else if (params.provider !== undefined || params.model !== undefined) {
+    candidates = candidates.filter(
+      candidate =>
+        (params.provider === undefined || candidate.target.provider === params.provider) &&
+        (params.model === undefined || candidate.target.model === params.model)
+    )
+  } else {
+    return { ok: true, selectedIndex: 0, modelPolicy: null }
+  }
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      error: deny('target_not_allowed', 'requested target is not authorized by this grant'),
+    }
+  }
+  // A bare model has no provider authority. Exact target/provider+model and
+  // policy refs are necessarily unambiguous by their grammar.
+  if (
+    params.modelPolicyRef === undefined &&
+    params.targetRef === undefined &&
+    params.provider === undefined &&
+    params.model !== undefined &&
+    candidates.length > 1
+  ) {
+    return {
+      ok: false,
+      error: deny('ambiguous_model', 'model is authorized by multiple providers; select a target'),
+    }
+  }
+  return { ok: true, selectedIndex: candidates[0]!.index, modelPolicy }
 }
 
 export async function authorizePromptBridge(
@@ -122,41 +282,33 @@ async function authorizePromptBridgeInner(
   const callerError = checkCaller(grant, callerRef)
   if (callerError) return callerError
 
-  // Model policy resolution (plan §2.2): a modelPolicyRef is never a black
-  // box — it must resolve to a concrete record on the grant.
-  let modelPolicy: PluginWorkloadSdkModelPolicy | null = null
-  if (params.modelPolicyRef !== undefined) {
-    modelPolicy = grant.modelPolicies[params.modelPolicyRef] ?? null
-    if (!modelPolicy) {
+  // The mcp-host is configured once by WRC with spec.agent.  promptBridge may
+  // fall back across the operator's ordered targets, but its primary target
+  // must remain that same bootstrap binding.  Reject drift before selector
+  // resolution, audit, quota, or credential-ticket issuance.
+  if (params.bootstrapProvider !== undefined || params.bootstrapModel !== undefined) {
+    const bootstrapProvider = params.bootstrapProvider?.trim() ?? ''
+    const bootstrapModel = params.bootstrapModel?.trim() ?? ''
+    const primaryTarget = grant.promptTargets[0]
+    if (
+      !bootstrapProvider ||
+      !bootstrapModel ||
+      !primaryTarget ||
+      primaryTarget.provider !== bootstrapProvider ||
+      primaryTarget.model !== bootstrapModel
+    ) {
       return deny(
         'provider_policy_denied',
-        `modelPolicyRef "${params.modelPolicyRef}" does not resolve to a model policy record`
-      )
-    }
-    if (params.model !== undefined && params.model !== modelPolicy.model) {
-      return deny(
-        'provider_policy_denied',
-        `model "${params.model}" does not match modelPolicyRef "${params.modelPolicyRef}"`
+        'promptBridge default target does not match the mcp-host bootstrap binding'
       )
     }
   }
 
-  const requestedModel = modelPolicy?.model ?? params.model ?? null
-  if (grant.allowedModels.length === 0) {
-    return deny('provider_policy_denied', 'grant has no allowedModels configured for promptBridge')
-  }
-  if (requestedModel === null) {
-    return deny(
-      'provider_policy_denied',
-      'promptBridge requests must provide a model or a modelPolicyRef that resolves to one'
-    )
-  }
-  if (!grant.allowedModels.includes(requestedModel)) {
-    return deny(
-      'provider_policy_denied',
-      `model "${requestedModel}" is not in the grant's allowedModels`
-    )
-  }
+  const resolution = resolvePromptTarget(grant, params)
+  if (!resolution.ok) return resolution.error
+  const selectedTarget = grant.promptTargets[resolution.selectedIndex]!
+  const authorizedTargets = grant.promptTargets.slice(resolution.selectedIndex)
+  const resolvedPolicyHash = hashPromptTargetPolicy(grant)
 
   const recorded = await recordInvocation({
     recipeNamespace: claims.recipeNamespace,
@@ -164,7 +316,7 @@ async function authorizePromptBridgeInner(
     callerRef,
     correlationId: params.correlationId,
     method: 'promptBridge',
-    detail: requestedModel ?? 'provider-default',
+    detail: selectedTarget.model,
     purpose: params.purpose,
     idempotencyKey: params.idempotencyKey,
     payload: params.payload,
@@ -192,8 +344,19 @@ async function authorizePromptBridgeInner(
         invocationId: recorded.invocation.id,
         replay: true,
         status: recorded.invocation.status,
-        model: requestedModel,
-        modelPolicy,
+        model: selectedTarget.model,
+        modelPolicy: resolution.modelPolicy,
+        selectedTarget,
+        authorizedTargets,
+        policyRevision: grant.policyRevision,
+        policyHash: resolvedPolicyHash,
+        authorizedTargetTickets: issueTargetTickets(
+          claims,
+          recorded.invocation.id,
+          authorizedTargets,
+          grant.policyRevision,
+          resolvedPolicyHash
+        ),
         maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
       },
     }
@@ -236,16 +399,20 @@ async function authorizePromptBridgeInner(
       invocationId: recorded.invocation.id,
       replay: recorded.kind === 'replay',
       status: recorded.kind === 'replay' ? 'in_progress' : recorded.invocation.status,
-      model: requestedModel,
-      modelPolicy,
+      model: selectedTarget.model,
+      modelPolicy: resolution.modelPolicy,
+      selectedTarget,
+      authorizedTargets,
+      policyRevision: grant.policyRevision,
+      policyHash: resolvedPolicyHash,
+      authorizedTargetTickets: issueTargetTickets(
+        claims,
+        recorded.invocation.id,
+        authorizedTargets,
+        grant.policyRevision,
+        resolvedPolicyHash
+      ),
       maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
-      // TODO(R5-F6): this is the promptBridge failover STOP-POINT. The bridge's
-      // same-provider failover (mcp-host `LlmBridge`) reads `allowedModels` off
-      // this authorize response; today NO build populates it, so the bridge
-      // always receives `undefined` → zero fallback candidates → the F6 path is
-      // inert end-to-end. Exposing `allowedModels: grant.allowedModels` HERE is
-      // what activates it (fail over only within the grant, spec §3-R5.7).
-      // Deliberately NOT wired yet — out of R5 scope.
     },
   }
 }

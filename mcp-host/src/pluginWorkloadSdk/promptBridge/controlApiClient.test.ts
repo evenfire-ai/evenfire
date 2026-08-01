@@ -11,6 +11,28 @@ const promptBody = {
   idempotencyKey: 'k1',
   messages: [{ role: 'user', content: 'hi' }],
 }
+const target = {
+  targetRef: 'primary-zai',
+  provider: 'zai',
+  model: 'glm-5.1',
+  credentialSlot: 'zai-api-key',
+}
+
+function authorizedBody(invocationId: string) {
+  return {
+    invocationId,
+    replay: false,
+    status: 'in_progress',
+    model: target.model,
+    modelPolicy: null,
+    selectedTarget: target,
+    authorizedTargets: [target],
+    authorizedTargetTickets: [{ targetRef: target.targetRef, credentialTicket: 'signed-ticket' }],
+    policyRevision: 2,
+    policyHash: 'a'.repeat(64),
+    maxOutputTokens: null,
+  }
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -32,16 +54,7 @@ function makeClient(fetchImpl: typeof fetch, breaker?: CircuitBreaker) {
 
 describe('PluginWorkloadSdkControlApiClient', () => {
   it('posts to the gateway with the mcp-host bearer token', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(201, {
-        invocationId: 'inv-1',
-        replay: false,
-        status: 'in_progress',
-        model: null,
-        modelPolicy: null,
-        maxOutputTokens: null,
-      })
-    )
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
     const result = await client.authorizePromptBridge(promptBody)
     expect(result.invocationId).toBe('inv-1')
@@ -64,6 +77,32 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1) // 4xx is not retried
   })
 
+  it('fails closed when authorization omits target tickets', async () => {
+    const { authorizedTargetTickets: _omitted, ...missingTickets } = authorizedBody('inv-1')
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, missingTickets))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(client.authorizePromptBridge(promptBody)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+    })
+  })
+
+  it('serializes provider and target selectors without supplying a host default', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.authorizePromptBridge({
+      ...promptBody,
+      provider: 'zai',
+      model: 'glm-5.1',
+      targetRef: 'primary-zai',
+    })
+    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      provider: 'zai',
+      model: 'glm-5.1',
+      targetRef: 'primary-zai',
+    })
+  })
+
   it('retries 5xx and returns provider_unavailable after exhausting retries', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(503, {}))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
@@ -78,16 +117,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     const fetchImpl = vi
       .fn()
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
-      .mockResolvedValueOnce(
-        jsonResponse(201, {
-          invocationId: 'inv-2',
-          replay: false,
-          status: 'in_progress',
-          model: null,
-          modelPolicy: null,
-          maxOutputTokens: null,
-        })
-      )
+      .mockResolvedValueOnce(jsonResponse(201, authorizedBody('inv-2')))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
     const result = await client.authorizePromptBridge(promptBody)
     expect(result.invocationId).toBe('inv-2')
@@ -117,14 +147,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
   })
 
   describe('refresh-on-401 (runtime-token durability)', () => {
-    const successBody = {
-      invocationId: 'inv-ok',
-      replay: false,
-      status: 'in_progress',
-      model: null,
-      modelPolicy: null,
-      maxOutputTokens: null,
-    }
+    const successBody = authorizedBody('inv-ok')
 
     function makeRefreshingClient(
       fetchImpl: typeof fetch,

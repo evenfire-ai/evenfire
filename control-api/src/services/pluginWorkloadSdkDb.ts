@@ -33,9 +33,11 @@ export const PLUGIN_WORKLOAD_SDK_ERROR_CODES = [
   'caller_not_allowed',
   'scope_denied',
   'target_not_allowed',
+  'ambiguous_model',
   'event_type_not_allowed',
   'quota_exceeded',
   'provider_policy_denied',
+  'provider_unavailable',
   'payload_too_large',
   'idempotency_conflict',
   'recipe_binding_mismatch',
@@ -91,6 +93,15 @@ export interface PluginWorkloadSdkModelPolicy {
   maxCostUsd?: number
 }
 
+/** A single operator-authorized promptBridge attempt target. */
+export interface PluginWorkloadSdkPromptTarget {
+  targetRef: string
+  provider: string
+  model: string
+  /** Secret data-key identity only; never its value. */
+  credentialSlot: string
+}
+
 export interface PluginWorkloadSdkGrant {
   id: string
   recipeNamespace: string
@@ -110,6 +121,10 @@ export interface PluginWorkloadSdkGrant {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  /** Empty/null means a legacy grant and is deliberately not routable. */
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
 }
@@ -154,10 +169,49 @@ export function hashPayload(payload: unknown): string {
   return createHash('sha256').update(stableStringify(payload)).digest('hex')
 }
 
+/** Stable fingerprint of the complete ordered policy; contains no secret values. */
+export function hashPromptTargetPolicy(
+  grant: Pick<PluginWorkloadSdkGrant, 'policyRevision' | 'defaultTargetRef' | 'promptTargets'>
+): string {
+  return createHash('sha256')
+    .update(
+      stableStringify({
+        revision: grant.policyRevision,
+        defaultTargetRef: grant.defaultTargetRef,
+        targets: grant.promptTargets,
+      })
+    )
+    .digest('hex')
+}
+
 // ─── Row mapping ─────────────────────────────────────────────────────────
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap(raw => {
+    if (typeof raw !== 'object' || raw === null) return []
+    const target = raw as Record<string, unknown>
+    if (
+      typeof target.targetRef !== 'string' ||
+      typeof target.provider !== 'string' ||
+      typeof target.model !== 'string' ||
+      typeof target.credentialSlot !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        targetRef: target.targetRef,
+        provider: target.provider,
+        model: target.model,
+        credentialSlot: target.credentialSlot,
+      },
+    ]
+  })
 }
 
 function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
@@ -188,6 +242,12 @@ function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
     allowedCallers: stringArray(row.allowed_callers),
     quotaLimits,
     modelPolicies,
+    promptTargets: promptTargets(row.prompt_targets),
+    defaultTargetRef: row.default_target_ref == null ? null : String(row.default_target_ref),
+    policyRevision:
+      typeof row.policy_revision === 'number' && Number.isInteger(row.policy_revision)
+        ? row.policy_revision
+        : 0,
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
   }
@@ -248,6 +308,8 @@ export interface UpsertGrantParams {
   allowedCallers?: string[]
   quotaLimits?: PluginWorkloadSdkQuotaLimits
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export async function upsertGrant(
@@ -271,9 +333,9 @@ export async function upsertGrant(
     const result = await db.query(
       `INSERT INTO plugin_workload_sdk_grants
          (recipe_namespace, recipe_name, capability_family, provider, allowed_models,
-          allowed_event_types, allowed_target_refs, allowed_user_refs, allowed_callers,
-          quota_limits, model_policies)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb)
+         allowed_event_types, allowed_target_refs, allowed_user_refs, allowed_callers,
+          quota_limits, model_policies, prompt_targets, default_target_ref)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13)
        ON CONFLICT (recipe_namespace, recipe_name, capability_family)
        DO UPDATE SET
          provider = EXCLUDED.provider,
@@ -284,6 +346,9 @@ export async function upsertGrant(
          allowed_callers = EXCLUDED.allowed_callers,
          quota_limits = EXCLUDED.quota_limits,
          model_policies = EXCLUDED.model_policies,
+         prompt_targets = EXCLUDED.prompt_targets,
+         default_target_ref = EXCLUDED.default_target_ref,
+         policy_revision = plugin_workload_sdk_grants.policy_revision + 1,
          updated_at = now()
        RETURNING *`,
       [
@@ -298,6 +363,8 @@ export async function upsertGrant(
         JSON.stringify(params.allowedCallers ?? []),
         JSON.stringify(params.quotaLimits ?? {}),
         JSON.stringify(params.modelPolicies ?? {}),
+        JSON.stringify(params.promptTargets ?? []),
+        params.defaultTargetRef ?? null,
       ]
     )
     const grant = mapGrantRow(result.rows[0] as Record<string, unknown>)

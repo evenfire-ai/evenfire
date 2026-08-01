@@ -23,6 +23,12 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
       allowed_callers JSONB NOT NULL DEFAULT '[]'::jsonb,
       quota_limits JSONB NOT NULL DEFAULT '{}'::jsonb,
       model_policies JSONB NOT NULL DEFAULT '{}'::jsonb,
+      -- Ordered operator-authorized promptBridge routing policy. This stays
+      -- separate from legacy provider/allowed_models so old rows can be
+      -- inventoried without accidentally becoming a routable policy.
+      prompt_targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+      default_target_ref TEXT NULL,
+      policy_revision INTEGER NOT NULL DEFAULT 1,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (recipe_namespace, recipe_name, capability_family)
@@ -85,5 +91,19 @@ export async function addPluginWorkloadSdkProviderColumn(db: DbClient): Promise<
   await db.query(`
     ALTER TABLE plugin_workload_sdk_grants
       ADD COLUMN IF NOT EXISTS provider TEXT;
+  `)
+}
+
+/**
+ * Adds the explicit ordered promptBridge target policy. JSONB arrays retain
+ * operator-authored order; the writer updates every policy field together in
+ * one transaction and increments the revision on every replacement.
+ */
+export async function addPluginWorkloadSdkPromptTargetPolicyColumns(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE plugin_workload_sdk_grants
+      ADD COLUMN IF NOT EXISTS prompt_targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS default_target_ref TEXT NULL,
+      ADD COLUMN IF NOT EXISTS policy_revision INTEGER NOT NULL DEFAULT 1;
   `)
 }

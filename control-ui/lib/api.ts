@@ -886,6 +886,16 @@ export type AdminUser = {
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.
 export type HostSecretResource = { name: string; keys?: string[] }
+
+/**
+ * Host/LLM Secret metadata only. `keys` are Kubernetes data-key names; values
+ * are never returned. SDK target editors use this rather than recipe-scoped
+ * sandbox secrets because promptBridge credentials resolve from host Secrets.
+ */
+export async function listLlmHostSecrets() {
+  return apiGet('/api/v1/admin/secrets') as Promise<{ items?: HostSecretResource[] }>
+}
+
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -3187,6 +3197,14 @@ export type PluginWorkloadSdkModelPolicy = {
   maxCostUsd?: number
 }
 
+export type PluginWorkloadSdkPromptTarget = {
+  targetRef: string
+  provider: string
+  model: string
+  // Identity of a provider-owned secret data key; never a secret value.
+  credentialSlot: string
+}
+
 export type PluginWorkloadSdkQuotaLimits = {
   maxRequestsPerRun?: number
   maxNotificationsPerRun?: number
@@ -3211,6 +3229,9 @@ export type PluginWorkloadSdkGrant = {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
 }
@@ -3228,6 +3249,8 @@ export type PluginWorkloadSdkGrantInput = {
   allowedCallers?: string[]
   quotaLimits?: PluginWorkloadSdkQuotaLimits
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export type PluginWorkloadSdkQuotaCounter = {

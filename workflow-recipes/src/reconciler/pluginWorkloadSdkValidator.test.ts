@@ -170,6 +170,32 @@ describe('validatePluginWorkloadSdkSpec', () => {
     expect(errors).toEqual([])
   })
 
+  it.each([
+    ['triggers', { triggers: { onDemand: {} } }],
+    ['scheduling', { scheduling: { cron: '0 * * * *' } }],
+    [
+      'coordinatorImage',
+      {
+        coordinatorImage:
+          'example.com/coordinator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+    ],
+  ] as const)('rejects SDK-only %s before resource construction', (_field, override) => {
+    const errors = validatePluginWorkloadSdkSpec(baseSpec({ promptBridge: {} }, { ...override }))
+    expect(errors).toContain(
+      'pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
+    )
+  })
+
+  it('rejects SDK-only workflow fields when steps is the empty-array compatibility input', () => {
+    const errors = validatePluginWorkloadSdkSpec(
+      baseSpec({ promptBridge: {} }, { steps: [], triggers: { onDemand: {} } })
+    )
+    expect(errors).toContain(
+      'pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
+    )
+  })
+
   it('accepts clientNotifications-only without any agent', () => {
     const errors = validatePluginWorkloadSdkSpec(
       baseSpec({ clientNotifications: { allowedEventTypes: ['e2e.test'] } }, { agent: undefined })

@@ -5,85 +5,51 @@ import {
   ALL_FAILOVER_CLASSES,
   type ClassifiedLike,
   type FailoverClass,
-  FailoverEngine,
-  type LlmPolicy,
-  type ModelPair,
+  classifyFailoverClass,
 } from '../../llm/failover'
-import type { ApiKeys, ModelConfig } from '../../types'
+import { isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
+import type { PromptBridgeTarget } from '../domain/types'
+import type { BrokeredCredential } from './credentialBrokerClient'
 
-/**
- * LLM bridge (plan §3.3 step 5, OQ-2): executes the authorized one-shot
- * completion against the provider bound to THIS mcp-host. The provider is
- * never selectable per request — only the model within it. Inference-only:
- * no tools, no session state (v1 invariant).
- *
- * Provider circuit breaker (plan §3.4): >50% failures over 30s opens the
- * circuit; subsequent calls return provider_unavailable until a 60s quiet
- * period elapses.
- *
- * Provider-fallback (R5 F6, spec §3-R5.7): when the caller supplies
- * `fallbackModels` (derived from the grant's `allowedModels`), an eligible
- * classified failure (`triggerOn`) switches to the next allowed model of the
- * SAME provider and retries the request. The bridge NEVER switches provider —
- * so, by construction, a fallback model always belongs to the grant's allowlist
- * (outside the grant = no switch, the original error propagates). The failover
- * decision runs on `classifyError(err).code`; the existing circuit breaker still
- * records every attempt (all classes) but stays OUTSIDE the trigger mechanism —
- * the reusable {@link FailoverEngine} decides the switch. Only the winning call
- * returns (and therefore meters, in the handler's `onUsage`).
- */
-
-/**
- * Internal carrier: an attempt that failed with a provider error, holding both
- * the failover classification (for the engine) and the ready
- * {@link PluginWorkloadError} to surface once the ordered list is exhausted.
- * Non-eligible failures (our own guardrails) are thrown as `PluginWorkloadError`
- * directly and propagate unchanged — the engine's classifier returns `null`.
- */
 class ClassifiedProviderError extends Error {
   constructor(
     readonly classified: ClassifiedLike,
-    private readonly pwe: PluginWorkloadError
+    private readonly publicError: PluginWorkloadError
   ) {
-    super(pwe.message)
+    super(publicError.message)
     this.name = 'ClassifiedProviderError'
   }
 
   toPluginWorkloadError(): PluginWorkloadError {
-    return this.pwe
+    return this.publicError
   }
 }
 
-export interface LlmBridgeContext {
-  keys: ApiKeys
-  provider: ModelConfig['provider']
-  defaultModel: string
+export interface PromptBridgeCredentialResolver {
+  resolve(input: {
+    invocationId: string
+    target: PromptBridgeTarget
+    credentialTicket: string
+  }): Promise<BrokeredCredential>
 }
 
 export interface LlmBridgeRequest {
-  model: string | null
+  invocationId: string
+  targets: Array<{ target: PromptBridgeTarget; credentialTicket: string }>
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
   temperature?: number
   timeoutMs: number
-  /**
-   * R5 F6 — ordered same-provider fallback models. Each MUST be a model the
-   * grant permits (the caller derives this from the grant's `allowedModels`);
-   * the bridge never switches provider, so a fallback is always inside the
-   * grant. Empty/absent = no failover = byte-identical to today's single call.
-   */
-  fallbackModels?: string[]
-  /**
-   * R5 F6 — failover classes that trigger a switch. Default: all four
-   * ({@link ALL_FAILOVER_CLASSES}). 400/validation is never eligible.
-   */
   triggerOn?: FailoverClass[]
 }
 
 export interface LlmBridgeResult {
   model: string
+  servedTarget: PromptBridgeTarget
+  fallbackUsed: boolean
+  llmSecretName: string
   content: string
   usage: { inputTokens: number; outputTokens: number }
   finishReason: 'complete' | 'length' | 'content_filter'
@@ -97,112 +63,143 @@ function mapFinishReason(reason: FinishReason): LlmBridgeResult['finishReason'] 
   return 'complete'
 }
 
+/**
+ * Executes only the ordered target suffix authorized by control-api. Each
+ * attempt redeems its own signed ticket and credential; credential/config
+ * failures are terminal, while eligible provider failures alone advance to
+ * the next authorized target.
+ */
 export class LlmBridge {
-  private readonly breaker: CircuitBreaker
+  private readonly breakers = new Map<string, CircuitBreaker>()
+  private static readonly MAX_TARGET_BREAKERS = 512
 
   constructor(
-    private readonly getContext: () => LlmBridgeContext | null,
+    private readonly credentials: PromptBridgeCredentialResolver,
     private readonly opts: {
       maxResponseBytes?: number
-      breaker?: CircuitBreaker
+      /** Creates an isolated breaker for each effective provider target. */
+      createBreaker?: (target: PromptBridgeTarget) => CircuitBreaker
       createProvider?: typeof createLLMProvider
     } = {}
   ) {
-    this.breaker = opts.breaker ?? new CircuitBreaker()
+    // Breaker state is intentionally keyed by the complete target identity.
+    // A provider/model/credential-slot policy can change while the mcp-host
+    // remains alive, so targetRef alone is not sufficient isolation.
+  }
+
+  private breakerKey(target: PromptBridgeTarget): string {
+    return [target.targetRef, target.provider, target.model, target.credentialSlot].join('\u0000')
+  }
+
+  private breakerFor(target: PromptBridgeTarget): CircuitBreaker {
+    const key = this.breakerKey(target)
+    const existing = this.breakers.get(key)
+    if (existing) return existing
+
+    const breaker = this.opts.createBreaker?.(target) ?? new CircuitBreaker()
+    // A recipe policy is bounded, but the policy can be edited repeatedly over
+    // the lifetime of a host. Keep this process-local cache bounded as well.
+    if (this.breakers.size >= LlmBridge.MAX_TARGET_BREAKERS) {
+      const oldest = this.breakers.keys().next().value
+      if (typeof oldest === 'string') this.breakers.delete(oldest)
+    }
+    this.breakers.set(key, breaker)
+    return breaker
   }
 
   async complete(request: LlmBridgeRequest): Promise<LlmBridgeResult> {
-    if (!this.breaker.allow()) {
-      throw new PluginWorkloadError(
-        'provider_unavailable',
-        'LLM provider circuit breaker is open',
-        true
-      )
+    if (request.targets.length === 0) {
+      throw new PluginWorkloadError('provider_unavailable', 'no authorized provider target', false)
     }
+    const triggerOn = new Set(request.triggerOn ?? ALL_FAILOVER_CLASSES)
+    let lastProviderError: ClassifiedProviderError | null = null
 
-    const context = this.getContext()
-    if (!context) {
-      throw new PluginWorkloadError(
-        'provider_unavailable',
-        'no LLM provider is configured on this mcp-host',
-        true
-      )
-    }
+    for (const [index, authorized] of request.targets.entries()) {
+      if (!isLlmProvider(authorized.target.provider)) {
+        throw new PluginWorkloadError(
+          'provider_unavailable',
+          'authorized provider configuration is unavailable',
+          false
+        )
+      }
 
-    const primaryModel = request.model ?? context.defaultModel
-    const fallbackModels = this.resolveFallbackModels(request.fallbackModels, primaryModel)
+      const breaker = this.breakerFor(authorized.target)
+      if (!breaker.allow()) {
+        const error = new ClassifiedProviderError(
+          { code: LlmErrorCode.ApiCallFailed, retryable: true },
+          new PluginWorkloadError(
+            'provider_unavailable',
+            'LLM provider is temporarily unavailable',
+            true
+          )
+        )
+        lastProviderError = error
+        const failureClass = classifyFailoverClass(
+          error.classified.code,
+          error.classified.retryable
+        )
+        const eligible = failureClass !== null && triggerOn.has(failureClass)
+        if (!eligible || index === request.targets.length - 1) throw error.toPluginWorkloadError()
+        continue
+      }
 
-    // No fallback configured → the single-attempt path, byte-identical to before
-    // (R5 §3-R5.1: "sin política = comportamiento actual").
-    if (fallbackModels.length === 0) {
+      // Ticket redemption is deliberately inside the attempt loop. This value
+      // is held only for the provider call and is never exposed in SDK output.
+      const credential = await this.credentials.resolve({
+        invocationId: request.invocationId,
+        target: authorized.target,
+        credentialTicket: authorized.credentialTicket,
+      })
+
       try {
-        return await this.attempt(context, primaryModel, request)
-      } catch (err) {
-        throw err instanceof ClassifiedProviderError ? err.toPluginWorkloadError() : err
+        const completion = await this.attempt(credential, request, breaker)
+        return {
+          ...completion,
+          servedTarget: authorized.target,
+          fallbackUsed: index > 0,
+          llmSecretName: credential.llmSecretName,
+        }
+      } catch (error) {
+        if (!(error instanceof ClassifiedProviderError)) throw error
+        lastProviderError = error
+        const failureClass = classifyFailoverClass(
+          error.classified.code,
+          error.classified.retryable
+        )
+        const eligible = failureClass !== null && triggerOn.has(failureClass)
+        if (!eligible || index === request.targets.length - 1) throw error.toPluginWorkloadError()
       }
     }
 
-    // Per-call engine: a promptBridge request is a stateless one-shot, so the
-    // sticky cooldown across requests is irrelevant — the engine is used purely
-    // for its ordered attempt loop + eligibility classification + metric.
-    const policy: LlmPolicy = {
-      cooldownSeconds: 0,
-      triggerOn: request.triggerOn ?? [...ALL_FAILOVER_CLASSES],
-      fallbacks: fallbackModels.map(model => ({ provider: context.provider, model })),
-    }
-    const engine = new FailoverEngine(policy)
-    const primaryPair: ModelPair = { provider: context.provider, model: primaryModel }
-    try {
-      return await engine.run(
-        primaryPair,
-        target => () => this.attempt(context, target.model, request),
-        err => (err instanceof ClassifiedProviderError ? err.classified : null)
-      )
-    } catch (err) {
-      throw err instanceof ClassifiedProviderError ? err.toPluginWorkloadError() : err
-    }
+    throw (
+      lastProviderError?.toPluginWorkloadError() ??
+      new PluginWorkloadError('provider_unavailable', 'authorized providers are unavailable', true)
+    )
   }
 
-  /**
-   * Dedupe fallback models against the primary + each other, preserving order.
-   * The list arrives already gated to the grant's `allowedModels`, so nothing
-   * here can widen it.
-   */
-  private resolveFallbackModels(raw: string[] | undefined, primaryModel: string): string[] {
-    if (!raw || raw.length === 0) return []
-    const seen = new Set<string>([primaryModel])
-    const out: string[] = []
-    for (const model of raw) {
-      if (typeof model === 'string' && model.length > 0 && !seen.has(model)) {
-        seen.add(model)
-        out.push(model)
-      }
-    }
-    return out
-  }
-
-  /**
-   * One completion attempt against `model` (same provider). On success records
-   * the breaker + returns the served pair; on an eligible provider failure
-   * throws a {@link ClassifiedProviderError} (so the engine can switch); on a
-   * guardrail failure (payload/usage/no-key) throws a `PluginWorkloadError`
-   * (non-eligible → propagates unchanged).
-   */
   private async attempt(
-    context: LlmBridgeContext,
-    model: string,
-    request: LlmBridgeRequest
-  ): Promise<LlmBridgeResult> {
+    credential: BrokeredCredential,
+    request: LlmBridgeRequest,
+    breaker: CircuitBreaker
+  ): Promise<Pick<LlmBridgeResult, 'model' | 'content' | 'usage' | 'finishReason'>> {
     const factory = this.opts.createProvider ?? createLLMProvider
-    const provider: SingleTurnProvider | null = factory(context.keys, {
-      provider: context.provider,
-      name: model,
+    const providerId = credential.target.provider
+    if (!isLlmProvider(providerId)) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'authorized provider configuration is unavailable',
+        false
+      )
+    }
+    const provider: SingleTurnProvider | null = factory(credential.keys, {
+      provider: providerId,
+      name: credential.target.model,
     })
     if (!provider) {
       throw new PluginWorkloadError(
         'provider_unavailable',
-        'LLM provider could not be constructed (missing API key)',
-        true
+        'authorized provider credentials are unavailable',
+        false
       )
     }
 
@@ -214,8 +211,7 @@ export class LlmBridge {
         temperature: request.temperature,
         signal: controller.signal,
       })
-      this.breaker.record(true)
-
+      breaker.record(true)
       const maxBytes = this.opts.maxResponseBytes ?? DEFAULT_MAX_LLM_RESPONSE_BYTES
       if (Buffer.byteLength(response.content, 'utf8') > maxBytes) {
         throw new PluginWorkloadError(
@@ -229,24 +225,20 @@ export class LlmBridge {
         throw new PluginWorkloadError(
           'provider_unavailable',
           'provider returned invalid usage',
-          true
+          false
         )
       }
-
       return {
-        model,
+        model: credential.target.model,
         content: response.content,
         usage: { inputTokens, outputTokens },
         finishReason: mapFinishReason(response.finish_reason),
       }
-    } catch (err) {
-      // Our own guardrails (payload/usage/no-key) are not provider failures:
-      // propagate unchanged, never fail over.
-      if (err instanceof PluginWorkloadError) throw err
-      this.breaker.record(false)
+    } catch (error) {
+      if (error instanceof PluginWorkloadError) throw error
+      breaker.record(false)
       if (controller.signal.aborted) {
         throw new ClassifiedProviderError(
-          // A timeout is a retryable transport failure → provider_unavailable.
           { code: LlmErrorCode.ApiCallFailed, retryable: true },
           new PluginWorkloadError(
             'provider_unavailable',
@@ -255,7 +247,7 @@ export class LlmBridge {
           )
         )
       }
-      const classified = provider.classifyError(err)
+      const classified = provider.classifyError(error)
       throw new ClassifiedProviderError(
         { code: classified.code, retryable: classified.retryable },
         new PluginWorkloadError(

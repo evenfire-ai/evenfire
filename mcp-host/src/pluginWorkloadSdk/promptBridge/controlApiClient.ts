@@ -1,5 +1,6 @@
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, isKnownPluginWorkloadErrorCode } from '../domain/errors'
+import type { PromptBridgeTarget } from '../domain/types'
 
 /**
  * Anti-corruption layer (plan §3.4): encapsulates the HTTP call to
@@ -36,19 +37,14 @@ export interface AuthorizePromptBridgeResponse {
   invocationId: string
   replay: boolean
   status: string
-  model: string | null
+  model: string
   modelPolicy: { provider: string; model: string; temperature?: number; maxCostUsd?: number } | null
+  selectedTarget: PromptBridgeTarget
+  authorizedTargets: PromptBridgeTarget[]
+  authorizedTargetTickets: Array<{ targetRef: string; credentialTicket: string }>
+  policyRevision: number
+  policyHash: string
   maxOutputTokens: number | null
-  /**
-   * R5 F6 — the grant's `allowed_models` (same-provider), if control-api
-   * surfaces it. OPTIONAL by design, but currently NO control-api build populates
-   * it (the authorize response omits it — see the `TODO(R5-F6)` stop-point in
-   * control-api `pluginWorkloadSdkAuthorizer.ts`). Until that field is wired, the
-   * bridge always receives `undefined` → no same-provider fallback candidates →
-   * the promptBridge failover path is inert. When present, the bridge fails over
-   * only among these models (never outside the grant — spec §3-R5.7).
-   */
-  allowedModels?: string[]
 }
 
 export interface SubmitClientNotificationResponse {
@@ -77,19 +73,41 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     typeof r.invocationId === 'string' &&
     typeof r.replay === 'boolean' &&
     typeof r.status === 'string' &&
-    (r.model === null || typeof r.model === 'string') &&
+    typeof r.model === 'string' &&
     (r.modelPolicy === null ||
       (typeof r.modelPolicy === 'object' &&
         r.modelPolicy !== null &&
         typeof (r.modelPolicy as Record<string, unknown>).provider === 'string' &&
         typeof (r.modelPolicy as Record<string, unknown>).model === 'string')) &&
-    (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number') &&
-    // Optional (R5 F6): absent (undefined or null), or a string array. Tolerating
-    // `null` matters — a gateway that serializes the absent field as `null`
-    // must not fail the WHOLE authorize response, only disable failover.
-    (r.allowedModels === undefined ||
-      r.allowedModels === null ||
-      (Array.isArray(r.allowedModels) && r.allowedModels.every(m => typeof m === 'string')))
+    isPromptBridgeTarget(r.selectedTarget) &&
+    Array.isArray(r.authorizedTargets) &&
+    r.authorizedTargets.length > 0 &&
+    r.authorizedTargets.every(isPromptBridgeTarget) &&
+    Array.isArray(r.authorizedTargetTickets) &&
+    r.authorizedTargetTickets.length === r.authorizedTargets.length &&
+    r.authorizedTargetTickets.every(
+      ticket =>
+        typeof ticket === 'object' &&
+        ticket !== null &&
+        typeof (ticket as Record<string, unknown>).targetRef === 'string' &&
+        typeof (ticket as Record<string, unknown>).credentialTicket === 'string'
+    ) &&
+    Number.isInteger(r.policyRevision) &&
+    (r.policyRevision as number) >= 1 &&
+    typeof r.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(r.policyHash) &&
+    (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number')
+  )
+}
+
+function isPromptBridgeTarget(value: unknown): value is PromptBridgeTarget {
+  if (typeof value !== 'object' || value === null) return false
+  const target = value as Record<string, unknown>
+  return (
+    typeof target.targetRef === 'string' &&
+    typeof target.provider === 'string' &&
+    typeof target.model === 'string' &&
+    typeof target.credentialSlot === 'string'
   )
 }
 
@@ -265,11 +283,16 @@ export class PluginWorkloadSdkControlApiClient {
     recipeNamespace: string
     recipeName: string
     callerRef: string
+    bootstrapProvider?: string
+    bootstrapModel?: string
     model?: string
+    provider?: string
+    targetRef?: string
     modelPolicyRef?: string
     purpose: string
     idempotencyKey: string
     messages: Array<{ role: string; content: string }>
+    metadata?: Record<string, unknown>
     correlationId?: string
   }): Promise<AuthorizePromptBridgeResponse> {
     const result = await this.post('/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge', body)

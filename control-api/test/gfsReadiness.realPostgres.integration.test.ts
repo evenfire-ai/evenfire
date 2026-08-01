@@ -74,9 +74,11 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     try {
       await client.query('BEGIN')
       await client.query(
-        `DELETE FROM schema_migrations WHERE version='0074_gfs_runtime_role_exact_contract'`
+        `DELETE FROM schema_migrations WHERE version='0075_plugin_workload_sdk_prompt_target_policy'`
       )
-      await expect(assertDbReady(client)).rejects.toThrow(/0074_gfs_runtime_role_exact_contract/)
+      await expect(assertDbReady(client)).rejects.toThrow(
+        /0075_plugin_workload_sdk_prompt_target_policy/
+      )
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()

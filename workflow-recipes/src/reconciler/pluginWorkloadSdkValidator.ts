@@ -21,6 +21,15 @@ export const DEFAULT_IDEMPOTENCY_KEY_PATTERN = '^[a-zA-Z0-9_-]{1,128}$'
 /** Condition type owned by the Plugin Workload SDK reconcile pass. */
 export const PLUGIN_WORKLOAD_SDK_CONDITION_TYPE = 'PluginWorkloadSdkCapability'
 
+/**
+ * WorkflowRecipe remains the CRD that carries Plugin Workload SDK, but an SDK
+ * workload is not a workflow. Keep the small set of workflow-only fields
+ * closed when the recipe has no executable steps. CEL is the first line of
+ * defence; this pure check preserves the same boundary for direct and
+ * mixed-version inputs that bypass admission.
+ */
+export const SDK_ONLY_WORKFLOW_FIELDS = ['triggers', 'scheduling', 'coordinatorImage'] as const
+
 function rejectWildcards(field: string, values: string[] | undefined, errors: string[]): void {
   for (const value of values ?? []) {
     if (value.includes('*')) {
@@ -47,6 +56,25 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
   if (!sdk) return []
 
   const errors: string[] = []
+
+  const hasWorkflowSteps = (spec.steps?.length ?? 0) > 0
+  if (!hasWorkflowSteps) {
+    const configuredWorkflowFields = SDK_ONLY_WORKFLOW_FIELDS.filter(field => {
+      switch (field) {
+        case 'triggers':
+          return spec.triggers !== undefined
+        case 'scheduling':
+          return spec.scheduling !== undefined
+        case 'coordinatorImage':
+          return spec.coordinatorImage !== undefined
+      }
+    })
+    if (configuredWorkflowFields.length > 0) {
+      errors.push(
+        'pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
+      )
+    }
+  }
 
   if (!sdk.promptBridge && !sdk.clientNotifications) {
     errors.push(

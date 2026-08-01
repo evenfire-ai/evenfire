@@ -1,8 +1,5 @@
 import { randomUUID } from 'crypto'
 import type { Config } from '../../config'
-import { apiKeysFromEnv } from '../../llm'
-import { isLlmProvider } from '../../llm/registryCore'
-import type { ApiKeys, ModelConfig } from '../../types'
 import type { LlmUsageEvent, UsageReporter } from '../../usage/usageReporter'
 import { getJwtRuntimeBinding } from '../../workflow/mcpHostRuntimeJwt'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from '../../workflow/userApprovalRequester'
@@ -10,8 +7,9 @@ import { ClientNotificationsHandler } from '../clientNotifications/handler'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { recordCircuitBreakerState } from '../metrics'
 import { PluginWorkloadSdkControlApiClient } from '../promptBridge/controlApiClient'
+import { PluginWorkloadSdkCredentialBrokerClient } from '../promptBridge/credentialBrokerClient'
 import { PromptBridgeHandler } from '../promptBridge/handler'
-import { LlmBridge, type LlmBridgeContext } from '../promptBridge/llmBridge'
+import { LlmBridge } from '../promptBridge/llmBridge'
 import { PluginWorkloadSdkServer, shouldStartPluginWorkloadSdk } from './sdkServer'
 import {
   loadWorkloadTokenRegistryFromDir,
@@ -126,12 +124,15 @@ export function maybeCreatePluginWorkloadSdkServer(
   runtimeAuth: McpHostRuntimeAuth | null,
   opts: {
     /**
-     * Live LLM binding source. Workflow-mode mcp-hosts receive their API
-     * key via POST /configure (never env), so main.ts wires this to the
-     * WorkflowService onLlmConfigured holder. Falls back to env-derived
-     * keys for dev usage.
+     * Live public LLM binding source. Workflow-mode mcp-hosts receive their
+     * provider/model via POST /configure (credentials never cross this
+     * callback), so main.ts wires this to the WorkflowService holder. A
+     * missing binding keeps promptBridge fail-closed until configure is ready.
      */
-    getLlmContext?: () => LlmBridgeContext | null
+    getLlmContext?: () => {
+      provider: string
+      defaultModel: string
+    } | null
     /**
      * Usage reporting (plan §5.6): when wired, every successful
      * promptBridge call ships one LlmUsageEvent (source_kind='workflow')
@@ -209,37 +210,19 @@ export function maybeCreatePluginWorkloadSdkServer(
   })
   recordCircuitBreakerState('control-api', false)
 
-  // OQ-2: the provider bound to this mcp-host is the single source of truth.
-  // promptBridge may select a model within it but never the provider. The set
-  // of known providers is the registry's `ALL_PROVIDERS`.
-  const envLlmContext = (): LlmBridgeContext | null => {
-    const rawProvider = config.devModelProvider ?? 'openai'
-    let provider: ModelConfig['provider']
-    if (isLlmProvider(rawProvider)) {
-      provider = rawProvider
-    } else {
-      console.warn(
-        `[PluginWorkloadSdk] Unknown devModelProvider '${rawProvider}', falling back to 'openai'`
-      )
-      provider = 'openai'
-    }
-    // Registry-driven & multi-slot (R4): collect each provider's dev
-    // credential slots from the env (a provider is included only when all its
-    // required slots are present).
-    const keys: ApiKeys = apiKeysFromEnv()
-    const defaultModel = config.devModelName ?? ''
-    if (!defaultModel) return null
-    return { keys, provider, defaultModel }
-  }
-  const getLlmContext = (): LlmBridgeContext | null => opts.getLlmContext?.() ?? envLlmContext()
-
-  const llmBridge = new LlmBridge(getLlmContext, {
-    maxResponseBytes: config.pluginWorkloadSdkMaxLlmResponseBytes,
-    breaker: new CircuitBreaker({
-      onStateChange: open => recordCircuitBreakerState('llm-provider', open),
-    }),
+  const credentialBroker = new PluginWorkloadSdkCredentialBrokerClient({
+    baseUrl: config.pluginWorkloadSdkCredentialBrokerUrl,
+    recipeNamespace: binding.recipeNamespace,
+    recipeName: binding.recipeName,
+    getAccessToken: () => runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '',
   })
-  recordCircuitBreakerState('llm-provider', false)
+  const llmBridge = new LlmBridge(credentialBroker, {
+    maxResponseBytes: config.pluginWorkloadSdkMaxLlmResponseBytes,
+    createBreaker: target =>
+      new CircuitBreaker({
+        onStateChange: open => recordCircuitBreakerState(`llm-provider:${target.targetRef}`, open),
+      }),
+  })
 
   const usageReporter = opts.usageReporter ?? null
   const promptBridgeHandler = new PromptBridgeHandler({
@@ -248,22 +231,27 @@ export function maybeCreatePluginWorkloadSdkServer(
     recipeNamespace: binding.recipeNamespace,
     recipeName: binding.recipeName,
     promptTimeoutMs: config.pluginWorkloadSdkPromptTimeoutSeconds * 1000,
-    resolveDefaultModel: () => getLlmContext()?.defaultModel ?? null,
+    getBootstrapTarget: opts.getLlmContext
+      ? () => {
+          const context = opts.getLlmContext?.()
+          if (!context) return null
+          return { provider: context.provider, model: context.defaultModel }
+        }
+      : undefined,
     onUsage: usage => {
       if (!usageReporter) return
-      const provider = getLlmContext()?.provider ?? 'unknown'
       const event = buildPromptBridgeUsageEvent({
         binding: {
           hostRef: runtimeAuth?.hostRef ?? binding.hostRef,
           recipeNamespace: binding.recipeNamespace,
           recipeName: binding.recipeName,
         },
-        provider,
+        provider: usage.provider,
         model: usage.model,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         callerRef: usage.callerRef,
-        metadata: usage.metadata,
+        metadata: { ...usage.metadata, llmSecretName: usage.llmSecretName },
       })
       if (event) usageReporter.enqueue(event)
     },

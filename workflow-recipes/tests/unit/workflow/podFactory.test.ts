@@ -414,6 +414,26 @@ describe('Pod Factory', () => {
     })
   })
 
+  describe('buildMcpHostPod Plugin SDK broker wiring', () => {
+    it('injects the real WRC endpoint into the mcp-host', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        agent,
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { mountWorkflowOutput: false, pluginWorkloadSdkEnabled: true }
+      )
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'CLERUM_WRC_URL',
+        value: 'http://wrc:8082',
+      })
+    })
+  })
+
   describe('buildMcpHostPod', () => {
     const pod = buildMcpHostPod(
       'my-wf',

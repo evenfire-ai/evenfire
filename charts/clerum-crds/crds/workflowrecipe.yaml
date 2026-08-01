@@ -44,9 +44,14 @@ spec:
               type: object
               # workloads is not required when steps is present (workflow-only recipes)
               x-kubernetes-validations:
-                # R1: agent{} requires steps[] — no agent without workflow
-                - rule: "!has(self.agent) || has(self.steps)"
-                  message: "agent requires steps: cannot define agent without workflow steps"
+                # R1: agent{} binds either an executable workflow or the eager
+                # Plugin Workload SDK promptBridge host. Empty steps[] is not a workflow.
+                - rule: "!has(self.agent) || (has(self.steps) && size(self.steps) > 0) || (has(self.pluginWorkloadSdk) && has(self.pluginWorkloadSdk.promptBridge))"
+                  message: "agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge"
+                # SDK-only recipes are a capability runtime, not a dormant workflow.
+                # Keep resolved workflow-only fields fail-closed in this mode.
+                - rule: "!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))"
+                  message: "spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage"
                 # R2: recipe must have workloads or steps (not empty)
                 - rule: "(has(self.workloads) && size(self.workloads) > 0) || has(self.steps)"
                   message: "recipe must define at least workloads or steps"
