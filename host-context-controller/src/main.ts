@@ -18,6 +18,7 @@ import {
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
 import {
@@ -113,9 +114,10 @@ async function main(): Promise<void> {
   const hasDesktopFn = hostReconciler
     ? (hostRef: string) => hostReconciler.hasDesktop(hostRef)
     : undefined
-  const providerAuthoritativeFn = watcher
-    ? () => watcher.isReadinessInventoryAuthoritative()
-    : undefined
+  // Dev (no watcher) gets an explicit always-authoritative gate: no inventory
+  // to certify there, and the server's fail-closed default would otherwise pin
+  // /ready at 503 forever (R3-B1). See resolveProviderAuthoritativeFn.
+  const providerAuthoritativeFn = resolveProviderAuthoritativeFn(watcher)
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
