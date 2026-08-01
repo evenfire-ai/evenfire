@@ -843,6 +843,14 @@ print_results() {
   echo ""
   echo -e "${BOLD}Total: ${e2e_total}  |  ${GREEN}Pass: ${e2e_pass}${NC}  |  ${RED}Fail: ${e2e_fail}${NC}"
   echo ""
+  # Zero tests executed is never success: a gate whose fixture never
+  # materialized (missing Host, aborted setup, empty filter) reaches here with
+  # e2e_total == 0 and, checking only e2e_fail, would print "All tests passed!"
+  # over an empty result set. Assert something actually ran before green.
+  if [ "$e2e_total" -eq 0 ]; then
+    echo -e "${RED}${BOLD}FAIL: zero tests executed — the harness never reached a real assertion${NC}" >&2
+    return 1
+  fi
   if [ "$e2e_fail" -eq 0 ]; then
     echo -e "${GREEN}${BOLD}All tests passed!${NC}"
     return 0
