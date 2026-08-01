@@ -243,4 +243,177 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
     expect(await readyStatus(server)).toBe(200)
   })
+
+  it('withholds readiness when the authoritative pass loses a delete fence under a provided safety snapshot', async () => {
+    const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
+    alignRevocationCounters(watcher)
+
+    // Baseline: a clean authoritative pass certifies and the gate opens.
+    mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+    await reconciler.fullReconcile([alphaContext], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: () => {},
+    })
+    alignRevocationCounters(watcher)
+    expect(await readyStatus(server)).toBe(200)
+
+    // Unlike the additive-phase test above, the stale allow is visible to the
+    // authoritative LISTs from the very start of the pass, so fullReconcile
+    // classifies it into the safety snapshot it provides to the revocation
+    // lane. Its identity-bound delete then loses the uid/resourceVersion
+    // precondition (409). The external-egress selector stays empty so the
+    // fence is lost in the provided-snapshot lane and nowhere else.
+    mocks.listNamespacedNetworkPolicy.mockImplementation(
+      async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => ({
+        items:
+          namespace === 'mcp-server' && !(labelSelector ?? '').includes('external-egress')
+            ? [stalePolicy]
+            : [],
+      })
+    )
+    mocks.deleteNamespacedNetworkPolicy.mockRejectedValue(
+      Object.assign(new Error('the object has been modified'), { code: 409 })
+    )
+
+    // The guarantee under test is that the fence degrades at the point of
+    // loss, while the condemned pass is still unwinding — not only when the
+    // pass finally reports. Sample it through the authority callback the pass
+    // keeps polling: every sample before the lost delete must be certified,
+    // and every later sample must already be withdrawn.
+    let certifications = 0
+    const fenceSeenDuringPass: boolean[] = []
+    await expect(
+      reconciler.fullReconcile([alphaContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => {
+          fenceSeenDuringPass.push(reconciler.hasCertifiedSafetyInventory())
+          return true
+        },
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete: () => {
+          certifications += 1
+        },
+      })
+    ).rejects.toThrow()
+
+    expect(certifications).toBe(0)
+    expect(fenceSeenDuringPass.length).toBeGreaterThan(1)
+    expect(fenceSeenDuringPass[0]).toBe(true)
+    expect(fenceSeenDuringPass[fenceSeenDuringPass.length - 1]).toBe(false)
+
+    alignRevocationCounters(watcher)
+    expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
+    expect(await readyStatus(server)).toBe(503)
+
+    // A clean authoritative pass re-certifies and reopens the gate.
+    mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+    await reconciler.fullReconcile([alphaContext], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: () => {},
+    })
+    alignRevocationCounters(watcher)
+    expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+    expect(await readyStatus(server)).toBe(200)
+  })
+
+  it('does not let a scoped delta certify readiness while the last authoritative pass left the inventory uncertified', async () => {
+    const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
+    const w = watcher as unknown as Record<string, any>
+
+    // Register the real Context watch so the production watch handler — the
+    // scoped-delta certification lane — can be driven through its callback.
+    await w.startContextWatch('ctx-rv-1')
+    const contextWatchCall = mocks.watch.mock.calls.find(([path]) =>
+      String(path).endsWith('/namespaces/mcp-server/contexts')
+    )
+    if (!contextWatchCall) throw new Error('Context watch was never registered')
+    const fireContextEvent = contextWatchCall[2] as (type: string, apiObj: unknown) => Promise<void>
+
+    // Seed the prior Context so the MODIFIED event below is a same-identity
+    // delta: same uid, same contextId, new generation.
+    const priorContext = {
+      name: 'alpha',
+      namespace: 'mcp-server',
+      uid: 'ctx-alpha-uid',
+      generation: 1,
+      spec: { contextId: 'alpha', mcpServers: [] },
+    }
+    w.contexts.set('alpha', priorContext)
+    alignRevocationCounters(watcher)
+
+    // Baseline clean authoritative pass: certified, gate open.
+    mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+    await reconciler.fullReconcile([priorContext], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: () => {},
+    })
+    alignRevocationCounters(watcher)
+    expect(await readyStatus(server)).toBe(200)
+
+    // The authoritative pass loses its delete fence under the provided
+    // snapshot, exactly as in the test above: the broad safety LISTs see the
+    // stale allow and its delete keeps 409ing. Every context-scoped LIST
+    // stays empty so the scoped delta fired below completes its own
+    // revocation cleanly — and because the 409 never clears, the convergence
+    // pass the watch event kicks off in the background can never certify
+    // either.
+    mocks.listNamespacedNetworkPolicy.mockImplementation(
+      async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+        const selector = labelSelector ?? ''
+        const scoped =
+          selector.includes(`${CONTEXT_LABEL}=`) || selector.includes('external-egress')
+        return { items: namespace === 'mcp-server' && !scoped ? [stalePolicy] : [] }
+      }
+    )
+    mocks.deleteNamespacedNetworkPolicy.mockRejectedValue(
+      Object.assign(new Error('the object has been modified'), { code: 409 })
+    )
+    await expect(
+      reconciler.fullReconcile([priorContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete: () => {},
+      })
+    ).rejects.toThrow()
+    alignRevocationCounters(watcher)
+    expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
+    expect(await readyStatus(server)).toBe(503)
+
+    // Fire a same-identity MODIFIED delta. Its scoped revocation completes
+    // (its label-scoped LISTs are clean) and it carries a delta certificate,
+    // so the only thing standing between it and
+    // recordNetworkPolicySafetyCertificate is the uncertified fence left by
+    // the authoritative pass.
+    const warnSpy = vi.spyOn(console, 'warn')
+    try {
+      await fireContextEvent('MODIFIED', {
+        metadata: { name: 'alpha', namespace: 'mcp-server', uid: 'ctx-alpha-uid', generation: 2 },
+        spec: { contextId: 'alpha', mcpServers: [] },
+      })
+
+      // The delta declined to certify: it warned, it recorded no certificate
+      // (the revocation counters were not advanced to the delta's bumped
+      // revision), and readiness stays withdrawn even after every counter is
+      // realigned so the fence is the only remaining gate.
+      expect(
+        warnSpy.mock.calls.some(call => String(call[0]).includes('Not certifying the scoped delta'))
+      ).toBe(true)
+      expect(w.networkPolicyRevocationContextRevision).not.toBe(w.contextDesiredRevision)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
+      alignRevocationCounters(watcher)
+      expect(await readyStatus(server)).toBe(503)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })
