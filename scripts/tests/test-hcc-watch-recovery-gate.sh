@@ -11,6 +11,7 @@ WATCH_GATE="${SCRIPT_DIR}/e2e-hcc-communicationchannel-watch-recovery.sh"
 READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-readiness-bootstrap.sh"
 MCP_READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-mcp-context-readiness.sh"
 HOST_BUNDLE_MEASURE="${SCRIPT_DIR}/measure-host-bundle-reconcile.sh"
+HOST_STORM_GATE="${SCRIPT_DIR}/e2e-host-storm-gate.sh"
 GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
@@ -479,6 +480,12 @@ marker_bindings=(
   "$HOST_BUNDLE_MEASURE" "HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'"
   "$HCC_K8S_CLIENT" 'Host reconciliation after ${reason} failed:'
 
+  "$HOST_STORM_GATE" "HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'"
+  "$HCC_K8S_CLIENT" 'Completed Host reconciliation after ${reason}'
+
+  "$HOST_STORM_GATE" "HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'"
+  "$HCC_K8S_CLIENT" 'Host reconciliation after ${reason} failed:'
+
   "$MCP_READINESS_GATE" 'Initial external egress reconciliation failed for ${MCP_NS}/${MCP_NAME};'
   "$HCC_EGRESS_COORDINATOR" 'Initial external egress reconciliation failed for ${key};'
 
@@ -520,12 +527,42 @@ done
 # unset. Assert the arity explicitly rather than relying on the pair count to
 # happen to notice.
 if [ $((${#marker_bindings[@]} % 4)) -eq 0 ] &&
-  [ "$marker_binding_count" -eq 29 ] &&
+  [ "$marker_binding_count" -eq 31 ] &&
   [ -z "$marker_drift" ]; then
   pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
 else
   printf '%s' "$marker_drift" >&2
   fail "a consumed HCC log marker drifted from its runtime producer (${marker_binding_count} pairs checked)"
+fi
+
+# Completeness fence: every static single-quoted *_MARKER defined in the e2e
+# gates MUST be inventoried above as a consumer_marker, so a NEW marker cannot be
+# born outside the drift fence (the pinned count only catches removals). Scoped
+# to single-quoted literals — a dynamic id like C_MARKER="refusal-c-${RUN_ID}"
+# (double-quoted, a per-run test id, not a cross-file HCC log marker) is not the
+# class this fence covers and is excluded by the quote style, not a hard-coded
+# allow-list.
+marker_is_inventoried() {
+  local needle="$1" i
+  for ((i = 1; i < ${#marker_bindings[@]}; i += 4)); do
+    [ "${marker_bindings[i]}" = "$needle" ] && return 0
+  done
+  return 1
+}
+uninventoried_markers=""
+while IFS= read -r marker_def; do
+  [ -n "$marker_def" ] || continue
+  marker_is_inventoried "$marker_def" ||
+    uninventoried_markers+="  ${marker_def}"$'\n'
+done < <(
+  grep -rhoE "^[[:space:]]*(readonly[[:space:]]+)?[A-Z_]+_MARKER='[^']*'" "${SCRIPT_DIR}"/*.sh |
+    sed -E "s/^[[:space:]]*(readonly[[:space:]]+)?//"
+)
+if [ -z "$uninventoried_markers" ]; then
+  pass "every single-quoted *_MARKER defined in the e2e gates is inventoried in the drift fence"
+else
+  printf '%s' "$uninventoried_markers" >&2
+  fail "an e2e gate defines a *_MARKER absent from marker_bindings (drift fence would miss it)"
 fi
 
 fixture_mcp_runtime_absent_function="$(
