@@ -1649,4 +1649,54 @@ else
   fail "cleanup can still print a false all-passed summary"
 fi
 
+# --- H3: SIGPIPE/pipefail sweep on HCC pass-marker log probes -------------
+# A `printf '%s[\n]' "$logs" | grep -Fq "$..._MARKER"` probe is a false-green
+# trap: on a large log with the marker near the top, `grep -Fq` exits early,
+# `printf` takes SIGPIPE, and under `set -o pipefail` the whole pipeline reports
+# failure — so a PRESENT marker reads as MISSING (deterministic 3/3 repro in the
+# round-2 storm gate). The safe idiom is a here-string: no producer to signal.
+#     grep -Fq -- "$MARKER" <<<"$logs"
+#
+# Scope: HCC pass-marker gates only (storm + measure). Explicitly OUT OF SCOPE
+# (tracked separately — a different failure class, or a non-HCC gate outside
+# this PR's blast radius):
+#   - e2e-gke-secrets.sh:291-294  grep -oE|wc leak COUNT: reads the whole log,
+#                                 no early-exit, so it is NOT the SIGPIPE class.
+#   - e2e-plugin-workload-sdk.sh  SDK markers (non-HCC).
+#   - e2e-lib.sh / e2e-prod-lib.sh / e2e-channel-reader-per-host.sh (non-HCC).
+HCC_STORM_GATE="${SCRIPT_DIR}/e2e-host-storm-gate.sh"
+# shellcheck disable=SC2016
+sigpipe_offenders="$(
+  grep -nE 'printf[^|]*\| *grep -Fq[^<]*_MARKER' \
+    "$HCC_STORM_GATE" "$HOST_BUNDLE_MEASURE" 2>/dev/null || true
+)"
+if [ -z "$sigpipe_offenders" ]; then
+  pass "HCC pass-marker probes use here-strings, not pipefail/SIGPIPE pipes"
+else
+  fail "HCC pass-marker probe reintroduced a printf|grep -Fq SIGPIPE path:
+${sigpipe_offenders}"
+fi
+
+# Corroborating repro of the mechanism the sweep guards against. The here-string
+# form MUST find a marker on line 1 of a 1.6 MB log (hard invariant). The pipe
+# form is expected to miss it under pipefail (SIGPIPE) — that miss is the bug,
+# demonstrated, not a standing assertion, so a platform that does not reproduce
+# it is not a suite failure: the static sweep above is the real enforcement.
+h3_marker='HCC_PASS_COMPLETED: h3 repro sentinel'
+h3_bulk="$(yes 'xxxxxxxxxxxxxxxx' | head -c 1600000)"
+h3_log="${h3_marker}
+${h3_bulk}"
+if grep -Fq -- "$h3_marker" <<<"$h3_log"; then
+  pass "here-string probe finds a marker on line 1 of a 1.6 MB log"
+else
+  fail "here-string probe MISSED a present marker on a large log (regression)"
+fi
+h3_pipe_found=0
+( set -o pipefail; printf '%s\n' "$h3_log" | grep -Fq -- "$h3_marker" ) && h3_pipe_found=1
+if [ "$h3_pipe_found" -eq 0 ]; then
+  pass "pipe+pipefail probe misses the same marker (SIGPIPE repro confirmed)"
+else
+  pass "pipe probe did not SIGPIPE on this platform; static sweep still enforces the idiom"
+fi
+
 exit "$FAIL"

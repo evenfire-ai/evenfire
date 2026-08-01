@@ -1062,11 +1062,11 @@ _replacement_fleet_completed_probe() {
   [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_C" ]] || return 1
   logs="$(kctl -n "$CONTROL_NS" logs "pod/${HCC_POD_C}" \
     -c host-context-controller 2>/dev/null)" || return 1
-  if printf '%s\n' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then
+  if grep -Fq -- "$HCC_PASS_FAILED_MARKER" <<<"$logs"; then
     replacement_fleet_state='failed'
     return 0
   fi
-  if printf '%s\n' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then
+  if grep -Fq -- "$HCC_PASS_COMPLETED_MARKER" <<<"$logs"; then
     replacement_fleet_state='completed'
     return 0
   fi
