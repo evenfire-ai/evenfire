@@ -22,7 +22,7 @@
  *     deletes are allowed to swallow errors — that mirrors existing
  *     convention and never masks a test's own assertions.
  */
-import { execFileSync, execSync, spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import { createHash, randomBytes } from 'crypto'
 import {
   CONTROL_API_URL,
@@ -38,12 +38,12 @@ export { CONTROL_API_URL, deleteJson, fetchJson, isServiceUp, postJson, putJson 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 // These test-config env vars flow into the kubectl command line built by
-// `kubectl()` (which shells out via execSync). A k8s context/namespace/ref name
-// is DNS-ish — letters, digits, dot, dash, underscore — so anything outside that
-// set is either a misconfiguration or a shell-injection attempt. Validate at the
-// source: this is the single choke point where external input reaches the
-// command line, so one guard here removes the injection vector for every caller
-// (CodeQL #827/#828, "indirect uncontrolled command line").
+// `kubectl()`/`kubectlApply()` (now via execFileSync argv — no shell). A k8s
+// context/namespace/ref name is DNS-ish — letters, digits, dot, dash, underscore
+// — so anything outside that set is either a misconfiguration or an injection
+// attempt. This source-level guard is defense in depth on top of the no-shell
+// execFileSync path that closes CodeQL #827/#828 ("indirect uncontrolled command
+// line").
 function requireSafeName(envName: string, value: string): string {
   if (!/^[A-Za-z0-9_.-]+$/.test(value)) {
     throw new Error(
@@ -94,14 +94,48 @@ export function randomSuffix(): string {
 
 // ─── kubectl ────────────────────────────────────────────────────────────────
 
+/**
+ * Split a kubectl argument string into argv tokens, honoring single/double
+ * quotes (e.g. `-o jsonpath='{...}'`, including `"`-quoted filters inside) so
+ * the whole invocation can go through execFileSync WITHOUT a shell. Only this
+ * split touches the string; the resulting tokens are passed as an argv array to
+ * kubectl, where shell metacharacters have no meaning. Closes CodeQL #827
+ * (js/indirect-command-line-injection): no env-derived value is ever
+ * interpolated into a shell command line.
+ */
+function tokenizeArgs(args: string): string[] {
+  const tokens: string[] = []
+  let cur = ''
+  let quote: "'" | '"' | null = null
+  let started = false
+  for (const ch of args) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else cur += ch
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+      started = true
+    } else if (ch === ' ' || ch === '\t' || ch === '\n') {
+      if (started) {
+        tokens.push(cur)
+        cur = ''
+        started = false
+      }
+    } else {
+      cur += ch
+      started = true
+    }
+  }
+  if (quote) throw new Error(`Unbalanced quote in kubectl args: ${JSON.stringify(args)}`)
+  if (started) tokens.push(cur)
+  return tokens
+}
+
 export function kubectl(args: string): string {
-  // KUBECTL_CONTEXT is validated at the source (requireSafeName) so it carries no
-  // shell metacharacters; `args` is composed by callers from literals, hex
-  // suffixes (randomBytes) and the validated namespace — no raw external input
-  // reaches this command line. Kept as execSync because callers pass a single
-  // pre-joined arg string (with quoted jsonpath); the injection source, the env
-  // vars, is what CodeQL #827 flags and what the source guard neutralizes.
-  return execSync(`kubectl --context=${KUBECTL_CONTEXT} ${args}`, {
+  // execFileSync (no shell): the context and every token go in as argv elements,
+  // so nothing is interpolated into a command line. KUBECTL_CONTEXT is also
+  // validated at the source (requireSafeName).
+  return execFileSync('kubectl', ['--context', KUBECTL_CONTEXT, ...tokenizeArgs(args)], {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
