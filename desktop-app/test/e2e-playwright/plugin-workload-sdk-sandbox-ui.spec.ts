@@ -23,6 +23,7 @@ test.skip(
 
 type EmbeddedContents = { id: number; url: string }
 type Rect = { x: number; y: number; width: number; height: number }
+type EmbeddedOption = { value: string; label: string }
 
 function assertSteplessSdkRecipePrecondition(): void {
   const context =
@@ -153,6 +154,22 @@ async function embeddedValue(
   )
 }
 
+async function embeddedOptions(
+  app: ElectronApplication,
+  webContentsId: number,
+  selector: string
+): Promise<EmbeddedOption[]> {
+  return app.evaluate(
+    async ({ webContents }, args) => {
+      const contents = webContents.fromId(args.webContentsId)
+      if (!contents || contents.isDestroyed()) return []
+      const script = `Array.from(document.querySelector(${JSON.stringify(args.selector)})?.options ?? []).map((option) => ({ value: option.value, label: option.textContent ?? '' }))`
+      return (await contents.executeJavaScript(script)) as EmbeddedOption[]
+    },
+    { webContentsId, selector }
+  )
+}
+
 async function embeddedActiveControl(
   app: ElectronApplication,
   webContentsId: number,
@@ -260,6 +277,31 @@ async function activateEmbedded(
   await sendEmbeddedKey(app, webContentsId, 'Enter')
 }
 
+async function selectEmbeddedRecipient(
+  app: ElectronApplication,
+  webContentsId: number,
+  selector: string
+): Promise<EmbeddedOption> {
+  const options = await embeddedOptions(app, webContentsId, selector)
+  const recipient = options.find(option => option.value && /@/.test(option.label))
+  if (!recipient) {
+    throw new Error(`Embedded recipient picker ${selector} has no visible email option.`)
+  }
+
+  // This is the native select path a user takes: focus the control, move from
+  // the placeholder to the first granted recipient, and commit with Enter.
+  // We inspect the option label only to verify the UI displays a human handle;
+  // the value is never injected into the DOM or sent directly to the backend.
+  await focusEmbeddedControl(app, webContentsId, selector)
+  await sendEmbeddedKey(app, webContentsId, 'Home')
+  await sendEmbeddedKey(app, webContentsId, 'ArrowDown')
+  await sendEmbeddedKey(app, webContentsId, 'Enter')
+  await expect.poll(() => embeddedValue(app, webContentsId, selector)).toBe(recipient.value)
+  expect(recipient.label).toContain('@')
+  expect(recipient.label).not.toMatch(/^[0-9a-f-]{36}$/i)
+  return recipient
+}
+
 test('Desktop Apps executes promptBridge and clientNotifications inside the real WebContentsView', async ({}, testInfo) => {
   requireRecorderConfirm(
     'E2E_PLUGIN_SDK_WRITE_CONFIRM',
@@ -314,11 +356,19 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     const promptResult = await embeddedText(app, webContentsId, '#prompt-out')
     expect(promptResult).not.toMatch(/"error"|provider_unavailable|requires a resolvable agent/i)
 
-    // Business signal for notifications: the real app loaded an authorized
-    // opaque recipient, then the native view submitted and rendered acceptance.
+    // Business signal for notifications: the real app loaded the grant-backed
+    // recipient list and the native view selected a visible email handle. The
+    // opaque userRef is produced by the select control, never typed by the test.
     await expect
-      .poll(() => embeddedValue(app!, webContentsId, '#userRef'), { timeout: 30_000 })
-      .not.toBe('')
+      .poll(
+        async () =>
+          (await embeddedOptions(app!, webContentsId, '#userRef')).filter(
+            option => option.value && /@/.test(option.label)
+          ).length,
+        { timeout: 30_000 }
+      )
+      .toBeGreaterThan(0)
+    await selectEmbeddedRecipient(app, webContentsId, '#userRef')
     await typeEmbedded(app, webContentsId, '#title', `Evenfire E2E ${marker}`)
     await typeEmbedded(app, webContentsId, '#message', 'Plugin Workload SDK Desktop validation.')
     await expect
@@ -336,6 +386,8 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     // operations, proving the Desktop Apps path rather than a direct proxy call.
     await expect(page.getByRole('button', { name: 'Back to apps' })).toBeVisible()
     expect(await findPromptNotifyContents(app)).toMatchObject({ id: webContentsId })
+    await page.getByRole('button', { name: 'Back to apps' }).click()
+    await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
   } finally {
     await finalizeRecording(app, page)
   }
