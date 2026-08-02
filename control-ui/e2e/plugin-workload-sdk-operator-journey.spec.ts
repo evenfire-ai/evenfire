@@ -384,6 +384,7 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       )
       expect(list.status).toBe(200)
       const grants = (list.data.data ?? list.data.items ?? list.data.grants ?? []) as Array<{
+        id?: string
         capabilityFamily?: string
         allowedModels?: string[]
         provider?: string
@@ -423,6 +424,27 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       expect(JSON.stringify(promptGrant)).not.toMatch(/secret|token/i)
     } finally {
       if (installedRecipeName) {
+        const grantList = await api(
+          token,
+          'GET',
+          `/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${installedRecipeName}`
+        ).catch(() => ({ status: 0, data: {} as Record<string, unknown> }))
+        const residualGrants = (grantList.data.data ??
+          grantList.data.items ??
+          grantList.data.grants ??
+          []) as Array<{ id?: string }>
+        for (const grant of residualGrants) {
+          if (grant.id) {
+            const deleted = await api(
+              token,
+              'DELETE',
+              `/api/v1/admin/plugin-workload-sdk/grants/${encodeURIComponent(grant.id)}?recipeNamespace=${encodeURIComponent(RECIPE_NS)}&recipeName=${encodeURIComponent(installedRecipeName)}`
+            )
+            if (deleted.status !== 200) {
+              throw new Error(`operator journey cleanup failed to delete grant: ${deleted.status}`)
+            }
+          }
+        }
         await api(
           token,
           'DELETE',
