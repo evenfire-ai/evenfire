@@ -17,6 +17,12 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
+// The rotation journey stages its connector on the mock MCP image (mirroring the
+// T2 integration `localMcpServerYaml` fixture) so the HCC rolls out a REAL
+// Deployment the UI can poll to a genuine `DeploymentReady=True` — an unmanaged
+// or non-existent image would never converge, only time out.
+const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
+
 // The connector-form selects are not label-associated (no htmlFor/id), so scope
 // to the wrapping `.cu-field` by its visible label text and drive its <select>.
 async function fieldSelect(page: Page, fieldLabelText: string, value: string): Promise<void> {
@@ -46,65 +52,6 @@ async function createEmptyContext(page: Page, contextName: string): Promise<void
       exact: true,
     })
   ).toBeVisible({ timeout: 20_000 })
-}
-
-// Creates a stdio connector backed by a single-key Kubernetes Secret (the
-// "Use Kubernetes Secret for credentials" path of the create form) so the
-// credential-rotation journey below has a real envSecret to rotate against.
-async function createSecretBackedConnector(
-  page: Page,
-  connectorName: string,
-  contextName: string,
-  secretName: string,
-  secretKey: string,
-  envVar: string,
-  initialValue: string
-): Promise<void> {
-  await page.getByRole('link', { name: 'Connectors', exact: true }).click()
-  await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-  await page.getByRole('button', { name: 'Create Connector', exact: true }).click()
-  await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
-
-  await page.getByPlaceholder('my-mcp-server').fill(connectorName)
-  await page
-    .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
-    .fill('qa-recorder/example:dev')
-  await page
-    .getByPlaceholder('Optional description of this connector')
-    .fill('QA recorder credential-rotation connector')
-
-  const contextDropdown = page.locator('.cu-selection-dropdown__button')
-  await expect(contextDropdown).toBeEnabled({ timeout: 20_000 })
-  await contextDropdown.click()
-  await expect(page.getByPlaceholder('Search contexts...')).toBeVisible({ timeout: 20_000 })
-  const contextOption = page.getByRole('option', { name: contextName, exact: true })
-  await expect(contextOption).toBeVisible({ timeout: 20_000 })
-  await contextOption.click()
-
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
-  await fieldSelect(page, 'Transport Type', 'stdio')
-  await fieldSelect(page, 'Managed', 'false')
-
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
-  await expect(page.getByText('External Egress', { exact: true })).toBeVisible({ timeout: 20_000 })
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
-  await page
-    .getByRole('checkbox', { name: 'Use Kubernetes Secret for credentials', exact: true })
-    .check()
-  await page.getByPlaceholder('brave-search-credentials').fill(secretName)
-  await page.getByRole('button', { name: 'Add Key Mapping', exact: true }).click()
-  await page.getByPlaceholder('api-key').fill(secretKey)
-  await page.getByPlaceholder('BRAVE_API_KEY').fill(envVar)
-  await page.getByPlaceholder('sk-...').fill(initialValue)
-
-  await page.getByRole('button', { name: 'Create connector', exact: true }).click()
-  await expect(page.getByText('Connector created successfully.', { exact: true })).toBeVisible({
-    timeout: 20_000,
-  })
-  await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 }
 
 async function createDiscoveryConnector(
@@ -244,16 +191,46 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     try {
       await loginThroughUi(page, credentials)
 
-      await createEmptyContext(page, contextName)
-      await createSecretBackedConnector(
-        page,
-        connectorName,
-        contextName,
-        secretName,
-        secretKey,
-        envVar,
-        'initial-value-123'
-      )
+      // Preconditions staged through the Control API (not the multi-step
+      // create-form UI): the behavior UNDER TEST here is the rotation journey, so
+      // the Secret + context + connector are set up out-of-band and the test
+      // drives only the rotation through the UI. A MANAGED connector on the mock
+      // image is used so the rotation reaches a real DeploymentReady terminal
+      // state (an unmanaged connector has no Deployment to poll). This mirrors the
+      // T2 integration `localMcpServerYaml` fixture.
+      const secretRes = await api(page.request, 'POST', '/api/v1/admin/mcp-secrets', {
+        name: secretName,
+        data: { [secretKey]: 'initial-value-123' },
+      })
+      expect(secretRes.status, `create Secret: ${JSON.stringify(secretRes.data)}`).toBeLessThan(300)
+
+      const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
+        metadata: { name: contextName },
+        spec: {
+          contextId: contextName,
+          description: 'QA recorder rotation context',
+          mcpServers: [],
+        },
+      })
+      expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
+
+      const srvRes = await api(page.request, 'POST', '/api/v1/admin/mcp-servers', {
+        metadata: { name: connectorName },
+        spec: {
+          image: MOCK_MCP_IMAGE,
+          contextRef: contextName,
+          description: 'issue #223 credential-rotation e2e connector',
+          transport: {
+            type: 'streamableHttp',
+            url: `http://${connectorName}.mcp-server.svc.cluster.local:3000/mcp`,
+            port: 3000,
+          },
+          healthCheck: { port: 3001 },
+          envSecret: { name: secretName, keys: [{ secretKey, envVar }] },
+          enabled: true,
+        },
+      })
+      expect(srvRes.status, `create connector: ${JSON.stringify(srvRes.data)}`).toBeLessThan(300)
 
       await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
       await expect(
