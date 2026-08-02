@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
+import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 export class SecretService {
   constructor(
@@ -30,6 +31,7 @@ export class SecretService {
   }
 
   async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+    assertValidSecretWriteKeys(req)
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
       kind: 'Secret',
@@ -62,6 +64,7 @@ export class SecretService {
    * keys must survive a partial update, use `mergeSecret` instead.
    */
   async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
+    assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
@@ -101,6 +104,7 @@ export class SecretService {
    * routes that target other namespaces unless their Role has been updated.
    */
   async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+    assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 
     const body: Partial<k8s.V1Secret> = {}
@@ -125,6 +129,7 @@ export class SecretService {
   }
 
   async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+    assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
     const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
 

@@ -15,6 +15,7 @@ import {
   parseSecretOwnership,
 } from '../../secretOwnership.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
+import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -91,7 +92,6 @@ const PROVIDER_OFFLINE_SCOPE: Record<string, string> = {
   'microsoft-graph': 'offline_access',
 }
 
-const SECRET_KEY_RE = /^[-._a-zA-Z0-9]+$/
 const STEP_RUN_KEYS = new Set(['type', 'language', 'code', 'capabilities'])
 const SENSITIVE_ENV_NAME_RE = /(PASSWORD|TOKEN|SECRET|API_KEY|CREDENTIAL|PRIVATE_KEY)/i
 const TEMPLATE_INPUT_REF_RE = /\{\{\s*inputs\.([A-Za-z0-9_.-]+)\s*\}\}/g
@@ -211,13 +211,6 @@ function validateName(name: string): boolean {
 function validateRecipeName(name: unknown): string | null {
   if (typeof name !== 'string' || !validateName(name)) {
     return 'name must be a lowercase RFC1123 label (letters, digits, hyphens; max 63 chars)'
-  }
-  return null
-}
-
-function validateSecretKey(key: unknown): string | null {
-  if (typeof key !== 'string' || key.length === 0 || !SECRET_KEY_RE.test(key)) {
-    return 'secret key must contain only letters, digits, dot, dash, or underscore'
   }
   return null
 }
@@ -740,7 +733,7 @@ export async function validateWorkflowRecipeSecretsAndCollectPending(
     }
     // imagePullSecrets carry no key — name + ownership are the only checks.
     if (ref.kind !== 'imagePullSecret') {
-      const keyErr = validateSecretKey(ref.key)
+      const keyErr = invalidSecretDataKeyReason(ref.key)
       if (keyErr) {
         errors.push({
           field: secretRefKeyField(ref),
@@ -1601,7 +1594,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
           : {}
       const stringData: Record<string, string> = {}
       for (const [key, value] of Object.entries(rawData)) {
-        const keyErr = validateSecretKey(key)
+        const keyErr = invalidSecretDataKeyReason(key)
         if (keyErr) {
           res.status(400).json({ error: keyErr, key })
           return

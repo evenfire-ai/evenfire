@@ -11,6 +11,7 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
@@ -324,8 +325,15 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      // Ensure all values are strings
+      // Reject invalid Secret keys and non-string values up front so creating a
+      // Secret with a key the apiserver refuses returns a clear 400 instead of
+      // the opaque 500 (mirrors the rotation guard on the PUT route).
       for (const [key, val] of Object.entries(data)) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
@@ -388,14 +396,9 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of Object.entries(data)) {
-        // A Kubernetes Secret data key must match [-._a-zA-Z0-9]+ AND is
-        // additionally rejected by the apiserver when it is "." / ".." or longer
-        // than 253 chars. Validate all three up front so an invalid key returns a
-        // clear 400 instead of the opaque apiserver 500 this guard exists to avoid.
-        if (!/^[A-Za-z0-9_.-]+$/.test(key) || key === '.' || key === '..' || key.length > 253) {
-          res.status(400).json({
-            error: `data key "${key}" is not a valid Secret key (only [-._a-zA-Z0-9], not "." or "..", max 253 chars)`,
-          })
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
           return
         }
         if (typeof val !== 'string') {
@@ -695,6 +698,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of Object.entries(data)) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
@@ -764,6 +772,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of dataEntries) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
