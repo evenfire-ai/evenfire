@@ -12,7 +12,7 @@
 //   E2E_SDK_PROMPT_BRIDGE_FAIL=<code>
 //   E2E_SDK_CLIENT_NOTIFICATION_OK=<notificationId>
 //   E2E_SDK_CLIENT_NOTIFICATION_FAIL=<code>
-//   E2E_SDK_IDEMPOTENCY_OK                       (same invocationId on replay)
+//   E2E_SDK_IDEMPOTENCY_REPLAY_GUARDED          (replay is rejected without a second provider call)
 //   E2E_SDK_IDEMPOTENCY_FAIL=<reason>
 //   E2E_SDK_QUOTA_EXCEEDED_OK                    (N+1 call correctly rejected)
 //   E2E_SDK_QUOTA_EXCEEDED_FAIL=<reason>
@@ -135,8 +135,12 @@ async function exerciseClientNotification() {
   }
 }
 
-// Idempotency: replay the same idempotencyKey → should return same invocationId
-// without consuming an additional quota slot.
+// Idempotency: replay the same idempotencyKey must never invoke the provider or
+// consume another quota slot. The public mcp-host route deliberately returns
+// idempotency_conflict for a completed prompt because the audit record does not
+// persist completion content to replay. The authorization record still keeps
+// the original invocation identity; callers must use a fresh key when they
+// need a new completion.
 async function exerciseIdempotency() {
   try {
     const { status, body } = await callSdk('/v1/prompt-bridge', {
@@ -144,12 +148,17 @@ async function exerciseIdempotency() {
       idempotencyKey: `e2e-prompt-${RUN_ID}`, // SAME key as first call
       messages: [{ role: 'user', content: 'Summarize: the quick brown fox.' }],
     })
-    if (status === 200 && body && body.invocationId === firstPromptBridgeId) {
-      log('E2E_SDK_IDEMPOTENCY_OK')
+    const code = (body && (body.error || body.code)) || `http_${status}`
+    if (status === 422 && code === 'idempotency_conflict') {
+      log('E2E_SDK_IDEMPOTENCY_REPLAY_GUARDED')
+    } else if (status === 200 && body && body.invocationId === firstPromptBridgeId) {
+      // Keep accepting the richer replay response if the SDK later adds
+      // durable completion replay without changing the no-double-charge
+      // invariant.
+      log('E2E_SDK_IDEMPOTENCY_REPLAY_GUARDED')
     } else if (status === 200 && body && body.invocationId !== firstPromptBridgeId) {
       log(`E2E_SDK_IDEMPOTENCY_FAIL=different_invocation_id:${body.invocationId}`)
     } else {
-      const code = (body && (body.error || body.code)) || `http_${status}`
       log(`E2E_SDK_IDEMPOTENCY_FAIL=${code}`)
     }
   } catch (err) {
