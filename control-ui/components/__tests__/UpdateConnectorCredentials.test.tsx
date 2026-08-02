@@ -328,7 +328,13 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     expect(screen.getByText(/Credentials rotated\./i)).toBeInTheDocument()
   })
 
-  it('reports failure only on the TERMINAL False (reason RolloutIncomplete)', async () => {
+  it('reports failure with the HCC diagnostic only after the FULL poll budget when RolloutIncomplete persists', async () => {
+    // RolloutIncomplete is the HCC saying "I exhausted MY 120s budget", not an
+    // irreversible verdict — its post-terminal re-poll can still correct the
+    // condition to True (see the recovery test below). So the UI must NOT latch
+    // failure on the first sighting; it reports failure only when its OWN
+    // POLL_TIMEOUT_MS expires with the diagnostic still uncorrected — and then
+    // with the HCC's rollout numbers, never a bare "timed out".
     mockUpdateMcpSecret.mockResolvedValue({
       name: ENV_SECRET.name,
       namespace: 'mcp-server',
@@ -347,10 +353,75 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     await renderPanel(ENV_SECRET)
     await submitRotation({ 'api-key': 'new-key-value' })
 
+    // First sighting: no failure latched — still inside the UI's own budget.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
     })
+    expect(screen.queryByText(/Rotation failed/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Rotating credentials/i)).toBeInTheDocument()
+
+    // Budget expiry with the diagnostic still standing: failure, carrying the
+    // HCC's rollout numbers, and NOT the inconclusive-timeout copy.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS)
+    })
     expect(screen.getByText(/Rotation failed:.*ready 0\/1/)).toBeInTheDocument()
+    expect(screen.queryByText(/did not finish within/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
+  })
+
+  it('recovers to success when a transient RolloutIncomplete is later corrected to True (HCC re-poll)', async () => {
+    // The HCC readiness budget (24x5s=120s, reconciler.ts pollReadiness) can write
+    // a False/RolloutIncomplete BEFORE a legitimately slow pod finishes rolling
+    // out; its post-terminal re-poll (commit c49957b) then corrects the condition
+    // to True within the UI's own POLL_TIMEOUT_MS (180s). RolloutIncomplete is
+    // therefore NOT irreversible — it means "the controller exhausted ITS budget,
+    // still observing". The UI must keep polling and report SUCCESS on the later
+    // True, not latch 'failed' on the first RolloutIncomplete. This is the
+    // false-negative a slow/loaded cluster reproduces (convergence 120s..180s).
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer
+      .mockResolvedValueOnce(
+        serverWithCondition({
+          status: 'False',
+          reason: 'RolloutIncomplete',
+          message: 'Rollout did not converge — ready 0/1, unavailable 1',
+          lastTransitionTime: '2026-01-01T00:00:02.000Z',
+        })
+      )
+      .mockResolvedValue(
+        serverWithCondition({
+          status: 'True',
+          message: 'ready',
+          lastTransitionTime: '2026-01-01T00:00:10.000Z',
+        })
+      )
+
+    await renderPanel(ENV_SECRET)
+    await submitRotation({ 'api-key': 'new-key-value' })
+
+    // First poll: a fresh RolloutIncomplete. The HCC may still correct it, so the
+    // UI must NOT declare failure and stop polling here — instead it tells the
+    // operator the rollout has outlived the controller's budget and is still
+    // being verified.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+    expect(screen.queryByText(/Rotation failed/i)).not.toBeInTheDocument()
+    expect(
+      screen.getByText(/taking longer than the controller's readiness budget/i)
+    ).toBeInTheDocument()
+
+    // Second poll: the HCC has corrected DeploymentReady to True -> success.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+    expect(screen.getByText(/Credentials rotated\./i)).toBeInTheDocument()
   })
 
   it('keeps waiting when DeploymentReady=True predates the PUT (stale success must not count)', async () => {
@@ -379,7 +450,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     expect(screen.getByText(/Rotating credentials/i)).toBeInTheDocument()
   })
 
-  it('reports failure with the condition message when DeploymentReady=False after the PUT', async () => {
+  it('reports failure with the condition message when RolloutIncomplete persists after the PUT', async () => {
     mockUpdateMcpSecret.mockResolvedValue({
       name: ENV_SECRET.name,
       namespace: 'mcp-server',
@@ -389,7 +460,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
-        // Pin the TERMINAL reason explicitly: this test asserts failure IS
+        // Pin the diagnosed reason explicitly: this test asserts failure IS
         // reported, so it must not silently inherit the helper's default reason.
         reason: 'RolloutIncomplete',
         message: 'pod CrashLoopBackOff: 0/1 ready',
@@ -400,8 +471,10 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     await renderPanel(ENV_SECRET)
     await submitRotation({ 'api-key': 'new-key-value' })
 
+    // A genuinely stuck pod: the diagnostic never gets corrected, so the UI's
+    // full budget elapses and the failure surfaces the HCC's message verbatim.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS + POLL_INTERVAL_MS)
     })
 
     expect(

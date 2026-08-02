@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
@@ -12,23 +12,37 @@ import type { RotationPhase, UpdateConnectorCredentialsProps } from './types'
 // (host-context-controller reconciler.ts: pollReadiness, 24 attempts × 5s =
 // 120s), plus room for the SecretInformer round-trip and one poll interval.
 //
-// The two budgets are not interchangeable: when a rollout fails, the HCC is the
-// one that writes the verdict — DeploymentReady=False with the rollout numbers
-// — at the END of its budget. If this timeout expired first, or at the same
-// moment, the operator would be shown a bare "timed out" instead of the
-// diagnosis that was about to arrive, and would have to go dig it out of the
-// CRD by hand. Giving up before the system has finished answering is the
-// difference between an actionable failure and a shrug.
+// The two budgets are not interchangeable, and the slack between them is
+// load-bearing in BOTH directions:
+//
+//  - When a rollout fails, the HCC writes the diagnosis — DeploymentReady=False
+//    reason=RolloutIncomplete with the rollout numbers — at the END of its
+//    budget. If this timeout expired first, the operator would see a bare
+//    "timed out" instead of the diagnosis that was about to arrive.
+//  - When a rollout is merely SLOW (a loaded cluster, a long image pull), the
+//    HCC exhausts its 120s budget and writes RolloutIncomplete before the pod
+//    goes Ready — and then its post-terminal re-poll (reconciler.ts,
+//    performReconcile) arms one more window and CORRECTS the condition to
+//    True/ReplicasAvailable once the Deployment converges. The ~60s this
+//    timeout outlives the HCC budget is precisely the observation slack in
+//    which that correction lands. Latching failure the moment RolloutIncomplete
+//    appears would throw that slack away and report a deterministic false
+//    negative for any rotation converging between 120s and 180s (issue #223).
+//
 // Exported so the tests drive fake timers off THESE values instead of keeping
 // their own copy: a duplicated budget silently stops testing the real one the
 // first time either side changes.
 export const POLL_INTERVAL_MS = 3_000
 export const POLL_TIMEOUT_MS = 180_000
 
-// The `reason` the HCC stamps on DeploymentReady=False ONLY when the readiness
-// poll has exhausted its budget — the terminal, actionable failure. Every other
-// False (notably `WaitingForReplicas`) is a transitory rollout state. Must match
-// host-context-controller/src/reconciler.ts.
+// The `reason` the HCC stamps on DeploymentReady=False when ITS readiness poll
+// has exhausted its budget. Terminal for that poll window — but NOT
+// irreversible: the HCC's post-terminal re-poll keeps observing and rewrites
+// the condition to True/ReplicasAvailable if the Deployment converges later.
+// For this UI it therefore means "keep the diagnostic, keep polling until OUR
+// budget expires", never "stop and declare failure". Every other False
+// (notably `WaitingForReplicas`) is a transitory rollout state with no
+// diagnostic value. Must match host-context-controller/src/reconciler.ts.
 export const ROLLOUT_INCOMPLETE_REASON = 'RolloutIncomplete'
 
 // Slack subtracted from the client-side cutoff to absorb clock skew between the
@@ -85,6 +99,14 @@ export function UpdateConnectorCredentials({
   const [phaseMessage, setPhaseMessage] = useState('')
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
   const [rotationAffected, setRotationAffected] = useState<string[]>([])
+  // The HCC's most recent RolloutIncomplete diagnostic, kept across polls (a
+  // ref, not state: it only matters at the timeout boundary, so it must not
+  // re-render or re-fire the poll effect). Seeing RolloutIncomplete never
+  // latches failure — the HCC re-polls post-terminal and can still correct the
+  // condition to True for a slow pod — but the diagnostic is preserved so that
+  // if OUR budget expires without a True, the operator gets the HCC's rollout
+  // numbers instead of a bare "timed out".
+  const rolloutIncompleteMessage = useRef<string | null>(null)
 
   useEffect(() => {
     if (!envSecret) return
@@ -120,6 +142,9 @@ export function UpdateConnectorCredentials({
     if (phase !== 'rotating' || !rotationCutoff) return
     let cancelled = false
     const startedAt = Date.now()
+    // Each rotation gets a clean slate: a diagnostic left over from a previous
+    // attempt must never be reported as THIS rotation's failure.
+    rolloutIncompleteMessage.current = null
 
     async function poll() {
       let latest: Awaited<ReturnType<typeof getMcpServer>>
@@ -141,21 +166,31 @@ export function UpdateConnectorCredentials({
         setPhase('success')
         return
       }
-      // A `False` DeploymentReady is NOT automatically a failure. The HCC writes
-      // `False` with reason `WaitingForReplicas` synchronously right after the
-      // rollout starts — the normal transitory state of EVERY rollout — and only
-      // escalates to the terminal reason `RolloutIncomplete` once its readiness
-      // poll exhausts its budget (host-context-controller reconciler.ts). Treating
-      // the transitory `False` as failure would abort almost every successful
-      // rotation on the first poll, seconds before the new pod goes Ready. So only
-      // the terminal verdict counts as failure; any other non-True state
-      // (WaitingForReplicas, Unknown) means "still rolling out" — keep polling
-      // until success, the terminal failure, or the bounded timeout. This mirrors
-      // the `reason === 'RolloutIncomplete'` discriminator the e2e helpers already
-      // use (assertRolloutNeverSucceeds).
+      // NO `False` DeploymentReady is a failure verdict for this UI — not even
+      // `RolloutIncomplete`:
+      //
+      //  - `WaitingForReplicas` is the normal transitory state of EVERY rollout,
+      //    written synchronously right after the PUT. Treating it as failure
+      //    would abort almost every successful rotation on the first poll.
+      //  - `RolloutIncomplete` means the HCC exhausted ITS 120s readiness budget
+      //    (host-context-controller reconciler.ts, pollReadiness 24×5s) — but the
+      //    HCC keeps observing past that verdict (post-terminal re-poll) and
+      //    corrects the condition to True when a slow pod converges. Latching
+      //    failure here would discard the ~60s of budget this poll still holds
+      //    and report a deterministic false negative for any rollout converging
+      //    between 120s and 180s — the exact bug of issue #223.
+      //
+      // So the ONLY outcomes are: a fresh True (success, above), or this poll's
+      // own bounded timeout — which reports `failed` with the preserved HCC
+      // diagnostic if RolloutIncomplete was seen, `timeout` otherwise.
       if (fresh.status === 'False' && fresh.reason === ROLLOUT_INCOMPLETE_REASON) {
-        setPhase('failed')
-        setPhaseMessage(fresh.message || 'The connector rollout did not complete.')
+        rolloutIncompleteMessage.current =
+          fresh.message || 'The connector rollout did not complete.'
+        // Keep the operator informed instead of silently spinning: the rollout
+        // has outlived the controller's own budget but is still being observed.
+        setPhaseMessage(
+          "The rollout is taking longer than the controller's readiness budget — still verifying…"
+        )
       }
     }
 
@@ -163,12 +198,23 @@ export function UpdateConnectorCredentials({
       if (Date.now() - startedAt >= POLL_TIMEOUT_MS) {
         clearInterval(id)
         if (!cancelled) {
-          setPhase('timeout')
-          setPhaseMessage(
-            `The rollout did not finish within ${Math.round(POLL_TIMEOUT_MS / 1000)}s. Run ` +
-              `"kubectl get mcpserver ${serverName} -o yaml" to see the current DeploymentReady ` +
-              'condition, or try the rotation again.'
-          )
+          if (rolloutIncompleteMessage.current !== null) {
+            // The HCC diagnosed the rollout (RolloutIncomplete) and never
+            // corrected it to True within our budget: a real failure, reported
+            // with the controller's own rollout numbers — never degraded to a
+            // bare "timed out".
+            setPhase('failed')
+            setPhaseMessage(rolloutIncompleteMessage.current)
+          } else {
+            // No verdict either way inside the budget — an inconclusive
+            // timeout, distinct from a diagnosed failure.
+            setPhase('timeout')
+            setPhaseMessage(
+              `The rollout did not finish within ${Math.round(POLL_TIMEOUT_MS / 1000)}s. Run ` +
+                `"kubectl get mcpserver ${serverName} -o yaml" to see the current DeploymentReady ` +
+                'condition, or try the rotation again.'
+            )
+          }
         }
         return
       }
@@ -252,6 +298,7 @@ export function UpdateConnectorCredentials({
     setPhaseMessage('')
     setRotationCutoff(null)
     setRotationAffected([])
+    rolloutIncompleteMessage.current = null
   }
 
   const busy = phase === 'saving' || phase === 'rotating'
