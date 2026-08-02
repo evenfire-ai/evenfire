@@ -16,8 +16,9 @@
 # session from the seeded admin on an explicitly selected local minikube profile.
 #
 # Usage:
-#   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-plugin-workload-sdk.sh
-#   bash scripts/e2e/e2e-plugin-workload-sdk.sh --cleanup-only
+#   E2E_PLUGIN_SDK_WRITE_CONFIRM=1 KUBECONTEXT=clerum-test \
+#     bash scripts/e2e/e2e-plugin-workload-sdk.sh
+#   E2E_PLUGIN_SDK_WRITE_CONFIRM=1 bash scripts/e2e/e2e-plugin-workload-sdk.sh --cleanup-only
 
 set -euo pipefail
 
@@ -189,6 +190,11 @@ FIXTURE="${SCRIPT_DIR}/../../tests/e2e/fixtures/plugin-workload-sdk-recipe.yaml"
 E2E_CREATED_RECIPE=0
 ADMIN_CURL_HTTP_STATUS=""
 ADMIN_CURL_BODY=""
+NOTIFICATION_PREF_SNAPSHOT_READY=0
+NOTIFICATION_PREF_SNAPSHOT_EXISTS=0
+NOTIFICATION_PREF_SNAPSHOT_MEDIUM=""
+NOTIFICATION_PREF_SNAPSHOT_FALLBACK=""
+NOTIFICATION_PREF_SNAPSHOT_ACCOUNT=""
 # Hard ceiling for the entire gate (default 15m). Override with E2E_GATE_MAX_SECONDS.
 E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-900}"
 E2E_GATE_STARTED_AT=$SECONDS
@@ -197,6 +203,15 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+
+require_write_confirmation() {
+  if [ "${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" != "1" ]; then
+    printf '%s\n' \
+      'Refusing Plugin Workload SDK E2E: this gate creates grants, calls providers, sends a notification, and changes test-user preferences.' \
+      'Set E2E_PLUGIN_SDK_WRITE_CONFIRM=1 explicitly for the branch-owned local Minikube profile.' >&2
+    return 1
+  fi
+}
 
 for provider in "$E2E_WORKFLOW_MODEL_PROVIDER" "$E2E_PROMPT_FALLBACK_PROVIDER"; do
   case "$provider" in
@@ -352,6 +367,10 @@ cleanup_on_exit() {
   if [ "${e2e_total:-0}" -gt 0 ] && [ "${E2E_SUPPRESS_RESULTS:-0}" != "1" ]; then
     print_results || true
   fi
+  if ! restore_notification_preferences && [ "$status" -eq 0 ]; then
+    fail "notification preference cleanup could not restore the seeded user state"
+    status=1
+  fi
   if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then exit "$status"; fi
   if [ "$E2E_CREATED_RECIPE" != "1" ]; then exit "$status"; fi
   if ! cleanup_sdk_recipe && [ "$status" -eq 0 ]; then
@@ -362,9 +381,12 @@ cleanup_on_exit() {
 }
 
 if [ "${1:-}" = "--cleanup-only" ]; then
+  require_write_confirmation || exit 2
   cleanup_sdk_recipe
   exit $?
 fi
+
+require_write_confirmation || exit 2
 
 trap cleanup_on_exit EXIT
 
@@ -520,6 +542,46 @@ psql_query() {
   kctl exec deploy/control-postgres -n "$CONTROL_NS" -- \
     psql -v ON_ERROR_STOP=1 -U postgres -d profiles -tA \
     -c "$sql" 2>/dev/null
+}
+
+snapshot_notification_preferences() {
+  local row
+  if ! row="$(psql_query "SELECT CASE WHEN preferred_medium IS NULL THEN '<NULL>' ELSE preferred_medium END || '|' || channel_fallback_enabled::text || '|' || CASE WHEN preferred_account_id IS NULL THEN '<NULL>' ELSE preferred_account_id::text END FROM user_notification_preferences WHERE user_id='${USER_REF}'::uuid;")"; then
+    return 1
+  fi
+  if [ -z "$row" ]; then
+    NOTIFICATION_PREF_SNAPSHOT_EXISTS=0
+    NOTIFICATION_PREF_SNAPSHOT_READY=1
+    return 0
+  fi
+  IFS='|' read -r NOTIFICATION_PREF_SNAPSHOT_MEDIUM \
+    NOTIFICATION_PREF_SNAPSHOT_FALLBACK \
+    NOTIFICATION_PREF_SNAPSHOT_ACCOUNT <<< "$row"
+  NOTIFICATION_PREF_SNAPSHOT_EXISTS=1
+  NOTIFICATION_PREF_SNAPSHOT_READY=1
+}
+
+restore_notification_preferences() {
+  if [ "${NOTIFICATION_PREF_SNAPSHOT_READY:-0}" != "1" ]; then
+    return 0
+  fi
+  if [ "${NOTIFICATION_PREF_SNAPSHOT_EXISTS:-0}" != "1" ]; then
+    psql_query "DELETE FROM user_notification_preferences WHERE user_id='${USER_REF}'::uuid;" >/dev/null 2>&1
+    return $?
+  fi
+
+  local medium_sql account_sql
+  if [ "$NOTIFICATION_PREF_SNAPSHOT_MEDIUM" = '<NULL>' ]; then
+    medium_sql='NULL'
+  else
+    medium_sql="'${NOTIFICATION_PREF_SNAPSHOT_MEDIUM}'"
+  fi
+  if [ "$NOTIFICATION_PREF_SNAPSHOT_ACCOUNT" = '<NULL>' ]; then
+    account_sql='NULL'
+  else
+    account_sql="'${NOTIFICATION_PREF_SNAPSHOT_ACCOUNT}'::uuid"
+  fi
+  psql_query "INSERT INTO user_notification_preferences (user_id,preferred_medium,channel_fallback_enabled,preferred_account_id) VALUES ('${USER_REF}'::uuid,${medium_sql},${NOTIFICATION_PREF_SNAPSHOT_FALLBACK},${account_sql}) ON CONFLICT (user_id) DO UPDATE SET preferred_medium=EXCLUDED.preferred_medium,channel_fallback_enabled=EXCLUDED.channel_fallback_enabled,preferred_account_id=EXCLUDED.preferred_account_id,updated_at=NOW();" >/dev/null 2>&1
 }
 
 is_psql_true() {
@@ -1083,6 +1145,12 @@ if [ -z "$desktop_session_token" ]; then
   exit 1
 fi
 ok "obtained desktop session token for notification-preferences checks"
+
+if ! snapshot_notification_preferences; then
+  fail "could not snapshot notification preferences for ${USER_REF}"
+  exit 1
+fi
+ok "snapshotted notification preferences before the contract PUT checks"
 
 session_curl PUT "/external/me/notification-preferences" "$desktop_session_token" '{"preferredMedium":"telegram"}' >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" = "400" ] &&

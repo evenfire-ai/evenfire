@@ -773,9 +773,9 @@ test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-d
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
 
 .PHONY: test-e2e-plugin-workload-sdk
-test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; set E2E_ADMIN_TOKEN for the full happy path)
+test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)
 	@echo "Running Plugin Workload SDK E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-plugin-workload-sdk.sh
+	KUBECONTEXT="$${KUBECONTEXT:-$${E2E_KUBECONTEXT:-}}" bash scripts/e2e/e2e-plugin-workload-sdk.sh
 
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
@@ -941,4 +941,3 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
-
