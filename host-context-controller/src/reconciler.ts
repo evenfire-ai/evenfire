@@ -1997,6 +1997,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // readiness this is the normal path right after any Deployment write —
     // including a credential rotation — so the poll owns the terminal verdict
     // on the CRD.
+    //
+    // Post-terminal re-observation (intentional, self-terminating): after a
+    // terminal RolloutIncomplete, the status write that recorded it fires a
+    // MODIFIED watch → performReconcile → here again with !ready, arming ONE more
+    // poll window. For a genuinely stuck deployment the terminal condition re-write
+    // is byte-identical (the detail is a pure function of the replica tuple, no
+    // timestamps), so writeStatusCondition's `unchanged` short-circuit skips the
+    // patch → no watch event → no further re-arm. The only thing that re-arms again
+    // is a deployment whose replica tuple perpetually OSCILLATES, and that is
+    // bounded to one reconcile per poll window (~120s) — not a tight loop, and (per
+    // pollReadiness's atomic check-then-set) not a timer leak.
     if (!ready) {
       this.pollReadiness(server)
     }
