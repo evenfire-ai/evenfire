@@ -262,8 +262,11 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       //    directly from the catalog, unlike connector entries that open the wizard.
       await uiLogin(page)
       await page.locator('text=Marketplace').first().click()
-      await expect(page.getByLabel('Search Marketplace entries')).toBeVisible({ timeout: 15_000 })
-      await page.getByLabel('Search Marketplace entries').fill(entryName)
+      const pluginsTab = page.getByRole('tab', { name: 'Plugins', exact: true })
+      await expect(pluginsTab).toBeVisible({ timeout: 15_000 })
+      await pluginsTab.click()
+      await expect(page.getByLabel('Search Marketplace plugins')).toBeVisible({ timeout: 15_000 })
+      await page.getByLabel('Search Marketplace plugins').fill(entryName)
       const row = page.locator('tr', { hasText: entryName })
       await expect(row).toBeVisible({ timeout: 15_000 })
       const installResp = page.waitForResponse(
