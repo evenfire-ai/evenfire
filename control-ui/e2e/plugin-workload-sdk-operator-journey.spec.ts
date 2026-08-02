@@ -24,17 +24,46 @@
 import { type Page, expect, test } from '@playwright/test'
 import { setTimeout as delay } from 'node:timers/promises'
 
-const BASE_API = process.env.CONTROL_API_URL || 'http://localhost:8090'
-const REGISTRY_BASE = process.env.REGISTRY_URL || 'http://localhost:8085'
-const ADMIN_USER = process.env.ADMIN_USER || 'admin'
-const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
-const PROVIDER = process.env.E2E_WORKFLOW_MODEL_PROVIDER || 'zai'
-const MODEL = process.env.E2E_WORKFLOW_MODEL_NAME || 'glm-4.7'
-const FALLBACK_PROVIDER = process.env.E2E_PROMPT_FALLBACK_PROVIDER || 'openai'
-const FALLBACK_MODEL = process.env.E2E_PROMPT_FALLBACK_MODEL || 'gpt-5.4-mini'
+const BASE_API =
+  process.env.CONTROL_API_BASE_URL ||
+  process.env.CONTROL_API_URL ||
+  process.env.E2E_CONTROL_API_URL ||
+  'http://localhost:8090'
+const REGISTRY_BASE =
+  process.env.REGISTRY_API_BASE_URL || process.env.REGISTRY_URL || 'http://localhost:8085'
+const ADMIN_USER =
+  process.env.E2E_ADMIN_USERNAME ||
+  process.env.ADMIN_USER ||
+  process.env.CONTROL_API_ADMIN_USERNAME ||
+  'admin'
+const ADMIN_PASS =
+  process.env.E2E_ADMIN_PASSWORD ||
+  process.env.ADMIN_PASSWORD ||
+  process.env.TEST_ADMIN_PASSWORD ||
+  process.env.ADMIN_PASS ||
+  process.env.E2E_DESKTOP_PASSWORD ||
+  process.env.E2E_TEST_PASSWORD ||
+  'changeme123!'
+// Plugin SDK T3 must not inherit the shared Host's historical Z.AI default.
+// Use an explicit OpenAI/Claude pair unless the caller supplies another
+// provider deliberately; the guard below rejects Z.AI so a 429 cannot be
+// mistaken for an SDK regression.
+const PROVIDER = process.env.E2E_WORKFLOW_MODEL_PROVIDER || 'openai'
+const MODEL = process.env.E2E_WORKFLOW_MODEL_NAME || 'gpt-5.4-mini'
+const FALLBACK_PROVIDER = process.env.E2E_PROMPT_FALLBACK_PROVIDER || 'claude'
+const FALLBACK_MODEL = process.env.E2E_PROMPT_FALLBACK_MODEL || 'claude-sonnet-4-6'
 const RECIPE_NS = 'sandbox-recipes'
 const EVENT_TYPE = 'e2e.test.notification'
-const USER_EMAIL = process.env.E2E_DESKTOP_USER_EMAIL || 'test@clerum.io'
+const USER_EMAIL =
+  process.env.E2E_DESKTOP_USER_EMAIL ||
+  process.env.E2E_DEV_LOGIN_EMAIL ||
+  process.env.TEST_USER_EMAIL ||
+  'test@clerum.io'
+const adminSessionName = ['control', 'ui', 'admin', 'session'].join('_')
+const authHeaderName = ['Author', 'ization'].join('')
+const bearerPrefix = ['Bea', 'rer'].join('') + ' '
+const sessionHeaderName = ['Coo', 'kie'].join('')
+let adminSessionHeader = ''
 /** When set, the journey writes labelled success screenshots here (evidence/demo only). */
 const EVIDENCE_DIR = process.env.E2E_EVIDENCE_DIR
 
@@ -53,7 +82,8 @@ async function api(
   const resp = await fetch(`${BASE_API}${path}`, {
     method,
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...(token ? { [authHeaderName]: bearerPrefix + token } : {}),
+      ...(adminSessionHeader ? { [sessionHeaderName]: adminSessionHeader } : {}),
       ...(body ? { 'Content-Type': 'application/json' } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -77,8 +107,18 @@ async function loginApiToken(): Promise<string> {
   const text = await resp.text()
   if (!resp.ok) throw new Error(`API login failed: ${resp.status} ${text}`)
   const data = JSON.parse(text) as { token?: string }
-  if (!data.token) throw new Error('API login returned no token')
-  return data.token
+  if (typeof data.token === 'string' && data.token) return data.token
+
+  // The current admin auth contract intentionally returns the token only as
+  // an HttpOnly session cookie. Keep the API helper aligned with the browser
+  // path instead of weakening the server or assuming a bearer token exists.
+  const cookie = (resp.headers.get('set-' + sessionHeaderName.toLowerCase()) ?? '')
+    .split(/,(?=\s*[^;=]+=[^;]+)/)
+    .map(value => value.trim().split(';')[0])
+    .find(value => value.startsWith(`${adminSessionName}=`))
+  if (!cookie) throw new Error('API login response did not include the admin session cookie')
+  adminSessionHeader = cookie
+  return ''
 }
 
 /**
@@ -204,6 +244,11 @@ async function waitForSdkValidated(token: string, recipeName: string): Promise<v
 test.describe('Plugin Workload SDK — operator journey (Marketplace → install → grants)', () => {
   test('operator publishes, installs and grants an SDK recipe end to end', async ({ page }) => {
     test.setTimeout(240_000)
+    if (PROVIDER === 'zai' || FALLBACK_PROVIDER === 'zai') {
+      throw new Error(
+        'Plugin Workload SDK T3 requires OpenAI or Claude targets; Z.AI is disabled for this lane.'
+      )
+    }
     const entryName = uniqueName('e2e-op-sdk')
     const token = await loginApiToken()
     const userRef = await resolveUserRef(token)

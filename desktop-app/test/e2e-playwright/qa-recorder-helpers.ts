@@ -28,6 +28,8 @@ export const EXTERNAL_REST_API_BASE_URL =
   process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
 export const RPC_PROXY_BASE_URL = process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
+const DEFAULT_DESKTOP_EMAIL = 'test@clerum.io'
+const DEFAULT_DESKTOP_PASSWORD = 'changeme123!'
 
 /** Require an explicit opt-in confirmation variable before a journey that writes, messages, or pays. */
 export function requireRecorderConfirm(flag: string, description: string): void {
@@ -77,17 +79,24 @@ function requiredValue(label: string, candidates: Array<string | undefined>): st
   return value
 }
 
+function configuredValue(candidates: Array<string | undefined>): string | undefined {
+  return candidates.find(candidate => candidate?.trim())?.trim()
+}
+
 export function desktopCredentials(): { email: string; password: string } {
   return {
-    email: requiredValue('E2E_DEV_LOGIN_EMAIL or TEST_USER_EMAIL', [
-      process.env.E2E_DEV_LOGIN_EMAIL,
-      process.env.TEST_USER_EMAIL,
-    ]),
-    password: requiredValue('a Desktop test password', [
-      process.env.E2E_DESKTOP_PASSWORD,
-      process.env.E2E_TEST_PASSWORD,
-      process.env.ADMIN_PASSWORD,
-    ]),
+    // The canonical repository .env is loaded by playwright.config.ts before
+    // this helper is imported. Keep explicit process/root-env values first;
+    // these defaults are only for a freshly seeded local profile with no env.
+    email:
+      configuredValue([process.env.E2E_DEV_LOGIN_EMAIL, process.env.TEST_USER_EMAIL]) ||
+      DEFAULT_DESKTOP_EMAIL,
+    password:
+      configuredValue([
+        process.env.E2E_DESKTOP_PASSWORD,
+        process.env.E2E_TEST_PASSWORD,
+        process.env.ADMIN_PASSWORD,
+      ]) || DEFAULT_DESKTOP_PASSWORD,
   }
 }
 

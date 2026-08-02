@@ -3,9 +3,9 @@ import { defineConfig } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 
-// Load .env.e2e for Playwright (vitest helpers load it separately)
-const envPath = path.resolve(__dirname, '../../.env.e2e')
-if (fs.existsSync(envPath)) {
+/** Load a dotenv-style file without overwriting an explicit process value. */
+function loadEnvFile(envPath: string): void {
+  if (!fs.existsSync(envPath)) return
   const lines = fs.readFileSync(envPath, 'utf8').split('\n')
   for (const line of lines) {
     const trimmed = line.trim()
@@ -13,10 +13,49 @@ if (fs.existsSync(envPath)) {
     const eqIndex = trimmed.indexOf('=')
     if (eqIndex === -1) continue
     const key = trimmed.slice(0, eqIndex).trim()
-    const value = trimmed.slice(eqIndex + 1).trim()
+    let value = trimmed.slice(eqIndex + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
     if (!process.env[key]) process.env[key] = value
   }
 }
+
+/**
+ * Resolve the canonical repository .env for a secondary worktree. Direct
+ * Playwright invocations do not inherit the shell wrapper's environment, so
+ * the Desktop lane must use the same root-env contract as Control UI:
+ * explicit process values, then the canonical root .env, then test defaults.
+ */
+function loadCanonicalRootEnv(): void {
+  const repoRoot = path.resolve(__dirname, '../..')
+  const localEnv = path.join(repoRoot, '.env')
+  if (fs.existsSync(localEnv)) {
+    loadEnvFile(localEnv)
+    return
+  }
+
+  const gitFile = path.join(repoRoot, '.git')
+  if (!fs.existsSync(gitFile) || !fs.statSync(gitFile).isFile()) return
+  const gitdirMatch = fs
+    .readFileSync(gitFile, 'utf8')
+    .trim()
+    .match(/^gitdir:\s*(.+)$/)
+  if (!gitdirMatch) return
+  const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1])
+  const commonDirFile = path.join(worktreeGitDir, 'commondir')
+  if (!fs.existsSync(commonDirFile)) return
+  const commonDir = path.resolve(worktreeGitDir, fs.readFileSync(commonDirFile, 'utf8').trim())
+  loadEnvFile(path.join(commonDir, '..', '.env'))
+}
+
+loadCanonicalRootEnv()
+// A lane-specific file may refine the canonical root env, but never overrides
+// an explicit shell value or a value already loaded from the root.
+loadEnvFile(path.resolve(__dirname, '../../.env.e2e'))
 
 export default defineConfig({
   testDir: '.',

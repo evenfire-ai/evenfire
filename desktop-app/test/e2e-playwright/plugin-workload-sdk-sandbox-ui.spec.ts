@@ -1,5 +1,6 @@
-import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
+import { type ElectronApplication, type Page, type TestInfo, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import {
   EXTERNAL_REST_API_BASE_URL,
   RPC_PROXY_BASE_URL,
@@ -19,6 +20,7 @@ const RUN_ENABLED = process.env.E2E_PLUGIN_SDK_DESKTOP === '1'
 const APP_TITLE = process.env.E2E_PLUGIN_SDK_APP_TITLE || 'Prompt & Notify'
 const RECIPE_NAME = process.env.E2E_PLUGIN_SDK_RECIPE_NAME || 'evenfire-prompt-notify-app'
 const RECIPE_NAMESPACE = process.env.E2E_PLUGIN_SDK_RECIPE_NAMESPACE || 'sandbox-recipes'
+const CAPTURE_VISUALS = process.env.E2E_PLUGIN_SDK_CAPTURE === '1'
 
 test.skip(
   !RUN_ENABLED,
@@ -28,6 +30,14 @@ test.skip(
 type EmbeddedContents = { id: number; url: string }
 type Rect = { x: number; y: number; width: number; height: number }
 type EmbeddedOption = { value: string; label: string }
+type NativeLayout = {
+  windowBounds: Rect
+  viewBounds: Rect | null
+  displayScaleFactor: number
+  mainRendererDpr: number
+  embeddedRendererDpr: number | null
+  embeddedCaptureSize: { width: number; height: number } | null
+}
 
 function assertSteplessSdkRecipePrecondition(): void {
   const context =
@@ -76,6 +86,11 @@ function assertSteplessSdkRecipePrecondition(): void {
     !spec.agent.model
   ) {
     throw new Error('Desktop candidate must declare a resolvable spec.agent bootstrap.')
+  }
+  if (!['openai', 'claude'].includes(spec.agent.provider.toLowerCase())) {
+    throw new Error(
+      `Desktop T3 candidate must use OpenAI or Claude; received provider ${spec.agent.provider}.`
+    )
   }
   if (!Array.isArray(spec.workloads) || spec.workloads.length === 0) {
     throw new Error('Desktop candidate must declare at least one plugin workload.')
@@ -205,6 +220,86 @@ async function embeddedActiveSignature(
         })()`)
     )
   }, webContentsId)
+}
+
+/**
+ * Capture the actual native WebContentsView, which is composited above the
+ * renderer and therefore is not guaranteed to appear in page.screenshot().
+ * The data URL crosses the Electron boundary without exposing browser state
+ * or using a DOM shortcut; the resulting PNG is a Playwright test artifact.
+ */
+async function captureEmbeddedView(
+  app: ElectronApplication,
+  webContentsId: number,
+  outputPath: string
+): Promise<void> {
+  const dataUrl = await app.evaluate(async ({ webContents }, id) => {
+    const contents = webContents.fromId(id)
+    if (!contents || contents.isDestroyed()) throw new Error('Embedded WebContentsView closed')
+    const image = await contents.capturePage()
+    return image.toDataURL()
+  }, webContentsId)
+  const encoded = dataUrl.match(/^data:image\/png;base64,(.+)$/)?.[1]
+  if (!encoded) throw new Error('Electron returned a non-PNG sandbox UI capture')
+  writeFileSync(outputPath, Buffer.from(encoded, 'base64'))
+}
+
+/** Capture the BrowserWindow renderer surface for comparison with the native child capture. */
+async function captureDesktopWindow(app: ElectronApplication, outputPath: string): Promise<void> {
+  const dataUrl = await app.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (!window || window.isDestroyed()) throw new Error('Desktop BrowserWindow closed')
+    const image = await window.capturePage()
+    return image.toDataURL()
+  })
+  const encoded = dataUrl.match(/^data:image\/png;base64,(.+)$/)?.[1]
+  if (!encoded) throw new Error('Electron returned a non-PNG desktop window capture')
+  writeFileSync(outputPath, Buffer.from(encoded, 'base64'))
+}
+
+/** Read the native child-view bounds for a geometry comparison artifact. */
+async function nativeEmbeddedLayout(
+  app: ElectronApplication,
+  webContentsId: number
+): Promise<NativeLayout> {
+  return app.evaluate(async ({ BrowserWindow, screen }, id) => {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (!window || window.isDestroyed()) throw new Error('Desktop BrowserWindow closed')
+    const child = window.contentView.children.find(view => view.webContents?.id === id)
+    const windowBounds = window.getBounds()
+    const display = screen.getDisplayMatching(windowBounds)
+    const mainRendererDpr = Number(
+      await window.webContents.executeJavaScript('window.devicePixelRatio')
+    )
+    const embeddedRendererDpr = child
+      ? Number(await child.webContents.executeJavaScript('window.devicePixelRatio'))
+      : null
+    const embeddedCaptureSize = child ? (await child.webContents.capturePage()).getSize() : null
+    return {
+      windowBounds,
+      viewBounds: child?.getBounds() ?? null,
+      displayScaleFactor: display.scaleFactor,
+      mainRendererDpr,
+      embeddedRendererDpr,
+      embeddedCaptureSize,
+    }
+  }, webContentsId)
+}
+
+async function attachVisualLayout(
+  page: Page,
+  app: ElectronApplication,
+  webContentsId: number,
+  testInfo: TestInfo,
+  stage: string
+): Promise<void> {
+  const rendererRect = await page.locator('.sandbox-ui-embed-slot').boundingBox()
+  const nativeLayout = await nativeEmbeddedLayout(app, webContentsId)
+  await testInfo.attach(`sandbox-ui-layout-${stage}`, {
+    body: JSON.stringify({ stage, rendererRect, nativeLayout }, null, 2),
+    contentType: 'application/json',
+  })
+  console.log(`[sandbox-ui-visual] ${JSON.stringify({ stage, rendererRect, nativeLayout })}`)
 }
 
 async function sendEmbeddedKey(
@@ -379,6 +474,20 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     const webContentsId = embedded!.id
     await expect.poll(() => embeddedRect(app!, webContentsId, '#run')).not.toBeNull()
 
+    if (CAPTURE_VISUALS) {
+      await page.screenshot({
+        path: testInfo.outputPath('desktop-app-sandbox-ui-open.png'),
+        fullPage: true,
+      })
+      await captureDesktopWindow(app, testInfo.outputPath('desktop-app-sandbox-ui-window-open.png'))
+      await captureEmbeddedView(
+        app,
+        webContentsId,
+        testInfo.outputPath('desktop-app-sandbox-ui-webcontents.png')
+      )
+      await attachVisualLayout(page, app, webContentsId, testInfo, 'open')
+    }
+
     const marker = `desktop-sdk-${Date.now()}`
 
     await test.step('reject an empty prompt without creating an invocation', async () => {
@@ -430,15 +539,11 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
         { timeout: 30_000 }
       )
       .toBeGreaterThan(0)
-    await test.step('reject invalid notification forms before the SDK call', async () => {
-      const before = sdkInvocationCount('clientNotifications')
-      await activateEmbedded(app!, webContentsId, '#notify')
-      await expect
-        .poll(() => embeddedText(app!, webContentsId, '#notify-out'))
-        .toContain('Select a recipient first.')
-      expect(sdkInvocationCount('clientNotifications')).toBe(before)
-    })
-
+    // The sample UI receives exactly one grant-authorized recipient and the
+    // native select therefore adopts it as its initial value. Verify that
+    // visible grant-backed choice before continuing; the missing-field guard
+    // below still proves the form rejects an incomplete notification without
+    // creating an SDK invocation.
     await selectEmbeddedRecipient(app, webContentsId, '#userRef')
     await typeEmbedded(app, webContentsId, '#title', `Evenfire E2E ${marker}`)
     await test.step('reject a notification missing its body before the SDK call', async () => {
@@ -471,6 +576,23 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     await expect
       .poll(() => notificationDeliverySignal(notificationId!), { timeout: 30_000 })
       .toMatch(/^plugin_workload_sdk\.notification\|(queued|retrying|sent)$/)
+
+    if (CAPTURE_VISUALS) {
+      await page.screenshot({
+        path: testInfo.outputPath('desktop-app-sandbox-ui-complete.png'),
+        fullPage: true,
+      })
+      await captureDesktopWindow(
+        app,
+        testInfo.outputPath('desktop-app-sandbox-ui-window-complete.png')
+      )
+      await captureEmbeddedView(
+        app,
+        webContentsId,
+        testInfo.outputPath('desktop-app-sandbox-ui-webcontents-complete.png')
+      )
+      await attachVisualLayout(page, app, webContentsId, testInfo, 'complete')
+    }
 
     // Renderer chrome + native view both remain alive after the two backend
     // operations, proving the Desktop Apps path rather than a direct proxy call.
