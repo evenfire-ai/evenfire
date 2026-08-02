@@ -957,6 +957,23 @@ export class WorkflowReconciler {
           this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
         )
       ),
+      // Older SDK-only reconciles used the shared workflow policy factory and
+      // left coordinator-shaped policies behind. Sweep the complete recipe
+      // label set so upgrades and dynamic policy names cannot retain a stale
+      // isolation lane. The selector is recipe-scoped and only matches WRC-
+      // managed policies, never the namespace-wide baseline policies.
+      this.safeDelete(() =>
+        this.deleteNetworkPoliciesByLabelSelector(
+          ns,
+          `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+        )
+      ),
+      this.safeDelete(() =>
+        this.deleteNetworkPoliciesByLabelSelector(
+          this.deps.config.mcpServerNamespace,
+          `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+        )
+      ),
     ])
   }
 
@@ -2398,6 +2415,10 @@ export class WorkflowReconciler {
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
       includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
+      // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
+      // control/egress lanes, but do not manufacture coordinator policies
+      // whose selectors can never match a real workload.
+      includeCoordinator: !eagerSdkMcpHost,
       // The outer WorkflowRecipe reconciler owns this declarative lane so it can
       // revoke before phase short-circuits while gating creation on provenance.
       includeCoordinatorGfs: false,

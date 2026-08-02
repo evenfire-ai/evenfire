@@ -59,6 +59,13 @@ export interface NetworkPolicyConfig {
   wrcPort: number
   mcpHostPort: number
   gfscPort?: number
+  /**
+   * Emit workflow-coordinator lanes. Stepless Plugin Workload SDK hosts do not
+   * have a coordinator; they still need the mcp-host control/egress lanes but
+   * must not receive coordinator NetworkPolicies that can never select a pod.
+   * Defaults to true for the existing workflow runtime.
+   */
+  includeCoordinator?: boolean
   includeMcpHost?: boolean
   includeCoordinatorGfs?: boolean
   includeArtifactReader?: boolean
@@ -194,6 +201,17 @@ export function buildWorkflowNetworkPolicies(
     'clerum.io/recipe': config.recipeName,
     'clerum.io/managed-by': 'wrc',
   }
+  const includeCoordinator = config.includeCoordinator !== false
+  const filterCoordinatorPolicies = (policies: k8s.V1NetworkPolicy[]) =>
+    includeCoordinator
+      ? policies
+      : policies.filter(policy => {
+          const name = policy.metadata?.name ?? ''
+          return (
+            !name.startsWith(`${config.recipeName}-coord-to-`) &&
+            !name.startsWith(`${config.recipeName}-coordinator-to-`)
+          )
+        })
   const dnsEgressRule: k8s.V1NetworkPolicyEgressRule = {
     to: [
       {
@@ -632,23 +650,25 @@ export function buildWorkflowNetworkPolicies(
     : []
 
   if (config.includeMcpHost === false) {
-    return config.includeArtifactReader
-      ? [
-          coordinatorToWrc,
-          ...(config.includeCoordinatorGfs ? [coordinatorToGfs] : []),
-          artifactReaderIngress,
-          ...snippetRunnerPolicies,
-          ...coordinatorWorkloadIngressPolicies,
-        ]
-      : [
-          coordinatorToWrc,
-          ...(config.includeCoordinatorGfs ? [coordinatorToGfs] : []),
-          ...snippetRunnerPolicies,
-          ...coordinatorWorkloadIngressPolicies,
-        ]
+    return filterCoordinatorPolicies(
+      config.includeArtifactReader
+        ? [
+            coordinatorToWrc,
+            ...(config.includeCoordinatorGfs ? [coordinatorToGfs] : []),
+            artifactReaderIngress,
+            ...snippetRunnerPolicies,
+            ...coordinatorWorkloadIngressPolicies,
+          ]
+        : [
+            coordinatorToWrc,
+            ...(config.includeCoordinatorGfs ? [coordinatorToGfs] : []),
+            ...snippetRunnerPolicies,
+            ...coordinatorWorkloadIngressPolicies,
+          ]
+    )
   }
 
-  return [
+  return filterCoordinatorPolicies([
     // 1. Coordinator → mcp_host (within sandbox-recipes)
     {
       apiVersion: 'networking.k8s.io/v1',
@@ -952,5 +972,5 @@ export function buildWorkflowNetworkPolicies(
     // port plus mcp-host -> WRC for per-attempt credential ticket redemption.
     // Empty unless the capability and feature flag are both enabled.
     ...pluginWorkloadSdkPolicies,
-  ]
+  ])
 }

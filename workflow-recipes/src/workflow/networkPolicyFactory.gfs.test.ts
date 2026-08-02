@@ -55,6 +55,24 @@ describe('workflow GFS NetworkPolicy', () => {
     expect(policies.some(np => np.metadata?.name === 'daily-report-mcp-host-to-gfs')).toBe(false)
   })
 
+  it('omits coordinator lanes for a stepless SDK host while keeping mcp-host access', () => {
+    const policies = buildWorkflowNetworkPolicies({
+      ...baseConfig,
+      includeCoordinator: false,
+      pluginWorkloadSdkSandboxAccess: true,
+    })
+    const names = policies.map(policy => policy.metadata?.name)
+
+    expect(names).not.toContain('daily-report-coord-to-mcp-host')
+    expect(names).not.toContain('daily-report-coord-to-mcp-host-ingress')
+    expect(names).not.toContain('daily-report-coord-to-wrc')
+    expect(names).not.toContain('daily-report-coordinator-to-gfs')
+    expect(names).toContain('daily-report-wrc-to-mcp-host')
+    expect(names).toContain('daily-report-mcp-host-to-gfs')
+    expect(names).toContain('daily-report-mcp-host-to-llm-api')
+    expect(names).toContain('daily-report-workload-to-mcp-host-sdk-ingress')
+  })
+
   it('opens coordinator egress to gfsc only when workflow output publishing is enabled', () => {
     const withoutPublish = buildWorkflowNetworkPolicies({ ...baseConfig, includeMcpHost: false })
     expect(withoutPublish.some(np => np.metadata?.name === 'daily-report-coordinator-to-gfs')).toBe(

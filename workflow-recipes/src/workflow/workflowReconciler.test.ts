@@ -1418,6 +1418,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     const npNames = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.map(
       call => call[0].body.metadata.name
     )
+    // A stepless SDK host has no coordinator. The eager network lane must not
+    // create workflow-only coordinator policies that would later be orphaned.
+    expect(npNames).not.toContain('sdk-recipe-coord-to-mcp-host')
+    expect(npNames).not.toContain('sdk-recipe-coord-to-mcp-host-ingress')
+    expect(npNames).not.toContain('sdk-recipe-coord-to-wrc')
     expect(npNames).toContain('sdk-recipe-workload-to-mcp-host-sdk-ingress')
     expect(npNames).toContain('sdk-recipe-workload-to-mcp-host-sdk-egress')
     expect(npNames).toContain('sdk-recipe-mcp-host-to-gfs')
@@ -1464,6 +1469,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     )
     expect(podNames).toContain('sdk-only-mcp-host')
     expect(podNames).not.toContain('sdk-only-coordinator')
+    const npNames = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+      call => call[0].body.metadata.name
+    )
+    expect(npNames).not.toContain('sdk-only-coord-to-mcp-host')
+    expect(npNames).not.toContain('sdk-only-coord-to-mcp-host-ingress')
+    expect(npNames).not.toContain('sdk-only-coord-to-wrc')
     expect(result.phase).toBe('active')
     expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
       'zai',
@@ -1496,6 +1507,34 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       namespace: sandboxNamespace,
     })
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('sweeps legacy SDK network policies by recipe label during cleanup', async () => {
+    mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
+      ({ namespace }: { namespace: string }) =>
+        Promise.resolve({
+          items:
+            namespace === sandboxNamespace
+              ? [{ metadata: { name: 'sdk-only-legacy-coord-to-mcp-host' } }]
+              : [],
+        })
+    )
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await reconciler.cleanupPluginWorkloadSdkOnly('sdk-only')
+
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: sandboxNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: mcpServerNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'sdk-only-legacy-coord-to-mcp-host',
+      namespace: sandboxNamespace,
+    })
   })
 
   it('brokers the provider into the eager mcp-host for promptBridge recipes', async () => {
