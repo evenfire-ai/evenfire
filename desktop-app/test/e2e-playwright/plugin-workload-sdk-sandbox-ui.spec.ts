@@ -10,6 +10,10 @@ import {
   login,
   requireRecorderConfirm,
 } from './qa-recorder-helpers'
+import {
+  profilesSql,
+  sqlLiteral,
+} from './third-party-authn-first-party-mcphost/workflowApprovalJourney'
 
 const RUN_ENABLED = process.env.E2E_PLUGIN_SDK_DESKTOP === '1'
 const APP_TITLE = process.env.E2E_PLUGIN_SDK_APP_TITLE || 'Prompt & Notify'
@@ -302,6 +306,39 @@ async function selectEmbeddedRecipient(
   return recipient
 }
 
+function sdkInvocationCount(method: 'promptBridge' | 'clientNotifications'): number {
+  const raw = profilesSql(`
+    SELECT count(*)::int
+      FROM plugin_workload_sdk_invocations
+     WHERE recipe_namespace = ${sqlLiteral(RECIPE_NAMESPACE)}
+       AND recipe_name = ${sqlLiteral(RECIPE_NAME)}
+       AND method = ${sqlLiteral(method)};
+  `)
+  return Number.parseInt(raw, 10) || 0
+}
+
+function latestSdkInvocationStatus(method: 'promptBridge' | 'clientNotifications'): string {
+  return profilesSql(`
+    SELECT status
+      FROM plugin_workload_sdk_invocations
+     WHERE recipe_namespace = ${sqlLiteral(RECIPE_NAMESPACE)}
+       AND recipe_name = ${sqlLiteral(RECIPE_NAME)}
+       AND method = ${sqlLiteral(method)}
+     ORDER BY created_at DESC
+     LIMIT 1;
+  `)
+}
+
+function notificationDeliverySignal(notificationId: string): string {
+  return profilesSql(`
+    SELECT event_type || '|' || status
+      FROM notification_deliveries
+     WHERE event_type = 'plugin_workload_sdk.notification'
+       AND payload->>'notificationId' = ${sqlLiteral(notificationId)}
+     LIMIT 1;
+  `)
+}
+
 test('Desktop Apps executes promptBridge and clientNotifications inside the real WebContentsView', async ({}, testInfo) => {
   requireRecorderConfirm(
     'E2E_PLUGIN_SDK_WRITE_CONFIRM',
@@ -343,16 +380,41 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     await expect.poll(() => embeddedRect(app!, webContentsId, '#run')).not.toBeNull()
 
     const marker = `desktop-sdk-${Date.now()}`
-    await typeEmbedded(
-      app,
-      webContentsId,
-      '#prompt',
-      `Reply with a short confirmation for test marker ${marker}.`
-    )
-    await activateEmbedded(app, webContentsId, '#run')
-    await expect
-      .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), { timeout: 120_000 })
-      .not.toMatch(/^(?:|Running…|Enter a prompt first\.)$/)
+
+    await test.step('reject an empty prompt without creating an invocation', async () => {
+      const before = sdkInvocationCount('promptBridge')
+      await activateEmbedded(app!, webContentsId, '#run')
+      await expect
+        .poll(() => embeddedText(app!, webContentsId, '#prompt-out'))
+        .toContain('Enter a prompt first.')
+      expect(sdkInvocationCount('promptBridge')).toBe(before)
+    })
+
+    await test.step('run the real prompt through the embedded UI', async () => {
+      await typeEmbedded(
+        app!,
+        webContentsId,
+        '#prompt',
+        `Reply with a short confirmation for test marker ${marker}.`
+      )
+      const before = sdkInvocationCount('promptBridge')
+      await activateEmbedded(app!, webContentsId, '#run')
+      await expect
+        .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), {
+          timeout: 5_000,
+          intervals: [1, 5, 10, 25, 50],
+        })
+        .toContain('Running…')
+      await expect
+        .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), { timeout: 120_000 })
+        .not.toMatch(/^(?:|Running…|Enter a prompt first\.)$/)
+      await expect
+        .poll(() => sdkInvocationCount('promptBridge'), { timeout: 30_000 })
+        .toBe(before + 1)
+      await expect
+        .poll(() => latestSdkInvocationStatus('promptBridge'), { timeout: 30_000 })
+        .toBe('complete')
+    })
     const promptResult = await embeddedText(app, webContentsId, '#prompt-out')
     expect(promptResult).not.toMatch(/"error"|provider_unavailable|requires a resolvable agent/i)
 
@@ -368,8 +430,25 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
         { timeout: 30_000 }
       )
       .toBeGreaterThan(0)
+    await test.step('reject invalid notification forms before the SDK call', async () => {
+      const before = sdkInvocationCount('clientNotifications')
+      await activateEmbedded(app!, webContentsId, '#notify')
+      await expect
+        .poll(() => embeddedText(app!, webContentsId, '#notify-out'))
+        .toContain('Select a recipient first.')
+      expect(sdkInvocationCount('clientNotifications')).toBe(before)
+    })
+
     await selectEmbeddedRecipient(app, webContentsId, '#userRef')
     await typeEmbedded(app, webContentsId, '#title', `Evenfire E2E ${marker}`)
+    await test.step('reject a notification missing its body before the SDK call', async () => {
+      const before = sdkInvocationCount('clientNotifications')
+      await activateEmbedded(app!, webContentsId, '#notify')
+      await expect
+        .poll(() => embeddedText(app!, webContentsId, '#notify-out'))
+        .toContain('Title and body are required.')
+      expect(sdkInvocationCount('clientNotifications')).toBe(before)
+    })
     await typeEmbedded(app, webContentsId, '#message', 'Plugin Workload SDK Desktop validation.')
     await expect
       .poll(() => embeddedValue(app!, webContentsId, '#title'))
@@ -381,6 +460,17 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     await expect
       .poll(() => embeddedText(app!, webContentsId, '#notify-out'), { timeout: 30_000 })
       .toMatch(/"notificationId"\s*:\s*"[0-9a-f-]{36}"/i)
+    const notificationResult = await embeddedText(app, webContentsId, '#notify-out')
+    const notificationId = notificationResult.match(
+      /"notificationId"\s*:\s*"([0-9a-f-]{36})"/i
+    )?.[1]
+    expect(notificationId).toBeTruthy()
+    await expect
+      .poll(() => latestSdkInvocationStatus('clientNotifications'), { timeout: 30_000 })
+      .toMatch(/^(accepted|delivered)$/)
+    await expect
+      .poll(() => notificationDeliverySignal(notificationId!), { timeout: 30_000 })
+      .toMatch(/^plugin_workload_sdk\.notification\|(queued|retrying|sent)$/)
 
     // Renderer chrome + native view both remain alive after the two backend
     // operations, proving the Desktop Apps path rather than a direct proxy call.
