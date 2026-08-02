@@ -349,15 +349,29 @@ cleanup_plugin_workload_sdk_db() {
   psql_query "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';" >/dev/null 2>&1 || true
 }
 
+prune_recipe_owned_resources() {
+  local cleanup_status=0 ns kind
+  # WRC owns the lifecycle sweep, but a failed/aborted reconcile can leave
+  # recipe-labeled SDK NetworkPolicies behind after the WorkflowRecipe is
+  # gone. The gate must not leak those resources into the next run, so prune
+  # only the exact fixture label in the two namespaces it can touch.
+  for ns in "$SANDBOX_NS" "$RECIPE_NS"; do
+    for kind in deployment service secret configmap networkpolicy pod pvc; do
+      kctl delete "$kind" -n "$ns" -l "clerum.io/recipe=${RECIPE_NAME}" \
+        --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
+    done
+  done
+  return "$cleanup_status"
+}
+
 cleanup_sdk_recipe() {
   local cleanup_status=0
   cleanup_plugin_workload_sdk_db
   kctl delete workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
   wait_for_workflowrecipe_deleted "$RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" || cleanup_status=1
-  # WRC sweeps Deployments, Secrets, ConfigMaps and NetworkPolicies by the
-  # recipe label on finalization; give it a moment, then best-effort prune the
-  # named pods that may linger.
-  kctl delete pod "${RECIPE_NAME}-mcp-host" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! prune_recipe_owned_resources; then
+    cleanup_status=1
+  fi
   return "$cleanup_status"
 }
 
