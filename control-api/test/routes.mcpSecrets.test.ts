@@ -616,6 +616,23 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(gateway.mergeSecret).not.toHaveBeenCalled()
   })
 
+  it('rejects the reserved keys "." and ".." with a 400 (charset-valid but apiserver-rejected)', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    // "." and ".." pass the [-._a-zA-Z0-9]+ charset but Kubernetes rejects them
+    // as Secret data keys — without the explicit exclusion they'd reach the
+    // apiserver and come back as the opaque 500 this guard exists to prevent.
+    for (const badKey of ['.', '..']) {
+      const res = await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { [badKey]: 'value' } })
+        .expect(400)
+      expect(res.body.error).toContain('not a valid Secret key')
+    }
+    expect(gateway.mergeSecret).not.toHaveBeenCalled()
+  })
+
   // ── Gateway failure ──────────────────────────────────────────────────────
 
   it('still returns 200 when listing connectors fails AFTER a successful merge (M1)', async () => {

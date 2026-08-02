@@ -388,12 +388,13 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of Object.entries(data)) {
-        // A Kubernetes Secret data key must be [-._a-zA-Z0-9]+. Reject an
-        // invalid key with a clear 400 up front instead of letting the apiserver
-        // refuse the patch as an opaque 500 the operator can't act on.
-        if (!/^[A-Za-z0-9_.-]+$/.test(key)) {
+        // A Kubernetes Secret data key must match [-._a-zA-Z0-9]+ AND is
+        // additionally rejected by the apiserver when it is "." / ".." or longer
+        // than 253 chars. Validate all three up front so an invalid key returns a
+        // clear 400 instead of the opaque apiserver 500 this guard exists to avoid.
+        if (!/^[A-Za-z0-9_.-]+$/.test(key) || key === '.' || key === '..' || key.length > 253) {
           res.status(400).json({
-            error: `data key "${key}" is not a valid Secret key (only letters, digits, '-', '_', '.')`,
+            error: `data key "${key}" is not a valid Secret key (only [-._a-zA-Z0-9], not "." or "..", max 253 chars)`,
           })
           return
         }
