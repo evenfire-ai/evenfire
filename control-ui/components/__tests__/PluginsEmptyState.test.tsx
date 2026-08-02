@@ -51,7 +51,17 @@ describe('PluginsEmptyState', () => {
     } as unknown as Awaited<ReturnType<typeof api.listRegistryApiKeys>>)
     render(<PluginsEmptyState />)
     expect(await screen.findByText(/already has API keys/i)).toBeInTheDocument()
-    expect(screen.getAllByText('@acme').length).toBeGreaterThan(0)
+    // Org name appears once (no longer repeated) and links to the Entries tab.
+    expect(screen.getAllByText('@acme')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: '@acme' })).toHaveAttribute(
+      'href',
+      '/marketplace/org/entries'
+    )
+    // "Install Plugin" is a link to the org area.
+    expect(screen.getByRole('link', { name: 'Install Plugin' })).toHaveAttribute(
+      'href',
+      '/marketplace/org'
+    )
     // No setup walkthrough for an already-configured org.
     expect(screen.queryByText(/name your organization/i)).toBeNull()
     expect(screen.queryByText(/To publish from CI or scripts/i)).toBeNull()

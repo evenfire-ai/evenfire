@@ -61,21 +61,21 @@ export function PluginsEmptyState() {
         <p>
           {orgTag ? (
             <>
-              Your organization <strong>{orgTag}</strong> is connected
+              Your organization{' '}
+              <a className="cu-link" href={CONTROL_ROUTES.marketplace.orgEntries}>
+                {orgTag}
+              </a>{' '}
+              is connected
             </>
           ) : (
             'Your organization is connected'
           )}
-          {setup.hasKeys === true ? ' and already has API keys' : ''}. Publish a plugin
-          {orgTag ? (
-            <>
-              {' '}
-              under <strong>{orgTag}</strong>
-            </>
-          ) : (
-            ''
-          )}
-          , then install it across your cluster with <strong>Install Plugin</strong>.
+          {setup.hasKeys === true ? ' and already has API keys' : ''}. Publish a plugin, then
+          install it across your cluster with{' '}
+          <a className="cu-link" href={CONTROL_ROUTES.marketplace.org}>
+            Install Plugin
+          </a>
+          .
           {setup.hasKeys === false ? (
             <>
               {' '}
