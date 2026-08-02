@@ -302,7 +302,20 @@ export function UpdateConnectorCredentials({
   }
 
   const busy = phase === 'saving' || phase === 'rotating'
-  const restartTargets = rotationAffected.length > 0 ? rotationAffected.join(', ') : serverName
+  // The poll above verifies ONLY this connector's own DeploymentReady, via
+  // getMcpServer(serverName). A shared Secret can be referenced by other
+  // connectors too (result.affectedConnectors); the HCC restarts them as well,
+  // but this screen never observes THEIR rollout. So the success banner asserts
+  // the new credential is being served only for the connector it actually
+  // verified (serverName), and names the rest as rolling out separately rather
+  // than claiming an unobserved success for them.
+  const otherAffected = rotationAffected.filter(name => name !== serverName)
+  const otherAffectedNote =
+    otherAffected.length === 0
+      ? ''
+      : ` ${otherAffected.length === 1 ? 'Another connector' : 'Other connectors'} sharing this Secret roll${
+          otherAffected.length === 1 ? 's' : ''
+        } out separately: ${otherAffected.join(', ')}.`
 
   return (
     <FormSection
@@ -362,14 +375,15 @@ export function UpdateConnectorCredentials({
 
         {phase === 'rotating' ? (
           <div className="cu-banner cu-banner--info" role="status">
-            Rotating credentials — waiting for {restartTargets} to restart with the new value.
+            Rotating credentials — waiting for {serverName} to restart with the new value.
             {phaseMessage ? ` ${phaseMessage}` : ''}
           </div>
         ) : null}
 
         {phase === 'success' ? (
           <div className="cu-banner cu-banner--ok" role="status">
-            Credentials rotated. {restartTargets} restarted and is serving the new credential.
+            Credentials rotated. {serverName} restarted and is serving the new credential.
+            {otherAffectedNote}
           </div>
         ) : null}
 

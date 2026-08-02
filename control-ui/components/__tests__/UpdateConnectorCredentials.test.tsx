@@ -545,4 +545,45 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     expect(screen.getByText(/did not finish within/i)).toBeInTheDocument()
     expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
   })
+
+  it('names only the verified connector as serving; lists other shared-Secret connectors as rolling out separately (no multi-connector overclaim)', async () => {
+    // A Secret shared by several connectors: the PUT reports ALL of them in
+    // affectedConnectors, but this screen's poll observes ONLY its own
+    // (SERVER_NAME) DeploymentReady. The success banner must therefore claim the
+    // new credential is being served for SERVER_NAME alone, and merely name the
+    // others as rolling out separately — never assert an unobserved success for
+    // them (a false-positive: SERVER_NAME could converge while the other pod
+    // CrashLoopBackOffs, yet the old banner said both "restarted and is serving").
+    const OTHER = 'other-connector-b'
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME, OTHER],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'ready',
+        lastTransitionTime: '2026-01-01T00:00:05.000Z',
+      })
+    )
+
+    await renderPanel(ENV_SECRET)
+    await submitRotation({ 'api-key': 'new-key-value' })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const banner = screen.getByRole('status')
+    // The verified connector IS asserted as serving; the other is only named as
+    // rolling out separately.
+    expect(banner).toHaveTextContent(
+      `Credentials rotated. ${SERVER_NAME} restarted and is serving the new credential. ` +
+        `Another connector sharing this Secret rolls out separately: ${OTHER}.`
+    )
+    // Regression guard for the overclaim: the unobserved connector must never be
+    // asserted as already serving the new credential.
+    expect(banner.textContent).not.toMatch(new RegExp(`${OTHER}[^.]*restarted and is serving`))
+  })
 })
