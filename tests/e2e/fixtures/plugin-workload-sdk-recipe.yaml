@@ -35,7 +35,9 @@ spec:
         - name: E2E_SDK_USER_REF
           value: PLACEHOLDER_USER_REF
         - name: E2E_SDK_QUOTA_LIMIT
-          value: '3'
+          value: '4'
+        - name: E2E_SDK_EXPLICIT_TARGET_REF
+          value: PLACEHOLDER_FALLBACK_TARGET_REF
   pluginWorkloadSdk:
     promptBridge:
       allowedModels:

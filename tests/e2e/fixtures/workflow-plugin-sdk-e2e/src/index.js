@@ -13,6 +13,7 @@
 //   E2E_SDK_CLIENT_NOTIFICATION_OK=<notificationId>
 //   E2E_SDK_CLIENT_NOTIFICATION_FAIL=<code>
 //   E2E_SDK_IDEMPOTENCY_REPLAY_GUARDED          (replay is rejected without a second provider call)
+//   E2E_SDK_EXPLICIT_TARGET_OK=<invocationId>   (approved targetRef was served)
 //   E2E_SDK_IDEMPOTENCY_FAIL=<reason>
 //   E2E_SDK_QUOTA_EXCEEDED_OK                    (N+1 call correctly rejected)
 //   E2E_SDK_QUOTA_EXCEEDED_FAIL=<reason>
@@ -24,7 +25,8 @@ const CALLER_REF = process.env.E2E_SDK_CALLER_REF || 'sdk-caller'
 const EVENT_TYPE = process.env.E2E_SDK_EVENT_TYPE || 'e2e.test.notification'
 const USER_REF = process.env.E2E_SDK_USER_REF || 'e2e-test-user'
 const RUN_ID = process.env.E2E_SDK_RUN_ID || String(Date.now())
-const QUOTA_LIMIT = parseInt(process.env.E2E_SDK_QUOTA_LIMIT || '3', 10)
+const QUOTA_LIMIT = parseInt(process.env.E2E_SDK_QUOTA_LIMIT || '4', 10)
+const EXPLICIT_TARGET_REF = process.env.E2E_SDK_EXPLICIT_TARGET_REF || ''
 
 /** Tracks the invocationId from the first promptBridge call for idempotency check. */
 let firstPromptBridgeId = null
@@ -135,6 +137,40 @@ async function exerciseClientNotification() {
   }
 }
 
+// Explicit selector: the backend can request one target from the operator's
+// ordered policy. The targetRef is injected as non-secret recipe configuration;
+// the workload never receives a provider key or credential slot value.
+async function exerciseExplicitTarget() {
+  if (!EXPLICIT_TARGET_REF) {
+    log('E2E_SDK_EXPLICIT_TARGET_FAIL=missing_target_ref')
+    return
+  }
+  try {
+    const { status, body } = await callSdk('/v1/prompt-bridge', {
+      purpose: 'generation',
+      targetRef: EXPLICIT_TARGET_REF,
+      idempotencyKey: `e2e-explicit-${RUN_ID}`,
+      messages: [{ role: 'user', content: 'Reply with the word approved.' }],
+    })
+    if (
+      status === 200 &&
+      body &&
+      body.invocationId &&
+      typeof body.content === 'string' &&
+      body.content.trim() &&
+      body.servedTarget &&
+      body.servedTarget.targetRef === EXPLICIT_TARGET_REF
+    ) {
+      log(`E2E_SDK_EXPLICIT_TARGET_OK=${body.invocationId}`)
+    } else {
+      const code = (body && (body.error || body.code)) || `http_${status}`
+      log(`E2E_SDK_EXPLICIT_TARGET_FAIL=${code}`)
+    }
+  } catch (err) {
+    log(`E2E_SDK_EXPLICIT_TARGET_FAIL=exception:${err && err.message ? err.message : err}`)
+  }
+}
+
 // Idempotency: replay the same idempotencyKey must never invoke the provider or
 // consume another quota slot. The public mcp-host route deliberately returns
 // idempotency_conflict for a completed prompt because the audit record does not
@@ -167,11 +203,12 @@ async function exerciseIdempotency() {
 }
 
 // Quota enforcement: fill remaining quota slots then verify N+1 is rejected.
-// The first promptBridge call consumed 1 slot; the idempotency replay does NOT
-// consume a slot. So we fill (QUOTA_LIMIT - 1) more, then attempt one beyond.
+// The default and explicit-target prompt calls consumed 2 slots; the
+// idempotency replay does NOT consume a slot. Fill the remaining slots, then
+// attempt one beyond.
 async function exerciseQuotaEnforcement() {
   try {
-    const remaining = QUOTA_LIMIT - 1
+    const remaining = QUOTA_LIMIT - 2
     for (let i = 0; i < remaining; i++) {
       const { status, body } = await callSdk('/v1/prompt-bridge', {
         purpose: 'classification',
@@ -214,6 +251,11 @@ async function main() {
     // Phase 1: Happy path — one promptBridge + one clientNotification.
     await exercisePromptBridge()
     await exerciseClientNotification()
+
+    // Phase 1b: explicit approved target selection.
+    if (firstPromptBridgeId) {
+      await exerciseExplicitTarget()
+    }
 
     // Phase 2: Idempotency — same key returns same invocationId.
     if (firstPromptBridgeId) {

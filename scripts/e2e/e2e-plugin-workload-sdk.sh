@@ -671,7 +671,7 @@ prompt_grant_payload() {
     --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
     --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
     --arg caller "$caller" \
-    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:3}}'
+    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:4}}'
 }
 
 # ─── prerequisites ───────────────────────────────────────────────────────
@@ -712,6 +712,7 @@ ok "SDK clientNotifications userRef targets desktop user ${USER_REF}"
 
 sed -e "s/PLACEHOLDER_PROVIDER/${E2E_WORKFLOW_MODEL_PROVIDER}/" \
     -e "s/PLACEHOLDER_MODEL/${E2E_WORKFLOW_MODEL_NAME}/" \
+    -e "s/PLACEHOLDER_FALLBACK_TARGET_REF/${E2E_PROMPT_FALLBACK_TARGET_REF}/" \
     -e "s/PLACEHOLDER_RECIPE_NAME/${RECIPE_NAME}/" \
     -e "s/PLACEHOLDER_USER_REF/${USER_REF}/" \
     "$FIXTURE" | kctl apply -f -
@@ -1076,6 +1077,13 @@ else
   exit 1
 fi
 
+if printf "%s" "$logs" | grep -q E2E_SDK_EXPLICIT_TARGET_OK; then
+  ok "sdk-caller explicit approved targetRef was served and returned non-empty content"
+else
+  fail "sdk-caller explicit approved targetRef did not return a served target/content marker"
+  exit 1
+fi
+
 if printf "%s" "$logs" | grep -q E2E_SDK_CLIENT_NOTIFICATION_OK; then
   ok "sdk-caller clientNotifications call was accepted (notificationId returned)"
 else
@@ -1211,7 +1219,7 @@ fi
 
 # Quota enforcement: N+1 call is rejected after quota exhausted.
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
-  ok "quota enforcement correctly rejected call after 3/3 requests consumed"
+  ok "quota enforcement correctly rejected call after 4/4 requests consumed"
 else
   fail "quota enforcement did not reject the excess call (fixture marker missing; caller logs redacted)"
   exit 1
