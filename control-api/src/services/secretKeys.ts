@@ -1,10 +1,12 @@
 // Kubernetes Secret data-key validation, centralized so every write path shares
 // ONE definition of "valid key". A Secret data key must satisfy the apiserver's
-// IsConfigMapKey check: it matches [-._a-zA-Z0-9]+, is neither "." nor "..", and
-// is at most 253 characters. A key that fails any of these is rejected by the
-// apiserver with an opaque 500; validating here turns that into an actionable
-// 400 at the single chokepoint (SecretService) every Secret write passes
-// through, so no route — present or future — can leak an invalid key to k8s.
+// IsConfigMapKey check: it matches [-._a-zA-Z0-9]+, is not "." and does NOT start
+// with ".." (k8s rejects ".", "..", and any "..*" prefix such as "..data" — the
+// reserved symlink convention of mounted Secret/ConfigMap volumes), and is at
+// most 253 characters. A key that fails any of these is rejected by the apiserver
+// with an opaque 500; validating here turns that into an actionable 400 at the
+// single chokepoint (SecretService) every Secret write passes through, so no
+// route — present or future — can leak an invalid key to k8s.
 
 export const SECRET_DATA_KEY_RE = /^[-._a-zA-Z0-9]+$/
 export const SECRET_DATA_KEY_MAX_LENGTH = 253
@@ -12,7 +14,7 @@ export const SECRET_DATA_KEY_MAX_LENGTH = 253
 // The one message used by both the route-level reason string and the thrown
 // error, so an operator sees identical wording no matter which layer rejects.
 function secretKeyErrorMessage(key: string): string {
-  return `data key "${key}" is not a valid Secret key (only [-._a-zA-Z0-9], not "." or "..", max ${SECRET_DATA_KEY_MAX_LENGTH} chars)`
+  return `data key "${key}" is not a valid Secret key (only [-._a-zA-Z0-9], not "." and not starting with "..", max ${SECRET_DATA_KEY_MAX_LENGTH} chars)`
 }
 
 // Thrown when a Secret data key cannot be a valid Kubernetes key. Carries
@@ -37,7 +39,7 @@ export function invalidSecretDataKeyReason(key: string): string | null {
   if (
     !SECRET_DATA_KEY_RE.test(key) ||
     key === '.' ||
-    key === '..' ||
+    key.startsWith('..') ||
     key.length > SECRET_DATA_KEY_MAX_LENGTH
   ) {
     return secretKeyErrorMessage(key)

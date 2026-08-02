@@ -19,6 +19,9 @@ const INVALID_KEYS: readonly string[] = [
   'café', // non-ASCII outside charset
   '', // empty
   'x'.repeat(SECRET_DATA_KEY_MAX_LENGTH + 1), // 254 chars, over the limit
+  '..foo', // "..*" prefix — apiserver rejects (reserved mounted-volume symlink)
+  '..data', // "..*" prefix
+  '...x', // "..*" prefix (three dots still starts with "..")
 ]
 
 // Keys that are legitimate Secret data keys and MUST keep flowing through to the
@@ -29,6 +32,8 @@ const VALID_KEYS: readonly string[] = [
   'tls.crt',
   'api-key',
   'foo.bar',
+  '.foo', // a single leading dot is valid — only the "..*" PREFIX is reserved
+  'foo..', // trailing dots are valid — only the prefix matters, not the suffix
   'a'.repeat(SECRET_DATA_KEY_MAX_LENGTH), // exactly 253 chars
 ]
 
