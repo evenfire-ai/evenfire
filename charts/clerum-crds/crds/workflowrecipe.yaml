@@ -2130,7 +2130,7 @@ spec:
                   properties:
                     state:
                       type: string
-                      enum: [validated, disabled]
+                      enum: [validated, disabled, degraded]
                     promptBridge:
                       type: boolean
                     clientNotifications:

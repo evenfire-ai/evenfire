@@ -47,6 +47,7 @@ export interface PromptBridgeHandlerDeps {
     model: string
     servedTarget: PromptBridgeTarget
     fallbackUsed: boolean
+    attemptCount: number
     llmSecretName: string
     inputTokens: number
     outputTokens: number
@@ -241,24 +242,24 @@ export class PromptBridgeHandler {
     if (!selected || !sameTarget(selected, authorized.selectedTarget)) {
       throw unexpectedAuthorizationResponse()
     }
-    const ticketByTarget = new Map(
-      authorized.authorizedTargetTickets.map(ticket => [ticket.targetRef, ticket.credentialTicket])
-    )
-    if (
-      ticketByTarget.size !== authorized.authorizedTargets.length ||
-      authorized.authorizedTargets.some(target => !ticketByTarget.has(target.targetRef))
-    ) {
-      throw unexpectedAuthorizationResponse()
-    }
-
     try {
       const completion = await this.deps.llmBridge.complete({
         invocationId: authorized.invocationId,
-        targets: authorized.authorizedTargets.map(target => ({
-          target,
-          credentialTicket: ticketByTarget.get(target.targetRef)!,
-        })),
+        targets: authorized.authorizedTargets.map(target => ({ target })),
         messages: request.messages,
+        policyRevision: authorized.policyRevision,
+        policyHash: authorized.policyHash,
+        credentialTicketIssuer: {
+          issue: async input =>
+            this.deps.controlApiClient.reissuePromptBridgeCredentialTicket({
+              recipeNamespace: this.deps.recipeNamespace,
+              recipeName: this.deps.recipeName,
+              invocationId: input.invocationId,
+              target: input.target,
+              policyRevision: input.policyRevision,
+              policyHash: input.policyHash,
+            }),
+        },
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
@@ -269,6 +270,7 @@ export class PromptBridgeHandler {
         model: completion.model,
         servedTarget: completion.servedTarget,
         fallbackUsed: completion.fallbackUsed,
+        attemptCount: completion.attemptCount,
         llmSecretName: completion.llmSecretName,
         inputTokens: completion.usage.inputTokens,
         outputTokens: completion.usage.outputTokens,

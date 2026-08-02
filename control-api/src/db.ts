@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkJitCredentialTicketColumns,
   addPluginWorkloadSdkPromptTargetPolicyColumns,
   addPluginWorkloadSdkProviderColumn,
   applyPluginWorkloadSdkSchema,
@@ -1375,6 +1376,8 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_events (llm_secret_name, ts) WHERE llm_secret_name IS NOT NULL;
     ALTER TABLE usage_events
       ADD COLUMN IF NOT EXISTS team_id TEXT;
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
     CREATE INDEX IF NOT EXISTS usage_events_team_id_ts_idx
       ON usage_events (team_id, ts) WHERE team_id IS NOT NULL;
 
@@ -1494,6 +1497,14 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_daily (team_id, bucket) WHERE team_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS usage_daily_recipe_idx
       ON usage_daily (recipe_name, bucket) WHERE recipe_name IS NOT NULL;
+  `)
+}
+
+/** Adds bounded promptBridge target attribution to the raw usage ledger. */
+async function addPromptBridgeUsageMetadataColumn(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
   `)
 }
 
@@ -5028,6 +5039,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0075_plugin_workload_sdk_prompt_target_policy',
     apply: addPluginWorkloadSdkPromptTargetPolicyColumns,
+  },
+  {
+    version: '0076_plugin_workload_sdk_jit_credential_tickets',
+    apply: addPluginWorkloadSdkJitCredentialTicketColumns,
+  },
+  {
+    version: '0077_plugin_workload_sdk_usage_attribution',
+    apply: addPromptBridgeUsageMetadataColumn,
   },
 ]
 

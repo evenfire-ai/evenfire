@@ -1,5 +1,5 @@
 import { type Response, Router } from 'express'
-import { PROVIDER_CREDENTIAL_SLOTS, isLlmProviderId } from '@clerum/llm-providers'
+import { isCredentialSlotOwnedByProvider, isLlmProviderId } from '@clerum/llm-providers'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModels.js'
@@ -145,15 +145,10 @@ function parseModelPolicies(
 }
 
 function credentialSlotBelongsToProvider(provider: string, credentialSlot: string): boolean {
-  if (!isLlmProviderId(provider)) return false
-  const canonicalSlots = PROVIDER_CREDENTIAL_SLOTS[provider].map(slot => slot.dataKey)
-  // Extra slots are created by the additive secrets editor and remain owned by
-  // their provider. A target only carries the key identity; this route never
-  // reads the Secret or returns a value.
-  return (
-    canonicalSlots.some(slot => credentialSlot === slot || credentialSlot.startsWith(`${slot}-`)) ||
-    credentialSlot.startsWith(`${provider}-`)
-  )
+  // This shares the exact slot-ownership rule with the runtime broker. A
+  // target only carries the key identity; this route never reads the Secret or
+  // returns a value.
+  return isCredentialSlotOwnedByProvider(provider, credentialSlot)
 }
 
 function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPromptTarget[] | null {

@@ -281,6 +281,32 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
   })
 
+  it('projects provider_unavailable separately from a validated capability declaration', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'degraded',
+      featureFlagEnabled: true,
+      providerUnavailable: true,
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'ProviderUnavailable',
+        message: 'Capability validated, but the configured provider is unavailable',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toEqual({
+      state: 'degraded',
+      promptBridge: true,
+      clientNotifications: false,
+      message: 'Capability validated, but the configured provider is unavailable',
+    })
+  })
+
   it('carries forward existing owned conditions when reconcile failed', () => {
     const existing = {
       type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,

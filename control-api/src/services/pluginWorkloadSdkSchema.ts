@@ -48,9 +48,24 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
       status TEXT NOT NULL CHECK (status IN ('in_progress','complete','failed','provider_unavailable','accepted','delivered')),
       quota_consumed BOOLEAN NOT NULL DEFAULT true,
       authorization_decision TEXT NOT NULL,
+      -- Persisted, non-secret prompt authorization snapshot used to mint a
+      -- fresh fallback ticket without trusting caller-supplied target lists.
+      prompt_authorization JSONB NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       completed_at TIMESTAMPTZ NULL
     );
+
+    CREATE TABLE IF NOT EXISTS plugin_workload_sdk_credential_ticket_jtis (
+      jti UUID PRIMARY KEY,
+      recipe_namespace TEXT NOT NULL,
+      recipe_name TEXT NOT NULL,
+      invocation_id UUID NOT NULL,
+      target_ref TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      redeemed_at TIMESTAMPTZ NULL
+    );
+    CREATE INDEX IF NOT EXISTS plugin_workload_sdk_credential_ticket_jtis_expiry
+      ON plugin_workload_sdk_credential_ticket_jtis (expires_at);
 
     -- Idempotency uniqueness scoped per recipe + method (OQ-5). Rows older
     -- than the 24h TTL are pruned by prunePluginWorkloadSdkExpiredIdempotency
@@ -105,5 +120,28 @@ export async function addPluginWorkloadSdkPromptTargetPolicyColumns(db: DbClient
       ADD COLUMN IF NOT EXISTS prompt_targets JSONB NOT NULL DEFAULT '[]'::jsonb,
       ADD COLUMN IF NOT EXISTS default_target_ref TEXT NULL,
       ADD COLUMN IF NOT EXISTS policy_revision INTEGER NOT NULL DEFAULT 1;
+  `)
+}
+
+/**
+ * Persists the original target suffix for JIT fallback ticket issuance and
+ * makes every ticket jti redeemable exactly once at credential introspection.
+ */
+export async function addPluginWorkloadSdkJitCredentialTicketColumns(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE plugin_workload_sdk_invocations
+      ADD COLUMN IF NOT EXISTS prompt_authorization JSONB NULL;
+
+    CREATE TABLE IF NOT EXISTS plugin_workload_sdk_credential_ticket_jtis (
+      jti UUID PRIMARY KEY,
+      recipe_namespace TEXT NOT NULL,
+      recipe_name TEXT NOT NULL,
+      invocation_id UUID NOT NULL,
+      target_ref TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      redeemed_at TIMESTAMPTZ NULL
+    );
+    CREATE INDEX IF NOT EXISTS plugin_workload_sdk_credential_ticket_jtis_expiry
+      ON plugin_workload_sdk_credential_ticket_jtis (expires_at);
   `)
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { assertDbReady } from '../src/db.js'
+import { CONTROL_API_MIGRATIONS, assertDbReady } from '../src/db.js'
+
+const LATEST_MIGRATION = CONTROL_API_MIGRATIONS.at(-1)!.version
 
 describe('assertDbReady', () => {
   it('accepts a database migrated through the authoritative GFS runtime role contract', async () => {
@@ -7,7 +9,7 @@ describe('assertDbReady', () => {
 
     await expect(assertDbReady({ query })).resolves.toBeUndefined()
     expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'), [
-      '0075_plugin_workload_sdk_prompt_target_policy',
+      LATEST_MIGRATION,
     ])
   })
 
@@ -15,7 +17,7 @@ describe('assertDbReady', () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ ready: false }], rowCount: 1 })
 
     await expect(assertDbReady({ query })).rejects.toThrow(
-      'migration 0075_plugin_workload_sdk_prompt_target_policy is required'
+      `migration ${LATEST_MIGRATION} is required`
     )
   })
 })

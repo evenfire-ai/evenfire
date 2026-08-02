@@ -20,6 +20,8 @@ export const DEFAULT_IDEMPOTENCY_KEY_PATTERN = '^[a-zA-Z0-9_-]{1,128}$'
 
 /** Condition type owned by the Plugin Workload SDK reconcile pass. */
 export const PLUGIN_WORKLOAD_SDK_CONDITION_TYPE = 'PluginWorkloadSdkCapability'
+export const PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE =
+  'PluginWorkloadSdkProviderUnavailable'
 
 /**
  * WorkflowRecipe remains the CRD that carries Plugin Workload SDK, but an SDK
@@ -169,9 +171,10 @@ export function buildPluginWorkloadSdkStatus(args: {
   existingConditions: StatusCondition[] | undefined
   phase: RecipePhase
   featureFlagEnabled: boolean
+  providerUnavailable?: boolean
   now: string
 }): PluginWorkloadSdkStatusProjection {
-  const { spec, existingConditions, phase, featureFlagEnabled, now } = args
+  const { spec, existingConditions, phase, featureFlagEnabled, providerUnavailable, now } = args
   const sdk = spec.pluginWorkloadSdk
 
   if (!sdk) {
@@ -207,6 +210,27 @@ export function buildPluginWorkloadSdkStatus(args: {
       c => c.type === PLUGIN_WORKLOAD_SDK_CONDITION_TYPE
     )
     return { conditions: carried, capability: undefined }
+  }
+
+  if (providerUnavailable) {
+    const message = 'Capability validated, but the configured provider is unavailable'
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'ProviderUnavailable',
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'degraded',
+        promptBridge,
+        clientNotifications,
+        message,
+      },
+    }
   }
 
   const families = [

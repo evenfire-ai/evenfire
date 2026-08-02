@@ -50,9 +50,6 @@ describe('Plugin Workload SDK — §6.2 response-shape security invariants', () 
         modelPolicy: { provider: 'zai', model: 'glm-4.7', apiKey: 'sk-provider-secret' },
         selectedTarget: target,
         authorizedTargets: [target],
-        authorizedTargetTickets: [
-          { targetRef: target.targetRef, credentialTicket: 'signed-ticket' },
-        ],
         policyRevision: 1,
         policyHash: 'a'.repeat(64),
         maxOutputTokens: null,

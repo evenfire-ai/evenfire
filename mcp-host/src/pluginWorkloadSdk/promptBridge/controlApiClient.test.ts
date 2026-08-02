@@ -27,7 +27,6 @@ function authorizedBody(invocationId: string) {
     modelPolicy: null,
     selectedTarget: target,
     authorizedTargets: [target],
-    authorizedTargetTickets: [{ targetRef: target.targetRef, credentialTicket: 'signed-ticket' }],
     policyRevision: 2,
     policyHash: 'a'.repeat(64),
     maxOutputTokens: null,
@@ -77,12 +76,12 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1) // 4xx is not retried
   })
 
-  it('fails closed when authorization omits target tickets', async () => {
-    const { authorizedTargetTickets: _omitted, ...missingTickets } = authorizedBody('inv-1')
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, missingTickets))
+  it('accepts a policy-only authorization envelope and leaves ticket issuance to the attempt path', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
-    await expect(client.authorizePromptBridge(promptBody)).rejects.toMatchObject({
-      code: 'provider_unavailable',
+    await expect(client.authorizePromptBridge(promptBody)).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      authorizedTargets: [target],
     })
   })
 
@@ -101,6 +100,66 @@ describe('PluginWorkloadSdkControlApiClient', () => {
       model: 'glm-5.1',
       targetRef: 'primary-zai',
     })
+  })
+
+  it('reissues a ticket bound to the authorized recipe, invocation, target, and policy snapshot', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        targetRef: target.targetRef,
+        credentialTicket: 'fresh-signed-ticket',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        expiresInSeconds: 60,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.reissuePromptBridgeCredentialTicket({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        target,
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+      })
+    ).resolves.toMatchObject({ credentialTicket: 'fresh-signed-ticket' })
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket'
+    )
+    expect(JSON.parse(String(init.body))).toEqual({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+      invocationId: 'inv-1',
+      targetRef: target.targetRef,
+    })
+  })
+
+  it('rejects a reissued ticket that does not match the original authorization snapshot', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        targetRef: 'different-target',
+        credentialTicket: 'fresh-signed-ticket',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        expiresInSeconds: 60,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(
+      client.reissuePromptBridgeCredentialTicket({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        target,
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: false })
   })
 
   it('retries 5xx and returns provider_unavailable after exhausting retries', async () => {

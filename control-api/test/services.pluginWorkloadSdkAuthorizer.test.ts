@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import {
   authorizeClientNotification,
   authorizeListRecipients,
   authorizePromptBridge,
+  reissuePromptBridgeCredentialTicket,
 } from '../src/services/pluginWorkloadSdkAuthorizer.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
@@ -26,6 +28,8 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     updateInvocationStatus: vi.fn(),
     consumePeriodQuota: vi.fn(),
     countRecentInvocations: vi.fn(),
+    getInvocationById: vi.fn(),
+    registerPluginWorkloadSdkCredentialTicketJti: vi.fn(),
   }
 })
 
@@ -98,6 +102,7 @@ function invocation(
     authorizationDecision: 'authorized',
     createdAt: '2026-06-09T00:00:00.000Z',
     completedAt: null,
+    promptAuthorization: null,
     ...overrides,
   }
 }
@@ -124,8 +129,11 @@ beforeEach(() => {
   vi.mocked(sdkDb.updateInvocationStatus).mockReset()
   vi.mocked(sdkDb.consumePeriodQuota).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockReset()
+  vi.mocked(sdkDb.getInvocationById).mockReset()
+  vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
   vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
+  vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
   vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
     kind: 'inserted',
     invocation: invocation(),
@@ -227,6 +235,35 @@ describe('authorizePromptBridge', () => {
         policyRevision: 1,
       },
     })
+  })
+
+  it('returns only the ordered policy and defers credential tickets to each attempt', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        promptTargets: [
+          {
+            targetRef: 'zai-primary',
+            provider: 'zai',
+            model: 'glm-4.7',
+            credentialSlot: 'zai-api-key',
+          },
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'gpt-5.4',
+            credentialSlot: 'openai-api-key',
+          },
+        ],
+        defaultTargetRef: 'zai-primary',
+      })
+    )
+
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) return
+    expect(result.value.authorizedTargets).toHaveLength(2)
+    expect(result.value).not.toHaveProperty('authorizedTargetTickets')
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
   })
 
   it('rejects a bare model shared by two authorized providers before recording an invocation', async () => {
@@ -525,6 +562,120 @@ describe('authorizePromptBridge', () => {
     })
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     expect(result).toMatchObject({ ok: false, error: 'idempotency_conflict' })
+  })
+})
+
+describe('reissuePromptBridgeCredentialTicket', () => {
+  const authorizedSuffix = {
+    policyRevision: 1,
+    policyHash: 'a'.repeat(64),
+    authorizedTargetRefs: ['primary-zai', 'openai-fallback'],
+  }
+
+  const twoTargetGrant = () =>
+    grant({
+      promptTargets: [
+        {
+          targetRef: 'primary-zai',
+          provider: 'zai',
+          model: 'glm-4.7',
+          credentialSlot: 'zai-api-key',
+        },
+        {
+          targetRef: 'openai-fallback',
+          provider: 'openai',
+          model: 'gpt-5.4',
+          credentialSlot: 'openai-api-key',
+        },
+      ],
+      defaultTargetRef: 'primary-zai',
+    })
+
+  it('issues a fresh short-lived ticket only for the persisted fallback suffix', async () => {
+    const policy = twoTargetGrant()
+    authorizedSuffix.policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(policy)
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({ promptAuthorization: { ...authorizedSuffix } })
+    )
+
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        invocationId: 'inv-1',
+        targetRef: 'openai-fallback',
+        policyRevision: 1,
+        policyHash: authorizedSuffix.policyHash,
+        expiresInSeconds: 60,
+      },
+    })
+    if (!result.ok) return
+    const claimsFromTicket = jwt.decode(result.value.credentialTicket) as jwt.JwtPayload
+    expect(claimsFromTicket).toMatchObject({
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+      policyHash: authorizedSuffix.policyHash,
+      policyRevision: 1,
+    })
+    expect(typeof claimsFromTicket.jti).toBe('string')
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).toHaveBeenCalledWith(
+      expect.objectContaining({ invocationId: 'inv-1', targetRef: 'openai-fallback' })
+    )
+    expect(JSON.stringify(result.value)).not.toContain('secret-value')
+  })
+
+  it('fails closed for a body target outside the original authorization suffix', async () => {
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({
+        promptAuthorization: { ...authorizedSuffix, authorizedTargetRefs: ['primary-zai'] },
+      })
+    )
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
+    expect(sdkDb.findGrant).not.toHaveBeenCalled()
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when policy changes or the invocation is terminal', async () => {
+    const policy = twoTargetGrant()
+    authorizedSuffix.policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        ...twoTargetGrant(),
+        policyRevision: 2,
+      })
+    )
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({ promptAuthorization: { ...authorizedSuffix } })
+    )
+    await expect(
+      reissuePromptBridgeCredentialTicket({
+        claims: claims(),
+        invocationId: 'inv-1',
+        targetRef: 'openai-fallback',
+      })
+    ).resolves.toMatchObject({ ok: false, error: 'provider_policy_denied' })
+
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({ status: 'failed', promptAuthorization: { ...authorizedSuffix } })
+    )
+    await expect(
+      reissuePromptBridgeCredentialTicket({
+        claims: claims(),
+        invocationId: 'inv-1',
+        targetRef: 'openai-fallback',
+      })
+    ).resolves.toMatchObject({ ok: false, error: 'provider_policy_denied' })
   })
 })
 

@@ -29,6 +29,7 @@ export class PluginWorkloadSdkCredentialBrokerClient {
     invocationId: string
     target: PromptBridgeTarget
     credentialTicket: string
+    timeoutMs?: number
   }): Promise<BrokeredCredential> {
     const fetchImpl = this.opts.fetchImpl ?? fetch
     const url = `${this.opts.baseUrl.replace(/\/+$/, '')}/api/v1/workflow/${encodeURIComponent(
@@ -37,6 +38,10 @@ export class PluginWorkloadSdkCredentialBrokerClient {
 
     let response: Response
     try {
+      const signal =
+        input.timeoutMs === undefined
+          ? undefined
+          : AbortSignal.timeout(Math.max(1, input.timeoutMs))
       response = await fetchImpl(url, {
         method: 'POST',
         headers: {
@@ -49,6 +54,7 @@ export class PluginWorkloadSdkCredentialBrokerClient {
           target: input.target,
           credentialTicket: input.credentialTicket,
         }),
+        signal,
       })
     } catch {
       throw unavailable()
@@ -99,6 +105,7 @@ function unavailable(): PluginWorkloadError {
   return new PluginWorkloadError(
     'provider_unavailable',
     'authorized provider credentials are unavailable',
-    false
+    false,
+    'credential_unavailable'
   )
 }

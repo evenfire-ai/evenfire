@@ -69,3 +69,13 @@ export declare const PROVIDER_NON_SECRET_ENV: Record<LlmProviderId, readonly Non
 
 /** Own-property (prototype-safe) guard for the canonical provider ids. */
 export declare function isLlmProviderId(s: unknown): s is LlmProviderId
+
+/**
+ * Returns whether a policy credential slot belongs to the provider. Additive
+ * suffixed slots are valid only for single, single-line API-key providers;
+ * multi-slot and multiline providers accept canonical slots only.
+ */
+export declare function isCredentialSlotOwnedByProvider(
+  provider: string,
+  credentialSlot: string,
+): boolean

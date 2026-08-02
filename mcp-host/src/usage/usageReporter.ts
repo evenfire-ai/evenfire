@@ -39,6 +39,18 @@ export type LlmUsageEvent = {
    */
   cache_read_tokens?: number
   cache_write_tokens?: number
+  /**
+   * Sanitized attribution for a Plugin Workload SDK promptBridge call. The
+   * values are policy identities and bounded execution metadata only; raw
+   * credentials, bearer tokens, and provider responses never enter this
+   * event.
+   */
+  prompt_bridge_metadata?: {
+    target_ref: string
+    credential_slot: string
+    fallback_used: boolean
+    attempt_count: number
+  }
 }
 
 export type UsageReporterOptions = {

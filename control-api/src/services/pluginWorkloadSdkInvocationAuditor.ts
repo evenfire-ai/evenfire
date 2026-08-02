@@ -2,6 +2,7 @@ import {
   type InsertInvocationResult,
   type PluginWorkloadSdkFamily,
   type PluginWorkloadSdkInvocationStatus,
+  type PluginWorkloadSdkPromptAuthorization,
   hashIdempotencyKey,
   hashPayload,
   insertInvocation,
@@ -35,6 +36,7 @@ export interface RecordInvocationParams {
   payload: unknown
   status: PluginWorkloadSdkInvocationStatus
   authorizationDecision: string
+  promptAuthorization?: PluginWorkloadSdkPromptAuthorization
 }
 
 export async function recordInvocation(
@@ -52,6 +54,7 @@ export async function recordInvocation(
     payloadHash: hashPayload(params.payload),
     status: params.status,
     authorizationDecision: params.authorizationDecision,
+    promptAuthorization: params.promptAuthorization,
   })
 }
 

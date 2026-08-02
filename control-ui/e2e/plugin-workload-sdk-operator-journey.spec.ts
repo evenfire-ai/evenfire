@@ -29,7 +29,9 @@ const REGISTRY_BASE = process.env.REGISTRY_URL || 'http://localhost:8085'
 const ADMIN_USER = process.env.ADMIN_USER || 'admin'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
 const PROVIDER = process.env.E2E_WORKFLOW_MODEL_PROVIDER || 'zai'
-const MODEL = process.env.E2E_WORKFLOW_MODEL_NAME || 'glm-5.1'
+const MODEL = process.env.E2E_WORKFLOW_MODEL_NAME || 'glm-4.7'
+const FALLBACK_PROVIDER = process.env.E2E_PROMPT_FALLBACK_PROVIDER || 'openai'
+const FALLBACK_MODEL = process.env.E2E_PROMPT_FALLBACK_MODEL || 'gpt-5.4-mini'
 const RECIPE_NS = 'sandbox-recipes'
 const EVENT_TYPE = 'e2e.test.notification'
 const USER_EMAIL = process.env.E2E_DESKTOP_USER_EMAIL || 'test@clerum.io'
@@ -237,7 +239,9 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       // 3. The eager mcp-host self-validates the SDK capability (regression path).
       await waitForSdkValidated(token, installedRecipeName)
 
-      // 4. promptBridge grant — configured through the grant page UI.
+      // 4. promptBridge grant — configured through the grant page UI. Add the
+      // fallback first, then the bootstrap target, and reorder it visibly so
+      // the saved policy proves both providers plus an explicit default/order.
       // Navigate through the visible application shell so this test proves the
       // operator journey rather than jumping directly to the grant route.
       await page.getByRole('link', { name: 'Plugins', exact: true }).click()
@@ -256,10 +260,30 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       await expect(page.locator('#sdk-family')).toHaveValue('promptBridge')
       await page.locator('#sdk-callers').fill('sdk-caller')
       const saveGrantButton = page.getByRole('button', { name: 'Save grant' })
-      await expect(page.locator('#sdk-target-model')).toHaveValue(MODEL)
+
+      await page.locator('#sdk-provider').selectOption(FALLBACK_PROVIDER)
+      await page.locator('#sdk-target-model').selectOption(FALLBACK_MODEL)
+      await page.locator('#sdk-credential-slot').selectOption(`${FALLBACK_PROVIDER}-api-key`)
+      await page.locator('#sdk-target-ref').fill(`fallback-${FALLBACK_PROVIDER}`)
+      await page.getByRole('button', { name: 'Add target' }).click()
+
+      await page.locator('#sdk-provider').selectOption(PROVIDER)
+      await page.locator('#sdk-target-model').selectOption(MODEL)
       await page.locator('#sdk-credential-slot').selectOption(`${PROVIDER}-api-key`)
       await page.locator('#sdk-target-ref').fill(`primary-${PROVIDER}`)
       await page.getByRole('button', { name: 'Add target' }).click()
+
+      const orderedTargets = page.getByLabel('Ordered promptBridge targets')
+      const primaryTargetRow = orderedTargets
+        .locator('div.cu-sdk-custom-model-row')
+        .filter({
+          hasText: `primary-${PROVIDER}:`,
+        })
+        .first()
+      await expect(primaryTargetRow).toContainText(`fallback 1 · primary-${PROVIDER}`)
+      await primaryTargetRow.getByRole('button', { name: 'Up' }).click()
+      await expect(orderedTargets).toContainText(`default · primary-${PROVIDER}`)
+      await expect(orderedTargets).toContainText(`fallback 1 · fallback-${FALLBACK_PROVIDER}`)
       await expect(saveGrantButton).toBeEnabled()
       await saveGrantButton.click()
       const promptRow = page.locator('tr', { hasText: installedRecipeName }).filter({
@@ -314,12 +338,41 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       const grants = (list.data.data ?? list.data.items ?? list.data.grants ?? []) as Array<{
         capabilityFamily?: string
         allowedModels?: string[]
+        provider?: string
+        defaultTargetRef?: string
+        promptTargets?: Array<{
+          targetRef?: string
+          provider?: string
+          model?: string
+          credentialSlot?: string
+        }>
+        policyRevision?: number
       }>
       const families = grants.map(g => g.capabilityFamily)
       expect(families).toContain('promptBridge')
       expect(families).toContain('clientNotifications')
       const promptGrant = grants.find(g => g.capabilityFamily === 'promptBridge')
       expect(promptGrant?.allowedModels).toContain(MODEL)
+      expect(promptGrant).toMatchObject({
+        provider: PROVIDER,
+        defaultTargetRef: `primary-${PROVIDER}`,
+        promptTargets: [
+          {
+            targetRef: `primary-${PROVIDER}`,
+            provider: PROVIDER,
+            model: MODEL,
+            credentialSlot: `${PROVIDER}-api-key`,
+          },
+          {
+            targetRef: `fallback-${FALLBACK_PROVIDER}`,
+            provider: FALLBACK_PROVIDER,
+            model: FALLBACK_MODEL,
+            credentialSlot: `${FALLBACK_PROVIDER}-api-key`,
+          },
+        ],
+        policyRevision: expect.any(Number),
+      })
+      expect(JSON.stringify(promptGrant)).not.toMatch(/secret|token/i)
     } finally {
       if (installedRecipeName) {
         await api(

@@ -32,6 +32,7 @@ llm_model_prices	legacy_dml
 member_registration_credentials	upsert
 notification_deliveries	legacy_dml
 oauth_grants	legacy_dml
+plugin_workload_sdk_credential_ticket_jtis	legacy_dml
 plugin_workload_sdk_grants	legacy_dml
 plugin_workload_sdk_invocations	legacy_dml
 plugin_workload_sdk_quota_counters	legacy_dml

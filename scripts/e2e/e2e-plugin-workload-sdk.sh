@@ -23,6 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
+# shellcheck source=e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
 require_safe_kube_context
 
@@ -32,6 +33,18 @@ EVENT_TYPE="e2e.test.notification"
 E2E_DESKTOP_USER_EMAIL="${E2E_DESKTOP_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
 E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-${CLERUM_MODEL_PROVIDER:-zai}}"
 E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-5.1}}"
+# promptBridge grants are an ordered, credential-bound policy. The target
+# reference is not a credential value; operators can override both values for
+# a non-default, provider-owned Secret data key without exposing its contents.
+# The gate deliberately carries two distinct providers so selector authorization
+# and ordered fallback are exercised independently of whether either paid
+# provider is available in the local cluster.
+E2E_PROMPT_TARGET_REF="${E2E_PROMPT_TARGET_REF:-primary}"
+E2E_PROMPT_CREDENTIAL_SLOT="${E2E_PROMPT_CREDENTIAL_SLOT:-${E2E_WORKFLOW_CREDENTIAL_SLOT:-}}"
+E2E_PROMPT_FALLBACK_PROVIDER="${E2E_PROMPT_FALLBACK_PROVIDER:-openai}"
+E2E_PROMPT_FALLBACK_MODEL="${E2E_PROMPT_FALLBACK_MODEL:-gpt-5.4-mini}"
+E2E_PROMPT_FALLBACK_TARGET_REF="${E2E_PROMPT_FALLBACK_TARGET_REF:-fallback-${E2E_PROMPT_FALLBACK_PROVIDER}}"
+E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="${E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT:-}"
 E2E_ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-}"
 # Seeded by scripts/e2e/seed-e2e-data.sh (copies ADMIN_PASSWORD into test users).
 E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
@@ -61,6 +74,47 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+
+default_prompt_credential_slot() {
+  case "$1" in
+    openai) printf '%s\n' 'openai-api-key' ;;
+    claude) printf '%s\n' 'claude-api-key' ;;
+    zai) printf '%s\n' 'zai-api-key' ;;
+    bailian) printf '%s\n' 'bailian-api-key' ;;
+    vertex) printf '%s\n' 'vertex-service-account-json' ;;
+    bedrock) printf '%s\n' 'aws-access-key-id' ;;
+    openrouter) printf '%s\n' 'openrouter-api-key' ;;
+    gemini) printf '%s\n' 'gemini-api-key' ;;
+    deepseek) printf '%s\n' 'deepseek-api-key' ;;
+    groq) printf '%s\n' 'groq-api-key' ;;
+    together) printf '%s\n' 'together-api-key' ;;
+    fireworks) printf '%s\n' 'fireworks-api-key' ;;
+    mistral) printf '%s\n' 'mistral-api-key' ;;
+    xai) printf '%s\n' 'xai-api-key' ;;
+    cerebras) printf '%s\n' 'cerebras-api-key' ;;
+    deepinfra) printf '%s\n' 'deepinfra-api-key' ;;
+    perplexity) printf '%s\n' 'perplexity-api-key' ;;
+    moonshot) printf '%s\n' 'moonshot-api-key' ;;
+    nebius) printf '%s\n' 'nebius-api-key' ;;
+    novita) printf '%s\n' 'novita-api-key' ;;
+    azure) printf '%s\n' 'azure-openai-api-key' ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -z "$E2E_PROMPT_CREDENTIAL_SLOT" ]; then
+  E2E_PROMPT_CREDENTIAL_SLOT="$(default_prompt_credential_slot "$E2E_WORKFLOW_MODEL_PROVIDER")" \
+    || { printf 'Unsupported promptBridge provider %q; set E2E_PROMPT_CREDENTIAL_SLOT explicitly\n' "$E2E_WORKFLOW_MODEL_PROVIDER" >&2; exit 2; }
+fi
+if [ -z "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" ]; then
+  E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="$(default_prompt_credential_slot "$E2E_PROMPT_FALLBACK_PROVIDER")" \
+    || { printf 'Unsupported promptBridge fallback provider %q; set E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT explicitly\n' "$E2E_PROMPT_FALLBACK_PROVIDER" >&2; exit 2; }
+fi
+if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
+  printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
+    "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+  exit 2
+fi
 
 gate_assert_deadline() {
   local phase=${1:-gate}
@@ -159,6 +213,7 @@ cleanup_sdk_recipe() {
   return "$cleanup_status"
 }
 
+# shellcheck disable=SC2329 # Registered below through the EXIT trap.
 cleanup_on_exit() {
   local status=$?
   if [ "${e2e_total:-0}" -gt 0 ] && [ "${E2E_SUPPRESS_RESULTS:-0}" != "1" ]; then
@@ -396,11 +451,32 @@ obtain_desktop_session_token() {
 create_grant() {
   local family=$1 payload
   if [ "$family" = "promptBridge" ]; then
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxRequestsPerRun":3}}'
+    payload="$(prompt_grant_payload "$WORKLOAD_ID")"
   else
     payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerRun":10}}'
   fi
   admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$payload"
+}
+
+# The admin API validates the policy; jq is used here solely to serialize E2E
+# configuration safely, never to carry credential values. `allowedModels` is
+# retained for the compatibility/bootstrap contract, while `promptTargets` is
+# the authorization policy and `defaultTargetRef` must select its first target.
+prompt_grant_payload() {
+  local caller=$1
+  jq -cn \
+    --arg namespace "$RECIPE_NS" \
+    --arg recipe "$RECIPE_NAME" \
+    --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+    --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+    --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+    --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+    --arg fallbackProvider "$E2E_PROMPT_FALLBACK_PROVIDER" \
+    --arg fallbackModel "$E2E_PROMPT_FALLBACK_MODEL" \
+    --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
+    --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
+    --arg caller "$caller" \
+    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:3}}'
 }
 
 # ─── prerequisites ───────────────────────────────────────────────────────
@@ -569,25 +645,58 @@ fi
 
 header "Admin grant guardrails"
 
-wildcard_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":["*"],"allowedCallers":["'"$WORKLOAD_ID"'"]}'
+wildcard_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+  --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:["*"],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller]}')"
 admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$wildcard_payload" >/dev/null || true
 wildcard_status="$ADMIN_CURL_HTTP_STATUS"
 wildcard_body="$ADMIN_CURL_BODY"
 if [ "$wildcard_status" = "400" ] && printf '%s' "$wildcard_body" | grep -q 'wildcard_not_allowed'; then
   ok "admin API rejects wildcard allowlists with wildcard_not_allowed"
 else
-  fail "wildcard grant was not rejected as expected (status=${wildcard_status}, body=${wildcard_body})"
+  fail "wildcard grant was not rejected as expected (HTTP ${wildcard_status:-unknown}; response body redacted)"
   exit 1
 fi
 
-empty_models_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":[],"allowedCallers":["'"$WORKLOAD_ID"'"]}'
-admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$empty_models_payload" >/dev/null || true
-empty_models_status="$ADMIN_CURL_HTTP_STATUS"
-empty_models_body="$ADMIN_CURL_BODY"
-if [ "$empty_models_status" = "400" ] && printf '%s' "$empty_models_body" | grep -q 'allowedModels must be non-empty'; then
-  ok "admin API rejects promptBridge grants without an explicit model"
+missing_policy_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],allowedCallers:[$caller]}')"
+admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$missing_policy_payload" >/dev/null || true
+missing_policy_status="$ADMIN_CURL_HTTP_STATUS"
+missing_policy_body="$ADMIN_CURL_BODY"
+if [ "$missing_policy_status" = "400" ] && printf '%s' "$missing_policy_body" | grep -q 'promptTargets must be a non-empty array'; then
+  ok "admin API rejects promptBridge grants without ordered promptTargets"
 else
-  fail "empty-model promptBridge grant was not rejected as expected (status=${empty_models_status}, body=${empty_models_body})"
+  fail "promptBridge grant without promptTargets was not rejected as expected (HTTP ${missing_policy_status:-unknown}; response body redacted)"
+  exit 1
+fi
+
+missing_default_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+  --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}],allowedCallers:[$caller]}')"
+admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$missing_default_payload" >/dev/null || true
+missing_default_status="$ADMIN_CURL_HTTP_STATUS"
+missing_default_body="$ADMIN_CURL_BODY"
+if [ "$missing_default_status" = "400" ] && printf '%s' "$missing_default_body" | grep -q 'defaultTargetRef is required'; then
+  ok "admin API rejects promptBridge grants without defaultTargetRef"
+else
+  fail "promptBridge grant without defaultTargetRef was not rejected as expected (HTTP ${missing_default_status:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -602,8 +711,45 @@ if ! stop_sdk_caller_fixture; then
 fi
 ok "paused sdk-caller fixture before authorization probes (run=${E2E_PROBE_RUN_ID})"
 
-create_grant promptBridge >/dev/null && ok "created promptBridge grant" || { fail "promptBridge grant creation failed"; exit 1; }
-create_grant clientNotifications >/dev/null && ok "created clientNotifications grant" || { fail "clientNotifications grant creation failed"; exit 1; }
+if create_grant promptBridge >/dev/null; then
+  ok "created promptBridge grant"
+else
+  fail "promptBridge grant creation failed"
+  exit 1
+fi
+if create_grant clientNotifications >/dev/null; then
+  ok "created clientNotifications grant"
+else
+  fail "clientNotifications grant creation failed"
+  exit 1
+fi
+
+# Read back only the persisted policy metadata. This proves the operator's
+# two-provider order/default contract without ever logging a Secret value,
+# bearer token, or credential ticket.
+prompt_grant_readback="$(admin_curl GET "/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${RECIPE_NAME}" || true)"
+if [ "$ADMIN_CURL_HTTP_STATUS" = "200" ] &&
+  printf '%s' "$prompt_grant_readback" | jq -e \
+    --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+    --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+    --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+    --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+    --arg fallbackProvider "$E2E_PROMPT_FALLBACK_PROVIDER" \
+    --arg fallbackModel "$E2E_PROMPT_FALLBACK_MODEL" \
+    --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
+    --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
+    '(.items // []) | map(select(.capabilityFamily == "promptBridge")) | .[0] as $grant |
+      ($grant.provider == $provider) and
+      ($grant.defaultTargetRef == $targetRef) and
+      (($grant.promptTargets // []) | length == 2) and
+      ($grant.promptTargets[0] == {targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}) and
+      ($grant.promptTargets[1] == {targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}) and
+      ((($grant | tojson) | test("secret|token"; "i")) | not)' >/dev/null; then
+  ok "persisted promptBridge policy contains ordered primary + fallback providers without credential material"
+else
+  fail "persisted promptBridge policy did not match the two-provider order/default contract (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
+  exit 1
+fi
 
 # Recipients read endpoint (grant-driven picker): the clientNotifications grant
 # just created carries allowedUserRefs=[USER_REF]. GET /v1/client-notifications/
@@ -654,10 +800,33 @@ else
   exit 1
 fi
 
-narrow_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["e2e-unlisted-caller"],"quotaLimits":{"maxRequestsPerRun":3}}'
+unauthorized_target="$(kctl exec "$caller_pod" -n "$SANDBOX_NS" -- env "E2E_PROBE_RUN_ID=${E2E_PROBE_RUN_ID}" node -e '
+fetch(process.env.PLUGIN_WORKLOAD_SDK_ENDPOINT + "/v1/prompt-bridge", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: "Bearer " + process.env.PLUGIN_WORKLOAD_SDK_TOKEN,
+  },
+  body: JSON.stringify({
+    purpose: "summarization",
+    targetRef: "unauthorized-third-provider",
+    idempotencyKey: "e2e-deny-target-" + process.env.E2E_PROBE_RUN_ID,
+    messages: [{ role: "user", content: "x" }],
+  }),
+}).then(async r => { const b = await r.json().catch(() => ({})); console.log(r.status + ":" + (b.error || "")); process.exit(0) })
+  .catch(() => { console.log("ERR"); process.exit(0) })
+' 2>/dev/null || true)"
+if printf "%s" "$unauthorized_target" | grep -q 'target_not_allowed'; then
+  ok "selector outside the two-provider policy is denied with target_not_allowed"
+else
+  fail "unauthorized provider target was not denied as expected (got '${unauthorized_target}')"
+  exit 1
+fi
+
+narrow_payload="$(prompt_grant_payload 'e2e-unlisted-caller')"
 admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$narrow_payload" >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
-  fail "failed to narrow promptBridge grant for caller_not_allowed probe (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "failed to narrow promptBridge grant for caller_not_allowed probe (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -708,14 +877,14 @@ logs="$(wait_for_caller_logs_matching E2E_SDK_CLIENT_NOTIFICATION_OK "$E2E_WAIT_
 if printf "%s" "$logs" | grep -q E2E_SDK_PROMPT_BRIDGE_OK; then
   ok "sdk-caller promptBridge call was authorized (invocationId returned)"
 else
-  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s: $(printf '%s' "$logs" | grep E2E_SDK_PROMPT_BRIDGE || true)"
+  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 
 if printf "%s" "$logs" | grep -q E2E_SDK_CLIENT_NOTIFICATION_OK; then
   ok "sdk-caller clientNotifications call was accepted (notificationId returned)"
 else
-  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s: $(printf '%s' "$logs" | grep E2E_SDK_CLIENT_NOTIFICATION || true)"
+  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 
@@ -777,7 +946,7 @@ header "Notification preferences PUT contract"
 
 desktop_session_token="$(obtain_desktop_session_token "$E2E_DESKTOP_USER_EMAIL" "$E2E_DESKTOP_PASSWORD" || true)"
 if [ -z "$desktop_session_token" ]; then
-  fail "could not obtain desktop session token for ${E2E_DESKTOP_USER_EMAIL} (HTTP ${ADMIN_CURL_HTTP_STATUS} via ${E2E_EXTERNAL_REST_API_URL}: ${ADMIN_CURL_BODY})"
+  fail "could not obtain desktop session token for ${E2E_DESKTOP_USER_EMAIL} (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown} via ${E2E_EXTERNAL_REST_API_URL}; response body redacted)"
   exit 1
 fi
 ok "obtained desktop session token for notification-preferences checks"
@@ -787,7 +956,7 @@ if [ "$ADMIN_CURL_HTTP_STATUS" = "400" ] &&
    printf '%s' "$ADMIN_CURL_BODY" | grep -q 'invalid_channel_fallback_enabled'; then
   ok "partial PUT without channelFallbackEnabled is rejected with invalid_channel_fallback_enabled"
 else
-  fail "partial notification-preferences PUT was not rejected as expected (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "partial notification-preferences PUT was not rejected as expected (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -796,13 +965,13 @@ if [ "$ADMIN_CURL_HTTP_STATUS" = "400" ] &&
    printf '%s' "$ADMIN_CURL_BODY" | grep -q 'invalid_preferred_medium'; then
   ok "partial PUT without preferredMedium is rejected with invalid_preferred_medium"
 else
-  fail "partial notification-preferences PUT without preferredMedium was not rejected as expected (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "partial notification-preferences PUT without preferredMedium was not rejected as expected (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
 session_curl PUT "/external/me/notification-preferences" "$desktop_session_token" '{"preferredMedium":null,"channelFallbackEnabled":false}' >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
-  fail "full notification-preferences PUT expected HTTP 200, got ${ADMIN_CURL_HTTP_STATUS}: ${ADMIN_CURL_BODY}"
+  fail "full notification-preferences PUT expected HTTP 200, got ${ADMIN_CURL_HTTP_STATUS:-unknown} (response body redacted)"
   exit 1
 fi
 
@@ -831,7 +1000,7 @@ fi
 if printf "%s" "$logs" | grep -q E2E_SDK_IDEMPOTENCY_OK; then
   ok "idempotency replay returned same invocationId (no extra quota consumed)"
 else
-  fail "idempotency replay did not return same invocationId: $(printf '%s' "$logs" | grep E2E_SDK_IDEMPOTENCY || true)"
+  fail "idempotency replay did not return the first invocationId (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 
@@ -839,7 +1008,7 @@ fi
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
   ok "quota enforcement correctly rejected call after 3/3 requests consumed"
 else
-  fail "quota enforcement did not reject excess call: $(printf '%s' "$logs" | grep E2E_SDK_QUOTA_EXCEEDED || true)"
+  fail "quota enforcement did not reject the excess call (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 

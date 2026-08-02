@@ -1,13 +1,18 @@
 import { pluginWorkloadSdkAuthDecisionsTotal } from '../observability/metrics.js'
 import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
-import { issuePluginWorkloadSdkCredentialTicket } from './pluginWorkloadSdkCredentialTicket.js'
+import {
+  PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS,
+  issuePluginWorkloadSdkCredentialTicketWithClaims,
+} from './pluginWorkloadSdkCredentialTicket.js'
 import {
   type PluginWorkloadSdkErrorCode,
   type PluginWorkloadSdkGrant,
   type PluginWorkloadSdkModelPolicy,
   type PluginWorkloadSdkPromptTarget,
   findGrant,
+  getInvocationById,
   hashPromptTargetPolicy,
+  registerPluginWorkloadSdkCredentialTicketJti,
 } from './pluginWorkloadSdkDb.js'
 import { markInvocationStatus, recordInvocation } from './pluginWorkloadSdkInvocationAuditor.js'
 import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js'
@@ -108,29 +113,7 @@ export interface AuthorizedPromptBridge {
   authorizedTargets: PluginWorkloadSdkPromptTarget[]
   policyRevision: number
   policyHash: string
-  /** One short-lived signed authorization artifact per eligible target. */
-  authorizedTargetTickets: Array<{ targetRef: string; credentialTicket: string }>
   maxOutputTokens: number | null
-}
-
-function issueTargetTickets(
-  claims: McpHostAccessClaims,
-  invocationId: string,
-  targets: PluginWorkloadSdkPromptTarget[],
-  policyRevision: number,
-  policyHash: string
-): Array<{ targetRef: string; credentialTicket: string }> {
-  return targets.map(target => ({
-    targetRef: target.targetRef,
-    credentialTicket: issuePluginWorkloadSdkCredentialTicket({
-      recipeNamespace: claims.recipeNamespace,
-      recipeName: claims.recipeName,
-      invocationId,
-      target,
-      policyRevision,
-      policyHash,
-    }),
-  }))
 }
 
 type PromptTargetResolution =
@@ -322,6 +305,11 @@ async function authorizePromptBridgeInner(
     payload: params.payload,
     status: 'in_progress',
     authorizationDecision: 'authorized',
+    promptAuthorization: {
+      policyRevision: grant.policyRevision,
+      policyHash: resolvedPolicyHash,
+      authorizedTargetRefs: authorizedTargets.map(target => target.targetRef),
+    },
   })
   if (recorded.kind === 'conflict') {
     return deny('idempotency_conflict', 'idempotency key was already used with a different payload')
@@ -350,13 +338,6 @@ async function authorizePromptBridgeInner(
         authorizedTargets,
         policyRevision: grant.policyRevision,
         policyHash: resolvedPolicyHash,
-        authorizedTargetTickets: issueTargetTickets(
-          claims,
-          recorded.invocation.id,
-          authorizedTargets,
-          grant.policyRevision,
-          resolvedPolicyHash
-        ),
         maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
       },
     }
@@ -405,14 +386,118 @@ async function authorizePromptBridgeInner(
       authorizedTargets,
       policyRevision: grant.policyRevision,
       policyHash: resolvedPolicyHash,
-      authorizedTargetTickets: issueTargetTickets(
-        claims,
-        recorded.invocation.id,
-        authorizedTargets,
-        grant.policyRevision,
-        resolvedPolicyHash
-      ),
       maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
+    },
+  }
+}
+
+export interface ReissuePromptBridgeCredentialTicketParams {
+  claims: McpHostAccessClaims
+  invocationId: string
+  targetRef: string
+}
+
+export type ReissuedPromptBridgeCredentialTicket = {
+  invocationId: string
+  targetRef: string
+  credentialTicket: string
+  policyRevision: number
+  policyHash: string
+  expiresInSeconds: number
+}
+
+/**
+ * Mints one short-lived ticket immediately before a fallback attempt. The
+ * target is accepted only when it was in the original, persisted suffix and
+ * the live policy still has exactly that revision/hash and caller authority.
+ * This route accepts no credential slot, model, provider, or caller from the
+ * workload, so it cannot turn a fallback request into a selector bypass.
+ */
+export async function reissuePromptBridgeCredentialTicket(
+  params: ReissuePromptBridgeCredentialTicketParams
+): Promise<PluginWorkloadSdkAuthzResult<ReissuedPromptBridgeCredentialTicket>> {
+  const scopeError = checkScope(params.claims)
+  if (scopeError) return scopeError
+
+  const invocation = await getInvocationById(params.invocationId)
+  if (
+    !invocation ||
+    invocation.recipeNamespace !== params.claims.recipeNamespace ||
+    invocation.recipeName !== params.claims.recipeName ||
+    invocation.method !== 'promptBridge' ||
+    invocation.status !== 'in_progress' ||
+    invocation.authorizationDecision !== 'authorized' ||
+    !invocation.promptAuthorization
+  ) {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge invocation is not eligible for ticket reissue'
+    )
+  }
+
+  const authorization = invocation.promptAuthorization
+  if (!authorization.authorizedTargetRefs.includes(params.targetRef)) {
+    return deny('target_not_allowed', 'target was not authorized for this invocation')
+  }
+
+  const grant = await findGrant(
+    params.claims.recipeNamespace,
+    params.claims.recipeName,
+    'promptBridge'
+  )
+  if (!grant || checkCaller(grant, invocation.callerRef)) {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge policy no longer authorizes this invocation'
+    )
+  }
+  const policyHash = hashPromptTargetPolicy(grant)
+  if (
+    grant.policyRevision !== authorization.policyRevision ||
+    policyHash !== authorization.policyHash
+  ) {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge policy changed after the original authorization'
+    )
+  }
+  const target = grant.promptTargets.find(candidate => candidate.targetRef === params.targetRef)
+  if (!target) {
+    return deny('target_not_allowed', 'target is not in the current promptBridge policy')
+  }
+
+  const issued = issuePluginWorkloadSdkCredentialTicketWithClaims({
+    recipeNamespace: params.claims.recipeNamespace,
+    recipeName: params.claims.recipeName,
+    invocationId: invocation.id,
+    target,
+    policyRevision: grant.policyRevision,
+    policyHash,
+  })
+  const registered = await registerPluginWorkloadSdkCredentialTicketJti({
+    jti: issued.claims.jti,
+    recipeNamespace: params.claims.recipeNamespace,
+    recipeName: params.claims.recipeName,
+    invocationId: invocation.id,
+    targetRef: target.targetRef,
+    expiresAt: new Date(Date.now() + PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS * 1_000),
+  })
+  if (!registered) {
+    return deny(
+      'provider_unavailable',
+      'credential ticket issuance is temporarily unavailable',
+      true
+    )
+  }
+  return {
+    ok: true,
+    value: {
+      invocationId: invocation.id,
+      targetRef: target.targetRef,
+      credentialTicket: issued.credentialTicket,
+      policyRevision: grant.policyRevision,
+      policyHash,
+      expiresInSeconds: PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS,
     },
   }
 }

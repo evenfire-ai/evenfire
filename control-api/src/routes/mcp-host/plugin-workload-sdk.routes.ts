@@ -9,6 +9,7 @@ import {
   authorizeClientNotification,
   authorizeListRecipients,
   authorizePromptBridge,
+  reissuePromptBridgeCredentialTicket,
 } from '../../services/pluginWorkloadSdkAuthorizer.js'
 import { verifyPluginWorkloadSdkCredentialTicket } from '../../services/pluginWorkloadSdkCredentialTicket.js'
 import {
@@ -27,6 +28,7 @@ import {
   getInvocationById,
   hashPromptTargetPolicy,
   listInvocations,
+  redeemPluginWorkloadSdkCredentialTicketJti,
   resolveRecipientProfiles,
 } from '../../services/pluginWorkloadSdkDb.js'
 import { markInvocationStatus } from '../../services/pluginWorkloadSdkInvocationAuditor.js'
@@ -40,6 +42,7 @@ import { isPlainObject } from '../../utils/isPlainObject.js'
 //
 //   POST /mcp-host/plugin-workload-sdk/prompt-bridge
 //   POST /mcp-host/plugin-workload-sdk/client-notification
+//   POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket
 //   GET  /mcp-host/plugin-workload-sdk/invocations/:recipeRef
 
 const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
@@ -393,6 +396,38 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   const router = Router()
 
   router.post(
+    // JIT fallback-ticket contract for mcp-host:
+    // - call only after the prior provider attempt has failed;
+    // - provide invocationId + next targetRef, never a credential identity;
+    // - redeem the returned ticket once, immediately before WRC reads the slot.
+    // The server derives caller and allowed suffix from the persisted
+    // invocation, verifies current policy, and emits a new one-shot jti.
+    '/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket',
+    requireMcpHostJwt,
+    asyncHandler(async (req, res) => {
+      const claims = req.mcpHostJwt!
+      const body = isPlainObject(req.body) ? req.body : {}
+      if (!checkRecipeBinding(body, claims, res)) return
+      const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
+      const targetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+      if (!invocationId || !targetRef || targetRef.length > MAX_TARGET_REF_LENGTH) {
+        res.status(400).json({ error: 'invocationId and targetRef are required' })
+        return
+      }
+      const result = await reissuePromptBridgeCredentialTicket({
+        claims,
+        invocationId,
+        targetRef,
+      })
+      if (!result.ok) {
+        sendAuthzError(res, result)
+        return
+      }
+      res.status(201).json(result.value)
+    })
+  )
+
+  router.post(
     '/mcp-host/plugin-workload-sdk/prompt-bridge',
     requireMcpHostJwt,
     asyncHandler(async (req, res) => {
@@ -439,7 +474,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         authorizedTargets: result.value.authorizedTargets,
         policyRevision: result.value.policyRevision,
         policyHash: result.value.policyHash,
-        authorizedTargetTickets: result.value.authorizedTargetTickets,
         maxOutputTokens: result.value.maxOutputTokens,
       })
     })
@@ -557,6 +591,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       const ticket = typeof body.credentialTicket === 'string' ? body.credentialTicket : ''
       const invocationId = typeof body.invocationId === 'string' ? body.invocationId : ''
       const targetRef = typeof body.targetRef === 'string' ? body.targetRef : ''
+      const redeem = body.redeem === true
       if (!ticket || !invocationId || !targetRef) {
         res.status(400).json({ error: 'credentialTicket, invocationId and targetRef are required' })
         return
@@ -578,7 +613,13 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         !invocation ||
         invocation.recipeNamespace !== claims.recipeNamespace ||
         invocation.recipeName !== claims.recipeName ||
-        invocation.method !== 'promptBridge'
+        invocation.method !== 'promptBridge' ||
+        invocation.status !== 'in_progress' ||
+        invocation.authorizationDecision !== 'authorized' ||
+        !invocation.promptAuthorization ||
+        !invocation.promptAuthorization.authorizedTargetRefs.includes(targetRef) ||
+        invocation.promptAuthorization.policyRevision !== ticketClaims.policyRevision ||
+        invocation.promptAuthorization.policyHash !== ticketClaims.policyHash
       ) {
         res.status(403).json({ error: 'provider_policy_denied', retryable: false })
         return
@@ -596,6 +637,19 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       ) {
         res.status(403).json({ error: 'provider_policy_denied', retryable: false })
         return
+      }
+      if (redeem) {
+        const redeemed = await redeemPluginWorkloadSdkCredentialTicketJti({
+          jti: ticketClaims.jti,
+          recipeNamespace: claims.recipeNamespace,
+          recipeName: claims.recipeName,
+          invocationId,
+          targetRef,
+        })
+        if (!redeemed) {
+          res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+          return
+        }
       }
       res.status(200).json({ active: true })
     })

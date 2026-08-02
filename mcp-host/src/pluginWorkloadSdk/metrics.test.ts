@@ -33,7 +33,6 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       modelPolicy: null,
       selectedTarget: target,
       authorizedTargets: [target],
-      authorizedTargetTickets: [{ targetRef: target.targetRef, credentialTicket: 'ticket' }],
       policyRevision: 1,
       policyHash: 'a'.repeat(64),
       maxOutputTokens: null,

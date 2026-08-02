@@ -4,6 +4,7 @@ import request from 'supertest'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
 import * as notificationEmitter from '../src/services/notificationEmitter.js'
 import * as authorizer from '../src/services/pluginWorkloadSdkAuthorizer.js'
+import { issuePluginWorkloadSdkCredentialTicket } from '../src/services/pluginWorkloadSdkCredentialTicket.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
 import * as auditor from '../src/services/pluginWorkloadSdkInvocationAuditor.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
@@ -30,7 +31,9 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   return {
     ...actual,
     getInvocationById: vi.fn(),
+    findGrant: vi.fn(),
     listInvocations: vi.fn(),
+    redeemPluginWorkloadSdkCredentialTicketJti: vi.fn(),
     resolveRecipientProfiles: vi.fn(),
   }
 })
@@ -44,6 +47,7 @@ vi.mock('../src/services/pluginWorkloadSdkAuthorizer.js', async () => {
     authorizePromptBridge: vi.fn(),
     authorizeClientNotification: vi.fn(),
     authorizeListRecipients: vi.fn(),
+    reissuePromptBridgeCredentialTicket: vi.fn(),
   }
 })
 
@@ -98,13 +102,17 @@ const validNotificationBody = {
 
 beforeEach(() => {
   vi.mocked(authorizer.authorizePromptBridge).mockReset()
+  vi.mocked(authorizer.reissuePromptBridgeCredentialTicket).mockReset()
   vi.mocked(authorizer.authorizeClientNotification).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
   vi.mocked(auditor.markInvocationStatus).mockReset().mockResolvedValue(true)
   vi.mocked(sdkDb.getInvocationById).mockReset()
+  vi.mocked(sdkDb.findGrant).mockReset()
+  vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(notificationEmitter.enqueuePluginWorkloadSdkNotification)
     .mockReset()
     .mockResolvedValue(undefined)
+  vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
   vi.mocked(authorizer.authorizePromptBridge).mockResolvedValue({
     ok: true,
     value: {
@@ -129,8 +137,18 @@ beforeEach(() => {
       ],
       policyRevision: 1,
       policyHash: 'policy-hash',
-      authorizedTargetTickets: [{ targetRef: 'primary-zai', credentialTicket: 'signed-ticket' }],
       maxOutputTokens: null,
+    },
+  })
+  vi.mocked(authorizer.reissuePromptBridgeCredentialTicket).mockResolvedValue({
+    ok: true,
+    value: {
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+      credentialTicket: 'signed-fresh-ticket',
+      policyRevision: 1,
+      policyHash: 'policy-hash',
+      expiresInSeconds: 60,
     },
   })
   vi.mocked(authorizer.authorizeClientNotification).mockResolvedValue({
@@ -246,8 +264,8 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
     expect(res.body).toMatchObject({ invocationId: 'inv-1', replay: false, model: 'glm-4.7' })
     expect(res.body).toMatchObject({
       selectedTarget: { targetRef: 'primary-zai', credentialSlot: 'zai-api-key' },
-      authorizedTargetTickets: [{ targetRef: 'primary-zai' }],
     })
+    expect(JSON.stringify(res.body)).not.toContain('credentialTicket')
   })
 
   it('forwards an exact provider/model selector without accepting a raw credential', async () => {
@@ -304,7 +322,6 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
         ],
         policyRevision: 1,
         policyHash: 'policy-hash',
-        authorizedTargetTickets: [{ targetRef: 'primary-zai', credentialTicket: 'signed-ticket' }],
         maxOutputTokens: null,
       },
     })
@@ -314,6 +331,50 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
       .send(validPromptBody)
     expect(res.status).toBe(200)
     expect(res.body.replay).toBe(true)
+  })
+})
+
+describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket', () => {
+  const body = {
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    invocationId: 'inv-1',
+    targetRef: 'openai-fallback',
+  }
+
+  it('requires the runtime JWT and recipe binding', async () => {
+    await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket')
+      .send(body)
+      .expect(401)
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ ...body, recipeName: 'other-recipe' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('recipe_binding_mismatch')
+    expect(authorizer.reissuePromptBridgeCredentialTicket).not.toHaveBeenCalled()
+  })
+
+  it('forwards only the bound invocation and target, never a caller or credential slot', async () => {
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ ...body, callerRef: 'attacker', credentialSlot: 'other-provider-key' })
+    expect(res.status).toBe(201)
+    expect(res.body).toEqual({
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+      credentialTicket: 'signed-fresh-ticket',
+      policyRevision: 1,
+      policyHash: 'policy-hash',
+      expiresInSeconds: 60,
+    })
+    expect(authorizer.reissuePromptBridgeCredentialTicket).toHaveBeenCalledWith({
+      claims: expect.objectContaining({ recipeNamespace: NS, recipeName: RECIPE }),
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+    })
   })
 })
 
@@ -635,5 +696,95 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'provider_policy_denied', retryable: false })
     expect(JSON.stringify(res.body)).not.toContain('credentialSlot')
+  })
+
+  it('consumes a valid jti exactly once after all policy and invocation checks', async () => {
+    const target = {
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+    }
+    const policyHash = sdkDb.hashPromptTargetPolicy({
+      policyRevision: 1,
+      defaultTargetRef: 'primary-zai',
+      promptTargets: [target],
+    })
+    const ticket = issuePluginWorkloadSdkCredentialTicket({
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      invocationId: 'inv-1',
+      target,
+      policyRevision: 1,
+      policyHash,
+    })
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue({
+      id: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      callerRef: 'api',
+      correlationId: null,
+      method: 'promptBridge',
+      detail: 'glm-4.7',
+      purpose: 'summarization',
+      idempotencyKeyHash: 'hash',
+      payloadHash: 'payload-hash',
+      status: 'in_progress',
+      quotaConsumed: true,
+      authorizationDecision: 'authorized',
+      promptAuthorization: {
+        policyRevision: 1,
+        policyHash,
+        authorizedTargetRefs: ['primary-zai'],
+      },
+      createdAt: '2026-08-02T00:00:00.000Z',
+      completedAt: null,
+    })
+    vi.mocked(sdkDb.findGrant).mockResolvedValue({
+      id: 'grant-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      capabilityFamily: 'promptBridge',
+      provider: 'zai',
+      allowedModels: ['glm-4.7'],
+      allowedEventTypes: [],
+      allowedTargetRefs: [],
+      allowedUserRefs: [],
+      allowedCallers: ['api'],
+      quotaLimits: {},
+      modelPolicies: {},
+      promptTargets: [target],
+      defaultTargetRef: 'primary-zai',
+      policyRevision: 1,
+      createdAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    })
+
+    const body = {
+      credentialTicket: ticket,
+      invocationId: 'inv-1',
+      targetRef: 'primary-zai',
+      redeem: true,
+    }
+    await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send(body)
+      .expect(200)
+    expect(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        targetRef: 'primary-zai',
+        jti: expect.any(String),
+      })
+    )
+
+    vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(false)
+    const replay = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send(body)
+    expect(replay.status).toBe(403)
+    expect(replay.body).toEqual({ error: 'provider_policy_denied', retryable: false })
   })
 })

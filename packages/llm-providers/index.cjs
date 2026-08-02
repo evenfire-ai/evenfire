@@ -182,10 +182,30 @@ function isLlmProviderId(s) {
   return typeof s === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_CREDENTIAL_SLOTS, s)
 }
 
+/**
+ * Whether a policy credentialSlot is a valid operator-owned slot for a
+ * provider. Single, single-line API-key providers may use additive suffixed
+ * slots (for example `openai-api-key-fallback-a`); multi-slot providers and
+ * multiline credentials must use one of their canonical slots exactly.
+ */
+function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
+  if (!isLlmProviderId(provider) || typeof credentialSlot !== 'string') return false
+  const slots = PROVIDER_CREDENTIAL_SLOTS[provider]
+  const canonical = slots.map(slot => slot.dataKey)
+  const singleSlotProvider = slots.length === 1 && slots[0].multiline !== true
+  if (singleSlotProvider) {
+    return canonical.some(
+      dataKey => credentialSlot === dataKey || credentialSlot.startsWith(`${dataKey}-`)
+    )
+  }
+  return canonical.includes(credentialSlot)
+}
+
 module.exports = {
   PROVIDER_IDS,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_NON_SECRET_ENV,
+  isCredentialSlotOwnedByProvider,
   isLlmProviderId,
 }

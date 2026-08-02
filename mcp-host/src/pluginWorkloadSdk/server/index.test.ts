@@ -57,4 +57,38 @@ describe('PluginWorkloadSdk server usage attribution', () => {
       output_tokens: 5,
     })
   })
+
+  it('records actual promptBridge target attribution without credential values', () => {
+    const event = buildPromptBridgeUsageEvent({
+      binding: {
+        hostRef: 'plugin-workload-sdk/sandbox-app',
+        recipeNamespace: 'sandbox-apps',
+        recipeName: 'prompt-notify',
+      },
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      inputTokens: 10,
+      outputTokens: 5,
+      callerRef: 'backend-worker',
+      promptBridgeMetadata: {
+        targetRef: 'fallback-openai',
+        credentialSlot: 'openai-api-key',
+        fallbackUsed: true,
+        attemptCount: 2,
+      },
+    })
+
+    expect(event).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      prompt_bridge_metadata: {
+        target_ref: 'fallback-openai',
+        credential_slot: 'openai-api-key',
+        fallback_used: true,
+        attempt_count: 2,
+      },
+    })
+    expect(JSON.stringify(event)).not.toContain('credentialTicket')
+    expect(JSON.stringify(event)).not.toContain('secret-')
+  })
 })

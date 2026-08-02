@@ -153,36 +153,81 @@ async function embeddedValue(
   )
 }
 
-async function clickEmbedded(
+async function embeddedActiveControl(
   app: ElectronApplication,
   webContentsId: number,
   selector: string
+): Promise<boolean> {
+  return app.evaluate(
+    async ({ webContents }, args) => {
+      const contents = webContents.fromId(args.webContentsId)
+      if (!contents || contents.isDestroyed()) return false
+      const script = `document.activeElement?.matches(${JSON.stringify(args.selector)}) === true`
+      return Boolean(await contents.executeJavaScript(script))
+    },
+    { webContentsId, selector }
+  )
+}
+
+async function embeddedActiveSignature(
+  app: ElectronApplication,
+  webContentsId: number
+): Promise<string> {
+  return app.evaluate(async ({ webContents }, webContentsId) => {
+    const contents = webContents.fromId(webContentsId)
+    if (!contents || contents.isDestroyed()) return 'destroyed'
+    return String(
+      await contents.executeJavaScript(`(() => {
+          const el = document.activeElement;
+          if (!el) return 'none';
+          return [el.tagName, el.id || '', el.getAttribute('name') || ''].join('#');
+        })()`)
+    )
+  }, webContentsId)
+}
+
+async function sendEmbeddedKey(
+  app: ElectronApplication,
+  webContentsId: number,
+  keyCode: string
 ): Promise<void> {
-  const rect = await embeddedRect(app, webContentsId, selector)
-  if (!rect) throw new Error(`Embedded control ${selector} is missing or not visible.`)
-  const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }
   await app.evaluate(
     ({ webContents }, args) => {
       const contents = webContents.fromId(args.webContentsId)
       if (!contents || contents.isDestroyed()) throw new Error('Embedded WebContentsView closed')
-      contents.sendInputEvent({ type: 'mouseMove', x: args.x, y: args.y })
-      contents.sendInputEvent({
-        type: 'mouseDown',
-        x: args.x,
-        y: args.y,
-        button: 'left',
-        clickCount: 1,
-      })
-      contents.sendInputEvent({
-        type: 'mouseUp',
-        x: args.x,
-        y: args.y,
-        button: 'left',
-        clickCount: 1,
-      })
+      contents.focus()
+      contents.sendInputEvent({ type: 'keyDown', keyCode: args.keyCode })
+      if (args.keyCode === 'Enter') {
+        contents.sendInputEvent({ type: 'char', keyCode: '\r' })
+      }
+      contents.sendInputEvent({ type: 'keyUp', keyCode: args.keyCode })
     },
-    { webContentsId, ...point }
+    { webContentsId, keyCode }
   )
+}
+
+async function focusEmbeddedControl(
+  app: ElectronApplication,
+  webContentsId: number,
+  selector: string
+): Promise<void> {
+  // WebContentsView controls below the fold cannot be clicked with coordinates
+  // returned by getBoundingClientRect(): Chromium drops pointer events whose
+  // target point is outside the view. Tab traversal is the native keyboard
+  // path a user takes and scrolls each focused control into view without DOM
+  // focus()/scrollIntoView() shortcuts.
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    if (await embeddedActiveControl(app, webContentsId, selector)) return
+    const activeBefore = await embeddedActiveSignature(app, webContentsId)
+    await sendEmbeddedKey(app, webContentsId, 'Tab')
+    await expect
+      .poll(() => embeddedActiveSignature(app, webContentsId), {
+        timeout: 2_000,
+        intervals: [10, 25, 50],
+      })
+      .not.toBe(activeBefore)
+  }
+  throw new Error(`Embedded control ${selector} did not receive native keyboard focus.`)
 }
 
 async function typeEmbedded(
@@ -191,15 +236,28 @@ async function typeEmbedded(
   selector: string,
   value: string
 ): Promise<void> {
-  await clickEmbedded(app, webContentsId, selector)
+  await focusEmbeddedControl(app, webContentsId, selector)
   await app.evaluate(
     ({ webContents }, args) => {
       const contents = webContents.fromId(args.webContentsId)
       if (!contents || contents.isDestroyed()) throw new Error('Embedded WebContentsView closed')
-      contents.insertText(args.value)
+      contents.focus()
+      for (const character of args.value) {
+        contents.sendInputEvent({ type: 'char', keyCode: character })
+      }
     },
     { webContentsId, value }
   )
+  await expect.poll(() => embeddedValue(app, webContentsId, selector)).toBe(value)
+}
+
+async function activateEmbedded(
+  app: ElectronApplication,
+  webContentsId: number,
+  selector: string
+): Promise<void> {
+  await focusEmbeddedControl(app, webContentsId, selector)
+  await sendEmbeddedKey(app, webContentsId, 'Enter')
 }
 
 test('Desktop Apps executes promptBridge and clientNotifications inside the real WebContentsView', async ({}, testInfo) => {
@@ -236,7 +294,9 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
         embedded = await findPromptNotifyContents(app!)
         return embedded?.url ?? ''
       })
-      .toContain('/api/v1/sandbox-ui/')
+      .toContain(
+        `/api/v1/sandbox-ui/${encodeURIComponent(RECIPE_NAMESPACE)}/${encodeURIComponent(RECIPE_NAME)}/view/`
+      )
     const webContentsId = embedded!.id
     await expect.poll(() => embeddedRect(app!, webContentsId, '#run')).not.toBeNull()
 
@@ -247,7 +307,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
       '#prompt',
       `Reply with a short confirmation for test marker ${marker}.`
     )
-    await clickEmbedded(app, webContentsId, '#run')
+    await activateEmbedded(app, webContentsId, '#run')
     await expect
       .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), { timeout: 120_000 })
       .not.toMatch(/^(?:|Running…|Enter a prompt first\.)$/)
@@ -261,10 +321,16 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
       .not.toBe('')
     await typeEmbedded(app, webContentsId, '#title', `Evenfire E2E ${marker}`)
     await typeEmbedded(app, webContentsId, '#message', 'Plugin Workload SDK Desktop validation.')
-    await clickEmbedded(app, webContentsId, '#notify')
+    await expect
+      .poll(() => embeddedValue(app!, webContentsId, '#title'))
+      .toBe(`Evenfire E2E ${marker}`)
+    await expect
+      .poll(() => embeddedValue(app!, webContentsId, '#message'))
+      .toBe('Plugin Workload SDK Desktop validation.')
+    await activateEmbedded(app, webContentsId, '#notify')
     await expect
       .poll(() => embeddedText(app!, webContentsId, '#notify-out'), { timeout: 30_000 })
-      .toMatch(/notificationId|accepted|delivered/i)
+      .toMatch(/"notificationId"\s*:\s*"[0-9a-f-]{36}"/i)
 
     // Renderer chrome + native view both remain alive after the two backend
     // operations, proving the Desktop Apps path rather than a direct proxy call.

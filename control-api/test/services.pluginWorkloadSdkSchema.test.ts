@@ -51,4 +51,16 @@ describe('pluginWorkloadSdkSchema', () => {
     expect(grantsCreate).not.toMatch(/super_admin_approved/)
     expect(source).toMatch(/DROP COLUMN IF EXISTS super_admin_approved/)
   })
+
+  it('persists JIT ticket authorization and one-shot ticket identities on fresh and upgraded schemas', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    expect(source).toMatch(/prompt_authorization JSONB NULL/)
+    expect(source).toMatch(/plugin_workload_sdk_credential_ticket_jtis/)
+    expect(source).toMatch(/redeemed_at TIMESTAMPTZ NULL/)
+    expect(source).toMatch(/addPluginWorkloadSdkJitCredentialTicketColumns/)
+  })
 })

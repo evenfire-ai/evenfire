@@ -3,6 +3,8 @@ import { pool } from '../src/db.js'
 import {
   consumePeriodQuota,
   deleteGrant,
+  redeemPluginWorkloadSdkCredentialTicketJti,
+  registerPluginWorkloadSdkCredentialTicketJti,
   resolveRecipientProfiles,
   upsertGrant,
 } from '../src/services/pluginWorkloadSdkDb.js'
@@ -68,6 +70,56 @@ describe('consumePeriodQuota — SQL bind parameter contract', () => {
     expect(sql).toContain('$6')
     expect(params).toHaveLength(maxPlaceholder(sql))
     expect(params).toHaveLength(6)
+  })
+})
+
+describe('JIT credential ticket jti registry', () => {
+  beforeEach(() => {
+    vi.mocked(pool.query).mockReset()
+  })
+
+  it('registers a non-secret, invocation-bound jti and reports insertion conflicts', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    await expect(
+      registerPluginWorkloadSdkCredentialTicketJti({
+        jti: '11111111-1111-4111-8111-111111111111',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        invocationId: '22222222-2222-4222-8222-222222222222',
+        targetRef: 'openai-fallback',
+        expiresAt: new Date('2026-08-02T12:01:00.000Z'),
+      })
+    ).resolves.toBe(true)
+    const [sql, params] = vi.mocked(pool.query).mock.calls[1] as unknown as [string, unknown[]]
+    expect(sql).toContain('plugin_workload_sdk_credential_ticket_jtis')
+    expect(sql).toContain('ON CONFLICT (jti) DO NOTHING')
+    expect(params).toHaveLength(6)
+    expect(JSON.stringify(params)).not.toContain('secret-value')
+  })
+
+  it('redeems a jti atomically once and binds every identifying field in SQL', async () => {
+    vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 1 } as never)
+    await expect(
+      redeemPluginWorkloadSdkCredentialTicketJti({
+        jti: '11111111-1111-4111-8111-111111111111',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        invocationId: '22222222-2222-4222-8222-222222222222',
+        targetRef: 'openai-fallback',
+      })
+    ).resolves.toBe(true)
+    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('redeemed_at IS NULL')
+    expect(sql).toContain('expires_at > now()')
+    expect(params).toEqual([
+      '11111111-1111-4111-8111-111111111111',
+      'sandbox-recipes',
+      'sdk-recipe',
+      '22222222-2222-4222-8222-222222222222',
+      'openai-fallback',
+    ])
   })
 })
 

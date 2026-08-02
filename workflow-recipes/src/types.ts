@@ -536,7 +536,7 @@ export interface PluginWorkloadSdkSnippetConfig {
  * actually has active (vs merely declared in spec).
  */
 export interface PluginWorkloadSdkCapabilityStatus {
-  state: 'validated' | 'disabled'
+  state: 'validated' | 'disabled' | 'degraded'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string

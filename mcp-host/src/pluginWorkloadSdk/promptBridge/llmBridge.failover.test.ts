@@ -77,10 +77,14 @@ function makeBridge(
 
 const request = {
   invocationId: 'inv-1',
-  targets: [
-    { target: primary, credentialTicket: 'ticket-primary' },
-    { target: fallback, credentialTicket: 'ticket-fallback' },
-  ],
+  targets: [{ target: primary }, { target: fallback }],
+  policyRevision: 1,
+  policyHash: 'a'.repeat(64),
+  credentialTicketIssuer: {
+    issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+      credentialTicket: `fresh-${target.targetRef}`,
+    })),
+  },
   messages: [{ role: 'user' as const, content: 'hi' }],
   timeoutMs: 5_000,
 }
@@ -106,6 +110,7 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       fallbackUsed: true,
       model: fallback.model,
       usage: { inputTokens: 3, outputTokens: 4 },
+      attemptCount: 2,
     })
   })
 
@@ -127,6 +132,62 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(providerCalls).toEqual([])
   })
 
+  it('reissues a fresh target-bound ticket immediately before each credential resolution', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('provider response')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const issue = vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+      credentialTicket: `fresh-${target.targetRef}`,
+    }))
+    const resolve = vi.fn(async ({ target, credentialTicket }) => {
+      expect(credentialTicket).toBe(`fresh-${target.targetRef}`)
+      return {
+        target,
+        keys: {
+          [target.provider]: { [`${target.provider}-api-key`]: 'provider-secret' },
+        } as ApiKeys,
+        llmSecretName: 'provider-secret',
+      }
+    })
+    const { bridge } = makeBridge({ [primary.model]: first, [fallback.model]: second }, resolve)
+
+    await bridge.complete({ ...request, credentialTicketIssuer: { issue } })
+
+    expect(issue).toHaveBeenNthCalledWith(1, {
+      invocationId: 'inv-1',
+      target: primary,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+    })
+    expect(issue).toHaveBeenNthCalledWith(2, {
+      invocationId: 'inv-1',
+      target: fallback,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+    })
+    expect(resolve).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not fall back when JIT ticket issuance fails', async () => {
+    const issue = vi.fn(async () => {
+      throw new PluginWorkloadError('provider_unavailable', 'ticket unavailable', true)
+    })
+    const { bridge, credentialCalls } = makeBridge({})
+    await expect(
+      bridge.complete({ ...request, credentialTicketIssuer: { issue } })
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
+    expect(issue).toHaveBeenCalledOnce()
+    expect(credentialCalls).toEqual([])
+  })
+
+  it('bounds JIT ticket issuance to the request deadline', async () => {
+    const issue = vi.fn(() => new Promise<{ credentialTicket: string }>(() => undefined))
+    const { bridge, credentialCalls } = makeBridge({})
+    await expect(
+      bridge.complete({ ...request, timeoutMs: 5, credentialTicketIssuer: { issue } })
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
+    expect(credentialCalls).toEqual([])
+  })
+
   it('does not fallback on a provider error outside triggerOn', async () => {
     const first = new FakeProvider(() => Promise.reject(new Error('429')))
     const second = new FakeProvider(() => Promise.resolve(OK))
@@ -139,6 +200,32 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       code: 'provider_unavailable',
     })
     expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+  })
+
+  it('surfaces only a safe provider reason and never the provider body', async () => {
+    const failing = new FakeProvider(() =>
+      Promise.reject(new Error('provider secret response body must stay private'))
+    )
+    const { bridge } = makeBridge({ [primary.model]: failing })
+
+    await expect(
+      bridge.complete({ ...request, targets: [{ target: primary }] })
+    ).rejects.toMatchObject({ code: 'provider_unavailable', reason: 'rate_limited' })
+
+    try {
+      await bridge.complete({ ...request, targets: [{ target: primary }] })
+    } catch (error) {
+      expect(error).toBeInstanceOf(PluginWorkloadError)
+      expect((error as PluginWorkloadError).toBody()).toEqual({
+        error: 'provider_unavailable',
+        message: 'LLM provider error: LLM_RATE_LIMITED',
+        retryable: true,
+        reason: 'rate_limited',
+      })
+      expect(JSON.stringify((error as PluginWorkloadError).toBody())).not.toContain(
+        'provider secret'
+      )
+    }
   })
 
   it('fails terminally when an authorized target cannot construct its provider', async () => {
@@ -232,7 +319,7 @@ describe('LlmBridge authorized multi-provider fallback', () => {
         bridge.complete({
           ...request,
           invocationId: `metric-${attempt}`,
-          targets: [{ target, credentialTicket: `ticket-${attempt}` }],
+          targets: [{ target }],
         })
       ).rejects.toMatchObject({ code: 'provider_unavailable' })
     }

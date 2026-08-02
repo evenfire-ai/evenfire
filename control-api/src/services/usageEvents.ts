@@ -26,6 +26,12 @@ export type LlmUsageEvent = {
   cache_read_tokens: number
   cache_write_tokens: number
   cache_tokens_reported: boolean
+  prompt_bridge_metadata: {
+    target_ref: string
+    credential_slot: string
+    fallback_used: boolean
+    attempt_count: number
+  } | null
 }
 
 export type UsageIngestResult = {
@@ -69,6 +75,35 @@ function intOrNull(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   if (!Number.isInteger(value)) return null
   return value
+}
+
+function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_metadata'] {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const targetRef = typeof record.target_ref === 'string' ? record.target_ref.trim() : ''
+  const credentialSlot =
+    typeof record.credential_slot === 'string' ? record.credential_slot.trim() : ''
+  const fallbackUsed = record.fallback_used
+  const attemptCount = intOrNull(record.attempt_count)
+  if (
+    !targetRef ||
+    targetRef.length > 256 ||
+    !credentialSlot ||
+    credentialSlot.length > 256 ||
+    typeof fallbackUsed !== 'boolean' ||
+    attemptCount === null ||
+    attemptCount < 1 ||
+    attemptCount > 64
+  ) {
+    return null
+  }
+  return {
+    target_ref: targetRef,
+    credential_slot: credentialSlot,
+    fallback_used: fallbackUsed,
+    attempt_count: attemptCount,
+  }
 }
 
 export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
@@ -115,6 +150,15 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   if (cache_read_raw === null || cache_write_raw === null) return null
   if (cache_read_raw < 0 || cache_write_raw < 0) return null
 
+  const prompt_bridge_metadata = promptBridgeMetadata(r.prompt_bridge_metadata)
+  if (
+    r.prompt_bridge_metadata !== undefined &&
+    r.prompt_bridge_metadata !== null &&
+    !prompt_bridge_metadata
+  ) {
+    return null
+  }
+
   const recipe_name = trimOrNull(r.recipe_name)
   const llm_secret_name = trimOrNull(r.llm_secret_name)
   const task_id = trimOrNull(r.task_id)
@@ -149,10 +193,11 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
     cache_read_tokens: cache_read_raw,
     cache_write_tokens: cache_write_raw,
     cache_tokens_reported,
+    prompt_bridge_metadata,
   }
 }
 
-const COLUMNS_PER_EVENT = 22
+const COLUMNS_PER_EVENT = 23
 
 function buildInsertSql(rowCount: number): string {
   const placeholders: string[] = []
@@ -167,7 +212,7 @@ function buildInsertSql(rowCount: number): string {
       request_id, ts, run_id, host_ref, context_ref, team_id, provider, model, llm_secret_name,
       source_kind, user_id, sender, channel_type, recipe_name, cron_job_id,
       task_id, iteration, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-      cache_tokens_reported
+      cache_tokens_reported, prompt_bridge_metadata
     )
     VALUES ${placeholders.join(',')}
     ON CONFLICT (request_id) DO NOTHING
@@ -200,7 +245,8 @@ function buildInsertParams(events: LlmUsageEvent[]): unknown[] {
       e.output_tokens,
       e.cache_read_tokens,
       e.cache_write_tokens,
-      e.cache_tokens_reported
+      e.cache_tokens_reported,
+      e.prompt_bridge_metadata
     )
   }
   return params

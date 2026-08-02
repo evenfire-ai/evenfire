@@ -47,6 +47,8 @@ export async function revalidatePluginSdkCredentialTicket(input: {
   credentialTicket: string
   invocationId: string
   targetRef: string
+  /** Consume the control-plane jti after the Secret read, not during preflight. */
+  redeem?: boolean
   fetchImpl?: typeof fetch
   controlApiBaseUrl?: string
 }): Promise<boolean> {
@@ -64,6 +66,7 @@ export async function revalidatePluginSdkCredentialTicket(input: {
           credentialTicket: input.credentialTicket,
           invocationId: input.invocationId,
           targetRef: input.targetRef,
+          ...(input.redeem ? { redeem: true } : {}),
         }),
       }
     )
@@ -478,6 +481,7 @@ export class ClerumMcpServer {
             credentialTicket: body.credentialTicket,
             invocationId: body.invocationId,
             targetRef: target.targetRef,
+            redeem: true,
           })
           if (!ticketStillActiveAfterResolve) {
             res.writeHead(403, { 'Content-Type': 'application/json' })

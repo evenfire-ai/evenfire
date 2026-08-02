@@ -32,12 +32,25 @@ export interface PromptBridgeCredentialResolver {
     invocationId: string
     target: PromptBridgeTarget
     credentialTicket: string
+    timeoutMs?: number
   }): Promise<BrokeredCredential>
+}
+
+export interface PromptBridgeCredentialTicketIssuer {
+  issue(input: {
+    invocationId: string
+    target: PromptBridgeTarget
+    policyRevision: number
+    policyHash: string
+  }): Promise<{ credentialTicket: string }>
 }
 
 export interface LlmBridgeRequest {
   invocationId: string
-  targets: Array<{ target: PromptBridgeTarget; credentialTicket: string }>
+  targets: Array<{ target: PromptBridgeTarget }>
+  policyRevision: number
+  policyHash: string
+  credentialTicketIssuer: PromptBridgeCredentialTicketIssuer
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
   temperature?: number
@@ -49,6 +62,7 @@ export interface LlmBridgeResult {
   model: string
   servedTarget: PromptBridgeTarget
   fallbackUsed: boolean
+  attemptCount: number
   llmSecretName: string
   content: string
   usage: { inputTokens: number; outputTokens: number }
@@ -56,6 +70,47 @@ export interface LlmBridgeResult {
 }
 
 const DEFAULT_MAX_LLM_RESPONSE_BYTES = 1024 * 1024
+
+function remainingTimeoutMs(deadlineAt: number): number {
+  return deadlineAt - Date.now()
+}
+
+async function withinDeadline<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  reason: 'timeout' | 'provider_unavailable' = 'timeout'
+): Promise<T> {
+  if (timeoutMs <= 0) {
+    throw new PluginWorkloadError(
+      'provider_unavailable',
+      'promptBridge request deadline elapsed before provider attempt',
+      true,
+      reason
+    )
+  }
+  let timeout: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new PluginWorkloadError(
+                'provider_unavailable',
+                'promptBridge request deadline elapsed before provider attempt',
+                true,
+                reason
+              )
+            ),
+          timeoutMs
+        )
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
 
 function mapFinishReason(reason: FinishReason): LlmBridgeResult['finishReason'] {
   if (reason === FinishReason.Length) return 'length'
@@ -109,9 +164,15 @@ export class LlmBridge {
 
   async complete(request: LlmBridgeRequest): Promise<LlmBridgeResult> {
     if (request.targets.length === 0) {
-      throw new PluginWorkloadError('provider_unavailable', 'no authorized provider target', false)
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'no authorized provider target',
+        false,
+        'configuration'
+      )
     }
     const triggerOn = new Set(request.triggerOn ?? ALL_FAILOVER_CLASSES)
+    const deadlineAt = Date.now() + request.timeoutMs
     let lastProviderError: ClassifiedProviderError | null = null
 
     for (const [index, authorized] of request.targets.entries()) {
@@ -119,7 +180,8 @@ export class LlmBridge {
         throw new PluginWorkloadError(
           'provider_unavailable',
           'authorized provider configuration is unavailable',
-          false
+          false,
+          'configuration'
         )
       }
 
@@ -130,7 +192,8 @@ export class LlmBridge {
           new PluginWorkloadError(
             'provider_unavailable',
             'LLM provider is temporarily unavailable',
-            true
+            true,
+            'provider_unavailable'
           )
         )
         lastProviderError = error
@@ -145,18 +208,40 @@ export class LlmBridge {
 
       // Ticket redemption is deliberately inside the attempt loop. This value
       // is held only for the provider call and is never exposed in SDK output.
-      const credential = await this.credentials.resolve({
-        invocationId: request.invocationId,
-        target: authorized.target,
-        credentialTicket: authorized.credentialTicket,
-      })
+      const ticket = await withinDeadline(
+        () =>
+          request.credentialTicketIssuer.issue({
+            invocationId: request.invocationId,
+            target: authorized.target,
+            policyRevision: request.policyRevision,
+            policyHash: request.policyHash,
+          }),
+        remainingTimeoutMs(deadlineAt),
+        'timeout'
+      )
+      const credential = await withinDeadline(
+        () =>
+          this.credentials.resolve({
+            invocationId: request.invocationId,
+            target: authorized.target,
+            credentialTicket: ticket.credentialTicket,
+            timeoutMs: remainingTimeoutMs(deadlineAt),
+          }),
+        remainingTimeoutMs(deadlineAt),
+        'timeout'
+      )
 
       try {
-        const completion = await this.attempt(credential, request, breaker)
+        const completion = await this.attempt(
+          credential,
+          { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
+          breaker
+        )
         return {
           ...completion,
           servedTarget: authorized.target,
           fallbackUsed: index > 0,
+          attemptCount: index + 1,
           llmSecretName: credential.llmSecretName,
         }
       } catch (error) {
@@ -173,7 +258,12 @@ export class LlmBridge {
 
     throw (
       lastProviderError?.toPluginWorkloadError() ??
-      new PluginWorkloadError('provider_unavailable', 'authorized providers are unavailable', true)
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'authorized providers are unavailable',
+        true,
+        'provider_unavailable'
+      )
     )
   }
 
@@ -182,13 +272,22 @@ export class LlmBridge {
     request: LlmBridgeRequest,
     breaker: CircuitBreaker
   ): Promise<Pick<LlmBridgeResult, 'model' | 'content' | 'usage' | 'finishReason'>> {
+    if (request.timeoutMs <= 0) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'promptBridge request deadline elapsed before provider attempt',
+        true,
+        'timeout'
+      )
+    }
     const factory = this.opts.createProvider ?? createLLMProvider
     const providerId = credential.target.provider
     if (!isLlmProvider(providerId)) {
       throw new PluginWorkloadError(
         'provider_unavailable',
         'authorized provider configuration is unavailable',
-        false
+        false,
+        'configuration'
       )
     }
     const provider: SingleTurnProvider | null = factory(credential.keys, {
@@ -199,7 +298,8 @@ export class LlmBridge {
       throw new PluginWorkloadError(
         'provider_unavailable',
         'authorized provider credentials are unavailable',
-        false
+        false,
+        'credential_unavailable'
       )
     }
 
@@ -225,7 +325,8 @@ export class LlmBridge {
         throw new PluginWorkloadError(
           'provider_unavailable',
           'provider returned invalid usage',
-          false
+          false,
+          'provider_unavailable'
         )
       }
       return {
@@ -243,17 +344,21 @@ export class LlmBridge {
           new PluginWorkloadError(
             'provider_unavailable',
             'LLM provider did not respond within the request timeout',
-            true
+            true,
+            'timeout'
           )
         )
       }
       const classified = provider.classifyError(error)
+      const reason =
+        classifyFailoverClass(classified.code, classified.retryable) ?? 'provider_unavailable'
       throw new ClassifiedProviderError(
         { code: classified.code, retryable: classified.retryable },
         new PluginWorkloadError(
           'provider_unavailable',
           `LLM provider error: ${classified.code}`,
-          classified.retryable
+          classified.retryable,
+          reason
         )
       )
     } finally {

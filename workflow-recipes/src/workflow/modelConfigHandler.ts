@@ -9,7 +9,11 @@
  * SDK bootstrap is identity-only; its prompt credentials stay behind the
  * per-attempt broker.
  */
-import { PROVIDER_CREDENTIAL_SLOTS, isLlmProviderId } from '@clerum/llm-providers'
+import {
+  PROVIDER_CREDENTIAL_SLOTS,
+  isCredentialSlotOwnedByProvider,
+  isLlmProviderId,
+} from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -232,16 +236,8 @@ export class ModelConfigHandler {
     }
 
     const slots = PROVIDER_CREDENTIAL_SLOTS[target.provider]
-    const canonicalDataKeys = slots.map(slot => slot.dataKey)
-    const singleSlotProvider = slots.length === 1
-    const slotBelongsToProvider = canonicalDataKeys.some(
-      dataKey =>
-        target.credentialSlot === dataKey || target.credentialSlot.startsWith(`${dataKey}-`)
-    )
-    if (
-      !slotBelongsToProvider ||
-      (!singleSlotProvider && !canonicalDataKeys.includes(target.credentialSlot))
-    ) {
+    const singleSlotProvider = slots.length === 1 && slots[0].multiline !== true
+    if (!isCredentialSlotOwnedByProvider(target.provider, target.credentialSlot)) {
       return { status: 400, body: { error: 'Invalid credential target' } }
     }
 

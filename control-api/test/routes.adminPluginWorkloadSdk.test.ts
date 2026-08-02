@@ -242,6 +242,54 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     )
   })
 
+  it('rejects additive slots for multi-slot or multiline providers before persisting policy', async () => {
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-bedrock' } as never)
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [{ model: 'claude-3-7-sonnet' }],
+      rowCount: 1,
+    } as never)
+
+    const bedrock = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        provider: 'bedrock',
+        allowedModels: ['claude-3-7-sonnet'],
+        promptTargets: [
+          {
+            targetRef: 'bedrock-fallback-slot',
+            provider: 'bedrock',
+            model: 'claude-3-7-sonnet',
+            credentialSlot: 'aws-access-key-id-fallback',
+          },
+        ],
+        defaultTargetRef: 'bedrock-fallback-slot',
+      })
+    expect(bedrock.status).toBe(400)
+    expect(bedrock.body.error).toContain('credentialSlot')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+
+    const vertex = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        provider: 'vertex',
+        allowedModels: ['gemini-2.5-pro'],
+        promptTargets: [
+          {
+            targetRef: 'vertex-fallback-slot',
+            provider: 'vertex',
+            model: 'gemini-2.5-pro',
+            credentialSlot: 'vertex-service-account-json-fallback',
+          },
+        ],
+        defaultTargetRef: 'vertex-fallback-slot',
+      })
+    expect(vertex.status).toBe(400)
+    expect(vertex.body.error).toContain('credentialSlot')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
   it('does not require a provider for clientNotifications grants', async () => {
     vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g2' } as never)
     const res = await request(buildApp())

@@ -30,6 +30,7 @@ const VALID_EVENT = {
   output_tokens: 80,
   cache_read_tokens: 40,
   cache_write_tokens: 10,
+  prompt_bridge_metadata: null,
 }
 
 describe('validateUsageEvent', () => {
@@ -151,6 +152,30 @@ describe('validateUsageEvent', () => {
     expect(validateUsageEvent({ ...VALID_EVENT, cache_read_tokens: 1.5 })).toBeNull()
     expect(validateUsageEvent({ ...VALID_EVENT, cache_write_tokens: 1.5 })).toBeNull()
   })
+
+  it('accepts bounded promptBridge target attribution and rejects malformed metadata', () => {
+    const ev = validateUsageEvent({
+      ...VALID_EVENT,
+      prompt_bridge_metadata: {
+        target_ref: 'zai-primary',
+        credential_slot: 'zai-api-key',
+        fallback_used: true,
+        attempt_count: 2,
+      },
+    })
+    expect(ev?.prompt_bridge_metadata).toEqual({
+      target_ref: 'zai-primary',
+      credential_slot: 'zai-api-key',
+      fallback_used: true,
+      attempt_count: 2,
+    })
+    expect(
+      validateUsageEvent({
+        ...VALID_EVENT,
+        prompt_bridge_metadata: { target_ref: 'zai-primary', fallback_used: true },
+      })
+    ).toBeNull()
+  })
 })
 
 describe('ingestUsageEvents', () => {
@@ -207,9 +232,10 @@ describe('ingestUsageEvents', () => {
     expect(params).toContain(VALID_EVENT.input_tokens)
     expect(params).toContain(VALID_EVENT.cache_read_tokens)
     expect(params).toContain(VALID_EVENT.cache_write_tokens)
-    expect(params.at(-1)).toBe(true)
-    // 22 columns per event (single event => 22 bound params).
-    expect(params).toHaveLength(22)
+    expect(params.at(-2)).toBe(true)
+    expect(params.at(-1)).toBeNull()
+    // 23 columns per event (single event => 23 bound params).
+    expect(params).toHaveLength(23)
   })
 
   it('mixes valid + invalid + duplicate accounting in a single call', async () => {

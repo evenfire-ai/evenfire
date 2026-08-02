@@ -80,6 +80,7 @@ import {
 import { issueOAuthBrokerToken } from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -486,6 +487,8 @@ export interface ReconcileResult {
    * UI/API-consumable reasons that should not be inferred from free-form messages.
    */
   workloadConditions?: StatusCondition[]
+  /** SDK-only eager-host provider health, kept separate from workflow phase. */
+  pluginWorkloadSdkProviderUnavailable?: boolean
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -1201,6 +1204,7 @@ export class WorkflowRecipeReconciler {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
+    let sdkOnlyProviderUnavailable = false
 
     // Defense-in-depth: the VAP + admin-API already enforce this invariant,
     // but a manually-applied CRD in another namespace must not be reconciled.
@@ -2302,6 +2306,7 @@ export class WorkflowRecipeReconciler {
       const sdkOnlyRuntime = isSdkOnly
         ? await this.reconcilePluginWorkloadSdkOnly(recipe)
         : undefined
+      sdkOnlyProviderUnavailable = sdkOnlyRuntime?.phase === 'provider_unavailable'
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -2358,6 +2363,7 @@ export class WorkflowRecipeReconciler {
         internalDependencyConditions,
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
+        pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
         requeueAfterMs:
@@ -5731,15 +5737,22 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here (not threaded through
-    // ReconcileResult) so every status patch carries a consistent projection
-    // of spec.pluginWorkloadSdk + feature flag, regardless of which reconcile
-    // return path produced the result.
+    // Plugin Workload SDK conditions are derived here so every status patch
+    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
+    // while the SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message.
     const pluginSdkProjection = buildPluginWorkloadSdkStatus({
       spec: recipe.spec,
       existingConditions: recipe.status?.conditions,
       phase: result.phase,
       featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
       now,
     })
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(

@@ -32,10 +32,6 @@ function authorization(overrides: Record<string, unknown> = {}) {
     modelPolicy: null,
     selectedTarget: primary,
     authorizedTargets: [primary, fallback],
-    authorizedTargetTickets: [
-      { targetRef: primary.targetRef, credentialTicket: 'ticket-primary' },
-      { targetRef: fallback.targetRef, credentialTicket: 'ticket-fallback' },
-    ],
     policyRevision: 7,
     policyHash: 'a'.repeat(64),
     maxOutputTokens: 2048,
@@ -60,6 +56,7 @@ function makeDeps(
       model: fallback.model,
       servedTarget: fallback,
       fallbackUsed: true,
+      attemptCount: 2,
       llmSecretName: 'provider-secret',
       content: 'summary text',
       usage: { inputTokens: 10, outputTokens: 5 },
@@ -149,10 +146,7 @@ describe('PromptBridgeHandler', () => {
       expect.objectContaining({
         invocationId: 'inv-1',
         maxTokens: 2048,
-        targets: [
-          { target: primary, credentialTicket: 'ticket-primary' },
-          { target: fallback, credentialTicket: 'ticket-fallback' },
-        ],
+        targets: [{ target: primary }, { target: fallback }],
       })
     )
     expect(result).toMatchObject({
@@ -171,24 +165,9 @@ describe('PromptBridgeHandler', () => {
         servedTarget: fallback,
         fallbackUsed: true,
         llmSecretName: 'provider-secret',
+        attemptCount: 2,
       })
     )
-  })
-
-  it('fails closed on inconsistent tickets before credential or provider access', async () => {
-    const authorize = vi.fn().mockResolvedValue(
-      authorization({
-        authorizedTargetTickets: [
-          { targetRef: primary.targetRef, credentialTicket: 'ticket-primary' },
-        ],
-      })
-    )
-    const { handler, complete } = makeDeps({ authorize })
-    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
-      code: 'provider_unavailable',
-      retryable: false,
-    })
-    expect(complete).not.toHaveBeenCalled()
   })
 
   it('does not repeat a provider charge for an existing non-failed replay', async () => {

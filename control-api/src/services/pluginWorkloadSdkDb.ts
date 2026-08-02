@@ -102,6 +102,17 @@ export interface PluginWorkloadSdkPromptTarget {
   credentialSlot: string
 }
 
+/**
+ * Non-secret snapshot of the originally authorized ordered suffix. It is the
+ * authority for JIT fallback-ticket issuance; a request body never supplies
+ * this list.
+ */
+export interface PluginWorkloadSdkPromptAuthorization {
+  policyRevision: number
+  policyHash: string
+  authorizedTargetRefs: string[]
+}
+
 export interface PluginWorkloadSdkGrant {
   id: string
   recipeNamespace: string
@@ -144,6 +155,7 @@ export interface PluginWorkloadSdkInvocationRecord {
   status: PluginWorkloadSdkInvocationStatus
   quotaConsumed: boolean
   authorizationDecision: string
+  promptAuthorization: PluginWorkloadSdkPromptAuthorization | null
   createdAt: string
   completedAt: string | null
 }
@@ -268,9 +280,32 @@ function mapInvocationRow(row: Record<string, unknown>): PluginWorkloadSdkInvoca
     status: row.status as PluginWorkloadSdkInvocationStatus,
     quotaConsumed: row.quota_consumed === true,
     authorizationDecision: String(row.authorization_decision),
+    promptAuthorization: promptAuthorization(row.prompt_authorization),
     createdAt: new Date(row.created_at as string).toISOString(),
     completedAt:
       row.completed_at === null ? null : new Date(row.completed_at as string).toISOString(),
+  }
+}
+
+function promptAuthorization(value: unknown): PluginWorkloadSdkPromptAuthorization | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.policyRevision !== 'number' ||
+    !Number.isInteger(record.policyRevision) ||
+    record.policyRevision < 1 ||
+    typeof record.policyHash !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(record.policyHash) ||
+    !Array.isArray(record.authorizedTargetRefs) ||
+    record.authorizedTargetRefs.length === 0 ||
+    !record.authorizedTargetRefs.every(ref => typeof ref === 'string' && ref.length > 0)
+  ) {
+    return null
+  }
+  return {
+    policyRevision: record.policyRevision,
+    policyHash: record.policyHash,
+    authorizedTargetRefs: [...record.authorizedTargetRefs],
   }
 }
 
@@ -552,6 +587,7 @@ export interface InsertInvocationParams {
   payloadHash: string
   status: PluginWorkloadSdkInvocationStatus
   authorizationDecision: string
+  promptAuthorization?: PluginWorkloadSdkPromptAuthorization
 }
 
 export type InsertInvocationResult =
@@ -575,8 +611,8 @@ export async function insertInvocation(
   const inserted = await pool.query(
     `INSERT INTO plugin_workload_sdk_invocations
        (recipe_namespace, recipe_name, caller_ref, correlation_id, method, detail, purpose,
-        idempotency_key_hash, payload_hash, status, authorization_decision)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        idempotency_key_hash, payload_hash, status, authorization_decision, prompt_authorization)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (recipe_namespace, recipe_name, method, idempotency_key_hash) DO NOTHING
      RETURNING *`,
     [
@@ -591,6 +627,7 @@ export async function insertInvocation(
       params.payloadHash,
       params.status,
       params.authorizationDecision,
+      params.promptAuthorization ? JSON.stringify(params.promptAuthorization) : null,
     ]
   )
   const insertedRow = inserted.rows[0] as Record<string, unknown> | undefined
@@ -624,6 +661,59 @@ export async function getInvocationById(
   ])
   const row = result.rows[0] as Record<string, unknown> | undefined
   return row ? mapInvocationRow(row) : null
+}
+
+export async function registerPluginWorkloadSdkCredentialTicketJti(input: {
+  jti: string
+  recipeNamespace: string
+  recipeName: string
+  invocationId: string
+  targetRef: string
+  expiresAt: Date
+}): Promise<boolean> {
+  // Opportunistic cleanup bounds the one-shot registry without retaining any
+  // credentials or ticket bodies.
+  await pool.query(
+    `DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE expires_at <= now()`
+  )
+  const result = await pool.query(
+    `INSERT INTO plugin_workload_sdk_credential_ticket_jtis
+       (jti, recipe_namespace, recipe_name, invocation_id, target_ref, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (jti) DO NOTHING`,
+    [
+      input.jti,
+      input.recipeNamespace,
+      input.recipeName,
+      input.invocationId,
+      input.targetRef,
+      input.expiresAt,
+    ]
+  )
+  return (result.rowCount ?? 0) === 1
+}
+
+/** Atomically consumes a ticket identity after all binding/policy checks pass. */
+export async function redeemPluginWorkloadSdkCredentialTicketJti(input: {
+  jti: string
+  recipeNamespace: string
+  recipeName: string
+  invocationId: string
+  targetRef: string
+}): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE plugin_workload_sdk_credential_ticket_jtis
+     SET redeemed_at = now()
+     WHERE jti = $1
+       AND recipe_namespace = $2
+       AND recipe_name = $3
+       AND invocation_id = $4
+       AND target_ref = $5
+       AND redeemed_at IS NULL
+       AND expires_at > now()`,
+    [input.jti, input.recipeNamespace, input.recipeName, input.invocationId, input.targetRef]
+  )
+  return (result.rowCount ?? 0) === 1
 }
 
 export async function updateInvocationStatus(

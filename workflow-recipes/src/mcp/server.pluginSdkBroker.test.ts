@@ -43,6 +43,27 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
     })
   })
 
+  it('marks the post-read revalidation as the one-shot redemption boundary', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response(200, { active: true }))
+    await expect(
+      revalidatePluginSdkCredentialTicket({
+        runtimeToken: 'runtime-jwt',
+        credentialTicket: 'signed-ticket',
+        invocationId: 'inv-1',
+        targetRef: 'fallback-openai',
+        redeem: true,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).resolves.toBe(true)
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      credentialTicket: 'signed-ticket',
+      invocationId: 'inv-1',
+      targetRef: 'fallback-openai',
+      redeem: true,
+    })
+  })
+
   it.each([
     [200, { active: false }],
     [403, { error: 'provider_policy_denied' }],

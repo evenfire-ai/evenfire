@@ -46,6 +46,12 @@ export function buildPromptBridgeUsageEvent(input: {
   inputTokens: number
   outputTokens: number
   callerRef: string
+  promptBridgeMetadata?: {
+    targetRef: string
+    credentialSlot: string
+    fallbackUsed: boolean
+    attemptCount: number
+  }
   metadata?: Record<string, unknown>
 }): LlmUsageEvent | null {
   const isWorkflowRecipe = input.binding.recipeNamespace === WORKFLOW_RECIPE_NAMESPACE
@@ -70,6 +76,16 @@ export function buildPromptBridgeUsageEvent(input: {
       iteration: null,
       input_tokens: input.inputTokens,
       output_tokens: input.outputTokens,
+      ...(input.promptBridgeMetadata
+        ? {
+            prompt_bridge_metadata: {
+              target_ref: input.promptBridgeMetadata.targetRef,
+              credential_slot: input.promptBridgeMetadata.credentialSlot,
+              fallback_used: input.promptBridgeMetadata.fallbackUsed,
+              attempt_count: input.promptBridgeMetadata.attemptCount,
+            },
+          }
+        : {}),
     }
   }
 
@@ -107,6 +123,16 @@ export function buildPromptBridgeUsageEvent(input: {
     iteration: null,
     input_tokens: input.inputTokens,
     output_tokens: input.outputTokens,
+    ...(input.promptBridgeMetadata
+      ? {
+          prompt_bridge_metadata: {
+            target_ref: input.promptBridgeMetadata.targetRef,
+            credential_slot: input.promptBridgeMetadata.credentialSlot,
+            fallback_used: input.promptBridgeMetadata.fallbackUsed,
+            attempt_count: input.promptBridgeMetadata.attemptCount,
+          },
+        }
+      : {}),
   }
 }
 
@@ -251,6 +277,12 @@ export function maybeCreatePluginWorkloadSdkServer(
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         callerRef: usage.callerRef,
+        promptBridgeMetadata: {
+          targetRef: usage.servedTarget.targetRef,
+          credentialSlot: usage.servedTarget.credentialSlot,
+          fallbackUsed: usage.fallbackUsed,
+          attemptCount: usage.attemptCount,
+        },
         metadata: { ...usage.metadata, llmSecretName: usage.llmSecretName },
       })
       if (event) usageReporter.enqueue(event)

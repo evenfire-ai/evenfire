@@ -1,5 +1,9 @@
 import { CircuitBreaker } from '../domain/circuitBreaker'
-import { PluginWorkloadError, isKnownPluginWorkloadErrorCode } from '../domain/errors'
+import {
+  PluginWorkloadError,
+  isKnownPluginWorkloadErrorCode,
+  isKnownPluginWorkloadErrorReason,
+} from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 
 /**
@@ -41,10 +45,18 @@ export interface AuthorizePromptBridgeResponse {
   modelPolicy: { provider: string; model: string; temperature?: number; maxCostUsd?: number } | null
   selectedTarget: PromptBridgeTarget
   authorizedTargets: PromptBridgeTarget[]
-  authorizedTargetTickets: Array<{ targetRef: string; credentialTicket: string }>
   policyRevision: number
   policyHash: string
   maxOutputTokens: number | null
+}
+
+export interface ReissuedPromptBridgeCredentialTicket {
+  invocationId: string
+  targetRef: string
+  credentialTicket: string
+  policyRevision: number
+  policyHash: string
+  expiresInSeconds: number
 }
 
 export interface SubmitClientNotificationResponse {
@@ -83,20 +95,30 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     Array.isArray(r.authorizedTargets) &&
     r.authorizedTargets.length > 0 &&
     r.authorizedTargets.every(isPromptBridgeTarget) &&
-    Array.isArray(r.authorizedTargetTickets) &&
-    r.authorizedTargetTickets.length === r.authorizedTargets.length &&
-    r.authorizedTargetTickets.every(
-      ticket =>
-        typeof ticket === 'object' &&
-        ticket !== null &&
-        typeof (ticket as Record<string, unknown>).targetRef === 'string' &&
-        typeof (ticket as Record<string, unknown>).credentialTicket === 'string'
-    ) &&
     Number.isInteger(r.policyRevision) &&
     (r.policyRevision as number) >= 1 &&
     typeof r.policyHash === 'string' &&
     /^[a-f0-9]{64}$/.test(r.policyHash) &&
     (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number')
+  )
+}
+
+function isReissuedPromptBridgeCredentialTicket(
+  value: unknown
+): value is ReissuedPromptBridgeCredentialTicket {
+  if (typeof value !== 'object' || value === null) return false
+  const ticket = value as Record<string, unknown>
+  return (
+    typeof ticket.invocationId === 'string' &&
+    typeof ticket.targetRef === 'string' &&
+    typeof ticket.credentialTicket === 'string' &&
+    ticket.credentialTicket.length > 0 &&
+    Number.isInteger(ticket.policyRevision) &&
+    (ticket.policyRevision as number) >= 1 &&
+    typeof ticket.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(ticket.policyHash) &&
+    Number.isInteger(ticket.expiresInSeconds) &&
+    (ticket.expiresInSeconds as number) > 0
   )
 }
 
@@ -255,13 +277,17 @@ export class PluginWorkloadSdkControlApiClient {
         error?: unknown
         message?: unknown
         retryable?: unknown
+        reason?: unknown
       }
       const code = typeof errorBody.error === 'string' ? errorBody.error : ''
       if (isKnownPluginWorkloadErrorCode(code)) {
         throw new PluginWorkloadError(
           code,
           typeof errorBody.message === 'string' ? errorBody.message : `request denied (${code})`,
-          errorBody.retryable === true
+          errorBody.retryable === true,
+          typeof errorBody.reason === 'string' && isKnownPluginWorkloadErrorReason(errorBody.reason)
+            ? errorBody.reason
+            : undefined
         )
       }
       if (response.status === 401) {
@@ -301,6 +327,50 @@ export class PluginWorkloadSdkControlApiClient {
         'provider_unavailable',
         'control-api returned an unexpected response shape for authorize-prompt-bridge',
         true
+      )
+    }
+    return result
+  }
+
+  /**
+   * Obtain a one-shot credential ticket immediately before a single target's
+   * credential resolution. The caller binds the original authorization
+   * snapshot; the gateway independently derives the credential identity.
+   */
+  async reissuePromptBridgeCredentialTicket(body: {
+    recipeNamespace: string
+    recipeName: string
+    invocationId: string
+    target: PromptBridgeTarget
+    policyRevision: number
+    policyHash: string
+  }): Promise<ReissuedPromptBridgeCredentialTicket> {
+    const result = await this.post(
+      '/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket',
+      {
+        recipeNamespace: body.recipeNamespace,
+        recipeName: body.recipeName,
+        invocationId: body.invocationId,
+        targetRef: body.target.targetRef,
+      }
+    )
+    if (!isReissuedPromptBridgeCredentialTicket(result)) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api returned an unexpected response shape for credential-ticket reissue',
+        true
+      )
+    }
+    if (
+      result.invocationId !== body.invocationId ||
+      result.targetRef !== body.target.targetRef ||
+      result.policyRevision !== body.policyRevision ||
+      result.policyHash !== body.policyHash
+    ) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api returned a credential ticket for a different authorization',
+        false
       )
     }
     return result

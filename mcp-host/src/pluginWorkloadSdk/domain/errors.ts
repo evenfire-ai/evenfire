@@ -24,6 +24,19 @@ export const PLUGIN_WORKLOAD_ERROR_CODES = [
 ] as const
 export type PluginWorkloadErrorCode = (typeof PLUGIN_WORKLOAD_ERROR_CODES)[number]
 
+/** Safe, closed diagnostic classes for provider_unavailable responses. */
+export const PLUGIN_WORKLOAD_ERROR_REASONS = [
+  'rate_limited',
+  'insufficient_quota',
+  'auth',
+  'provider_unavailable',
+  'credential_unavailable',
+  'configuration',
+  'timeout',
+  'network',
+] as const
+export type PluginWorkloadErrorReason = (typeof PLUGIN_WORKLOAD_ERROR_REASONS)[number]
+
 const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
   capability_not_declared: 403,
   caller_not_allowed: 403,
@@ -41,25 +54,49 @@ const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
 }
 
 const ERROR_CODE_SET = new Set<string>(PLUGIN_WORKLOAD_ERROR_CODES)
+const ERROR_REASON_SET = new Set<string>(PLUGIN_WORKLOAD_ERROR_REASONS)
 
 export class PluginWorkloadError extends Error {
   readonly code: PluginWorkloadErrorCode
   readonly retryable: boolean
   readonly httpStatus: number
+  readonly reason?: PluginWorkloadErrorReason
 
-  constructor(code: PluginWorkloadErrorCode, message: string, retryable = false) {
+  constructor(
+    code: PluginWorkloadErrorCode,
+    message: string,
+    retryable = false,
+    reason?: PluginWorkloadErrorReason
+  ) {
     super(message)
     this.name = 'PluginWorkloadError'
     this.code = code
     this.retryable = retryable
     this.httpStatus = ERROR_HTTP_STATUS[code]
+    this.reason = reason
   }
 
-  toBody(): { error: PluginWorkloadErrorCode; message: string; retryable: boolean } {
-    return { error: this.code, message: this.message, retryable: this.retryable }
+  toBody(): {
+    error: PluginWorkloadErrorCode
+    message: string
+    retryable: boolean
+    reason?: PluginWorkloadErrorReason
+  } {
+    return {
+      error: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      ...(this.reason ? { reason: this.reason } : {}),
+    }
   }
 }
 
 export function isKnownPluginWorkloadErrorCode(code: string): code is PluginWorkloadErrorCode {
   return ERROR_CODE_SET.has(code)
+}
+
+export function isKnownPluginWorkloadErrorReason(
+  reason: string
+): reason is PluginWorkloadErrorReason {
+  return ERROR_REASON_SET.has(reason)
 }
