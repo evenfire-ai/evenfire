@@ -223,6 +223,13 @@ export function buildPluginWorkloadSdkStatus(args: {
           message,
           lastTransitionTime: now,
         },
+        {
+          type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+          status: 'True',
+          reason: 'ProviderUnavailable',
+          message,
+          lastTransitionTime: now,
+        },
       ],
       capability: {
         state: 'degraded',

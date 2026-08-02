@@ -9,6 +9,7 @@ import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFa
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { isRetryableInfraError } from './k8sErrors'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
+import { PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE } from './pluginWorkloadSdkValidator'
 import {
   resolveResourceName,
   resolveScopedStatefulSetResourceName,
@@ -1380,6 +1381,73 @@ describe('WorkflowRecipeReconciler', () => {
         lastTransitionTime: 'now',
       },
     ])
+  })
+
+  it('replaces and clears the SDK provider-unavailable condition on recovery', async () => {
+    ;(
+      reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+    ).config.pluginWorkloadSdkEnabled = true
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+      status: {
+        phase: 'degraded',
+        conditions: [
+          {
+            type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+            status: 'True',
+            reason: 'ProviderUnavailable',
+            lastTransitionTime: 'old',
+          },
+        ],
+      },
+    })
+
+    await reconciler.patchStatus(recipe, {
+      phase: 'degraded',
+      message: 'configured provider unavailable',
+      workloadStatuses: [],
+      pluginWorkloadSdkProviderUnavailable: true,
+    })
+    const degradedPatch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+    expect(
+      degradedPatch.status.conditions.filter(
+        (condition: { type: string }) =>
+          condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE
+      )
+    ).toHaveLength(1)
+
+    mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+    const recoveredRecipe: WorkflowRecipeCRD = {
+      ...recipe,
+      status: { phase: 'degraded', conditions: degradedPatch.status.conditions },
+    }
+    await reconciler.patchStatus(recoveredRecipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProviderUnavailable: false,
+    })
+    const recoveredPatch =
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+    expect(
+      recoveredPatch.status.conditions.some(
+        (condition: { type: string }) =>
+          condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE
+      )
+    ).toBe(false)
+    expect(recoveredPatch.status.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'PluginWorkloadSdkCapability',
+          status: 'True',
+          reason: 'Validated',
+        }),
+      ])
+    )
   })
 
   it('prunes only selected stale internal-dependency policies when none are desired', async () => {

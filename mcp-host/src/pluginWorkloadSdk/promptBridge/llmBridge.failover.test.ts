@@ -114,6 +114,27 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     })
   })
 
+  it('stops after every authorized target has an eligible failure', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('primary unavailable')))
+    const second = new FakeProvider(() => Promise.reject(new Error('fallback unavailable')))
+    const { bridge, providerCalls, credentialCalls } = makeBridge({
+      [primary.model]: first,
+      [fallback.model]: second,
+    })
+
+    await expect(bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: true,
+      reason: 'rate_limited',
+    })
+    expect(credentialCalls).toEqual([primary.targetRef, fallback.targetRef])
+    expect(providerCalls).toEqual([
+      `${primary.provider}/${primary.model}`,
+      `${fallback.provider}/${fallback.model}`,
+    ])
+    expect(JSON.stringify(providerCalls)).not.toContain('secret-')
+  })
+
   it('treats credential resolution failure as terminal and never redeems a fallback', async () => {
     const resolve = vi.fn(async () => {
       throw new PluginWorkloadError(

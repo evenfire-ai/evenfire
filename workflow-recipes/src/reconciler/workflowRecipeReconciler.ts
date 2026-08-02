@@ -237,7 +237,10 @@ function mergeSecretOwnershipConditions(
   return mergeOwnedConditions(existing, fresh, SECRET_OWNERSHIP_CONDITION_TYPES)
 }
 
-const PLUGIN_WORKLOAD_SDK_CONDITION_TYPES = new Set([PLUGIN_WORKLOAD_SDK_CONDITION_TYPE])
+const PLUGIN_WORKLOAD_SDK_CONDITION_TYPES = new Set([
+  PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+])
 
 function mergePluginWorkloadSdkConditions(
   existing: StatusCondition[] | undefined,

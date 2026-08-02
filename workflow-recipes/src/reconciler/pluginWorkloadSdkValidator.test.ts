@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PluginWorkloadSdkSpec, WorkflowRecipeSpec } from '../types'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -294,6 +295,13 @@ describe('buildPluginWorkloadSdkStatus', () => {
       {
         type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
         status: 'False',
+        reason: 'ProviderUnavailable',
+        message: 'Capability validated, but the configured provider is unavailable',
+        lastTransitionTime: NOW,
+      },
+      {
+        type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+        status: 'True',
         reason: 'ProviderUnavailable',
         message: 'Capability validated, but the configured provider is unavailable',
         lastTransitionTime: NOW,
