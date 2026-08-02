@@ -22,6 +22,84 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve the canonical repository environment before sourcing e2e-lib. A
+# secondary worktree normally has no .env of its own; the seeded credentials
+# and provider keys live in the primary checkout. Explicit process values are
+# intentionally preserved, then the test-specific defaults are applied below:
+#
+#   process environment > canonical root .env > safe test defaults
+#
+# The filtered temporary file lets us source the trusted dotenv file without
+# allowing it to overwrite a value supplied by the caller. It is removed
+# before this function returns and never appears in test output.
+load_canonical_root_env() {
+  local repo_root env_file common_dir main_repo_dir filtered raw_line line key
+  repo_root="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+  env_file=""
+
+  if [ -f "${repo_root}/.env" ]; then
+    env_file="${repo_root}/.env"
+  else
+    common_dir="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [ -n "$common_dir" ]; then
+      case "$common_dir" in
+        /*) main_repo_dir="$(cd "${common_dir}/.." && pwd)" ;;
+        *) main_repo_dir="$(cd "${repo_root}/${common_dir}/.." && pwd)" ;;
+      esac
+      if [ -f "${main_repo_dir}/.env" ]; then
+        env_file="${main_repo_dir}/.env"
+      fi
+    fi
+  fi
+
+  if [ -z "$env_file" ]; then
+    return 0
+  fi
+
+  filtered="$(mktemp "${TMPDIR:-/tmp}/evenfire-plugin-sdk-env.XXXXXX")"
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="${line#export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    case "$line" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    case "$key" in
+      [A-Za-z_][A-Za-z0-9_]*) ;;
+      *) continue ;;
+    esac
+    if [ "${!key+x}" = x ]; then
+      continue
+    fi
+    printf '%s\n' "$raw_line" >> "$filtered"
+  done < "$env_file"
+
+  # Temporarily disable errexit so the temporary file is removed even when a
+  # malformed local dotenv assignment is encountered.
+  set +e
+  set -a
+  # shellcheck disable=SC1090
+  . "$filtered"
+  local source_status=$?
+  set +a
+  set -e
+  rm -f "$filtered"
+  if [ "$source_status" -ne 0 ]; then
+    printf 'Failed to load canonical .env from %s\n' "$env_file" >&2
+    return "$source_status"
+  fi
+}
+
+load_canonical_root_env
 export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
 # shellcheck source=e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
@@ -31,8 +109,39 @@ RECIPE_NAME="e2e-plugin-workload-sdk"
 WORKLOAD_ID="sdk-caller"
 EVENT_TYPE="e2e.test.notification"
 E2E_DESKTOP_USER_EMAIL="${E2E_DESKTOP_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
-E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-${CLERUM_MODEL_PROVIDER:-zai}}"
-E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-5.1}}"
+
+# The host-wide CLERUM_MODEL_PROVIDER may legitimately remain Z.AI for other
+# local workloads, but this gate must not spend its T3 calls against the
+# provider currently limited by 429s. Inherit the host provider/model only
+# when it is an allowed OpenAI/Claude target; otherwise use the deterministic
+# OpenAI default and make the fallback Claude. An explicit E2E_* value still
+# wins and is validated below.
+E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-}"
+E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-}"
+if [ -z "$E2E_WORKFLOW_MODEL_PROVIDER" ]; then
+  case "${CLERUM_MODEL_PROVIDER:-}" in
+    openai|claude)
+      E2E_WORKFLOW_MODEL_PROVIDER="$CLERUM_MODEL_PROVIDER"
+      if [ -z "$E2E_WORKFLOW_MODEL_NAME" ] && [ -n "${CLERUM_MODEL_NAME:-}" ]; then
+        E2E_WORKFLOW_MODEL_NAME="$CLERUM_MODEL_NAME"
+      fi
+      ;;
+    '')
+      E2E_WORKFLOW_MODEL_PROVIDER="openai"
+      ;;
+    *)
+      warn "CLERUM_MODEL_PROVIDER=${CLERUM_MODEL_PROVIDER} is not used by this Plugin Workload SDK gate; selecting the OpenAI default because the Z.AI lane is unavailable"
+      E2E_WORKFLOW_MODEL_PROVIDER="openai"
+      ;;
+  esac
+fi
+if [ -z "$E2E_WORKFLOW_MODEL_NAME" ]; then
+  case "$E2E_WORKFLOW_MODEL_PROVIDER" in
+    openai) E2E_WORKFLOW_MODEL_NAME="gpt-5.4-mini" ;;
+    claude) E2E_WORKFLOW_MODEL_NAME="claude-sonnet-4-6" ;;
+    *) E2E_WORKFLOW_MODEL_NAME="gpt-5.4-mini" ;;
+  esac
+fi
 # promptBridge grants are an ordered, credential-bound policy. The target
 # reference is not a credential value; operators can override both values for
 # a non-default, provider-owned Secret data key without exposing its contents.
@@ -41,8 +150,22 @@ E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-5.1
 # provider is available in the local cluster.
 E2E_PROMPT_TARGET_REF="${E2E_PROMPT_TARGET_REF:-primary}"
 E2E_PROMPT_CREDENTIAL_SLOT="${E2E_PROMPT_CREDENTIAL_SLOT:-${E2E_WORKFLOW_CREDENTIAL_SLOT:-}}"
-E2E_PROMPT_FALLBACK_PROVIDER="${E2E_PROMPT_FALLBACK_PROVIDER:-openai}"
-E2E_PROMPT_FALLBACK_MODEL="${E2E_PROMPT_FALLBACK_MODEL:-gpt-5.4-mini}"
+E2E_PROMPT_FALLBACK_PROVIDER="${E2E_PROMPT_FALLBACK_PROVIDER:-}"
+E2E_PROMPT_FALLBACK_MODEL="${E2E_PROMPT_FALLBACK_MODEL:-}"
+if [ -z "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
+  if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "claude" ]; then
+    E2E_PROMPT_FALLBACK_PROVIDER="openai"
+  else
+    E2E_PROMPT_FALLBACK_PROVIDER="claude"
+  fi
+fi
+if [ -z "$E2E_PROMPT_FALLBACK_MODEL" ]; then
+  case "$E2E_PROMPT_FALLBACK_PROVIDER" in
+    openai) E2E_PROMPT_FALLBACK_MODEL="gpt-5.4-mini" ;;
+    claude) E2E_PROMPT_FALLBACK_MODEL="claude-sonnet-4-6" ;;
+    *) E2E_PROMPT_FALLBACK_MODEL="" ;;
+  esac
+fi
 E2E_PROMPT_FALLBACK_TARGET_REF="${E2E_PROMPT_FALLBACK_TARGET_REF:-fallback-${E2E_PROMPT_FALLBACK_PROVIDER}}"
 E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="${E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT:-}"
 E2E_ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-}"
@@ -74,6 +197,16 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+
+for provider in "$E2E_WORKFLOW_MODEL_PROVIDER" "$E2E_PROMPT_FALLBACK_PROVIDER"; do
+  case "$provider" in
+    openai|claude) ;;
+    *)
+      printf 'Plugin Workload SDK E2E only permits OpenAI or Claude targets; got %q\n' "$provider" >&2
+      exit 2
+      ;;
+  esac
+done
 
 default_prompt_credential_slot() {
   case "$1" in
