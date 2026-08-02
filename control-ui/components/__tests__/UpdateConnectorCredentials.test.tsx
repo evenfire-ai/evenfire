@@ -199,6 +199,29 @@ describe('UpdateConnectorCredentials — client-side validation', () => {
   })
 })
 
+describe('UpdateConnectorCredentials — PUT rejection', () => {
+  it('surfaces the backend error and never reports success when the rotation PUT is rejected', async () => {
+    // The primary #223 journey must fail LOUD, not silent: when control-api
+    // rejects the rotation PUT — e.g. the c01394e invalid Secret-key 400, or any
+    // other 4xx/5xx — the UI has to show the failure and must never flip to a
+    // false "Credentials rotated." A rejected PUT also means no rollout to poll.
+    mockUpdateMcpSecret.mockRejectedValue(
+      new Error('400 Bad Request - data key "..bad" is not a valid Secret key')
+    )
+
+    await renderPanel(ENV_SECRET)
+    await submitRotation({ 'api-key': 'sk-super-secret' })
+
+    expect(screen.getByText(/Rotation failed/i)).toBeInTheDocument()
+    expect(screen.getByText(/not a valid Secret key/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
+    // The PUT was actually attempted (not blocked client-side), and the failure
+    // short-circuits before any DeploymentReady poll.
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockGetMcpServer).not.toHaveBeenCalled()
+  })
+})
+
 // ─── Polling / DeploymentReady correlation — the CRD contract (Fase 3 §6) ───
 describe('UpdateConnectorCredentials — rollout polling', () => {
   it('reports success once a FRESH DeploymentReady=True is observed after the PUT', async () => {
