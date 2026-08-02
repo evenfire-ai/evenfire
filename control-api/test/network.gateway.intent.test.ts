@@ -72,6 +72,13 @@ function docContaining(docs: string[], substring: string): string {
   return hit
 }
 
+function locationBlock(config: string, marker: string): string {
+  const start = config.indexOf(marker)
+  if (start < 0) throw new Error(`No gateway location containing: ${marker}`)
+  const next = config.indexOf('\n        location ', start + marker.length)
+  return next < 0 ? config.slice(start) : config.slice(start, next)
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -334,6 +341,19 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
     )
+  })
+
+  it('routes promptBridge JIT credential tickets through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
   })
 
   it('keeps governed agent-run ingest POST-only through the mcp-host gateway', () => {
