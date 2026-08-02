@@ -98,10 +98,13 @@ export class SecretService {
    * other owners may add adjacent keys; a full `replaceNamespacedSecret`
    * from one owner would wipe the other owner's keys.
    *
-   * Requires `secrets: patch` RBAC verb on the target namespace's Role —
-   * currently granted only in `deploy/base/channels/rbac.yaml` for the
-   * `control-api-communication-channels` Role. Do NOT call this from
-   * routes that target other namespaces unless their Role has been updated.
+   * Requires `secrets: patch` RBAC verb on the target namespace's Role.
+   * Granted in `deploy/base/channels/rbac.yaml` (the
+   * `control-api-communication-channels` Role, for the channel-reader flow
+   * above) and in `deploy/base/mcp-server/rbac.yaml` (the `control-api` Role,
+   * for the issue #223 connector credential-rotation route). Do NOT call this
+   * from a route targeting any OTHER namespace unless that namespace's Role
+   * has been granted `patch`.
    */
   async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
     assertValidSecretWriteKeys(req)
