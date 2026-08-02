@@ -49,18 +49,20 @@ beforeEach(() => {
 })
 
 describe('MarketplaceOrgArea', () => {
-  it('labels the area with the org name when connected', () => {
+  it('labels the area with the org name, linked to the Entries tab', () => {
     vi.mocked(capHook.useRegistryCapability).mockReturnValue(
       cap({ orgName: 'acme', scope: '@acme', canManageOrg: true })
     )
     render(<MarketplaceOrgArea activeTab="entries" />)
-    expect(screen.getByText('@acme')).toBeInTheDocument()
+    const orgLink = screen.getByRole('link', { name: '@acme' })
+    expect(orgLink).toHaveAttribute('href', '/marketplace/org/entries')
   })
 
-  it('labels the area "Your org" before the deployment is claimed', () => {
+  it('labels the area "Your org" (plain text, not a link) before the deployment is claimed', () => {
     vi.mocked(capHook.useRegistryCapability).mockReturnValue(cap({}))
     render(<MarketplaceOrgArea activeTab="entries" />)
     expect(screen.getByText('Your org')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Your org' })).toBeNull()
   })
 
   it('entries: shows OwnedEntries when the org can manage', () => {

@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { useRegistryCapability } from '../../lib/hooks/useRegistryCapability'
@@ -48,6 +49,16 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
 
   const orgName = capability?.orgName ?? null
   const orgLabel = orgName ? `@${orgName}` : loading ? 'Organization' : 'Your org'
+  // Once we know the org, its name is a shortcut into the org's own published
+  // plugins (the Entries tab). While the name is still resolving, keep it plain
+  // text so we don't link a placeholder label.
+  const orgTitle = orgName ? (
+    <Link className="cu-link" href={CONTROL_ROUTES.marketplace.orgEntries}>
+      {orgLabel}
+    </Link>
+  ) : (
+    orgLabel
+  )
   const orgScope = capability?.scope ?? null
   const canManageOrg = capability?.canManageOrg === true
   // Cross-org sharing availability, mirrored from the inbound-grants probe.
@@ -58,7 +69,7 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
     <section>
       <div className="cu-card cu-card--viewport-fill">
         <MarketplaceTabs active="org" />
-        <TablePanelHeader title={orgLabel} subtitle="Everything your org owns on the registry" />
+        <TablePanelHeader title={orgTitle} subtitle="Everything your org owns on the registry" />
         <div className="cu-card__body">
           <TabBar<OrgAreaTab>
             ariaLabel="Organization sections"

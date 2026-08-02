@@ -1,16 +1,11 @@
 'use client'
 
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
-import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
-import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { LoadingScreen } from '@components/LoadingScreen'
-import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipesTab } from '@components/RecipesTab'
-import { IconWorkflow } from '@components/Sidebar/icons'
-import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { isSilentApiError } from '@lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
@@ -32,9 +27,6 @@ function WorkflowRecipesPageContent() {
   const searchParams = useSearchParams()
 
   const [pageError, setPageError] = useState('')
-  const [installerOpen, setInstallerOpen] = useState(false)
-  const [installerStarting, setInstallerStarting] = useState(false)
-  const installerTimerRef = useRef<number | null>(null)
   const { recipes, loading, error, refresh } = useRecipePolling({
     enabled: authState.isLoggedIn && !authState.isLoading,
     onError: fetchError => {
@@ -63,23 +55,6 @@ function WorkflowRecipesPageContent() {
     }
   }, [authState.isLoading, authState.isLoggedIn, router])
 
-  useEffect(() => {
-    if (!installerStarting) return
-    // Keep the skeleton visible briefly so the install drawer transition can settle
-    // before the heavier installer content renders, avoiding a one-frame layout flash.
-    installerTimerRef.current = window.setTimeout(() => {
-      setInstallerOpen(true)
-      setInstallerStarting(false)
-      installerTimerRef.current = null
-    }, 120)
-    return () => {
-      if (installerTimerRef.current !== null) {
-        window.clearTimeout(installerTimerRef.current)
-        installerTimerRef.current = null
-      }
-    }
-  }, [installerStarting])
-
   if (authState.isLoading) {
     return <LoadingScreen />
   }
@@ -89,52 +64,14 @@ function WorkflowRecipesPageContent() {
   }
 
   return (
-    <DashboardLayout isDetailPage={installerOpen || installerStarting}>
-      {installerStarting ? (
-        <CreateFlowSkeleton
-          {...CREATE_FLOW_LOADING.installPlugin}
-          onBack={() => {
-            setPageError('')
-            setInstallerStarting(false)
-          }}
-          backDisabled={false}
-        />
-      ) : installerOpen ? (
-        <RecipeEditor
-          onSaved={() => {
-            setPageError('')
-            setInstallerOpen(false)
-            void refresh()
-          }}
-          onCancel={() => {
-            setPageError('')
-            setInstallerOpen(false)
-          }}
-          pageHeader={
-            <CreatePageHeader
-              icon={<IconWorkflow />}
-              title="Install Plugin"
-              subtitle="Prepare a plugin manifest, validate policy, and deploy it."
-              backLabel="Back to plugins"
-              onBack={() => {
-                setPageError('')
-                setInstallerOpen(false)
-              }}
-            />
-          }
-        />
-      ) : (
-        <RecipesTab
-          items={recipes}
-          loading={loading}
-          error={surfaceError}
-          onInstall={() => {
-            setPageError('')
-            setInstallerStarting(true)
-          }}
-          onRefresh={refresh}
-        />
-      )}
+    <DashboardLayout>
+      <RecipesTab
+        items={recipes}
+        loading={loading}
+        error={surfaceError}
+        onInstall={() => router.push(CONTROL_ROUTES.marketplace.org)}
+        onRefresh={refresh}
+      />
     </DashboardLayout>
   )
 }
