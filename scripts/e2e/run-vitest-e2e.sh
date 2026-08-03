@@ -19,6 +19,17 @@ DEFAULT_VITEST_SUITES=(
   integration/mcp-proxy-routing.test.ts
   integration/network-policies.test.ts
   integration/profiles-chain.test.ts
+  # Connector credential rotation (issue #223). This list is explicit, not a
+  # glob over tests/e2e/ — a suite that is not named here simply never runs,
+  # and a gate that never ran a test proves nothing.
+  integration/mcp-secret-rotation-failure.test.ts
+  integration/mcp-secret-rotation-preservation.test.ts
+  integration/mcp-secret-rotation-isolation.test.ts
+  integration/mcp-secret-rotation-shared.test.ts
+  integration/mcp-secret-rotation-remote.test.ts
+  integration/mcp-hcc-upgrade-rollout.test.ts
+  integration/mcp-server-readiness-regression.test.ts
+  integration/mcp-secrets-access-guard.test.ts
   mcp-host/approval-endpoints.test.ts
   mcp-host/artifacts.e2e.test.ts
   mcp-host/crd.test.ts
@@ -216,11 +227,52 @@ fi
 wait_http mcp-host "${MCP_HOST_RUNTIME_HEALTH_BASE}/v1/runtime/health" 90 \
   || die "mcp-host runtime health never became ready. Check ${PF_LOG}"
 
+# ── Gate integrity: make a false green impossible ────────────────────────────
+# The cluster-unreachable bypass (E2E_SKIP_IF_CLUSTER_UNREACHABLE) is for LOCAL
+# exploration only: with it set, every `it()` returns early and the suite
+# reports "passed" with zero assertions. An official gate that skips silently
+# proves nothing. Refuse the bypass here so it can never turn a down cluster
+# into a false green.
+if [[ -n "${E2E_SKIP_IF_CLUSTER_UNREACHABLE:-}" ]]; then
+  die "E2E_SKIP_IF_CLUSTER_UNREACHABLE is set — the gate refuses the skip bypass (a down cluster would report a false green). Unset it; the flag is for local exploration only."
+fi
+
+# Run Vitest and FAIL if zero tests actually executed, even on a green exit:
+# "nothing failed" is not "everything passed". A renamed/deleted suite or an
+# empty glob must not pass silently.
+run_vitest_gate() {
+  local log
+  log="$(mktemp)"
+  local status=0
+  # Capture Vitest's real exit code across the tee (a pipe otherwise reports
+  # tee's status). Guards below run regardless, to catch a green-but-empty run.
+  set +e
+  npx vitest run "$@" 2>&1 | tee "${log}"
+  status="${PIPESTATUS[0]}"
+  set -e
+  if grep -qE "No test files found" "${log}"; then
+    rm -f "${log}"
+    die "Vitest reported 'No test files found' — zero tests executed. A gate that ran nothing is not green."
+  fi
+  if ! grep -qE "Tests +[1-9][0-9]* (passed|failed)" "${log}"; then
+    rm -f "${log}"
+    die "Vitest reported no executed tests (no 'Tests N' with N>0). Refusing to treat an empty run as success."
+  fi
+  rm -f "${log}"
+  return "${status}"
+}
+
 log "Running Vitest E2E"
 cd tests/e2e
 if [[ "$#" -gt 0 ]]; then
-  npx vitest run "$@"
+  run_vitest_gate "$@"
 else
   log "No explicit Vitest specs supplied; running deterministic default suites"
-  npx vitest run "${DEFAULT_VITEST_SUITES[@]}"
+  # A suite renamed or deleted out of this explicit list would resolve to zero
+  # files and pass silently while the other suites keep files.length > 0. Fail
+  # loud, by name, before running a single test.
+  for suite in "${DEFAULT_VITEST_SUITES[@]}"; do
+    [[ -f "${suite}" ]] || die "Vitest suite not found: ${suite} (renamed or deleted?). A gate cannot pass over a suite that never ran."
+  done
+  run_vitest_gate "${DEFAULT_VITEST_SUITES[@]}"
 fi

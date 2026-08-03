@@ -14,8 +14,16 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-export const CONTROL_UI_URL = process.env.CONTROL_UI_URL || 'http://127.0.0.1:3000'
-export const CONTROL_API_URL = process.env.CONTROL_API_URL || 'http://127.0.0.1:8090'
+// Prefer `localhost` over `127.0.0.1`: when control-api runs with
+// NODE_ENV=production (any real cluster) the admin session cookie is set with
+// `Secure`. Chromium treats both loopback spellings as trustworthy and sends
+// the cookie, but Playwright's own cookie jar (used by `page.request` /
+// APIRequestContext) only exempts `localhost`/`*.localhost` from the
+// secure-cookie-over-http filter (playwright-core network.js isLocalHostname).
+// Against `http://127.0.0.1:<port>` every api(page.request, ...) call is sent
+// WITHOUT the session cookie and 401s even though the browser session is live.
+export const CONTROL_UI_URL = process.env.CONTROL_UI_URL || 'http://localhost:3000'
+export const CONTROL_API_URL = process.env.CONTROL_API_URL || 'http://localhost:8090'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
 
 export type ApiResult<T = Record<string, unknown>> = {

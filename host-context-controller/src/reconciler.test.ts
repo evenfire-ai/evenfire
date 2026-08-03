@@ -230,10 +230,12 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
   })
 
-  it('returns ok:true when the server has no envSecret', async () => {
+  it('returns ok:true with an empty revision when the server has no envSecret', async () => {
     const server = makeServer({ name: 'no-secret' })
     const result = await reconciler.validateSecret(server)
-    expect(result).toEqual({ ok: true })
+    // No credentials to hash, so no credentials-revision annotation is written
+    // on the pod template (issue #223).
+    expect(result).toEqual({ ok: true, revision: '' })
   })
 
   it('returns SecretNotFound when the Secret is missing (404)', async () => {
@@ -304,8 +306,9 @@ describe('PR-B B1 — validateSecret result shape', () => {
     }
   })
 
-  it('returns ok:true when all required keys are present', async () => {
-    // Base64 value doesn't matter — the validator only checks key presence.
+  it('returns ok:true and the content revision when all required keys are present', async () => {
+    // The base64 value does not matter for key-presence validation, but it IS
+    // what the revision hashes (issue #223).
     coreApi.readNamespacedSecret.mockResolvedValueOnce({ data: { password: 'cGFzcw==' } })
 
     const server = makeServer({
@@ -314,7 +317,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
 
     const result = await reconciler.validateSecret(server)
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, revision: expect.stringMatching(/^[0-9a-f]{64}$/) })
   })
 
   it('fails closed and removes managed runtime resources when secret validation fails', async () => {
@@ -604,6 +607,49 @@ describe('PR-B B1 — writeStatusCondition', () => {
         v.labels.secret_name === 'pg-creds'
     )
     expect(sample?.value).toBe(0)
+  })
+
+  it('fences the patch with resourceVersion and retries on a 422 conflict (M2)', async () => {
+    const existing = {
+      type: 'DeploymentReady',
+      status: 'False',
+      reason: 'WaitingForReplicas',
+      message: 'waiting',
+      lastTransitionTime: '2020-01-01T00:00:00.000Z',
+    }
+    // First read at rv=v1; after the conflict, the re-read observes rv=v2 (a
+    // concurrent writer bumped it).
+    customApi.getNamespacedCustomObjectStatus
+      .mockResolvedValueOnce({
+        metadata: { resourceVersion: 'v1' },
+        status: { conditions: [existing] },
+      })
+      .mockResolvedValueOnce({
+        metadata: { resourceVersion: 'v2' },
+        status: { conditions: [existing] },
+      })
+    // First patch loses the race (the resourceVersion `test` op fails → 422);
+    // the retry succeeds.
+    customApi.patchNamespacedCustomObjectStatus
+      .mockRejectedValueOnce(Object.assign(new Error('the test operation failed'), { code: 422 }))
+      .mockResolvedValueOnce({})
+
+    const server = makeServer({ name: 'pg' })
+    await reconciler.writeStatusCondition(server, {
+      type: 'DeploymentReady',
+      status: 'True',
+      reason: 'ReplicasAvailable',
+      message: 'ready',
+    })
+
+    // Re-read and re-patched instead of losing the write.
+    expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+    // Both patches are fenced; the successful retry uses the RE-READ version.
+    const firstBody = customApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
+    const secondBody = customApi.patchNamespacedCustomObjectStatus.mock.calls[1][0].body
+    expect(firstBody[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: 'v1' })
+    expect(secondBody[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: 'v2' })
   })
 })
 

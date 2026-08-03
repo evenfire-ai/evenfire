@@ -54,6 +54,7 @@ import {
 } from './types'
 import {
   applyNetworkPolicy,
+  canonicalStringify,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
@@ -4271,11 +4272,6 @@ export class HostReconciler {
     })
     return (response.items || []).filter(item => item.metadata?.labels?.[HOST_LABEL])
   }
-}
-
-function canonicalStringify(obj: Record<string, unknown>): string {
-  const sorted = Object.keys(obj).sort()
-  return JSON.stringify(sorted.map(k => [k, obj[k]]))
 }
 
 /**
