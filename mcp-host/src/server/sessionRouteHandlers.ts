@@ -66,15 +66,23 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     query: { agent?: string; limit?: number; cursor?: string }
   ) => {
     const convManager = getConversationManager()
-    const keyPrefix = query.agent ? `${userSub}:rpc:${query.agent}:` : `${userSub}:rpc:`
-    const cursorScope = sessionsCursorScope(userSub, query.agent)
+    // Normalize an empty `agent` to undefined ONCE, up front. An empty string is
+    // "no agent scope", not the agent literally named "". Without this the three
+    // downstream uses disagreed: the prefix treated '' as falsy (non-scoped) but
+    // the store query and cursor scope received '' as a real agent — the store
+    // then fail-closes ('' -> userIdFromRpcPrefix null -> []), so an empty agent
+    // silently returned zero sessions instead of the unscoped catalog. The store
+    // fail-close is correct and stays; the fix is to never send it '' from here.
+    const agent = query.agent || undefined
+    const keyPrefix = agent ? `${userSub}:rpc:${agent}:` : `${userSub}:rpc:`
+    const cursorScope = sessionsCursorScope(userSub, agent)
     const cursor = decodeSessionsCursor(query.cursor, cursorScope)
     const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
       limit: query.limit === undefined ? undefined : query.limit + 1,
       cursor: cursor
         ? { updatedAt: new Date(cursor.updatedAt), key: `${keyPrefix}${cursor.key}` }
         : undefined,
-      agent: query.agent,
+      agent,
     })
     const { page, nextCursor } = paginateSessionSummaries(
       entries,
