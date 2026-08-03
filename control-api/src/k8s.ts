@@ -669,7 +669,7 @@ export type RecipePodInfo = {
   }>
 }
 
-function extractHttpStatus(err: unknown): number | null {
+export function extractHttpStatus(err: unknown): number | null {
   if (!err || typeof err !== 'object') return null
   const maybe = err as {
     statusCode?: number

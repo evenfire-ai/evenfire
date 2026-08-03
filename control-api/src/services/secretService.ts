@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
+import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 // A write-side summary of a Secret — NEVER carries `.data` values. Every admin
 // secret-write route echoes this, so secret values cannot leave the Secret store
@@ -53,6 +54,7 @@ export class SecretService {
   }
 
   async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+    assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -85,6 +87,7 @@ export class SecretService {
    * keys must survive a partial update, use `mergeSecret` instead.
    */
   async updateSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+    assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
@@ -124,12 +127,16 @@ export class SecretService {
    * other owners may add adjacent keys; a full `replaceNamespacedSecret`
    * from one owner would wipe the other owner's keys.
    *
-   * Requires `secrets: patch` RBAC verb on the target namespace's Role —
-   * currently granted only in `deploy/base/channels/rbac.yaml` for the
-   * `control-api-communication-channels` Role. Do NOT call this from
-   * routes that target other namespaces unless their Role has been updated.
+   * Requires `secrets: patch` RBAC verb on the target namespace's Role.
+   * Granted in `deploy/base/channels/rbac.yaml` (the
+   * `control-api-communication-channels` Role, for the channel-reader flow
+   * above) and in `deploy/base/mcp-server/rbac.yaml` (the `control-api` Role,
+   * for the issue #223 connector credential-rotation route). Do NOT call this
+   * from a route targeting any OTHER namespace unless that namespace's Role
+   * has been granted `patch`.
    */
   async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+    assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 
     const body: Partial<k8s.V1Secret> = {}
@@ -161,6 +168,7 @@ export class SecretService {
     namespace?: string
     key: string
   }): Promise<SecretSummary> {
+    assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
     const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
 
