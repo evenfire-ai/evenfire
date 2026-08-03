@@ -155,6 +155,42 @@ plane split documented at `evenfire-managed-cluster-control/docs/registry-auth.m
 Two facts fall out that shape our design: MCC's Secret is **unlabeled**, and its
 credential source (`*`-admin endpoint) is **unavailable to control-api**.
 
+### 4.4 The existing secrets-injection sequence (what we hook into)
+
+control-api already writes Secrets into the plugin namespace during install/upgrade,
+and self-provisioning must slot into that ordered flow — not bypass it. The **install
+handler** (`registry.ts`) runs:
+
+1. Build `mcpServerSpec`; set the in-memory `imagePullSecrets` **reference** (~1124)
+   — no K8s write yet.
+2. Preflight validation (422 on failure).
+3. Ownership metadata: `{ 'clerum.io/managed-by':'control-api',
+   'clerum.io/server-mode':… }` (labels) + catalog annotations.
+4. **Step 3 — create the per-plugin credentials Secret** (`<name>-credentials`,
+   `Opaque`, `stringData`) into `targetNs`, **fail-loud**
+   (`extractK8sError → res.status().json(); return`), set `secretCreated=true`
+   (`registry.ts:~1200-1250`).
+5. **Step 4 — create the McpServer CRD**; on failure, **rollback**: delete the
+   credentials Secret iff `secretCreated` (`registry.ts:1255-1272`).
+6. Step 5 — Context allowlist (rolls back too).
+
+The **upgrade handler** mirrors this and already uses the exact idempotent shape this
+spec proposes: read the existing Secret (`getSecret`, tolerating `404` via
+`k8sErr.status !== 404`) → `updateSecret` if present, else `createSecret`, labelled
+`managed-by:control-api` (`registry.ts:~1830-1875`).
+
+Three properties of this flow directly justify the design and are load-bearing for
+where we hook in:
+
+- **Label precedent** — the credentials Secret is *already* stamped
+  `clerum.io/managed-by:control-api`, so the pull Secret's ownership label (§7.2) is
+  the same marker the flow already uses, not a new convention.
+- **Fail-loud precedent** — Step 3 is the pattern §7.1/§7.3 mirror.
+- **Namespace + rollback** — the credentials Secret and CRD both land in `targetNs`,
+  and the credentials Secret is per-plugin (rolled back on CRD failure). The pull
+  Secret must therefore also target `targetNs` (co-location, §7.1) but sit **outside**
+  the per-plugin rollback (it is namespace-shared, §7.3).
+
 ---
 
 ## 5. Ownership: why control-api, not HCC/WRC
@@ -276,15 +312,21 @@ both phases; only the mint call changes.
 A control-api service (e.g. `services/registryPullSecretService.ts`) exposing:
 
 ```
-ensureRegistryPullSecret(): Promise<'created' | 'repaired' | 'exists-ours' | 'exists-foreign' | 'skipped'>
+ensureRegistryPullSecret(targetNs: string): Promise<'created' | 'repaired' | 'exists-ours' | 'exists-foreign' | 'skipped'>
 ```
 
 It takes the injected `K8sGateway` (for `getSecret`/`createSecret`/`updateSecret`,
-`k8s.ts:389-394`) and the new registry mint function (§6.1) as dependencies, and is
-invoked from the two attach sites with the gateway already in hand. It **always
-targets `config.mcpServersNamespace`** — it does **not** honor a caller-supplied
-`body.namespace` (see §7.2 and R7). If the gateway is absent (dev/no-cluster),
-it no-ops.
+`k8s.ts:389-394`) and the new registry mint function (§6.1) as dependencies. It is
+called with the **same `targetNs` the McpServer + credentials Secret use**
+(`targetNs = body.namespace || config.mcpServersNamespace`, `registry.ts:1011`),
+because `imagePullSecrets` are **namespace-local**: the pull Secret must live in the
+same namespace as the plugin pod (`server.namespace = targetNs`,
+`host-context-controller/src/reconciler.ts:946-948`) or the ref silently fails to
+resolve. It does **not** invent its own namespace — co-location with the McpServer is
+a correctness requirement, not a policy choice. The guardrail against writing into an
+arbitrary namespace is the RBAC check in step 2 (a `403` read aborts before minting),
+plus constraining plugin installs to control-api's covered namespaces (§8). If the
+gateway is absent (dev/no-cluster), it no-ops.
 
 Algorithm:
 
@@ -344,7 +386,7 @@ mint call should carry a bounded timeout.
 | Field | Value | Source of truth |
 | --- | --- | --- |
 | `metadata.name` | `evenfire-registry-pull` | `EVENFIRE_REGISTRY_PULL_SECRET_NAME` (`registryImagePullSecret.ts:15`) |
-| `metadata.namespace` | **`config.mcpServersNamespace` only** (`mcp-server` self-hosted / `mcp-server-<slug>` shared) — the provisioner ignores any `body.namespace` override (§7.1, R7) | `config.ts:285,460` |
+| `metadata.namespace` | **`targetNs`** = the McpServer's own namespace (`body.namespace \|\| config.mcpServersNamespace`) — must co-locate with the pod, since `imagePullSecrets` are namespace-local (§7.1) | `registry.ts:1011`, `reconciler.ts:946-948` |
 | `metadata.labels` | `clerum.io/managed-by: control-api` (provenance label — the ownership marker) | precedent `registry.ts:1206-1209`, `workflow-recipes secretFactory` |
 | `type` | `kubernetes.io/dockerconfigjson` | kubelet contract |
 | `data['.dockerconfigjson']` | base64 payload **verbatim** (do not double-encode; use `data`, not `stringData`) | `secretService.ts:44`; `secrets.ts:110-121` |
@@ -373,23 +415,34 @@ mint call should carry a bounded timeout.
 
 ### 7.3 Trigger point
 
-**Primary: lazy, at the attach site.** Call `ensureRegistryPullSecret()` (which
-targets `config.mcpServersNamespace`, §7.1) immediately before the two places the
-reference is attached (`registry.ts:~1117` install, `registry.ts:~1808` upgrade),
-when `shouldAttachEvenfirePullSecret` is true, using the router's existing
-`K8sGateway`. This:
+**Primary: lazy, co-located with the existing Secret write.** The install handler
+already has a dedicated Secret-write phase — *"Step 3: Create K8s Secret if
+credentials provided"* (`registry.ts:~1200-1250`) — that runs **before** *"Step 4:
+Create McpServer CRD"* (`registry.ts:~1255`). Call `ensureRegistryPullSecret(targetNs)`
+in that same Step-3 window (when `shouldAttachEvenfirePullSecret` is true), so the
+pull Secret exists before the CRD that references it is created. The upgrade handler
+has the symmetric phase (*"Step 4: Update credentials"* before the CRD update,
+`registry.ts:~1830-1875`). Both already hold the router's `K8sGateway`
+(`createAdminRegistryRouter(gateway?)`, `registry.ts:732`). This:
 
 - provisions exactly when a private evenfire-hosted plugin is installed/upgraded,
-- does zero work on clusters that never install such plugins,
+- targets the correct namespace (`targetNs`) automatically, co-located with the pod,
 - is idempotent via read-before-mint.
 
-The attach sites write via the router's `K8sGateway` today
-(`createAdminRegistryRouter(gateway?)`, `registry.ts:732`; the install write is the
-fail-loud pattern at `registry.ts:1226-1240`, and the upgrade path has the analogous
-write). Provisioning is **fail-loud**: on mint/write
-error, return the `5xx` `registry_pull_secret_provision_failed` and do not attach an
-unresolvable ref (§7.1 failure contract). When `gateway` is absent (dev/no-cluster),
-provisioning no-ops and the attach behaves as today.
+**Rollback scoping (important).** Step 4's CRD-create failure path **rolls back the
+per-plugin credentials Secret** (`registry.ts:1265-1272`, `deleteSecret` guarded by
+`secretCreated`). The pull Secret is **namespace-shared** across every plugin in
+`targetNs` — it MUST NOT be added to that rollback (deleting it would break other
+installed plugins and defeats idempotent reuse). So `ensureRegistryPullSecret` sits
+*outside* the per-plugin `secretCreated`/rollback bookkeeping; a later CRD failure
+leaves the pull Secret in place (correct — it is reused, not owned by this one
+install).
+
+**Fail-loud.** On mint/write error, return the `5xx`
+`registry_pull_secret_provision_failed` and do not attach an unresolvable ref (§7.1
+failure contract) — mirroring the existing fail-loud credentials write at
+`registry.ts:1226-1240`. When `gateway` is absent (dev/no-cluster), provisioning
+no-ops and the attach behaves as today.
 
 **Optional: boot-time reconcile.** A non-fatal pass in `main.ts` alongside
 `reconcileAllowedModelsConfigMapOnBoot` (`main.ts:~61`) can pre-create the Secret so
@@ -510,17 +563,21 @@ exactly one plugin namespace holds exactly one org's plugins, and a single
 cluster-scoped `evenfire-registry-pull` Secret carrying that org's identity is
 correct and safe.
 
-> **Guardrail.** Self-provisioning MUST write only into control-api's own configured
-> `mcpServersNamespace` and MUST NOT clobber an externally-provisioned Secret. This
-> is **enforced in code**, not by convention: `ensureRegistryPullSecret` ignores any
-> caller-supplied `body.namespace` (which `registry.ts:1011` otherwise honors for the
-> McpServer write) and always uses `config.mcpServersNamespace`. Do not lean on RBAC
-> as the backstop — control-api holds secrets-create in five namespaces
-> (`mcp-server`, `mcp-host`, `control-plane`, `sandbox-recipes`, `sandbox-ui`), which
-> is broader than this guardrail allows. If a deployment ever hosts more than one
-> org/namespace, the pull Secret must become **per-namespace** (one per
-> `mcp-server-<slug>`, as the managed operator already does) — re-verify before any
-> multi-org self-hosted mode ships.
+> **Guardrail.** The pull Secret is written into **`targetNs`** — the same namespace
+> as the McpServer + credentials Secret — because `imagePullSecrets` are
+> namespace-local and must co-locate with the pod (§7.1). It MUST NOT clobber an
+> externally-provisioned Secret (§7.4 ownership read). The safety property against a
+> caller directing the write into an *arbitrary* namespace is: the read/write goes
+> through the same `K8sGateway` under control-api's RBAC, so a namespace outside
+> control-api's secrets-RBAC set (`mcp-server`, `mcp-host`, `control-plane`,
+> `sandbox-recipes`, `sandbox-ui`) fails the read with `403` and **aborts before
+> minting** (§7.1 step 2, R7). Because self-hosted is single-tenant, in practice
+> `targetNs` is `config.mcpServersNamespace` (default `mcp-server`); an operator that
+> exposes the `body.namespace` override should constrain it to that covered set. If a
+> deployment ever hosts more than one org/namespace, the pull Secret is already
+> naturally per-namespace (it follows `targetNs`), but the *single-org-per-namespace*
+> assumption must be re-verified before any multi-org self-hosted mode ships — as the
+> managed operator already does with `mcp-server-<slug>`.
 
 Note the resolved contradiction between the two registry specs: "one org per
 cluster" is the **self-hosted/dedicated** truth; the managed operator's own model is
@@ -564,10 +621,11 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 | R1 | Phase 1 stores a **push-capable** standing key namespace-wide (blast radius — a workload with `secrets:get` RBAC or a mounted Secret could exfiltrate and `docker push`; `imagePullSecrets` themselves are kubelet-only, not container-mounted). | Ship Phase 2 pull-only mint as fast-follow (§6.2); security sign-off on the interim; non-expiring key with reactive rotation (§7.6). |
 | R2 | Clobbering an operator/MCC Secret. | Mode gate + `managed-by` ownership read; foreign Secrets are never written (§7.4); unlabeled-⇒-foreign invariant noted (§7.2). |
 | R3 | Key accumulation toward `MAX_ACTIVE_KEYS_PER_ORG=100` (additive `mintKey`, no revoke). | Revoke-prior control-api key before re-mint (§6.1/§7.1); read-before-mint; in-process serialization; revoke a key minted into a lost create-`409` race. |
-| R4 | Write to an unintended namespace via `body.namespace`. | `ensureRegistryPullSecret` ignores the override and always uses `config.mcpServersNamespace` (§7.2/§8). |
+| R4 | Pull Secret in the wrong namespace → ref silently unresolved (`imagePullSecrets` are namespace-local). | Provision into `targetNs` (co-located with the McpServer + credentials Secret), not a fixed namespace; a namespace outside control-api's secrets-RBAC set fails the read `403` and aborts (§7.1/§8). |
 | R5 | Self-hosted registry identity / org mapping not yet established (no claimed client, `orgName` null). | Gate on `isRegistryAuthActive()` **and** non-null `resolvePublishScope().orgName`; skip with a clear install-time error, never mint against `/org/null/keys` (§7.1). Presupposes a working self-hosted connect flow. |
 | R6 | Registry unreachable. | control-api→registry egress already covered in base; kubelet→registry pull is a node/GKE firewall concern, not a pod NetworkPolicy (§7.8). |
-| R7 | Read/write in a namespace outside control-api's secrets RBAC (`{mcp-server, mcp-host, control-plane, sandbox-recipes, sandbox-ui}`). | Provisioner is pinned to `config.mcpServersNamespace` (default `mcp-server`, covered + pre-created); a non-404 read error (e.g. `403`) aborts before minting, so no key-cap slot is wasted (§7.1). |
+| R7 | `targetNs` outside control-api's secrets RBAC (`{mcp-server, mcp-host, control-plane, sandbox-recipes, sandbox-ui}`) via a `body.namespace` override. | Default `targetNs` is `config.mcpServersNamespace` (`mcp-server`, covered + pre-created); a non-404 read error (e.g. `403`) aborts before minting, so no key-cap slot is wasted (§7.1); operators exposing the override constrain it to the covered set (§8). |
+| R8 | Shared pull Secret wrongly torn down by a per-plugin rollback. | `ensureRegistryPullSecret` sits outside the Step-4 `secretCreated`/`deleteSecret` rollback scope; a CRD-create failure never deletes the namespace-shared pull Secret (§7.3). |
 
 ---
 
