@@ -636,12 +636,27 @@ cluster" is the **self-hosted/dedicated** truth; the managed operator's own mode
 shared multi-tenant with per-`mcp-server-<slug>` isolation. This spec targets the
 self-hosted single-tenant slice and does not regress the managed per-namespace model.
 
-**Generality note:** the auto-attach only fires for registry-built `McpServer`s,
-which land in `mcp-server[-slug]`. A *non-transport* recipe workload pulling a
-private evenfire image would resolve its imagePullSecrets to `sandbox-recipes[-slug]`
-(`control-api/src/routes/admin/recipes.ts:66-80`) — not covered here. For now,
-private-image plugins are transport workloads; broadening to `sandbox-recipes` is
-future scope.
+> **KNOWN LIMITATION — recipe plugins are NOT covered by this spec.**
+>
+> The auto-attach fires only for registry-built `McpServer`s, which land in
+> `mcp-server[-slug]`. A `WorkflowRecipe` workload pulling a private evenfire image
+> resolves to `sandbox-recipes[-slug]` or `sandbox-ui[-slug]`
+> (`control-api/src/routes/admin/recipes.ts:66-80`), where this spec provisions nothing —
+> and `install-recipe` has no pull-secret hook at all. Worse, a *mixed* recipe (transport
+> + non-transport) that declares the Secret by name gets it **silently stripped**: the
+> Issue-#637 gate classifies our `managed-by`-only Secret as unlabeled → `denied`, and
+> `combineSecretAccess` makes a denial in one namespace denial everywhere.
+>
+> This is a design gap, not a configuration one — nothing in the platform can currently
+> create a usable pull Secret for a recipe namespace (`POST /admin/recipes/secrets`
+> hardcodes `type: 'Opaque'`, which the kubelet ignores for image pulls).
+>
+> Closing it is specified in
+> [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md),
+> which extends this model with a single-mint fan-out and platform-side injection. **Do
+> not** close it by labelling this Secret `clerum.io/shared=true` — the #637 predicate is
+> shared between `envSecret` and `imagePullSecrets`, so that would let any recipe read the
+> credential out of its own environment (see that spec, §5.1).
 
 ---
 
