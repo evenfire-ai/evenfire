@@ -357,12 +357,16 @@ Algorithm:
      wrong-typed same-named Secret), regardless of label → **`'repaired'`**: mint and
      `updateSecret` (replace) — do **not** `createSecret` (it would 409). This closes
      the gap where a create-409 is silently "treated as success" over a broken Secret.
-3. **Mint (revoke-prior first).** If a prior control-api-minted key id is on record
-   (Secret annotation or a small state row), **revoke it** (`DELETE /org/:org/keys/:id`,
-   `org.ts:334-349`) before minting, to bound accumulation (§6.1). Then call the
-   registry mint for `resolvePublishScope().orgName` (Phase 1: machine
-   `POST /org/:org/keys`; Phase 2: pull-only). Obtain the server-built
-   `dockerconfigjson` (already base64), or reproduce locally via the same pure formula
+3. **Mint (revoke-prior first).** If a prior control-api-minted pull key id is on
+   record (Secret annotation or a small state row), **revoke it**
+   (`DELETE /org/:org/keys/:id`, `org.ts:334-349`) before minting, to bound
+   accumulation (§6.1). Scope revoke-prior to keys carrying control-api's fixed
+   pull-key **description marker** so it never revokes a user/CI key (§7.9-3). Then
+   call the registry mint for `resolvePublishScope().orgName` with that description
+   (Phase 1: machine `POST /org/:org/keys`; Phase 2: pull-only). **Build the
+   `dockerconfigjson` locally**, keyed on `registryHostFromUrl(config.registryUrl)`
+   (the image host, per the attach invariant) — *not* the registry's
+   `registryTokenIssuer`-keyed response (§7.9-2) — via
    `{auths:{[host]:{username:'_',password:key,auth:base64('_:'+key)}}}`
    (`orgApiKeyService.ts:147-151`). Record the returned key id for future revoke.
 4. **Write.** `createSecret` (absent) or `updateSecret` (repair) with
@@ -485,11 +489,15 @@ still applies to avoid key churn and the 100-key cap.
   and the non-expiring-key choice are **required** for Phase 1, else a revoked-out-of-band
   or expired key strands the cluster with no self-heal. Posture in one line:
   *control-api owns rotation for Secrets it owns and never touches a foreign Secret.*
-- **GC.** In self-hosted there is no MCC uninstall. The Secret is a standing
-  namespace credential for the cluster's lifetime; no ownerReference/finalizer is
-  added (consistent with the absence of ownerReferences anywhere in control-api
-  today). Revocation of the underlying `efrk_` key on teardown is out of scope for
-  Phase 1.
+- **GC.** Plugin uninstall deletes the per-plugin `<name>-credentials` Secret by name
+  and does **not** touch the shared pull Secret (§7.9) — correct, since other plugins
+  may still need it. The Secret is therefore a standing namespace credential for the
+  cluster's lifetime; no ownerReference/finalizer is added (consistent with the
+  absence of ownerReferences anywhere in control-api today). Neither uninstall nor any
+  other path revokes the underlying `efrk_` key, so the registry-side key is a
+  standing credential too and can accrue across re-mints unless revoke-prior (§7.1) is
+  honored. Revoking the key on the last-plugin uninstall (and on `registryUrl`/host
+  change) is out of scope for Phase 1 but noted as a lifecycle follow-up.
 
 ### 7.7 Optional HCC enhancement — presence validation
 
@@ -552,6 +560,52 @@ mode).
 Net: no in-repo NetworkPolicy change is required for either plane; document the
 node-level firewall expectation for self-hosted operators pulling from a remote
 registry.
+
+### 7.9 Verified side effects & interactions
+
+Traced against the current install/upgrade/uninstall code. **Cleared (safe today):**
+
+- **Uninstall never sweeps the pull Secret.** The uninstall handler deletes
+  `${resourceName}-credentials` **by name** (`registry.ts:1610`) and the McpServer by
+  name — never by label selector. `clerum.io/managed-by=control-api` is **not** used
+  as a list/delete selector anywhere in control-api (only `clerum.io/recipe` and pod
+  selectors are). So the namespace-shared pull Secret survives every per-plugin
+  uninstall.
+- **The #637 recipe↔Secret access gate does not apply.** That gate
+  (`parseSecretOwnership` / `isSecretAccessibleByRecipe`) only governs secrets a
+  recipe **projects into its pod**. An `imagePullSecrets` entry is consumed by the
+  kubelet, never projected — so the pull Secret's absence of `owner-recipe`/`shared`
+  labels is irrelevant and cannot trip recipe validation.
+
+**Must-handle (these will bite if missed):**
+
+1. **Hook placement is independent of `credRequired`.** The existing Step-3 Secret
+   write is gated on `if (credRequired)` (`registry.ts:1217`). A private evenfire-hosted
+   plugin with **no** required credentials (`credRequired === false`) creates *no*
+   credentials Secret — but still needs the pull Secret. `ensureRegistryPullSecret`
+   MUST therefore be called **outside** the `credRequired` block, gated only on
+   `shouldAttachEvenfirePullSecret`. Placing it inside would silently reintroduce
+   `ImagePullBackOff` for credential-less private-image plugins.
+2. **Build the dockerconfigjson locally, keyed on the image host.** The kubelet selects
+   the pull credential by matching the image's registry host against the
+   `.auths` keys. The registry's server-built blob is keyed on *its* `registryTokenIssuer`
+   (`org.ts:295` → `buildDockerconfigjson(config.registryTokenIssuer, key)`,
+   default `registry.evenfire.ai`), which is **independent config** from control-api's
+   `config.registryUrl`. control-api has no `registryTokenIssuer` field. So
+   `ensureRegistryPullSecret` MUST build the blob itself with
+   `registryHostFromUrl(config.registryUrl)` as the `.auths` host — which the
+   `shouldAttachEvenfirePullSecret` invariant guarantees equals the image host — rather
+   than trust the registry's `registryTokenIssuer`-keyed response. Same pure formula
+   (`{auths:{[host]:{username:'_',password:key,auth:base64('_:'+key)}}}`), local host.
+3. **Shared key cap, list visibility, and revoke safety.** control-api already exposes
+   `/admin/registry/keys` (`registry.ts:2221-2247`), where operators mint/list/revoke
+   `efrk_` keys via the user-token path — all sharing `MAX_ACTIVE_KEYS_PER_ORG=100`.
+   The auto-minted pull key therefore (a) counts against that cap alongside CI/user
+   keys, and (b) appears in the user-facing key list. Mint it with a **fixed,
+   recognizable description** (e.g. `evenfire-registry-pull (auto)`), and scope
+   revoke-prior (§6.1) to keys carrying that marker so it never revokes a user/CI key.
+   Consider filtering it from the `/admin/registry/keys` GET list to avoid operator
+   confusion.
 
 ---
 
@@ -626,6 +680,9 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 | R6 | Registry unreachable. | control-api→registry egress already covered in base; kubelet→registry pull is a node/GKE firewall concern, not a pod NetworkPolicy (§7.8). |
 | R7 | `targetNs` outside control-api's secrets RBAC (`{mcp-server, mcp-host, control-plane, sandbox-recipes, sandbox-ui}`) via a `body.namespace` override. | Default `targetNs` is `config.mcpServersNamespace` (`mcp-server`, covered + pre-created); a non-404 read error (e.g. `403`) aborts before minting, so no key-cap slot is wasted (§7.1); operators exposing the override constrain it to the covered set (§8). |
 | R8 | Shared pull Secret wrongly torn down by a per-plugin rollback. | `ensureRegistryPullSecret` sits outside the Step-4 `secretCreated`/`deleteSecret` rollback scope; a CRD-create failure never deletes the namespace-shared pull Secret (§7.3). |
+| R9 | `.dockerconfigjson` keyed on the wrong host → present Secret still yields `ImagePullBackOff`. | Build the blob locally keyed on `registryHostFromUrl(config.registryUrl)` (= image host), not the registry's `registryTokenIssuer` (§7.9-2). |
+| R10 | Auto-minted pull key collides with user/CI keys — shared 100-cap, appears in the operator key list, or revoke-prior nukes a user key. | Fixed description marker on the pull key; revoke-prior scoped to that marker only; optionally hide it from `/admin/registry/keys` GET (§7.9-3). |
+| R11 | Credential-less private-image plugin (`credRequired=false`) gets no pull Secret. | Hook is outside the `if (credRequired)` block, gated only on `shouldAttachEvenfirePullSecret` (§7.9-1). |
 
 ---
 
@@ -645,6 +702,17 @@ path and reads as `'exists-foreign'` if the mode ever flips.
   preserved.
 - **Coexistence** — with a pre-existing unlabeled Secret, ensure returns
   `'exists-foreign'` and does not mint.
+- **Existing tests to revise (not just add).** `control-api/test/routes.registryInstall.test.ts`
+  asserts `createSecret` call counts that this change alters: `:864`
+  `toHaveBeenCalledTimes(1)` (now 2 for an evenfire-hosted plugin), and `:1148`/`:1204`
+  `not.toHaveBeenCalled()` (now called if the plugin is evenfire-hosted). These, and the
+  `evenfire imagePullSecrets attach` describe block (`:1424`), must be updated to
+  account for the pull-Secret create and to assert its shape/namespace.
+- **Host-keying** — the minted Secret's `.auths` key equals the image host
+  (`registryUrl` host), not `registryTokenIssuer`, verified against a config where the
+  two differ (§7.9-2).
+- **credRequired=false** — a private evenfire-hosted plugin with no credentials still
+  gets the pull Secret (hook outside the `credRequired` block, §7.9-1).
 
 ---
 
