@@ -77,8 +77,8 @@ MCC** that violates the open-core boundary (the OSS platform must run standalone
 - `config.ts:62` — "Delivered by MCC in the registry-voucher Secret" (adjacent
   subsystem; see §7.8).
 
-Andy's framing (paraphrased): *this repo should not know anything about MCC*, and
-the pull-secret responsibility should sit with the controllers that already inject
+A proposed direction: *this repo should not know anything about MCC*, and the
+pull-secret responsibility should sit with the controllers that already inject
 auth-related secrets (WRC / HCC). §5 assesses that proposal; the conclusion is that
 **control-api** is the correct owner, and gating on the existing
 `registryConnectionMode` discriminator is what actually removes the MCC coupling.
@@ -195,7 +195,7 @@ where we hook in:
 
 ## 5. Ownership: why control-api, not HCC/WRC
 
-Andy's proposal routes provisioning to WRC/HCC "because they already inject
+The proposal to route provisioning to WRC/HCC rests on "they already inject
 auth-related secrets." The review shows that premise is **only half true**, and the
 factoring it implies is the higher-cost path:
 
@@ -218,7 +218,7 @@ factoring it implies is the higher-cost path:
   install (`registry.ts:1215-1248`).
 
 **Decision:** control-api self-provisions. HCC stays a pass-through of the reference
-(with an optional presence-validation enhancement, §7.7). This honors Andy's real
+(with an optional presence-validation enhancement, §7.7). This honors the real
 goal — *the repo stops depending on MCC* — better than relocating the mint, because
 the dependency is removed by the `registryConnectionMode` gate, not by moving code
 into a controller that would need registry credentials plumbed into it.
@@ -525,8 +525,8 @@ self-provisioning, keeping the constant and predicate (they are the local contra
   `control-api/src`, or G2 does not hold.
 
 **Adjacent — catalog, decide explicitly (likely follow-up):** these mention MCC or
-managed-mode topology but are *not* the pull secret. Andy's "the repo should know
-nothing about MCC" argues for scrubbing the literal word "MCC" (replace with "the
+managed-mode topology but are *not* the pull secret. The "repo should know nothing
+about MCC" goal argues for scrubbing the literal word "MCC" (replace with "the
 managed operator" / "managed mode"), but the *behavior* they branch on is legitimate
 (control-api genuinely differs by `registryConnectionMode`):
 
@@ -609,7 +609,7 @@ Traced against the current install/upgrade/uninstall code. **Cleared (safe today
 
 ---
 
-## 8. Multi-tenancy guardrail (Andy's §7, carried forward)
+## 8. Multi-tenancy guardrail (carried forward from the registry bridge design §7)
 
 The self-hosted / OSS platform is **single-tenant — one organization per
 deployment** (`docs/concepts/open-core-and-hosted.md:38`, `docs/faq.md:21`). So
