@@ -7,9 +7,15 @@ import {
 import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkAttemptLedgerColumns,
   addPluginWorkloadSdkJitCredentialTicketColumns,
   addPluginWorkloadSdkPromptTargetPolicyColumns,
+  addPluginWorkloadSdkProtocolAndRevocation,
+  addPluginWorkloadSdkProviderAttemptLedger,
   addPluginWorkloadSdkProviderColumn,
+  addPluginWorkloadSdkRevocationEpoch,
+  addPluginWorkloadSdkRuntimeAccess,
+  addPluginWorkloadSdkUsageSourceKind,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
 } from './services/pluginWorkloadSdkSchema.js'
@@ -1336,7 +1342,7 @@ async function applyWorkflowRecipeAllowedTeamsAuditSchema(db: DbClient): Promise
 async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
   await db.query(`
     DO $$ BEGIN
-      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown');
+      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown','plugin_workload_sdk');
     EXCEPTION WHEN duplicate_object THEN NULL;
     END $$;
 
@@ -3030,14 +3036,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'iteration'
+                  'cache_write_tokens', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
              AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'source_kind') = 'string'
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
@@ -3052,6 +3058,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -4325,7 +4349,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'cache_tokens_reported', 'iteration'
+                  'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
@@ -4333,7 +4357,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
              AND jsonb_typeof(value->'source_kind') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
              AND jsonb_typeof(value->'output_tokens') = 'number'
@@ -4348,6 +4372,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -5047,6 +5089,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0077_plugin_workload_sdk_usage_attribution',
     apply: addPromptBridgeUsageMetadataColumn,
+  },
+  {
+    version: '0078_plugin_workload_sdk_attempt_ledger',
+    apply: addPluginWorkloadSdkAttemptLedgerColumns,
+  },
+  {
+    version: '0079_plugin_workload_sdk_usage_source_kind',
+    apply: addPluginWorkloadSdkUsageSourceKind,
+  },
+  {
+    version: '0080_plugin_workload_sdk_protocol_revocation',
+    apply: addPluginWorkloadSdkProtocolAndRevocation,
+  },
+  {
+    version: '0081_plugin_workload_sdk_provider_attempt_ledger',
+    apply: addPluginWorkloadSdkProviderAttemptLedger,
+  },
+  {
+    version: '0082_plugin_workload_sdk_revocation_epoch',
+    apply: addPluginWorkloadSdkRevocationEpoch,
+  },
+  {
+    version: '0083_plugin_workload_sdk_runtime_access',
+    apply: addPluginWorkloadSdkRuntimeAccess,
   },
 ]
 

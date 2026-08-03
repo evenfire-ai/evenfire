@@ -42,11 +42,51 @@ const MAX_BODY_BYTES = 512 * 1024 // 512KB
 const CONTROL_API_BASE_URL =
   process.env.CONTROL_API_BASE_URL || 'http://control-api.control-plane.svc.cluster.local:8090'
 
+/**
+ * Bind a credential request to the already verified signed-ticket target.
+ * Callers may echo the target for diagnostics, but the resolver must receive
+ * only these ticket claims. A mismatch is denied before any Secret lookup.
+ */
+export function bindPluginSdkCredentialTarget(
+  ticketTarget: PluginSdkCredentialTarget,
+  bodyTarget: PluginSdkCredentialTarget
+): PluginSdkCredentialTarget | null {
+  if (
+    ticketTarget.targetRef !== bodyTarget.targetRef ||
+    ticketTarget.provider !== bodyTarget.provider ||
+    ticketTarget.model !== bodyTarget.model ||
+    ticketTarget.credentialSlot !== bodyTarget.credentialSlot
+  ) {
+    return null
+  }
+  return { ...ticketTarget }
+}
+
+/**
+ * The request may echo the target for diagnostics, but this predicate is
+ * never an authority source. The signed ticket remains the only value used by
+ * revalidation and Secret resolution (see the broker route below).
+ */
+export function pluginSdkCredentialTargetEchoMatches(
+  signedTarget: PluginSdkCredentialTarget,
+  bodyTarget: PluginSdkCredentialTarget
+): boolean {
+  return (
+    signedTarget.targetRef === bodyTarget.targetRef &&
+    signedTarget.provider === bodyTarget.provider &&
+    signedTarget.model === bodyTarget.model &&
+    signedTarget.credentialSlot === bodyTarget.credentialSlot
+  )
+}
+
 export async function revalidatePluginSdkCredentialTicket(input: {
   runtimeToken: string
   credentialTicket: string
   invocationId: string
   targetRef: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   /** Consume the control-plane jti after the Secret read, not during preflight. */
   redeem?: boolean
   fetchImpl?: typeof fetch
@@ -66,6 +106,9 @@ export async function revalidatePluginSdkCredentialTicket(input: {
           credentialTicket: input.credentialTicket,
           invocationId: input.invocationId,
           targetRef: input.targetRef,
+          attemptGeneration: input.attemptGeneration,
+          providerAttemptId: input.providerAttemptId,
+          providerAttemptIndex: input.providerAttemptIndex,
           ...(input.redeem ? { redeem: true } : {}),
         }),
       }
@@ -423,6 +466,12 @@ export class ClerumMcpServer {
         if (
           body.recipeNamespace !== this.sandboxNamespace ||
           typeof body.invocationId !== 'string' ||
+          !Number.isInteger(body.attemptGeneration) ||
+          Number(body.attemptGeneration) < 1 ||
+          typeof body.providerAttemptId !== 'string' ||
+          !body.providerAttemptId ||
+          !Number.isInteger(body.providerAttemptIndex) ||
+          Number(body.providerAttemptIndex) < 1 ||
           !target ||
           typeof target.targetRef !== 'string' ||
           typeof target.provider !== 'string' ||
@@ -443,15 +492,24 @@ export class ClerumMcpServer {
           res.end(JSON.stringify({ error: 'Credential ticket denied' }))
           return
         }
-        const ticketMatches =
-          ticket.recipeName === recipeName &&
-          ticket.recipeNamespace === this.sandboxNamespace &&
-          ticket.invocationId === body.invocationId &&
-          ticket.targetRef === target.targetRef &&
-          ticket.provider === target.provider &&
-          ticket.model === target.model &&
-          ticket.credentialSlot === target.credentialSlot
-        if (!ticketMatches) {
+        // Derive the resolver target directly from the verified JWT claims.
+        // `target` is an untrusted diagnostic echo and must not flow into any
+        // policy, revalidation, or Secret-resolution operation.
+        const signedTarget: PluginSdkCredentialTarget = {
+          targetRef: ticket.targetRef,
+          provider: ticket.provider,
+          model: ticket.model,
+          credentialSlot: ticket.credentialSlot,
+        }
+        if (
+          ticket.recipeName !== recipeName ||
+          ticket.recipeNamespace !== this.sandboxNamespace ||
+          ticket.invocationId !== body.invocationId ||
+          ticket.attemptGeneration !== Number(body.attemptGeneration) ||
+          ticket.providerAttemptId !== body.providerAttemptId ||
+          ticket.providerAttemptIndex !== Number(body.providerAttemptIndex) ||
+          !pluginSdkCredentialTargetEchoMatches(signedTarget, target)
+        ) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Credential ticket denied' }))
           return
@@ -460,12 +518,6 @@ export class ClerumMcpServer {
         // is verified, use its claims as the sole identity passed to the
         // Secret resolver and to all subsequent policy revalidation calls.
         const boundInvocationId = ticket.invocationId
-        const boundTarget: PluginSdkCredentialTarget = {
-          targetRef: ticket.targetRef,
-          provider: ticket.provider,
-          model: ticket.model,
-          credentialSlot: ticket.credentialSlot,
-        }
         // TOCTOU gate: ticket signature proves what was authorized, while this
         // control-api read proves that the invocation and policy revision/hash
         // are still current immediately before the Secret lookup.
@@ -473,7 +525,10 @@ export class ClerumMcpServer {
           runtimeToken,
           credentialTicket: body.credentialTicket,
           invocationId: boundInvocationId,
-          targetRef: boundTarget.targetRef,
+          targetRef: signedTarget.targetRef,
+          attemptGeneration: ticket.attemptGeneration,
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
         })
         if (!ticketStillActive) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -485,7 +540,7 @@ export class ClerumMcpServer {
           res.end(JSON.stringify({ error: 'Credential broker unavailable' }))
           return
         }
-        const result = await this.modelConfigHandler.resolvePluginSdkCredential(boundTarget)
+        const result = await this.modelConfigHandler.resolvePluginSdkCredential(signedTarget)
         // Re-check after the Secret read as well as before it.  Control API
         // and the WRC Secret store are separate systems, so a single remote
         // check cannot be atomic with the read; the post-read gate ensures a
@@ -495,7 +550,10 @@ export class ClerumMcpServer {
             runtimeToken,
             credentialTicket: body.credentialTicket,
             invocationId: boundInvocationId,
-            targetRef: boundTarget.targetRef,
+            targetRef: signedTarget.targetRef,
+            attemptGeneration: ticket.attemptGeneration,
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
             redeem: true,
           })
           if (!ticketStillActiveAfterResolve) {

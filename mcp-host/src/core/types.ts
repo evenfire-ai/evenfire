@@ -92,7 +92,7 @@ export interface TokenUsage {
  * vary per task (source_kind, user_id, etc.) come from the call site.
  */
 export interface UsageContext {
-  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown' | 'plugin_workload_sdk'
   /** Immutable ingress trace identity. It is carried to usage ingestion, not treated as DB authority. */
   traceContext?: TraceContextV1 | null
   team_id?: string | null

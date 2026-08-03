@@ -25,6 +25,7 @@ const fallback: PromptBridgeTarget = {
 
 function authorization(overrides: Record<string, unknown> = {}) {
   return {
+    contractVersion: 2,
     invocationId: 'inv-1',
     replay: false,
     providerCallRequired: true,
@@ -33,6 +34,7 @@ function authorization(overrides: Record<string, unknown> = {}) {
     modelPolicy: null,
     selectedTarget: primary,
     authorizedTargets: [primary, fallback],
+    attemptGeneration: 1,
     policyRevision: 7,
     policyHash: 'a'.repeat(64),
     maxOutputTokens: 2048,
@@ -42,6 +44,7 @@ function authorization(overrides: Record<string, unknown> = {}) {
 
 function makeDeps(
   overrides: {
+    ensure?: ReturnType<typeof vi.fn>
     authorize?: ReturnType<typeof vi.fn>
     complete?: ReturnType<typeof vi.fn>
     report?: ReturnType<typeof vi.fn>
@@ -65,7 +68,10 @@ function makeDeps(
     })
   const handler = new PromptBridgeHandler({
     controlApiClient: {
+      ensurePromptBridgeCapabilities: overrides.ensure ?? vi.fn().mockResolvedValue(undefined),
       authorizePromptBridge: authorize,
+      reissuePromptBridgeCredentialTicket: vi.fn(),
+      reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
       reportInvocationStatus: report,
     } as unknown as PluginWorkloadSdkControlApiClient,
     llmBridge: { complete } as unknown as LlmBridge,
@@ -138,6 +144,27 @@ describe('PromptBridgeHandler', () => {
     expect(authorize).not.toHaveBeenCalled()
   })
 
+  it('reports missing operator policy as a policy denial before creating an invocation', async () => {
+    const ensure = vi
+      .fn()
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_policy_denied',
+          'an active operator grant is required',
+          false
+        )
+      )
+    const { handler, authorize, complete, report } = makeDeps({ ensure })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_policy_denied',
+      retryable: false,
+    })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+  })
+
   it('passes exactly the signed authorized suffix and returns the served target', async () => {
     const onUsage = vi.fn()
     const { handler, complete, report } = makeDeps({ onUsage })
@@ -158,7 +185,7 @@ describe('PromptBridgeHandler', () => {
       policyRevision: 7,
       content: 'summary text',
     })
-    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete')
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete', 1)
     expect(onUsage).toHaveBeenCalledWith(
       expect.objectContaining({
         provider: 'openai',
@@ -207,6 +234,6 @@ describe('PromptBridgeHandler', () => {
       code: 'provider_unavailable',
       retryable: false,
     })
-    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable')
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
   })
 })

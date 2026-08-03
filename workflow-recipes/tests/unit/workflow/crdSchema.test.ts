@@ -128,7 +128,9 @@ describe('WorkflowRecipe CRD snippet step schema', () => {
     expect(rules).toContain(
       '!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))'
     )
-    expect(crd).toContain('agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge')
+    expect(crd).toContain(
+      'agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge'
+    )
     expect(crd).toContain(
       'spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
     )

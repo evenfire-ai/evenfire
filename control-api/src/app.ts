@@ -23,6 +23,7 @@ import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEv
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from './routes/internal/infrastructureTelemetryEvents.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
+import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
 import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
@@ -183,6 +184,7 @@ export function createApp(gateway: K8sGateway) {
     })
   )
   api.use(createInternalUsageEventsRouter())
+  api.use(createInternalPluginWorkloadSdkRouter())
   api.use(createInternalBudgetsCheckRouter())
   api.use(createInternalWebhooksRouter(gateway))
   api.use(createInternalWorkflowApprovalReaderRouter(gateway))

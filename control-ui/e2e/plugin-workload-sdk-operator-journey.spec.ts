@@ -5,10 +5,9 @@
  *   1. Publish the SDK recipe to the Marketplace (registry-api).
  *   2. Instantiate it from the Marketplace UI  → POST /admin/registry/install-recipe
  *      → a versioned WorkflowRecipe CRD in sandbox-recipes.
- *   3. Wait for the stepless eager mcp-host to validate the SDK capability
- *      (status.pluginWorkloadSdk.state === 'validated'). This is the path that
- *      regressed (configure readiness race) — the operator journey must observe
- *      it self-validate without a keepalive step or manual intervention.
+ *   3. Wait for the stepless eager mcp-host identity bootstrap. A fresh recipe
+ *      normally reports `awaiting_policy` until the operator creates a grant;
+ *      this is an expected policy state, not provider failure.
  *   4. Configure the two SDK grants (promptBridge + clientNotifications) from
  *      the grant page UI so an allowed user can receive notifications.
  *   5. Verify both grants are listed and bound to the installed recipe.
@@ -23,6 +22,8 @@
  */
 import { type Page, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const BASE_API =
@@ -30,7 +31,11 @@ const BASE_API =
   process.env.CONTROL_API_URL ||
   process.env.E2E_CONTROL_API_URL ||
   ''
-const REGISTRY_BASE = process.env.REGISTRY_API_BASE_URL || process.env.REGISTRY_URL || ''
+const REGISTRY_BASE =
+  process.env.REGISTRY_API_BASE_URL ||
+  process.env.REGISTRY_API_URL ||
+  process.env.REGISTRY_URL ||
+  ''
 const CONTROL_UI_BASE = process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || ''
 const ADMIN_USER =
   process.env.E2E_ADMIN_USERNAME ||
@@ -46,13 +51,33 @@ const ADMIN_PASS =
   process.env.E2E_TEST_PASSWORD ||
   'changeme123!'
 // Plugin SDK T3 must not inherit the shared Host's historical Z.AI default.
-// Use an explicit OpenAI/Claude pair unless the caller supplies another
-// provider deliberately; the guard below rejects Z.AI so a 429 cannot be
-// mistaken for an SDK regression.
-const PROVIDER = process.env.E2E_WORKFLOW_MODEL_PROVIDER || 'openai'
-const MODEL = process.env.E2E_WORKFLOW_MODEL_NAME || 'gpt-5.4-mini'
-const FALLBACK_PROVIDER = process.env.E2E_PROMPT_FALLBACK_PROVIDER || 'claude'
-const FALLBACK_MODEL = process.env.E2E_PROMPT_FALLBACK_MODEL || 'claude-sonnet-4-6'
+// An explicit E2E provider wins; otherwise only an OpenAI/Claude root setting
+// is inherited. An unsupported root provider fails before any UI mutation
+// instead of silently redirecting a paid call.
+const configuredProvider = process.env.E2E_WORKFLOW_MODEL_PROVIDER?.trim() || ''
+const inheritedProvider = process.env.CLERUM_MODEL_PROVIDER?.trim() || ''
+const PROVIDER =
+  configuredProvider ||
+  (inheritedProvider === 'openai' || inheritedProvider === 'claude' ? inheritedProvider : 'openai')
+if (inheritedProvider && !configuredProvider && !['openai', 'claude'].includes(inheritedProvider)) {
+  throw new Error(
+    `Plugin Workload SDK E2E refuses inherited provider ${inheritedProvider}; set E2E_WORKFLOW_MODEL_PROVIDER and E2E_WORKFLOW_MODEL_NAME explicitly to OpenAI or Claude.`
+  )
+}
+const MODEL =
+  process.env.E2E_WORKFLOW_MODEL_NAME ||
+  (PROVIDER === 'claude' ? 'claude-sonnet-4-6' : 'gpt-5.4-mini')
+const FALLBACK_PROVIDER =
+  process.env.E2E_PROMPT_FALLBACK_PROVIDER || (PROVIDER === 'claude' ? 'openai' : 'claude')
+const FALLBACK_MODEL =
+  process.env.E2E_PROMPT_FALLBACK_MODEL ||
+  (FALLBACK_PROVIDER === 'claude' ? 'claude-sonnet-4-6' : 'gpt-5.4-mini')
+if (!['openai', 'claude'].includes(PROVIDER) || !['openai', 'claude'].includes(FALLBACK_PROVIDER)) {
+  throw new Error('Plugin Workload SDK E2E only permits OpenAI and Claude targets.')
+}
+if (PROVIDER === FALLBACK_PROVIDER) {
+  throw new Error('Plugin Workload SDK E2E requires distinct primary and fallback providers.')
+}
 const RECIPE_NS = 'sandbox-recipes'
 const EVENT_TYPE = 'e2e.test.notification'
 const USER_EMAIL =
@@ -68,6 +93,21 @@ let adminSessionHeader = ''
 /** When set, the journey writes labelled success screenshots here (evidence/demo only). */
 const EVIDENCE_DIR = process.env.E2E_EVIDENCE_DIR
 
+function isProductionContext(context: string): boolean {
+  return (
+    /(^|[-_])(prod|production)([-_]|$)/i.test(context) ||
+    (/(^|[-_])clerum([-_]|$)$/i.test(context) && !/example-dev/i.test(context))
+  )
+}
+
+function isAllowedMutableContext(context: string): boolean {
+  return (
+    context === 'clerum-test' ||
+    /^clerum-(codex|detached)-.+-[0-9a-f]{8}$/.test(context) ||
+    /^clerum-.+-[0-9a-f]{7,8}$/.test(context)
+  )
+}
+
 function assertMutableBranchProfile(): void {
   if (process.env.E2E_PLUGIN_SDK_WRITE_CONFIRM !== '1') {
     throw new Error('Mutable Plugin Workload SDK E2E requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1.')
@@ -75,13 +115,57 @@ function assertMutableBranchProfile(): void {
   const context =
     process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
   if (!context) throw new Error('E2E_K8S_CONTEXT is required for the mutable operator journey.')
-  const currentContext = execFileSync(
-    'kubectl',
-    ['--context', context, 'config', 'current-context'],
-    { encoding: 'utf8', timeout: 15_000 }
-  ).trim()
+  if (isProductionContext(context) || !isAllowedMutableContext(context)) {
+    throw new Error(
+      `Mutable Plugin Workload SDK E2E only permits clerum-test or a branch-owned Minikube profile; refusing context ${context}.`
+    )
+  }
+  const currentContext = execFileSync('kubectl', ['config', 'current-context'], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  }).trim()
   if (currentContext !== context) {
     throw new Error(`kubectl context mismatch: expected ${context}, got ${currentContext}`)
+  }
+
+  const repoRoot = path.resolve(__dirname, '../..')
+  const expectedHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim()
+  const expectedWorktreeId = createHash('sha1').update(repoRoot).digest('hex')
+  const marker = JSON.parse(
+    execFileSync(
+      'kubectl',
+      [
+        '--context',
+        context,
+        '-n',
+        'control-plane',
+        'get',
+        'configmap',
+        'clerum-pre-gate-sync-state',
+        '-o',
+        'json',
+      ],
+      { encoding: 'utf8', timeout: 15_000 }
+    )
+  ) as { data?: Record<string, string> }
+  const markerData = marker.data ?? {}
+  if (!markerData.gitHead || !markerData.worktreeId || !markerData.clusterFingerprint) {
+    throw new Error(
+      `Profile ${context} has no complete pre-gate sync marker (gitHead/worktreeId/clusterFingerprint required).`
+    )
+  }
+  if (markerData.gitHead !== expectedHead || markerData.worktreeId !== expectedWorktreeId) {
+    throw new Error(
+      `Profile ${context} marker does not belong to this worktree/head: marker head=${markerData.gitHead} worktree=${markerData.worktreeId}; expected head=${expectedHead} worktree=${expectedWorktreeId}.`
+    )
+  }
+  const expectedClusterFingerprint = process.env.E2E_EXPECTED_CLUSTER_FINGERPRINT?.trim()
+  if (expectedClusterFingerprint && markerData.clusterFingerprint !== expectedClusterFingerprint) {
+    throw new Error(
+      `Profile ${context} marker cluster fingerprint ${markerData.clusterFingerprint} does not match E2E_EXPECTED_CLUSTER_FINGERPRINT ${expectedClusterFingerprint}.`
+    )
   }
 
   const urls = [
@@ -240,17 +324,24 @@ function recipeManifest(name: string, userRef: string): Record<string, unknown> 
   }
 }
 
-async function waitForSdkValidated(token: string, recipeName: string): Promise<void> {
+async function waitForSdkState(
+  token: string,
+  recipeName: string,
+  acceptedStates: readonly string[],
+  label: string
+): Promise<string> {
   for (let attempt = 1; attempt <= 60; attempt += 1) {
     const { status, data } = await api(token, 'GET', `/api/v1/admin/recipes/${recipeName}`)
     if (status === 200) {
       const sdk = (data as { status?: { pluginWorkloadSdk?: { state?: string } } }).status
         ?.pluginWorkloadSdk
-      if (sdk?.state === 'validated') return
+      if (sdk?.state && acceptedStates.includes(sdk.state)) return sdk.state
     }
     await delay(2_000)
   }
-  throw new Error(`recipe ${recipeName} SDK capability did not reach validated`)
+  throw new Error(
+    `recipe ${recipeName} SDK capability did not reach ${label} (${acceptedStates.join(' or ')})`
+  )
 }
 
 test.describe('Plugin Workload SDK — operator journey (Marketplace → install → grants)', () => {
@@ -327,8 +418,16 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       expect(installedRecipeName).not.toBe('')
       await expect(row.getByRole('button', { name: 'Installed' })).toBeDisabled()
 
-      // 3. The eager mcp-host self-validates the SDK capability (regression path).
-      await waitForSdkValidated(token, installedRecipeName)
+      // 3. The eager mcp-host proves the SDK identity before a grant exists.
+      // The expected fresh-install state is awaiting_policy; no provider call
+      // is authorized until the operator completes the grant journey below.
+      const identityState = await waitForSdkState(
+        token,
+        installedRecipeName,
+        ['awaiting_policy', 'validated'],
+        'identity bootstrap readiness'
+      )
+      expect(['awaiting_policy', 'validated']).toContain(identityState)
 
       // 4. promptBridge grant — configured through the grant page UI. Add the
       // fallback first, then the bootstrap target, and reorder it visibly so
@@ -416,6 +515,11 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       await expect(notifyRow).toBeVisible({ timeout: 15_000 })
       await expect(notifyRow).toContainText('users:')
       await expect(notifyRow).not.toContainText(userRef) // resolved to a handle, not the UUID
+
+      // Both grants now exist. The WRC must observe the active target policy
+      // and transition from awaiting_policy to validated before data-plane use.
+      await waitForSdkState(token, installedRecipeName, ['validated'], 'validated policy')
+
       if (EVIDENCE_DIR)
         await page.screenshot({ path: `${EVIDENCE_DIR}/operator-2-grant-created.png` })
 
@@ -495,6 +599,24 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
                 cleanupErrors.push(`delete grant ${grant.id}: ${String(error)}`)
               }
             }
+            try {
+              const afterDelete = await api(
+                token,
+                'GET',
+                `/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${installedRecipeName}`
+              )
+              const remaining = (afterDelete.data.data ??
+                afterDelete.data.items ??
+                afterDelete.data.grants ??
+                []) as unknown[]
+              if (afterDelete.status !== 200 || remaining.length > 0) {
+                cleanupErrors.push(
+                  `grant cleanup postcondition failed: status=${afterDelete.status}, remaining=${remaining.length}`
+                )
+              }
+            } catch (error) {
+              cleanupErrors.push(`verify grants deleted: ${String(error)}`)
+            }
           }
         } catch (error) {
           cleanupErrors.push(`list/delete grants: ${String(error)}`)
@@ -508,6 +630,24 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
           if (uninstalled.status >= 300 && uninstalled.status !== 404) {
             cleanupErrors.push(`uninstall ${installedRecipeName}: ${uninstalled.status}`)
           }
+          if (uninstalled.status < 300 || uninstalled.status === 404) {
+            let recipeStatus = uninstalled.status
+            for (let attempt = 0; attempt < 15 && recipeStatus !== 404; attempt++) {
+              await delay(1_000)
+              recipeStatus = (
+                await api(
+                  token,
+                  'GET',
+                  `/api/v1/admin/recipes/${encodeURIComponent(installedRecipeName)}`
+                )
+              ).status
+            }
+            if (recipeStatus !== 404) {
+              cleanupErrors.push(
+                `recipe cleanup postcondition failed: ${installedRecipeName} still returned HTTP ${recipeStatus}`
+              )
+            }
+          }
         } catch (error) {
           cleanupErrors.push(`uninstall ${installedRecipeName}: ${String(error)}`)
         }
@@ -519,6 +659,16 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
         )
         if (!deletedEntry.ok && deletedEntry.status !== 404) {
           cleanupErrors.push(`delete registry entry ${entryName}: ${deletedEntry.status}`)
+        }
+        if (deletedEntry.ok || deletedEntry.status === 404) {
+          const afterDelete = await fetch(
+            `${REGISTRY_BASE}/api/v1/entries/${encodeURIComponent(entryName)}/versions/1.0.0`
+          )
+          if (afterDelete.status !== 404) {
+            cleanupErrors.push(
+              `registry cleanup postcondition failed: ${entryName} returned HTTP ${afterDelete.status}`
+            )
+          }
         }
       } catch (error) {
         cleanupErrors.push(`delete registry entry ${entryName}: ${String(error)}`)

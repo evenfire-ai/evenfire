@@ -84,10 +84,17 @@ async function createTestApp(
   const service = {
     executeStep: vi.fn().mockResolvedValue({ stepId: 's1', status: 'completed' }),
     configure: vi.fn().mockReturnValue({ configured: true }),
-    configurePluginWorkloadSdkBootstrap: vi.fn().mockReturnValue({
+    configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({
       configured: true,
+      ready: true,
       provider: 'openai',
       model: 'gpt-5.4-mini',
+      contractVersion: 2,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+      defaultTargetRef: 'primary-openai',
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5.4-mini',
     }),
     getStatus: vi.fn().mockReturnValue({ ready: true, configured: true }),
     ...serviceOverride,
@@ -366,10 +373,17 @@ describe('workflowRouter — JWT auth middleware', () => {
 
   it('POST /plugin-workload-sdk/bootstrap accepts only public identity and forwards no credential', async () => {
     const token = await signWorkflowToken({ sub: 'wrc', scopes: ['configure'] })
-    const bootstrap = vi.fn().mockReturnValue({
+    const bootstrap = vi.fn().mockResolvedValue({
       configured: true,
+      ready: true,
       provider: 'openai',
       model: 'gpt-5.4-mini',
+      contractVersion: 2,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+      defaultTargetRef: 'primary-openai',
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5.4-mini',
     })
     const { baseUrl, server } = await createTestApp(publicKeyPem, true, {
       configurePluginWorkloadSdkBootstrap: bootstrap,

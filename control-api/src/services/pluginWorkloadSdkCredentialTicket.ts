@@ -17,6 +17,9 @@ export type PluginWorkloadSdkCredentialTicketClaims = {
   recipeNamespace: string
   recipeName: string
   invocationId: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   targetRef: string
   provider: string
   model: string
@@ -35,6 +38,9 @@ export function issuePluginWorkloadSdkCredentialTicket(input: {
   recipeNamespace: string
   recipeName: string
   invocationId: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   target: PluginWorkloadSdkPromptTarget
   policyRevision: number
   policyHash: string
@@ -51,6 +57,9 @@ export function issuePluginWorkloadSdkCredentialTicketWithClaims(input: {
   recipeNamespace: string
   recipeName: string
   invocationId: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   target: PluginWorkloadSdkPromptTarget
   policyRevision: number
   policyHash: string
@@ -61,6 +70,9 @@ export function issuePluginWorkloadSdkCredentialTicketWithClaims(input: {
     recipeNamespace: input.recipeNamespace,
     recipeName: input.recipeName,
     invocationId: input.invocationId,
+    attemptGeneration: input.attemptGeneration,
+    providerAttemptId: input.providerAttemptId,
+    providerAttemptIndex: input.providerAttemptIndex,
     targetRef: input.target.targetRef,
     provider: input.target.provider,
     model: input.target.model,
@@ -102,6 +114,14 @@ export function verifyPluginWorkloadSdkCredentialTicket(
       typeof claims.recipeNamespace !== 'string' ||
       typeof claims.recipeName !== 'string' ||
       typeof claims.invocationId !== 'string' ||
+      typeof claims.attemptGeneration !== 'number' ||
+      !Number.isInteger(claims.attemptGeneration) ||
+      claims.attemptGeneration < 1 ||
+      typeof claims.providerAttemptId !== 'string' ||
+      claims.providerAttemptId.length === 0 ||
+      typeof claims.providerAttemptIndex !== 'number' ||
+      !Number.isInteger(claims.providerAttemptIndex) ||
+      claims.providerAttemptIndex < 1 ||
       typeof claims.targetRef !== 'string' ||
       typeof claims.provider !== 'string' ||
       typeof claims.model !== 'string' ||

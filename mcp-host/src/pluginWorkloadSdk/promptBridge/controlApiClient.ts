@@ -38,6 +38,7 @@ export interface ControlApiClientOptions {
 }
 
 export interface AuthorizePromptBridgeResponse {
+  contractVersion: 2
   invocationId: string
   replay: boolean
   providerCallRequired: boolean
@@ -46,13 +47,60 @@ export interface AuthorizePromptBridgeResponse {
   modelPolicy: { provider: string; model: string; temperature?: number; maxCostUsd?: number } | null
   selectedTarget: PromptBridgeTarget
   authorizedTargets: PromptBridgeTarget[]
+  attemptGeneration: number
   policyRevision: number
   policyHash: string
   maxOutputTokens: number | null
 }
 
+export interface PluginWorkloadSdkCapabilities {
+  contractVersion: 2
+  supportedContractVersions: number[]
+  targetAwarePromptBridge: true
+  attemptLedger: true
+  credentialTickets: true
+  policyState: string
+  policyRevision: number
+  policyHash: string | null
+  defaultTargetRef: string | null
+  defaultProvider: string | null
+  defaultModel: string | null
+  v2Ready: boolean
+}
+
+export interface PluginWorkloadSdkBootstrapProof {
+  ready: true
+  contractVersion: 2
+  provider: string
+  model: string
+  policyReady: boolean
+  policyState: string
+  policyReason?:
+    | 'grant_missing'
+    | 'policy_unreviewed'
+    | 'policy_revoking'
+    | 'policy_disabled'
+    | 'bootstrap_target_mismatch'
+    | 'policy_not_ready'
+  /**
+   * Policy metadata is deliberately optional at identity bootstrap. A recipe
+   * may be installed and publish an awaiting-policy SDK runtime before an
+   * operator creates its promptBridge grant. The grant is still required for
+   * every request and is checked by the authorization endpoint against this
+   * binding.
+   */
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+}
+
 export interface ReissuedPromptBridgeCredentialTicket {
   invocationId: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   targetRef: string
   credentialTicket: string
   policyRevision: number
@@ -83,6 +131,7 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
   if (typeof v !== 'object' || v === null) return false
   const r = v as Record<string, unknown>
   return (
+    r.contractVersion === 2 &&
     typeof r.invocationId === 'string' &&
     typeof r.replay === 'boolean' &&
     (r.providerCallRequired === undefined || typeof r.providerCallRequired === 'boolean') &&
@@ -97,11 +146,34 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     Array.isArray(r.authorizedTargets) &&
     r.authorizedTargets.length > 0 &&
     r.authorizedTargets.every(isPromptBridgeTarget) &&
+    Number.isInteger(r.attemptGeneration) &&
+    (r.attemptGeneration as number) >= 1 &&
     Number.isInteger(r.policyRevision) &&
     (r.policyRevision as number) >= 1 &&
     typeof r.policyHash === 'string' &&
     /^[a-f0-9]{64}$/.test(r.policyHash) &&
     (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number')
+  )
+}
+
+function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapabilities {
+  if (typeof v !== 'object' || v === null) return false
+  const value = v as Record<string, unknown>
+  return (
+    value.contractVersion === 2 &&
+    Array.isArray(value.supportedContractVersions) &&
+    value.supportedContractVersions.includes(2) &&
+    value.targetAwarePromptBridge === true &&
+    value.attemptLedger === true &&
+    value.credentialTickets === true &&
+    typeof value.policyState === 'string' &&
+    Number.isInteger(value.policyRevision) &&
+    Number(value.policyRevision) >= 0 &&
+    (value.policyHash === null || typeof value.policyHash === 'string') &&
+    (value.defaultTargetRef === null || typeof value.defaultTargetRef === 'string') &&
+    (value.defaultProvider === null || typeof value.defaultProvider === 'string') &&
+    (value.defaultModel === null || typeof value.defaultModel === 'string') &&
+    typeof value.v2Ready === 'boolean'
   )
 }
 
@@ -112,6 +184,12 @@ function isReissuedPromptBridgeCredentialTicket(
   const ticket = value as Record<string, unknown>
   return (
     typeof ticket.invocationId === 'string' &&
+    Number.isInteger(ticket.attemptGeneration) &&
+    (ticket.attemptGeneration as number) >= 1 &&
+    typeof ticket.providerAttemptId === 'string' &&
+    ticket.providerAttemptId.length > 0 &&
+    Number.isInteger(ticket.providerAttemptIndex) &&
+    (ticket.providerAttemptIndex as number) >= 1 &&
     typeof ticket.targetRef === 'string' &&
     typeof ticket.credentialTicket === 'string' &&
     ticket.credentialTicket.length > 0 &&
@@ -168,6 +246,7 @@ function isListClientNotificationRecipientsResponse(
 export class PluginWorkloadSdkControlApiClient {
   private readonly breaker: CircuitBreaker
   private refreshInFlight: Promise<void> | null = null
+  private capabilitiesInFlight: Promise<PluginWorkloadSdkCapabilities> | null = null
 
   constructor(private readonly opts: ControlApiClientOptions) {
     this.breaker = opts.breaker ?? new CircuitBreaker()
@@ -274,6 +353,14 @@ export class PluginWorkloadSdkControlApiClient {
         return response.json()
       }
 
+      if (response.status === 404 && path.endsWith('/prompt-bridge/v2')) {
+        throw new PluginWorkloadError(
+          'protocol_mismatch',
+          'control-api does not expose the promptBridge v2 contract; rollout must upgrade control-api before mcp-host',
+          true
+        )
+      }
+
       // Non-retryable 4xx: map the structured code without leaking the body.
       const errorBody = (await response.json().catch(() => ({}))) as {
         error?: unknown
@@ -307,6 +394,187 @@ export class PluginWorkloadSdkControlApiClient {
         )
   }
 
+  private async getOnce(path: string): Promise<unknown> {
+    if (!this.breaker.allow()) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api gateway circuit breaker is open',
+        true
+      )
+    }
+    const fetchImpl = this.opts.fetchImpl ?? fetch
+    let response: Response
+    try {
+      response = await fetchImpl(`${this.opts.baseUrl.replace(/\/+$/, '')}${path}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.opts.getAccessToken()}` },
+      })
+    } catch {
+      this.breaker.record(false)
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api capability probe failed',
+        true
+      )
+    }
+    if (response.status === 404 || response.status === 405) {
+      this.breaker.record(true)
+      throw new PluginWorkloadError(
+        'protocol_mismatch',
+        'control-api does not advertise the promptBridge v2 contract; upgrade control-api before mcp-host',
+        true
+      )
+    }
+    if (response.status >= 500) {
+      this.breaker.record(false)
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        `control-api capability probe responded ${response.status}`,
+        true
+      )
+    }
+    this.breaker.record(true)
+    if (response.ok) return response.json()
+    if (response.status === 401) {
+      throw new PluginWorkloadError('unauthorized', 'gateway rejected mcp-host credentials')
+    }
+    throw new PluginWorkloadError(
+      'protocol_mismatch',
+      'control-api capability contract was rejected',
+      true
+    )
+  }
+
+  private async get(path: string): Promise<unknown> {
+    try {
+      return await this.getOnce(path)
+    } catch (err) {
+      if (
+        err instanceof PluginWorkloadError &&
+        err.code === 'unauthorized' &&
+        this.opts.refreshOnUnauthorized
+      ) {
+        await this.triggerRefresh()
+        return this.getOnce(path)
+      }
+      throw err
+    }
+  }
+
+  /** Fetch the capabilities contract, coalescing only concurrent probes. */
+  async getPromptBridgeCapabilities(): Promise<PluginWorkloadSdkCapabilities> {
+    if (this.capabilitiesInFlight) return this.capabilitiesInFlight
+    const request = this.get('/api/v1/mcp-host/plugin-workload-sdk/capabilities')
+      .then(result => {
+        if (!isPluginWorkloadSdkCapabilities(result)) {
+          throw new PluginWorkloadError(
+            'protocol_mismatch',
+            'control-api capability response is not the promptBridge v2 contract',
+            true
+          )
+        }
+        return result
+      })
+      .finally(() => {
+        if (this.capabilitiesInFlight === request) this.capabilitiesInFlight = null
+      })
+    this.capabilitiesInFlight = request
+    return request
+  }
+
+  /**
+   * Negotiates the target-aware/JIT wire contract before a prompt. There is no
+   * v1 fallback: an SDK host must not send multiprovider traffic to an API that
+   * cannot fence attempts or tickets.
+   */
+  async ensurePromptBridgeCapabilities(): Promise<void> {
+    const capabilities = await this.getPromptBridgeCapabilities()
+    if (!capabilities.v2Ready) {
+      throw new PluginWorkloadError(
+        'provider_policy_denied',
+        'control-api promptBridge policy is not ready; an active operator grant is required',
+        false
+      )
+    }
+  }
+
+  /**
+   * Fresh two-phase bootstrap proof. The completed response is never cached;
+   * only an in-flight request may be shared. This always proves that
+   * control-api and mcp-host speak the v2 SDK contract. `policyReady` is a
+   * separate live signal: a missing or unreviewed grant is a legitimate
+   * awaiting-policy state, not a provider outage. Policy/default/target
+   * coherence is enforced again when the workload authorizes its first prompt.
+   */
+  async verifyPromptBridgeBootstrapV2(
+    expectedProvider: string,
+    expectedModel: string
+  ): Promise<PluginWorkloadSdkBootstrapProof> {
+    const capabilities = await this.getPromptBridgeCapabilities()
+    if (
+      capabilities.contractVersion !== 2 ||
+      !capabilities.supportedContractVersions.includes(2) ||
+      capabilities.targetAwarePromptBridge !== true ||
+      capabilities.attemptLedger !== true ||
+      capabilities.credentialTickets !== true ||
+      typeof expectedProvider !== 'string' ||
+      expectedProvider.length === 0 ||
+      typeof expectedModel !== 'string' ||
+      expectedModel.length === 0
+    ) {
+      throw new PluginWorkloadError(
+        'protocol_mismatch',
+        'control-api promptBridge identity bootstrap contract is not ready',
+        true
+      )
+    }
+    const policyReady =
+      capabilities.v2Ready &&
+      capabilities.policyRevision >= 1 &&
+      !!capabilities.policyHash &&
+      /^[a-f0-9]{64}$/.test(capabilities.policyHash) &&
+      !!capabilities.defaultTargetRef &&
+      capabilities.defaultProvider === expectedProvider &&
+      capabilities.defaultModel === expectedModel
+    const policyReason = policyReady
+      ? undefined
+      : capabilities.policyState === 'missing'
+        ? 'grant_missing'
+        : capabilities.policyState === 'legacy_unreviewed'
+          ? 'policy_unreviewed'
+          : capabilities.policyState === 'revoking'
+            ? 'policy_revoking'
+            : capabilities.policyState === 'disabled'
+              ? 'policy_disabled'
+              : capabilities.v2Ready
+                ? 'bootstrap_target_mismatch'
+                : 'policy_not_ready'
+    return {
+      ready: true,
+      contractVersion: 2,
+      provider: expectedProvider,
+      model: expectedModel,
+      policyReady,
+      policyState: capabilities.policyState,
+      ...(policyReason ? { policyReason } : {}),
+      ...(capabilities.v2Ready &&
+      capabilities.policyRevision >= 1 &&
+      capabilities.policyHash &&
+      /^[a-f0-9]{64}$/.test(capabilities.policyHash) &&
+      capabilities.defaultTargetRef &&
+      capabilities.defaultProvider &&
+      capabilities.defaultModel
+        ? {
+            policyRevision: capabilities.policyRevision,
+            policyHash: capabilities.policyHash,
+            defaultTargetRef: capabilities.defaultTargetRef,
+            defaultProvider: capabilities.defaultProvider,
+            defaultModel: capabilities.defaultModel,
+          }
+        : {}),
+    }
+  }
+
   async authorizePromptBridge(body: {
     recipeNamespace: string
     recipeName: string
@@ -323,7 +591,10 @@ export class PluginWorkloadSdkControlApiClient {
     metadata?: Record<string, unknown>
     correlationId?: string
   }): Promise<AuthorizePromptBridgeResponse> {
-    const result = await this.post('/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge', body)
+    const result = await this.post('/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2', {
+      contractVersion: 2,
+      ...body,
+    })
     if (!isAuthorizePromptBridgeResponse(result)) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -331,11 +602,9 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    // N/N-1 compatibility: control-api versions predating the explicit
-    // provider-call disposition omitted this field. Their idempotency contract
-    // already made non-replay responses executable and replay responses
-    // non-executable, so derive the same fail-closed decision while rejecting
-    // any malformed non-boolean value.
+    // The v2 response is strict. Only the provider-call disposition remains
+    // additive for a short server-first rollout window; absence is derived from
+    // the already persisted idempotency contract and never enables credentials.
     return {
       ...result,
       providerCallRequired:
@@ -355,6 +624,7 @@ export class PluginWorkloadSdkControlApiClient {
     recipeNamespace: string
     recipeName: string
     invocationId: string
+    attemptGeneration: number
     target: PromptBridgeTarget
     policyRevision: number
     policyHash: string
@@ -366,6 +636,7 @@ export class PluginWorkloadSdkControlApiClient {
         recipeName: body.recipeName,
         invocationId: body.invocationId,
         targetRef: body.target.targetRef,
+        attemptGeneration: body.attemptGeneration,
       }
     )
     if (!isReissuedPromptBridgeCredentialTicket(result)) {
@@ -377,6 +648,9 @@ export class PluginWorkloadSdkControlApiClient {
     }
     if (
       result.invocationId !== body.invocationId ||
+      result.attemptGeneration !== body.attemptGeneration ||
+      result.providerAttemptId.length === 0 ||
+      result.providerAttemptIndex < 1 ||
       result.targetRef !== body.target.targetRef ||
       result.policyRevision !== body.policyRevision ||
       result.policyHash !== body.policyHash
@@ -390,28 +664,37 @@ export class PluginWorkloadSdkControlApiClient {
     return result
   }
 
+  async reportProviderAttemptStatus(body: {
+    invocationId: string
+    recipeNamespace: string
+    recipeName: string
+    attemptGeneration: number
+    providerAttemptId: string
+    providerAttemptIndex: number
+    status: 'complete' | 'failed' | 'provider_unavailable'
+  }): Promise<void> {
+    await this.post(
+      `/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/${encodeURIComponent(
+        body.providerAttemptId
+      )}/status`,
+      body
+    )
+  }
+
   async reportInvocationStatus(
     invocationId: string,
     recipeNamespace: string,
     recipeName: string,
-    status: 'complete' | 'failed' | 'provider_unavailable'
+    status: 'complete' | 'failed' | 'provider_unavailable',
+    attemptGeneration: number
   ): Promise<void> {
-    // Status reporting is best-effort: a failure to report must never mask
-    // the actual promptBridge outcome for the workload.
-    try {
-      await this.post(
-        `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(invocationId)}/status`,
-        { recipeNamespace, recipeName, status }
-      )
-    } catch (err) {
-      // Best-effort: log structured via src/logger.ts ([Component] prefix →
-      // JSON). Fold the error into the message so it is not lost.
-      console.warn(
-        `[PluginWorkloadSdk] failed to report invocation ${invocationId} status=${status}: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      )
-    }
+    // A completion is not safe to return until control-api has accepted the
+    // generation-fenced terminal transition. Swallowing this error would let
+    // the caller observe a result whose audit/usage lease is still active.
+    await this.post(
+      `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(invocationId)}/status`,
+      { recipeNamespace, recipeName, status, attemptGeneration }
+    )
   }
 
   async submitClientNotification(body: {

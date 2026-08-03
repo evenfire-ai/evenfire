@@ -37,6 +37,7 @@ describe('PluginWorkloadSdkCredentialBrokerClient', () => {
 
     const result = await client.resolve({
       invocationId: 'inv-1',
+      attemptGeneration: 1,
       target,
       credentialTicket: 'signed-ticket',
     })
@@ -48,6 +49,7 @@ describe('PluginWorkloadSdkCredentialBrokerClient', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       recipeNamespace: 'sandbox-recipes',
       invocationId: 'inv-1',
+      attemptGeneration: 1,
       target,
       credentialTicket: 'signed-ticket',
     })
@@ -65,7 +67,12 @@ describe('PluginWorkloadSdkCredentialBrokerClient', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
     const error = await client
-      .resolve({ invocationId: 'inv-1', target, credentialTicket: 'signed-ticket' })
+      .resolve({
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        target,
+        credentialTicket: 'signed-ticket',
+      })
       .catch(caught => caught)
     expect(error).toMatchObject({ code: 'provider_unavailable', retryable: false })
     expect(String(error.message)).not.toContain('secret-name-that-must-not-leak')
@@ -89,7 +96,12 @@ describe('PluginWorkloadSdkCredentialBrokerClient', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
     await expect(
-      client.resolve({ invocationId: 'inv-1', target, credentialTicket: 'signed-ticket' })
+      client.resolve({
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        target,
+        credentialTicket: 'signed-ticket',
+      })
     ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: false })
   })
 })

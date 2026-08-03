@@ -1,4 +1,4 @@
-import { type Response, Router } from 'express'
+import { type Request, type Response, Router } from 'express'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
@@ -27,8 +27,11 @@ import {
 import {
   findGrant,
   getInvocationById,
+  getPluginWorkloadSdkAttemptReceipt,
+  getPluginWorkloadSdkProviderAttempt,
   hashPromptTargetPolicy,
   listInvocations,
+  markPluginWorkloadSdkProviderAttemptStatus,
   redeemPluginWorkloadSdkCredentialTicketJti,
   resolveRecipientProfiles,
 } from '../../services/pluginWorkloadSdkDb.js'
@@ -41,7 +44,9 @@ import { isPlainObject } from '../../utils/isPlainObject.js'
 // host/control gateway path as every other mcp-host runtime call
 // (conformance: spec §19 "mcp-host control-api access uses the gateway").
 //
-//   POST /mcp-host/plugin-workload-sdk/prompt-bridge
+//   POST /mcp-host/plugin-workload-sdk/prompt-bridge/v2
+//   POST /mcp-host/plugin-workload-sdk/prompt-bridge (v1 compatibility)
+//   GET  /mcp-host/plugin-workload-sdk/capabilities
 //   POST /mcp-host/plugin-workload-sdk/client-notification
 //   POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket
 //   GET  /mcp-host/plugin-workload-sdk/invocations/:recipeRef
@@ -51,6 +56,8 @@ const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 /** Opaque refs must not smuggle raw channel addresses (spec §17). */
 const EMAIL_LIKE_RE = /@/
 const PHONE_LIKE_RE = /^\+?[0-9][0-9\s().-]{6,}$/
+/** Current target-aware/JIT promptBridge wire contract. */
+export const PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION = 2
 
 // Credential-ticket introspection and reissue both perform signature checks,
 // database reads, and (for reissue) signing work before the provider call.
@@ -79,6 +86,7 @@ const AUTHZ_HTTP_STATUS: Record<PluginWorkloadSdkErrorCode, number> = {
   payload_too_large: 413,
   idempotency_conflict: 422,
   recipe_binding_mismatch: 400,
+  protocol_mismatch: 503,
 }
 
 function sendAuthzError(res: Response, error: PluginWorkloadSdkAuthzError): void {
@@ -135,6 +143,7 @@ function validateCallerRef(value: unknown, res: Response): string | null {
 // ─── promptBridge input validation (plan §2.7) ───────────────────────────
 
 interface ParsedPromptBridgeBody {
+  contractVersion?: number
   callerRef: string
   bootstrapProvider: string
   bootstrapModel: string
@@ -151,17 +160,45 @@ interface ParsedPromptBridgeBody {
 
 function parsePromptBridgeBody(
   body: Record<string, unknown>,
-  res: Response
+  res: Response,
+  options: {
+    requireContractVersion?: boolean
+    requireBootstrapBinding?: boolean
+    legacyProtocol?: boolean
+  } = {}
 ): ParsedPromptBridgeBody | null {
   const callerRef = validateCallerRef(body.callerRef, res)
   if (!callerRef) return null
+
+  const contractVersion =
+    body.contractVersion === undefined
+      ? undefined
+      : Number.isInteger(body.contractVersion)
+        ? Number(body.contractVersion)
+        : 0
+  if (
+    (options.requireContractVersion &&
+      contractVersion !== PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION) ||
+    (!options.requireContractVersion &&
+      contractVersion !== undefined &&
+      (options.legacyProtocol
+        ? contractVersion !== 1
+        : contractVersion !== PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION))
+  ) {
+    res.status(409).json({
+      error: 'protocol_mismatch',
+      message: `promptBridge contractVersion ${PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION} is required`,
+      retryable: true,
+    })
+    return null
+  }
 
   // These fields are supplied only by the recipe-bound mcp-host.  They carry
   // the public provider/model identity from spec.agent, never credentials.
   const bootstrapProvider =
     typeof body.bootstrapProvider === 'string' ? body.bootstrapProvider.trim() : ''
   const bootstrapModel = typeof body.bootstrapModel === 'string' ? body.bootstrapModel.trim() : ''
-  if (!bootstrapProvider || !bootstrapModel) {
+  if (options.requireBootstrapBinding && (!bootstrapProvider || !bootstrapModel)) {
     res.status(400).json({ error: 'bootstrap_binding_required' })
     return null
   }
@@ -245,6 +282,7 @@ function parsePromptBridgeBody(
       : undefined
 
   return {
+    ...(contractVersion !== undefined ? { contractVersion } : {}),
     callerRef,
     bootstrapProvider,
     bootstrapModel,
@@ -407,6 +445,68 @@ function parseClientNotificationBody(
 
 // ─── Router ──────────────────────────────────────────────────────────────
 
+async function handlePromptBridgeAuthorization(
+  req: Request,
+  res: Response,
+  options: {
+    requireContractVersion: boolean
+    requireBootstrapBinding: boolean
+    legacyProtocol?: boolean
+  }
+): Promise<void> {
+  const claims = req.mcpHostJwt!
+  const body = isPlainObject(req.body) ? req.body : {}
+  if (!checkRecipeBinding(body, claims, res)) return
+  const parsed = parsePromptBridgeBody(body, res, options)
+  if (!parsed) return
+
+  const result = await authorizePromptBridge({
+    claims,
+    callerRef: parsed.callerRef,
+    bootstrapProvider: parsed.bootstrapProvider,
+    bootstrapModel: parsed.bootstrapModel,
+    model: parsed.model,
+    provider: parsed.provider,
+    targetRef: parsed.targetRef,
+    modelPolicyRef: parsed.modelPolicyRef,
+    purpose: parsed.purpose,
+    idempotencyKey: parsed.idempotencyKey,
+    payload: {
+      messages: parsed.messages,
+      model: parsed.model ?? null,
+      provider: parsed.provider ?? null,
+      targetRef: parsed.targetRef ?? null,
+      modelPolicyRef: parsed.modelPolicyRef ?? null,
+      purpose: parsed.purpose,
+      ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
+    },
+    correlationId: parsed.correlationId,
+    legacyProtocol: options.legacyProtocol,
+  })
+  if (!result.ok) {
+    sendAuthzError(res, result)
+    return
+  }
+
+  res.status(result.value.replay ? 200 : 201).json({
+    ...(options.requireContractVersion
+      ? { contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION }
+      : {}),
+    invocationId: result.value.invocationId,
+    replay: result.value.replay,
+    providerCallRequired: result.value.providerCallRequired,
+    status: result.value.status,
+    model: result.value.model,
+    modelPolicy: result.value.modelPolicy,
+    selectedTarget: result.value.selectedTarget,
+    authorizedTargets: result.value.authorizedTargets,
+    attemptGeneration: result.value.attemptGeneration,
+    policyRevision: result.value.policyRevision,
+    policyHash: result.value.policyHash,
+    maxOutputTokens: result.value.maxOutputTokens,
+  })
+}
+
 export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   const router = Router()
 
@@ -426,14 +526,25 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       if (!checkRecipeBinding(body, claims, res)) return
       const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
       const targetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
-      if (!invocationId || !targetRef || targetRef.length > MAX_TARGET_REF_LENGTH) {
-        res.status(400).json({ error: 'invocationId and targetRef are required' })
+      const attemptGeneration = Number.isInteger(body.attemptGeneration)
+        ? Number(body.attemptGeneration)
+        : 0
+      if (
+        !invocationId ||
+        !targetRef ||
+        targetRef.length > MAX_TARGET_REF_LENGTH ||
+        attemptGeneration < 1
+      ) {
+        res
+          .status(400)
+          .json({ error: 'invocationId, targetRef and attemptGeneration are required' })
         return
       }
       const result = await reissuePromptBridgeCredentialTicket({
         claims,
         invocationId,
         targetRef,
+        attemptGeneration,
       })
       if (!result.ok) {
         sendAuthzError(res, result)
@@ -443,55 +554,63 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     })
   )
 
+  // v2 is the target-aware/JIT contract. It is additive: old mcp-hosts keep
+  // using the v1 path below, while new clients fail clearly if this endpoint
+  // is absent instead of falling back to bootstrap credentials.
+  router.post(
+    '/mcp-host/plugin-workload-sdk/prompt-bridge/v2',
+    requireMcpHostJwt,
+    asyncHandler(async (req, res) =>
+      handlePromptBridgeAuthorization(req, res, {
+        requireContractVersion: true,
+        requireBootstrapBinding: true,
+      })
+    )
+  )
+
+  // Compatibility lane for an older mcp-host during a server-first rollout.
+  // It intentionally has no cross-provider target response contract; it uses
+  // the current persisted policy but does not require the new bootstrap fields.
   router.post(
     '/mcp-host/plugin-workload-sdk/prompt-bridge',
     requireMcpHostJwt,
-    asyncHandler(async (req, res) => {
-      const claims = req.mcpHostJwt!
-      const body = isPlainObject(req.body) ? req.body : {}
-      if (!checkRecipeBinding(body, claims, res)) return
-      const parsed = parsePromptBridgeBody(body, res)
-      if (!parsed) return
-
-      const result = await authorizePromptBridge({
-        claims,
-        callerRef: parsed.callerRef,
-        bootstrapProvider: parsed.bootstrapProvider,
-        bootstrapModel: parsed.bootstrapModel,
-        model: parsed.model,
-        provider: parsed.provider,
-        targetRef: parsed.targetRef,
-        modelPolicyRef: parsed.modelPolicyRef,
-        purpose: parsed.purpose,
-        idempotencyKey: parsed.idempotencyKey,
-        payload: {
-          messages: parsed.messages,
-          model: parsed.model ?? null,
-          provider: parsed.provider ?? null,
-          targetRef: parsed.targetRef ?? null,
-          modelPolicyRef: parsed.modelPolicyRef ?? null,
-          purpose: parsed.purpose,
-          ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
-        },
-        correlationId: parsed.correlationId,
+    asyncHandler(async (req, res) =>
+      handlePromptBridgeAuthorization(req, res, {
+        requireContractVersion: false,
+        requireBootstrapBinding: false,
+        legacyProtocol: true,
       })
-      if (!result.ok) {
-        sendAuthzError(res, result)
-        return
-      }
+    )
+  )
 
-      res.status(result.value.replay ? 200 : 201).json({
-        invocationId: result.value.invocationId,
-        replay: result.value.replay,
-        providerCallRequired: result.value.providerCallRequired,
-        status: result.value.status,
-        model: result.value.model,
-        modelPolicy: result.value.modelPolicy,
-        selectedTarget: result.value.selectedTarget,
-        authorizedTargets: result.value.authorizedTargets,
-        policyRevision: result.value.policyRevision,
-        policyHash: result.value.policyHash,
-        maxOutputTokens: result.value.maxOutputTokens,
+  router.get(
+    '/mcp-host/plugin-workload-sdk/capabilities',
+    requireMcpHostJwt,
+    asyncHandler(async (_req, res) => {
+      const claims = _req.mcpHostJwt!
+      const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
+      const v2Ready = Boolean(
+        grant &&
+        grant.policyState === 'active' &&
+        grant.policyRevision >= 1 &&
+        grant.promptTargets.length > 0 &&
+        grant.defaultTargetRef !== null &&
+        grant.promptTargets[0]?.targetRef === grant.defaultTargetRef
+      )
+      const primaryTarget = grant?.promptTargets[0] ?? null
+      res.status(200).json({
+        contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
+        supportedContractVersions: [1, 2],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: grant?.policyState ?? 'missing',
+        policyRevision: grant?.policyRevision ?? 0,
+        policyHash: v2Ready && grant ? hashPromptTargetPolicy(grant) : null,
+        defaultTargetRef: grant?.defaultTargetRef ?? null,
+        defaultProvider: primaryTarget?.provider ?? null,
+        defaultModel: primaryTarget?.model ?? null,
+        v2Ready,
       })
     })
   )
@@ -609,9 +728,30 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       const ticket = typeof body.credentialTicket === 'string' ? body.credentialTicket : ''
       const invocationId = typeof body.invocationId === 'string' ? body.invocationId : ''
       const targetRef = typeof body.targetRef === 'string' ? body.targetRef : ''
+      const providedAttemptGeneration = Number.isInteger(body.attemptGeneration)
+        ? Number(body.attemptGeneration)
+        : null
+      const attemptGeneration = providedAttemptGeneration ?? 0
+      const providerAttemptId =
+        typeof body.providerAttemptId === 'string' ? body.providerAttemptId.trim() : ''
+      const providerAttemptIndex = Number.isInteger(body.providerAttemptIndex)
+        ? Number(body.providerAttemptIndex)
+        : 0
       const redeem = body.redeem === true
-      if (!ticket || !invocationId || !targetRef) {
-        res.status(400).json({ error: 'credentialTicket, invocationId and targetRef are required' })
+      if (
+        !ticket ||
+        !invocationId ||
+        !targetRef ||
+        !providerAttemptId ||
+        attemptGeneration < 1 ||
+        providerAttemptIndex < 1
+      ) {
+        res
+          .status(400)
+          .json({
+            error:
+              'credentialTicket, invocationId, targetRef, providerAttemptId and attemptGeneration are required',
+          })
         return
       }
       const ticketClaims = verifyPluginWorkloadSdkCredentialTicket(ticket)
@@ -621,7 +761,10 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         ticketClaims.recipeName !== claims.recipeName ||
         ticketClaims.sub !== `${claims.recipeNamespace}/${claims.recipeName}` ||
         ticketClaims.invocationId !== invocationId ||
-        ticketClaims.targetRef !== targetRef
+        ticketClaims.targetRef !== targetRef ||
+        ticketClaims.attemptGeneration !== attemptGeneration ||
+        ticketClaims.providerAttemptId !== providerAttemptId ||
+        ticketClaims.providerAttemptIndex !== providerAttemptIndex
       ) {
         res.status(403).json({ error: 'provider_policy_denied', retryable: false })
         return
@@ -633,6 +776,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         invocation.recipeName !== claims.recipeName ||
         invocation.method !== 'promptBridge' ||
         invocation.status !== 'in_progress' ||
+        invocation.attemptGeneration !== attemptGeneration ||
         invocation.authorizationDecision !== 'authorized' ||
         !invocation.promptAuthorization ||
         !invocation.promptAuthorization.authorizedTargetRefs.includes(targetRef) ||
@@ -642,10 +786,29 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         res.status(403).json({ error: 'provider_policy_denied', retryable: false })
         return
       }
+      const receipt = await getPluginWorkloadSdkAttemptReceipt(invocationId, attemptGeneration)
+      const providerAttempt = await getPluginWorkloadSdkProviderAttempt(providerAttemptId)
+      if (
+        !receipt ||
+        receipt.recipeNamespace !== claims.recipeNamespace ||
+        receipt.recipeName !== claims.recipeName ||
+        receipt.method !== 'promptBridge' ||
+        receipt.status !== 'in_progress' ||
+        receipt.attemptGeneration !== attemptGeneration ||
+        !providerAttempt ||
+        providerAttempt.invocationId !== invocationId ||
+        providerAttempt.attemptGeneration !== attemptGeneration ||
+        providerAttempt.targetRef !== targetRef ||
+        providerAttempt.status !== 'in_progress'
+      ) {
+        res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+        return
+      }
       const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
       const target = grant?.promptTargets.find(candidate => candidate.targetRef === targetRef)
       if (
         !grant ||
+        grant.policyState !== 'active' ||
         !target ||
         grant.policyRevision !== ticketClaims.policyRevision ||
         hashPromptTargetPolicy(grant) !== ticketClaims.policyHash ||
@@ -663,6 +826,8 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
           recipeName: claims.recipeName,
           invocationId,
           targetRef,
+          attemptGeneration,
+          providerAttemptId,
         })
         if (!redeemed) {
           res.status(403).json({ error: 'provider_policy_denied', retryable: false })
@@ -685,13 +850,15 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       if (!checkRecipeBinding(body, claims, res)) return
 
       const status = typeof body.status === 'string' ? body.status : ''
+      const providedAttemptGeneration = Number.isInteger(body.attemptGeneration)
+        ? Number(body.attemptGeneration)
+        : null
       if (!['complete', 'failed', 'provider_unavailable'].includes(status)) {
         res
           .status(400)
           .json({ error: 'status must be one of: complete, failed, provider_unavailable' })
         return
       }
-
       const invocation = await getInvocationById(req.params.id)
       if (!invocation) {
         res.status(404).json({ error: 'invocation not found' })
@@ -706,16 +873,90 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         return
       }
 
+      const attemptGeneration = providedAttemptGeneration ?? invocation.attemptGeneration
+      if (
+        providedAttemptGeneration === null &&
+        (invocation.contractVersion !== 1 || invocation.attemptGeneration !== 1)
+      ) {
+        res.status(400).json({ error: 'attemptGeneration is required for contract v2' })
+        return
+      }
+      if (attemptGeneration < 1) {
+        res.status(400).json({ error: 'attemptGeneration is required' })
+        return
+      }
+
       const updated = await markInvocationStatus(
         invocation.id,
         status as 'complete' | 'failed' | 'provider_unavailable',
-        { recipeNamespace: claims.recipeNamespace, recipeName: claims.recipeName }
+        {
+          recipeNamespace: claims.recipeNamespace,
+          recipeName: claims.recipeName,
+          expectedCurrentStatus: 'in_progress',
+          expectedAttemptGeneration: attemptGeneration,
+        }
       )
       if (!updated) {
-        res.status(404).json({ error: 'invocation not found' })
+        res.status(409).json({ error: 'stale_attempt', retryable: false })
         return
       }
       res.status(200).json({ id: invocation.id, status })
+    })
+  )
+
+  router.post(
+    '/mcp-host/plugin-workload-sdk/provider-attempts/:id/status',
+    requireMcpHostJwt,
+    asyncHandler(async (req, res) => {
+      const claims = req.mcpHostJwt!
+      const body = isPlainObject(req.body) ? req.body : {}
+      if (!checkRecipeBinding(body, claims, res)) return
+      const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
+      const attemptGeneration = Number.isInteger(body.attemptGeneration)
+        ? Number(body.attemptGeneration)
+        : 0
+      const providerAttemptIndex = Number.isInteger(body.providerAttemptIndex)
+        ? Number(body.providerAttemptIndex)
+        : 0
+      const status = body.status
+      if (
+        !invocationId ||
+        attemptGeneration < 1 ||
+        providerAttemptIndex < 1 ||
+        !['complete', 'failed', 'provider_unavailable'].includes(String(status))
+      ) {
+        res
+          .status(400)
+          .json({
+            error: 'invocationId, attemptGeneration, providerAttemptIndex and status are required',
+          })
+        return
+      }
+      const attempt = await getPluginWorkloadSdkProviderAttempt(req.params.id)
+      if (
+        !attempt ||
+        attempt.invocationId !== invocationId ||
+        attempt.recipeNamespace !== claims.recipeNamespace ||
+        attempt.recipeName !== claims.recipeName ||
+        attempt.attemptGeneration !== attemptGeneration ||
+        attempt.attemptIndex !== providerAttemptIndex
+      ) {
+        res.status(403).json({ error: 'provider_policy_denied', retryable: false })
+        return
+      }
+      const updated = await markPluginWorkloadSdkProviderAttemptStatus({
+        id: attempt.id,
+        invocationId,
+        recipeNamespace: claims.recipeNamespace,
+        recipeName: claims.recipeName,
+        attemptGeneration,
+        status: status as 'complete' | 'failed' | 'provider_unavailable',
+      })
+      if (!updated) {
+        res.status(409).json({ error: 'stale_attempt', retryable: false })
+        return
+      }
+      res.status(200).json({ id: attempt.id, status })
     })
   )
 

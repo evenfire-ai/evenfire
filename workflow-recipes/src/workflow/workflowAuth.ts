@@ -27,6 +27,10 @@ export interface PluginSdkCredentialTicketClaims {
   recipeName: string
   recipeNamespace: string
   invocationId: string
+  /** Physical-attempt identity issued by control-api; never caller supplied. */
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   targetRef: string
   provider: string
   model: string
@@ -163,6 +167,14 @@ export async function verifyPluginSdkCredentialTicket(
     typeof claims.recipeName !== 'string' ||
     typeof claims.recipeNamespace !== 'string' ||
     typeof claims.invocationId !== 'string' ||
+    typeof claims.attemptGeneration !== 'number' ||
+    !Number.isInteger(claims.attemptGeneration) ||
+    claims.attemptGeneration < 1 ||
+    typeof claims.providerAttemptId !== 'string' ||
+    claims.providerAttemptId.length === 0 ||
+    typeof claims.providerAttemptIndex !== 'number' ||
+    !Number.isInteger(claims.providerAttemptIndex) ||
+    claims.providerAttemptIndex < 1 ||
     typeof claims.targetRef !== 'string' ||
     typeof claims.provider !== 'string' ||
     typeof claims.model !== 'string' ||
@@ -182,6 +194,9 @@ export async function verifyPluginSdkCredentialTicket(
     recipeName: claims.recipeName,
     recipeNamespace: claims.recipeNamespace,
     invocationId: claims.invocationId,
+    attemptGeneration: claims.attemptGeneration as number,
+    providerAttemptId: claims.providerAttemptId,
+    providerAttemptIndex: claims.providerAttemptIndex as number,
     targetRef: claims.targetRef,
     provider: claims.provider,
     model: claims.model,

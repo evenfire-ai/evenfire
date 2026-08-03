@@ -379,24 +379,38 @@ async function activateEmbedded(
 async function selectEmbeddedRecipient(
   app: ElectronApplication,
   webContentsId: number,
-  selector: string
+  selector: string,
+  expectedEmail: string
 ): Promise<EmbeddedOption> {
   const options = await embeddedOptions(app, webContentsId, selector)
-  const recipient = options.find(option => option.value && /@/.test(option.label))
+  const normalizedExpectedEmail = expectedEmail.trim().toLowerCase()
+  const recipient = options.find(
+    option => option.value && option.label.trim().toLowerCase() === normalizedExpectedEmail
+  )
   if (!recipient) {
-    throw new Error(`Embedded recipient picker ${selector} has no visible email option.`)
+    throw new Error(
+      `Embedded recipient picker ${selector} has no option for authenticated user ${expectedEmail}.`
+    )
+  }
+  const recipientIndex = options.findIndex(option => option.value === recipient.value)
+  if (recipientIndex < 0) {
+    throw new Error(`Embedded recipient picker ${selector} lost the authenticated-user option.`)
   }
 
   // This is the native select path a user takes: focus the control, move from
-  // the placeholder to the first granted recipient, and commit with Enter.
+  // the first option to the authenticated user's granted recipient, and commit
+  // with Enter. The option order is not part of the contract, so the number of
+  // ArrowDown events is derived from the live option list rather than assumed.
   // We inspect the option label only to verify the UI displays a human handle;
   // the value is never injected into the DOM or sent directly to the backend.
   await focusEmbeddedControl(app, webContentsId, selector)
   await sendEmbeddedKey(app, webContentsId, 'Home')
-  await sendEmbeddedKey(app, webContentsId, 'ArrowDown')
+  for (let index = 0; index < recipientIndex; index += 1) {
+    await sendEmbeddedKey(app, webContentsId, 'ArrowDown')
+  }
   await sendEmbeddedKey(app, webContentsId, 'Enter')
   await expect.poll(() => embeddedValue(app, webContentsId, selector)).toBe(recipient.value)
-  expect(recipient.label).toContain('@')
+  expect(recipient.label.trim().toLowerCase()).toBe(normalizedExpectedEmail)
   expect(recipient.label).not.toMatch(/^[0-9a-f-]{36}$/i)
   return recipient
 }
@@ -448,10 +462,11 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
   let app: ElectronApplication | undefined
   let page: Page | undefined
   try {
+    const credentials = desktopCredentials()
     const launched = await launchDesktopApp(testInfo)
     app = launched.app
     page = launched.page
-    await login(page, desktopCredentials())
+    await login(page, credentials)
 
     await page.getByTestId('nav-sandbox-ui').click()
     await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
@@ -544,7 +559,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     // visible grant-backed choice before continuing; the missing-field guard
     // below still proves the form rejects an incomplete notification without
     // creating an SDK invocation.
-    await selectEmbeddedRecipient(app, webContentsId, '#userRef')
+    await selectEmbeddedRecipient(app, webContentsId, '#userRef', credentials.email)
     await typeEmbedded(app, webContentsId, '#title', `Evenfire E2E ${marker}`)
     await test.step('reject a notification missing its body before the SDK call', async () => {
       const before = sdkInvocationCount('clientNotifications')

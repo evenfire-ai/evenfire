@@ -6,12 +6,13 @@ import {
   resolvePendingWorkflowApprovalDelivery,
 } from '../src/services/notificationDeliveryQueueService.js'
 
-vi.mock('../src/db.js', () => ({
-  pool: {
-    query: vi.fn(),
-  },
-  withTransaction: vi.fn(),
-}))
+vi.mock('../src/db.js', () => {
+  const pool = { query: vi.fn() }
+  return {
+    pool,
+    withTransaction: vi.fn(async (fn: (db: typeof pool) => unknown) => fn(pool)),
+  }
+})
 
 const mockedPoolQuery = vi.mocked(pool.query) as ReturnType<typeof vi.fn>
 
@@ -162,6 +163,8 @@ describe('notificationDeliveryTerminalService', () => {
         rowCount: 1,
       } as any)
       .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
+      .mockResolvedValueOnce({ rows: [{ attempt_generation: 1 }], rowCount: 1 } as any)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
 
     await expect(
       acknowledgeNotificationDelivery({
@@ -173,7 +176,7 @@ describe('notificationDeliveryTerminalService', () => {
       })
     ).resolves.toBe(true)
 
-    expect(mockedPoolQuery).toHaveBeenCalledTimes(2)
+    expect(mockedPoolQuery).toHaveBeenCalledTimes(4)
     const invocationSql = String(mockedPoolQuery.mock.calls[1]![0])
     expect(invocationSql).toContain('UPDATE plugin_workload_sdk_invocations')
     // Guarded transition: only from 'accepted', sets completed_at.
@@ -181,6 +184,7 @@ describe('notificationDeliveryTerminalService', () => {
       'invocation-1',
       'delivered',
       true,
+      0,
       'accepted',
     ])
   })

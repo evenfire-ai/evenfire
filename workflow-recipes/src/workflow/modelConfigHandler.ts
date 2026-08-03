@@ -211,7 +211,48 @@ export class ModelConfigHandler {
       if (result.status >= 400) {
         return { status: 502, body: { error: 'mcp_host bootstrap failed' } }
       }
-      return { status: 202, body: { configured: true, provider, model } }
+      if (
+        result.body.configured !== true ||
+        result.body.ready !== true ||
+        result.body.contractVersion !== 2 ||
+        result.body.provider !== provider ||
+        result.body.model !== model ||
+        !isBootstrapIdentityProof(result.body)
+      ) {
+        return {
+          status: 502,
+          body: { error: 'mcp_host bootstrap identity is not Plugin Workload SDK v2' },
+        }
+      }
+      const policyProof = isBootstrapPolicyProof(result.body)
+      return {
+        status: 202,
+        body: {
+          configured: true,
+          ready: true,
+          provider,
+          model,
+          contractVersion: 2,
+          ...(typeof result.body.policyReady === 'boolean'
+            ? { policyReady: result.body.policyReady }
+            : {}),
+          ...(typeof result.body.policyState === 'string'
+            ? { policyState: result.body.policyState }
+            : {}),
+          ...(typeof result.body.policyReason === 'string'
+            ? { policyReason: result.body.policyReason }
+            : {}),
+          ...(policyProof
+            ? {
+                policyRevision: result.body.policyRevision,
+                policyHash: result.body.policyHash,
+                defaultTargetRef: result.body.defaultTargetRef,
+                defaultProvider: result.body.defaultProvider,
+                defaultModel: result.body.defaultModel,
+              }
+            : {}),
+        },
+      }
     } catch {
       return { status: 502, body: { error: 'mcp_host bootstrap unreachable' } }
     }
@@ -558,4 +599,34 @@ export class ModelConfigHandler {
     }
     return resolved
   }
+}
+
+function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
+  return (
+    body.configured === true &&
+    body.ready === true &&
+    body.contractVersion === 2 &&
+    typeof body.provider === 'string' &&
+    body.provider.length > 0 &&
+    typeof body.model === 'string' &&
+    body.model.length > 0
+  )
+}
+
+function isBootstrapPolicyProof(body: Record<string, unknown>): boolean {
+  return (
+    isBootstrapIdentityProof(body) &&
+    Number.isSafeInteger(body.policyRevision) &&
+    Number(body.policyRevision) >= 1 &&
+    typeof body.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(body.policyHash) &&
+    typeof body.defaultTargetRef === 'string' &&
+    body.defaultTargetRef.length > 0 &&
+    typeof body.defaultProvider === 'string' &&
+    body.defaultProvider.length > 0 &&
+    typeof body.defaultModel === 'string' &&
+    body.defaultModel.length > 0 &&
+    body.defaultProvider === body.provider &&
+    body.defaultModel === body.model
+  )
 }

@@ -2,6 +2,7 @@ import express, { type Express } from 'express'
 import type http from 'http'
 import { type RuntimeJwtBinding, getJwtRuntimeBinding } from '../../workflow/mcpHostRuntimeJwt'
 import type { ClientNotificationsHandler } from '../clientNotifications/handler'
+import type { PluginWorkloadSdkBootstrapProof } from '../promptBridge/controlApiClient'
 import type { PromptBridgeHandler } from '../promptBridge/handler'
 import { registerSdkRoutes } from './routes'
 
@@ -112,6 +113,13 @@ export class PluginWorkloadSdkServer {
       maxRequestsPerMinutePerWorkload: opts.maxRequestsPerMinutePerWorkload ?? 100,
       maxConcurrentPerWorkload: opts.maxConcurrentPerWorkload ?? 10,
     })
+  }
+
+  verifyPromptBridgeBootstrapV2(
+    expectedProvider: string,
+    expectedModel: string
+  ): Promise<PluginWorkloadSdkBootstrapProof> {
+    return this.opts.promptBridgeHandler.verifyBootstrapV2(expectedProvider, expectedModel)
   }
 
   async start(): Promise<void> {

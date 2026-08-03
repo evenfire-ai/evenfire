@@ -83,7 +83,7 @@ describe('PluginWorkloadSdk server usage attribution', () => {
     })
 
     expect(event).toMatchObject({
-      source_kind: 'unknown',
+      source_kind: 'plugin_workload_sdk',
       channel_type: 'plugin_workload_sdk',
       recipe_name: 'stepless',
       run_id: null,
@@ -100,6 +100,8 @@ describe('PluginWorkloadSdk server usage attribution', () => {
         recipeNamespace: 'sandbox-apps',
         recipeName: 'prompt-notify',
       },
+      runtimeMode: 'sdk-only',
+      invocationId: '00000000-0000-4000-8000-000000000100',
       provider: 'openai',
       model: 'gpt-5.4-mini',
       inputTokens: 10,

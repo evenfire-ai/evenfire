@@ -32,9 +32,12 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   return {
     ...actual,
     getInvocationById: vi.fn(),
+    getPluginWorkloadSdkAttemptReceipt: vi.fn(),
+    getPluginWorkloadSdkProviderAttempt: vi.fn(),
     findGrant: vi.fn(),
     listInvocations: vi.fn(),
     redeemPluginWorkloadSdkCredentialTicketJti: vi.fn(),
+    markPluginWorkloadSdkProviderAttemptStatus: vi.fn(),
     resolveRecipientProfiles: vi.fn(),
   }
 })
@@ -108,17 +111,24 @@ beforeEach(() => {
   vi.mocked(sdkDb.listInvocations).mockReset()
   vi.mocked(auditor.markInvocationStatus).mockReset().mockResolvedValue(true)
   vi.mocked(sdkDb.getInvocationById).mockReset()
+  vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
+  vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockReset()
   vi.mocked(sdkDb.findGrant).mockReset()
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockReset()
+  vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(notificationEmitter.enqueuePluginWorkloadSdkNotification)
     .mockReset()
     .mockResolvedValue(undefined)
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
+  vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue(null)
+  vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockResolvedValue(null)
+  vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockResolvedValue(true)
   vi.mocked(authorizer.authorizePromptBridge).mockResolvedValue({
     ok: true,
     value: {
       invocationId: 'inv-1',
       replay: false,
+      providerCallRequired: true,
       status: 'in_progress',
       model: 'glm-4.7',
       modelPolicy: null,
@@ -136,6 +146,7 @@ beforeEach(() => {
           credentialSlot: 'zai-api-key',
         },
       ],
+      attemptGeneration: 1,
       policyRevision: 1,
       policyHash: 'policy-hash',
       maxOutputTokens: null,
@@ -145,7 +156,10 @@ beforeEach(() => {
     ok: true,
     value: {
       invocationId: 'inv-1',
+      attemptGeneration: 1,
       targetRef: 'openai-fallback',
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      providerAttemptIndex: 1,
       credentialTicket: 'signed-fresh-ticket',
       policyRevision: 1,
       policyHash: 'policy-hash',
@@ -167,6 +181,77 @@ beforeEach(() => {
     .mockResolvedValue([
       { userRef: '11111111-1111-4111-8111-111111111111', displayName: 'Ada Lovelace' },
     ])
+})
+
+describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
+  it('advertises the v2 identity contract while a prompt policy is missing', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(null)
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      contractVersion: 2,
+      supportedContractVersions: [1, 2],
+      targetAwarePromptBridge: true,
+      attemptLedger: true,
+      credentialTickets: true,
+      policyState: 'missing',
+      policyRevision: 0,
+      policyHash: null,
+      defaultTargetRef: null,
+      defaultProvider: null,
+      defaultModel: null,
+      v2Ready: false,
+    })
+  })
+
+  it('reports an active target policy as v2-ready', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue({
+      id: 'grant-capabilities',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      capabilityFamily: 'promptBridge',
+      provider: 'openai',
+      allowedModels: ['gpt-5.4-mini'],
+      allowedEventTypes: [],
+      allowedTargetRefs: [],
+      allowedUserRefs: [],
+      allowedCallers: ['api'],
+      quotaLimits: {},
+      modelPolicies: {},
+      promptTargets: [
+        {
+          targetRef: 'primary-openai',
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          credentialSlot: 'openai-api-key',
+        },
+      ],
+      defaultTargetRef: 'primary-openai',
+      policyState: 'active',
+      policyRevision: 2,
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      policyState: 'active',
+      policyRevision: 2,
+      defaultTargetRef: 'primary-openai',
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5.4-mini',
+      v2Ready: true,
+    })
+    expect(res.body.policyHash).toMatch(/^[a-f0-9]{64}$/)
+  })
 })
 
 describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
@@ -341,6 +426,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket', (
     recipeName: RECIPE,
     invocationId: 'inv-1',
     targetRef: 'openai-fallback',
+    attemptGeneration: 1,
   }
 
   it('requires the runtime JWT and recipe binding', async () => {
@@ -367,6 +453,9 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket', (
       invocationId: 'inv-1',
       targetRef: 'openai-fallback',
       credentialTicket: 'signed-fresh-ticket',
+      attemptGeneration: 1,
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      providerAttemptIndex: 1,
       policyRevision: 1,
       policyHash: 'policy-hash',
       expiresInSeconds: 60,
@@ -375,6 +464,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket', (
       claims: expect.objectContaining({ recipeNamespace: NS, recipeName: RECIPE }),
       invocationId: 'inv-1',
       targetRef: 'openai-fallback',
+      attemptGeneration: 1,
     })
   })
 })
@@ -599,7 +689,7 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/status', () => {
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/invocations/missing/status')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
-      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete' })
+      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete', attemptGeneration: 1 })
     expect(res.status).toBe(404)
   })
 
@@ -611,20 +701,21 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/status', () => {
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/status')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
-      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete' })
+      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete', attemptGeneration: 1 })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('binding_mismatch')
     expect(auditor.markInvocationStatus).not.toHaveBeenCalled()
   })
 
-  it('returns 404 when the status update does not match the invocation binding', async () => {
+  it('returns 409 when the status update loses the invocation CAS race', async () => {
     vi.mocked(sdkDb.getInvocationById).mockResolvedValue(invocation)
     vi.mocked(auditor.markInvocationStatus).mockResolvedValue(false)
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/status')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
-      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete' })
-    expect(res.status).toBe(404)
+      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'complete', attemptGeneration: 1 })
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'stale_attempt', retryable: false })
   })
 
   it('marks the invocation status on a valid report', async () => {
@@ -632,11 +723,18 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/status', () => {
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/status')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
-      .send({ recipeNamespace: NS, recipeName: RECIPE, status: 'provider_unavailable' })
+      .send({
+        recipeNamespace: NS,
+        recipeName: RECIPE,
+        status: 'provider_unavailable',
+        attemptGeneration: 1,
+      })
     expect(res.status).toBe(200)
     expect(auditor.markInvocationStatus).toHaveBeenCalledWith('inv-1', 'provider_unavailable', {
       recipeNamespace: NS,
       recipeName: RECIPE,
+      expectedCurrentStatus: 'in_progress',
+      expectedAttemptGeneration: 1,
     })
   })
 })
@@ -693,7 +791,14 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
-      .send({ credentialTicket: 'not-a-ticket', invocationId: 'inv-1', targetRef: 'primary-zai' })
+      .send({
+        credentialTicket: 'not-a-ticket',
+        invocationId: 'inv-1',
+        targetRef: 'primary-zai',
+        attemptGeneration: 1,
+        providerAttemptId: '33333333-3333-4333-8333-333333333333',
+        providerAttemptIndex: 1,
+      })
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'provider_policy_denied', retryable: false })
     expect(JSON.stringify(res.body)).not.toContain('credentialSlot')
@@ -715,6 +820,9 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
       recipeNamespace: NS,
       recipeName: RECIPE,
       invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      providerAttemptIndex: 1,
       target,
       policyRevision: 1,
       policyHash,
@@ -733,12 +841,16 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
       status: 'in_progress',
       quotaConsumed: true,
       authorizationDecision: 'authorized',
+      contractVersion: 2,
       promptAuthorization: {
         policyRevision: 1,
         policyHash,
         authorizedTargetRefs: ['primary-zai'],
       },
+      attemptGeneration: 1,
+      leaseExpiresAt: '2026-08-02T00:01:00.000Z',
       createdAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:00:00.000Z',
       completedAt: null,
     })
     vi.mocked(sdkDb.findGrant).mockResolvedValue({
@@ -756,15 +868,52 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
       modelPolicies: {},
       promptTargets: [target],
       defaultTargetRef: 'primary-zai',
+      policyState: 'active',
       policyRevision: 1,
       createdAt: '2026-08-02T00:00:00.000Z',
       updatedAt: '2026-08-02T00:00:00.000Z',
+    })
+
+    vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      method: 'promptBridge',
+      targetRefs: ['primary-zai'],
+      policyRevision: 1,
+      policyHash,
+      status: 'in_progress',
+      startedAt: '2026-08-02T00:00:00.000Z',
+      leaseExpiresAt: '2026-08-02T00:01:00.000Z',
+      completedAt: null,
+    })
+    vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockResolvedValue({
+      id: '33333333-3333-4333-8333-333333333333',
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      attemptIndex: 1,
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+      status: 'in_progress',
+      credentialJti: null,
+      startedAt: '2026-08-02T00:00:00.000Z',
+      leaseExpiresAt: '2026-08-02T00:01:00.000Z',
+      completedAt: null,
+      usageRequestId: null,
     })
 
     const body = {
       credentialTicket: ticket,
       invocationId: 'inv-1',
       targetRef: 'primary-zai',
+      attemptGeneration: 1,
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      providerAttemptIndex: 1,
       redeem: true,
     }
     await request(buildApp())

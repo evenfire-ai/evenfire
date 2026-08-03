@@ -5,16 +5,24 @@ import {
   issuePluginWorkloadSdkCredentialTicketWithClaims,
 } from './pluginWorkloadSdkCredentialTicket.js'
 import {
+  MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS,
   type PluginWorkloadSdkErrorCode,
   type PluginWorkloadSdkGrant,
   type PluginWorkloadSdkModelPolicy,
   type PluginWorkloadSdkPromptTarget,
   findGrant,
   getInvocationById,
+  getPluginWorkloadSdkAttemptReceipt,
   hashPromptTargetPolicy,
+  markPluginWorkloadSdkProviderAttemptStatus,
   registerPluginWorkloadSdkCredentialTicketJti,
+  reservePluginWorkloadSdkProviderAttempt,
 } from './pluginWorkloadSdkDb.js'
-import { markInvocationStatus, recordInvocation } from './pluginWorkloadSdkInvocationAuditor.js'
+import {
+  markInvocationStatus,
+  recordInvocation,
+  reviveFailedSdkInvocation,
+} from './pluginWorkloadSdkInvocationAuditor.js'
 import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js'
 
 // ─── Plugin Workload SDK — authorizer (plan §2.2) ────────────────────────
@@ -31,7 +39,6 @@ import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js
 //      flipped to failed so the trail shows the denied attempt.
 
 const PLUGIN_WORKLOAD_SDK_SCOPE = 'plugin-workload-sdk'
-const MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS = 4
 
 export type PluginWorkloadSdkAuthzError = {
   ok: false
@@ -99,6 +106,8 @@ export interface AuthorizePromptBridgeParams {
   /** Canonical request payload — hashed for idempotency conflict detection. */
   payload: unknown
   correlationId?: string
+  /** True only for the temporary pre-v2 mcp-host compatibility route. */
+  legacyProtocol?: boolean
 }
 
 export interface AuthorizedPromptBridge {
@@ -114,6 +123,8 @@ export interface AuthorizedPromptBridge {
   selectedTarget: PluginWorkloadSdkPromptTarget
   /** Selected target plus its strictly ordered authorized fallback suffix. */
   authorizedTargets: PluginWorkloadSdkPromptTarget[]
+  /** Fencing token for this physical provider attempt. */
+  attemptGeneration: number
   policyRevision: number
   policyHash: string
   maxOutputTokens: number | null
@@ -265,6 +276,17 @@ async function authorizePromptBridgeInner(
     return deny('capability_not_declared', 'recipe has no promptBridge grant')
   }
 
+  if (params.legacyProtocol) {
+    return authorizeLegacyPromptBridge(params, grant)
+  }
+
+  if (grant.policyState !== 'active' || grant.policyRevision < 1) {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge grant requires an explicit operator-reviewed target policy'
+    )
+  }
+
   const callerError = checkCaller(grant, callerRef)
   if (callerError) return callerError
 
@@ -319,7 +341,14 @@ async function authorizePromptBridgeInner(
       policyHash: resolvedPolicyHash,
       authorizedTargetRefs: authorizedTargets.map(target => target.targetRef),
     },
+    requiredGrantStates: ['active'],
   })
+  if (recorded.kind === 'policy_revoked') {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge policy was revoked before invocation reservation'
+    )
+  }
   if (recorded.kind === 'conflict') {
     return deny('idempotency_conflict', 'idempotency key was already used with a different payload')
   }
@@ -346,6 +375,7 @@ async function authorizePromptBridgeInner(
         modelPolicy: resolution.modelPolicy,
         selectedTarget,
         authorizedTargets,
+        attemptGeneration: recorded.invocation.attemptGeneration,
         policyRevision: grant.policyRevision,
         policyHash: resolvedPolicyHash,
         maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
@@ -374,45 +404,75 @@ async function authorizePromptBridgeInner(
         'idempotency key belongs to an older promptBridge policy; retry with a new idempotency key'
       )
     }
-    const revived = await markInvocationStatus(recorded.invocation.id, 'in_progress', {
+    const revivedGeneration = await reviveFailedSdkInvocation({
+      invocationId: recorded.invocation.id,
       recipeNamespace: claims.recipeNamespace,
       recipeName: claims.recipeName,
-      expectedCurrentStatus: 'failed',
     })
-    // Older unit doubles did not return a boolean. Treat only an explicit
-    // false as a lost CAS; the real DB helper always returns true/false.
-    if (revived === false) {
+    if (revivedGeneration === null) {
       return deny(
         'idempotency_conflict',
         'idempotent retry is already being handled; use a new idempotency key if it fails again',
         true
       )
     }
+    recorded.invocation.attemptGeneration = revivedGeneration
   }
 
-  const rate = await checkRateLimit(
-    claims.recipeNamespace,
-    claims.recipeName,
-    'promptBridge',
-    grant
-  )
-  if (!rate.ok) {
-    await markInvocationStatus(recorded.invocation.id, 'failed', {
-      recipeNamespace: claims.recipeNamespace,
-      recipeName: claims.recipeName,
-      ...(recorded.kind === 'replay' ? { expectedCurrentStatus: 'in_progress' as const } : {}),
-    })
-    return deny(rate.error, rate.message)
+  const statusBinding = {
+    recipeNamespace: claims.recipeNamespace,
+    recipeName: claims.recipeName,
+    ...(recorded.kind === 'replay'
+      ? {
+          expectedCurrentStatus: 'in_progress' as const,
+          expectedAttemptGeneration: recorded.invocation.attemptGeneration,
+        }
+      : { expectedAttemptGeneration: recorded.invocation.attemptGeneration }),
+  }
+  const transitionToFailed = async (): Promise<void> => {
+    await markInvocationStatus(recorded.invocation.id, 'failed', statusBinding)
   }
 
-  const quota = await consumeQuota(claims.recipeNamespace, claims.recipeName, 'promptBridge', grant)
-  if (!quota.ok) {
-    await markInvocationStatus(recorded.invocation.id, 'failed', {
-      recipeNamespace: claims.recipeNamespace,
-      recipeName: claims.recipeName,
-      ...(recorded.kind === 'replay' ? { expectedCurrentStatus: 'in_progress' as const } : {}),
-    })
-    return deny(quota.error, quota.message)
+  // The retry CAS happens before rate/quota checks. Any exception after that
+  // claim must release it; otherwise the maintenance sweep can fail an active
+  // retry (and make its JIT ticket appear invalid) while the caller is still
+  // handling the error.
+  try {
+    const rate = await checkRateLimit(
+      claims.recipeNamespace,
+      claims.recipeName,
+      'promptBridge',
+      grant
+    )
+    if (!rate.ok) {
+      await transitionToFailed()
+      return deny(rate.error, rate.message)
+    }
+
+    // Period quota is charged once per logical idempotent invocation. A
+    // failed provider retry is a new physical attempt (rate-limited above),
+    // not a second logical request that should consume the same run budget.
+    if (recorded.kind !== 'replay') {
+      const quota = await consumeQuota(
+        claims.recipeNamespace,
+        claims.recipeName,
+        'promptBridge',
+        grant
+      )
+      if (!quota.ok) {
+        await transitionToFailed()
+        return deny(quota.error, quota.message)
+      }
+    }
+  } catch (error) {
+    try {
+      await transitionToFailed()
+    } catch {
+      // Preserve the original rate/quota/database error. The maintenance
+      // sweep remains the final recovery path if the compensating update also
+      // fails.
+    }
+    throw error
   }
 
   return {
@@ -426,8 +486,183 @@ async function authorizePromptBridgeInner(
       modelPolicy: resolution.modelPolicy,
       selectedTarget,
       authorizedTargets,
+      attemptGeneration: recorded.invocation.attemptGeneration,
       policyRevision: grant.policyRevision,
       policyHash: resolvedPolicyHash,
+      maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
+    },
+  }
+}
+
+/**
+ * Narrow compatibility lane for an older mcp-host during a rolling upgrade.
+ * It deliberately reads only the legacy provider + flat allowedModels fields,
+ * never target policy/JIT data, and records contract_version=1.  This keeps an
+ * old host on its already configured single provider while v2 owns the new
+ * multiprovider target contract.
+ */
+async function authorizeLegacyPromptBridge(
+  params: AuthorizePromptBridgeParams,
+  grant: PluginWorkloadSdkGrant
+): Promise<PluginWorkloadSdkAuthzResult<AuthorizedPromptBridge>> {
+  const { claims, callerRef } = params
+  if (grant.policyState !== 'legacy_unreviewed' && grant.policyState !== 'active') {
+    return deny('provider_policy_denied', 'promptBridge policy is being revoked or is disabled')
+  }
+  const callerError = checkCaller(grant, callerRef)
+  if (callerError) return callerError
+  if (params.targetRef !== undefined || params.modelPolicyRef !== undefined) {
+    return deny(
+      'protocol_mismatch',
+      'legacy promptBridge accepts only the configured provider and model; upgrade mcp-host for target selectors',
+      true
+    )
+  }
+  const provider = grant.provider?.trim() || params.bootstrapProvider?.trim() || ''
+  const model = params.model?.trim() || params.bootstrapModel?.trim() || grant.allowedModels[0]
+  if (!provider || !model || grant.allowedModels.length === 0) {
+    return deny(
+      'provider_policy_denied',
+      'legacy promptBridge grant has no explicit provider/model binding; review it before use'
+    )
+  }
+  if (params.provider !== undefined && params.provider !== provider) {
+    return deny(
+      'provider_policy_denied',
+      'legacy promptBridge provider is fixed by the host binding'
+    )
+  }
+  if (params.bootstrapProvider !== undefined && params.bootstrapProvider.trim() !== provider) {
+    return deny(
+      'provider_policy_denied',
+      'legacy promptBridge bootstrap provider is not authorized'
+    )
+  }
+  if (params.bootstrapModel !== undefined && params.bootstrapModel.trim() !== model) {
+    return deny('provider_policy_denied', 'legacy promptBridge bootstrap model is not authorized')
+  }
+  if (!grant.allowedModels.includes(model)) {
+    return deny('target_not_allowed', 'requested model is not in the legacy grant allowlist')
+  }
+
+  const selectedTarget: PluginWorkloadSdkPromptTarget = {
+    targetRef: `legacy:${provider}:${model}`,
+    provider,
+    model,
+    credentialSlot: 'legacy-host-binding',
+  }
+  const recorded = await recordInvocation({
+    recipeNamespace: claims.recipeNamespace,
+    recipeName: claims.recipeName,
+    callerRef,
+    correlationId: params.correlationId,
+    method: 'promptBridge',
+    detail: model,
+    purpose: params.purpose,
+    idempotencyKey: params.idempotencyKey,
+    payload: params.payload,
+    status: 'in_progress',
+    authorizationDecision: 'authorized',
+    contractVersion: 1,
+    requiredGrantStates: ['active', 'legacy_unreviewed'],
+  })
+  if (recorded.kind === 'policy_revoked') {
+    return deny(
+      'provider_policy_denied',
+      'legacy promptBridge policy was revoked before invocation reservation'
+    )
+  }
+  if (recorded.kind === 'conflict') {
+    return deny('idempotency_conflict', 'idempotency key was already used with a different payload')
+  }
+  if (recorded.kind === 'race_unresolved') {
+    return deny('idempotency_conflict', 'idempotency reservation could not be resolved', true)
+  }
+  if (recorded.kind === 'replay') {
+    if (recorded.invocation.contractVersion !== 1 || recorded.invocation.status === 'failed') {
+      return deny(
+        'idempotency_conflict',
+        'legacy invocation cannot be replayed after a failed or upgraded attempt; retry with a new key'
+      )
+    }
+    return {
+      ok: true,
+      value: {
+        invocationId: recorded.invocation.id,
+        replay: true,
+        providerCallRequired: false,
+        status: recorded.invocation.status,
+        model: selectedTarget.model,
+        modelPolicy: null,
+        selectedTarget,
+        authorizedTargets: [selectedTarget],
+        attemptGeneration: recorded.invocation.attemptGeneration,
+        policyRevision: 0,
+        policyHash: '0'.repeat(64),
+        maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
+      },
+    }
+  }
+
+  try {
+    const rate = await checkRateLimit(
+      claims.recipeNamespace,
+      claims.recipeName,
+      'promptBridge',
+      grant
+    )
+    if (!rate.ok) {
+      await markInvocationStatus(recorded.invocation.id, 'failed', {
+        recipeNamespace: claims.recipeNamespace,
+        recipeName: claims.recipeName,
+        expectedCurrentStatus: 'in_progress',
+        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
+      })
+      return deny(rate.error, rate.message)
+    }
+    const quota = await consumeQuota(
+      claims.recipeNamespace,
+      claims.recipeName,
+      'promptBridge',
+      grant
+    )
+    if (!quota.ok) {
+      await markInvocationStatus(recorded.invocation.id, 'failed', {
+        recipeNamespace: claims.recipeNamespace,
+        recipeName: claims.recipeName,
+        expectedCurrentStatus: 'in_progress',
+        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
+      })
+      return deny(quota.error, quota.message)
+    }
+  } catch (error) {
+    try {
+      await markInvocationStatus(recorded.invocation.id, 'failed', {
+        recipeNamespace: claims.recipeNamespace,
+        recipeName: claims.recipeName,
+        expectedCurrentStatus: 'in_progress',
+        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
+      })
+    } catch {
+      // Preserve the original database/rate error; maintenance will fence it.
+    }
+    throw error
+  }
+
+  return {
+    ok: true,
+    value: {
+      invocationId: recorded.invocation.id,
+      replay: false,
+      providerCallRequired: true,
+      status: 'in_progress',
+      model: selectedTarget.model,
+      modelPolicy: null,
+      selectedTarget,
+      authorizedTargets: [selectedTarget],
+      attemptGeneration: recorded.invocation.attemptGeneration,
+      policyRevision: 0,
+      policyHash: '0'.repeat(64),
       maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
     },
   }
@@ -437,11 +672,15 @@ export interface ReissuePromptBridgeCredentialTicketParams {
   claims: McpHostAccessClaims
   invocationId: string
   targetRef: string
+  attemptGeneration: number
 }
 
 export type ReissuedPromptBridgeCredentialTicket = {
   invocationId: string
   targetRef: string
+  attemptGeneration: number
+  providerAttemptId: string
+  providerAttemptIndex: number
   credentialTicket: string
   policyRevision: number
   policyHash: string
@@ -468,6 +707,7 @@ export async function reissuePromptBridgeCredentialTicket(
     invocation.recipeName !== params.claims.recipeName ||
     invocation.method !== 'promptBridge' ||
     invocation.status !== 'in_progress' ||
+    invocation.attemptGeneration !== params.attemptGeneration ||
     invocation.authorizationDecision !== 'authorized' ||
     !invocation.promptAuthorization
   ) {
@@ -478,6 +718,16 @@ export async function reissuePromptBridgeCredentialTicket(
   }
 
   const authorization = invocation.promptAuthorization
+  const receipt = await getPluginWorkloadSdkAttemptReceipt(invocation.id, params.attemptGeneration)
+  if (
+    !receipt ||
+    receipt.recipeNamespace !== params.claims.recipeNamespace ||
+    receipt.recipeName !== params.claims.recipeName ||
+    receipt.method !== 'promptBridge' ||
+    receipt.status !== 'in_progress'
+  ) {
+    return deny('provider_policy_denied', 'promptBridge attempt receipt is stale or missing')
+  }
   if (!authorization.authorizedTargetRefs.includes(params.targetRef)) {
     return deny('target_not_allowed', 'target was not authorized for this invocation')
   }
@@ -487,7 +737,8 @@ export async function reissuePromptBridgeCredentialTicket(
     params.claims.recipeName,
     'promptBridge'
   )
-  if (!grant || checkCaller(grant, invocation.callerRef)) {
+  const callerError = grant ? checkCaller(grant, invocation.callerRef) : null
+  if (!grant || grant.policyState !== 'active' || grant.policyRevision < 1 || callerError) {
     return deny(
       'provider_policy_denied',
       'promptBridge policy no longer authorizes this invocation'
@@ -508,11 +759,28 @@ export async function reissuePromptBridgeCredentialTicket(
     return deny('target_not_allowed', 'target is not in the current promptBridge policy')
   }
 
+  const providerAttempt = await reservePluginWorkloadSdkProviderAttempt({
+    invocationId: invocation.id,
+    recipeNamespace: params.claims.recipeNamespace,
+    recipeName: params.claims.recipeName,
+    attemptGeneration: invocation.attemptGeneration,
+    target,
+  })
+  if (!providerAttempt) {
+    return deny(
+      'provider_policy_denied',
+      'promptBridge attempt is stale, fenced, or exceeds the physical-attempt budget'
+    )
+  }
+
   const issued = issuePluginWorkloadSdkCredentialTicketWithClaims({
     recipeNamespace: params.claims.recipeNamespace,
     recipeName: params.claims.recipeName,
     invocationId: invocation.id,
     target,
+    providerAttemptId: providerAttempt.id,
+    providerAttemptIndex: providerAttempt.attemptIndex,
+    attemptGeneration: invocation.attemptGeneration,
     policyRevision: grant.policyRevision,
     policyHash,
   })
@@ -522,9 +790,19 @@ export async function reissuePromptBridgeCredentialTicket(
     recipeName: params.claims.recipeName,
     invocationId: invocation.id,
     targetRef: target.targetRef,
+    attemptGeneration: invocation.attemptGeneration,
+    providerAttemptId: providerAttempt.id,
     expiresAt: new Date(Date.now() + PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS * 1_000),
   })
   if (!registered) {
+    await markPluginWorkloadSdkProviderAttemptStatus({
+      id: providerAttempt.id,
+      invocationId: invocation.id,
+      recipeNamespace: params.claims.recipeNamespace,
+      recipeName: params.claims.recipeName,
+      attemptGeneration: invocation.attemptGeneration,
+      status: 'failed',
+    })
     return deny(
       'provider_unavailable',
       'credential ticket issuance is temporarily unavailable',
@@ -536,6 +814,9 @@ export async function reissuePromptBridgeCredentialTicket(
     value: {
       invocationId: invocation.id,
       targetRef: target.targetRef,
+      attemptGeneration: invocation.attemptGeneration,
+      providerAttemptId: providerAttempt.id,
+      providerAttemptIndex: providerAttempt.attemptIndex,
       credentialTicket: issued.credentialTicket,
       policyRevision: grant.policyRevision,
       policyHash,
@@ -624,7 +905,14 @@ async function authorizeClientNotificationInner(
     payload: params.payload,
     status: 'accepted',
     authorizationDecision: 'authorized',
+    requiredGrantStates: ['active'],
   })
+  if (recorded.kind === 'policy_revoked') {
+    return deny(
+      'provider_policy_denied',
+      'clientNotifications policy was revoked before invocation reservation'
+    )
+  }
   if (recorded.kind === 'conflict') {
     return deny('idempotency_conflict', 'idempotency key was already used with a different payload')
   }

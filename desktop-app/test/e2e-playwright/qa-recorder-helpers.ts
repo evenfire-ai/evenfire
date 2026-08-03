@@ -25,8 +25,15 @@ import path from 'node:path'
 export const DESKTOP_APP_ROOT = path.resolve(__dirname, '../..')
 export const MAIN_ENTRY = path.join(DESKTOP_APP_ROOT, 'dist/main.js')
 export const EXTERNAL_REST_API_BASE_URL =
-  process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
-export const RPC_PROXY_BASE_URL = process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094'
+  process.env.EXTERNAL_REST_API_BASE_URL ||
+  process.env.EXTERNAL_REST_API_URL ||
+  process.env.E2E_EXTERNAL_REST_API_URL ||
+  'http://127.0.0.1:8091'
+export const RPC_PROXY_BASE_URL =
+  process.env.RPC_PROXY_BASE_URL ||
+  process.env.RPC_PROXY_URL ||
+  process.env.E2E_RPC_PROXY_URL ||
+  'http://127.0.0.1:8094'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
 const DEFAULT_DESKTOP_EMAIL = 'test@clerum.io'
 const DEFAULT_DESKTOP_PASSWORD = 'changeme123!'

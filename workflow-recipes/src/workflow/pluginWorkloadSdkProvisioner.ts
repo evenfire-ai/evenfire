@@ -30,7 +30,31 @@ import type { WorkflowRuntimePlan } from './runtimePlan'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
 
-export type EagerSdkMcpHostStatus = 'ready' | 'deploying' | 'failed' | 'provider_unavailable'
+export type EagerSdkMcpHostStatus =
+  | 'ready'
+  | 'awaiting_policy'
+  | 'deploying'
+  | 'failed'
+  | 'provider_unavailable'
+
+export interface EagerSdkBootstrapProof {
+  ready: true
+  contractVersion: 2
+  podUid: string
+  provider: string
+  model: string
+  policyReady?: boolean
+  policyState?: string
+  policyReason?: string
+  /** Optional snapshot when a grant already exists; request authorization
+   * always re-reads and validates the current policy. */
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+  verifiedAt: string
+}
 
 /**
  * Consecutive eager SDK bootstrap failures tolerated before the provider is
@@ -76,15 +100,8 @@ export type PluginWorkloadSdkProvisionerDeps = {
  * keep the reconciler file bounded while preserving the existing behavior.
  */
 export class PluginWorkloadSdkProvisioner {
-  /**
-   * In-memory record of the last successful eager-SDK provider bootstrap, keyed
-   * by recipe name. The value is `<podUid>:<provider>:<model>` — when it matches
-   * the current mcp-host pod and agent, the identity-only bootstrap is skipped
-   * to avoid an RS256 sign + HTTP POST on every level-triggered reconcile. Lost
-   * on WRC restart, which just bootstraps once (still idempotent); a pod restart
-   * changes the UID and forces a refresh.
-   */
-  private readonly eagerSdkConfiguredByRecipe = new Map<string, string>()
+  /** Last fresh Control API proof, tied to the current pod UID. */
+  private readonly eagerSdkBootstrapProofByRecipe = new Map<string, EagerSdkBootstrapProof>()
 
   /**
    * Consecutive eager SDK bootstrap failures per recipe and stable bootstrap
@@ -104,8 +121,12 @@ export class PluginWorkloadSdkProvisioner {
   constructor(private readonly deps: PluginWorkloadSdkProvisionerDeps) {}
 
   clearRecipeState(recipeName: string): void {
-    this.eagerSdkConfiguredByRecipe.delete(recipeName)
+    this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
     this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
+  }
+
+  getBootstrapProof(recipeName: string): EagerSdkBootstrapProof | undefined {
+    return this.eagerSdkBootstrapProofByRecipe.get(recipeName)
   }
 
   /**
@@ -120,6 +141,7 @@ export class PluginWorkloadSdkProvisioner {
       `${recipeName}-mcp-host`,
       this.deps.config.sandboxNamespace
     )
+    this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
     this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
   }
 
@@ -150,13 +172,11 @@ export class PluginWorkloadSdkProvisioner {
     const log = createLogger('wrc', recipeName)
     const mcpHostAgent = resolveEagerSdkMcpHostAgent(spec)
 
-    if (!mcpHostAgent) {
-      if (spec.pluginWorkloadSdk?.promptBridge) {
-        log.warn(
-          'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
-            'add spec.agent or a step agent with provider+model to recover the eager mcp-host'
-        )
-      }
+    if (!mcpHostAgent && spec.pluginWorkloadSdk?.promptBridge) {
+      log.warn(
+        'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
+          'declare spec.agent with provider+model to bind the eager mcp-host'
+      )
       return 'failed'
     }
 
@@ -251,12 +271,17 @@ export class PluginWorkloadSdkProvisioner {
 
     const readiness = await this.readinessForEagerSdkMcpHost(recipeName)
     if (!spec.pluginWorkloadSdk?.promptBridge) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
     if (!this.deps.modelConfigHandler) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
-    if (readiness.status !== 'ready') return readiness.status
+    if (readiness.status !== 'ready') {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+      return readiness.status
+    }
 
     if (!readiness.uid) {
       log.warn(
@@ -265,12 +290,8 @@ export class PluginWorkloadSdkProvisioner {
       return 'deploying'
     }
 
+    if (!mcpHostAgent) return 'failed'
     const configureKey = `${readiness.uid}:${mcpHostAgent.provider}:${mcpHostAgent.model}`
-    if (this.eagerSdkConfiguredByRecipe.get(recipeName) === configureKey) {
-      this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
-      return 'ready'
-    }
-
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
@@ -284,25 +305,33 @@ export class PluginWorkloadSdkProvisioner {
         wrcConfigureToken
       )
       if (result.status >= 400) {
-        this.eagerSdkConfiguredByRecipe.delete(recipeName)
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
           reason: 'Plugin Workload SDK eager mcp-host bootstrap returned an error',
           detail: { status: result.status },
         })
       }
-      this.eagerSdkConfiguredByRecipe.set(recipeName, configureKey)
+      const proof = parseEagerSdkBootstrapProof(result.body, readiness.uid)
+      if (!proof) {
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+        return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
+          reason: 'Plugin Workload SDK bootstrap response omitted identity proof',
+          detail: { status: result.status },
+        })
+      }
+      this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
+      if (spec.pluginWorkloadSdk.promptBridge && proof.policyReady === false) {
+        return 'awaiting_policy'
+      }
     } catch (err) {
-      this.eagerSdkConfiguredByRecipe.delete(recipeName)
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
         reason: 'Plugin Workload SDK eager mcp-host bootstrap failed',
         detail: { error: err instanceof Error ? err.message : String(err) },
       })
     }
-    // Reuse the readiness captured above: bootstrap does not recreate the pod,
-    // and we already gated on readiness.status === 'ready', so a second K8s
-    // readiness GET would return the same status. Avoid the extra round-trip.
-    return readiness.status
+    return 'ready'
   }
 
   async readinessForEagerSdkMcpHost(
@@ -451,5 +480,53 @@ export class PluginWorkloadSdkProvisioner {
         namespace: this.deps.config.sandboxNamespace,
       })
     )
+  }
+}
+
+function parseEagerSdkBootstrapProof(
+  body: Record<string, unknown>,
+  podUid: string
+): EagerSdkBootstrapProof | null {
+  if (
+    body.configured !== true ||
+    body.ready !== true ||
+    body.contractVersion !== 2 ||
+    typeof body.provider !== 'string' ||
+    typeof body.model !== 'string' ||
+    body.provider.length === 0 ||
+    body.model.length === 0
+  ) {
+    return null
+  }
+  const hasPolicyProof =
+    Number.isSafeInteger(body.policyRevision) &&
+    Number(body.policyRevision) >= 1 &&
+    typeof body.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(body.policyHash) &&
+    typeof body.defaultTargetRef === 'string' &&
+    body.defaultTargetRef.length > 0 &&
+    typeof body.defaultProvider === 'string' &&
+    body.defaultProvider === body.provider &&
+    typeof body.defaultModel === 'string' &&
+    body.defaultModel === body.model
+  return {
+    ready: true,
+    contractVersion: 2,
+    podUid,
+    provider: body.provider,
+    model: body.model,
+    policyReady: body.policyReady !== false && hasPolicyProof,
+    policyState: typeof body.policyState === 'string' ? body.policyState : 'unknown',
+    ...(typeof body.policyReason === 'string' ? { policyReason: body.policyReason } : {}),
+    verifiedAt: new Date().toISOString(),
+    ...(hasPolicyProof
+      ? {
+          policyRevision: Number(body.policyRevision),
+          policyHash: body.policyHash as string,
+          defaultTargetRef: body.defaultTargetRef as string,
+          defaultProvider: body.defaultProvider as string,
+          defaultModel: body.defaultModel as string,
+        }
+      : {}),
   }
 }

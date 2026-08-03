@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ClerumMcpServer, revalidatePluginSdkCredentialTicket } from './server'
+import {
+  ClerumMcpServer,
+  bindPluginSdkCredentialTarget,
+  pluginSdkCredentialTargetEchoMatches,
+  revalidatePluginSdkCredentialTicket,
+} from './server'
 
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -9,6 +14,20 @@ function response(status: number, body: unknown): Response {
 }
 
 describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
+  it('denies a body target mismatch before the resolver and returns only signed claims', () => {
+    const signedTarget = {
+      targetRef: 'primary-openai',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      credentialSlot: 'openai-api-key',
+    }
+    const mismatched = { ...signedTarget, provider: 'claude' }
+    expect(bindPluginSdkCredentialTarget(signedTarget, mismatched)).toBeNull()
+    expect(bindPluginSdkCredentialTarget(signedTarget, signedTarget)).toEqual(signedTarget)
+    expect(pluginSdkCredentialTargetEchoMatches(signedTarget, mismatched)).toBe(false)
+    expect(pluginSdkCredentialTargetEchoMatches(signedTarget, signedTarget)).toBe(true)
+  })
+
   it('consumes each verified ticket jti only once within its TTL', () => {
     const server = new ClerumMcpServer({} as never, 8082, {} as never, 'sandbox-recipes')
     const consume = (
@@ -26,6 +45,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
         runtimeToken: 'runtime-jwt',
         credentialTicket: 'signed-ticket',
         invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'provider-attempt-1',
+        providerAttemptIndex: 1,
         targetRef: 'primary-zai',
         fetchImpl: fetchImpl as unknown as typeof fetch,
         controlApiBaseUrl: 'http://control-api:8090/',
@@ -39,6 +61,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       credentialTicket: 'signed-ticket',
       invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'provider-attempt-1',
+      providerAttemptIndex: 1,
       targetRef: 'primary-zai',
     })
   })
@@ -50,6 +75,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
         runtimeToken: 'runtime-jwt',
         credentialTicket: 'signed-ticket',
         invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'provider-attempt-2',
+        providerAttemptIndex: 2,
         targetRef: 'fallback-openai',
         redeem: true,
         fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -59,6 +87,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       credentialTicket: 'signed-ticket',
       invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'provider-attempt-2',
+      providerAttemptIndex: 2,
       targetRef: 'fallback-openai',
       redeem: true,
     })
@@ -75,6 +106,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
         runtimeToken: 'runtime-jwt',
         credentialTicket: 'signed-ticket',
         invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'provider-attempt-1',
+        providerAttemptIndex: 1,
         targetRef: 'primary-zai',
         fetchImpl: fetchImpl as unknown as typeof fetch,
         controlApiBaseUrl: 'http://control-api:8090',
@@ -89,6 +123,9 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
         runtimeToken: 'runtime-jwt',
         credentialTicket: 'signed-ticket',
         invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'provider-attempt-1',
+        providerAttemptIndex: 1,
         targetRef: 'primary-zai',
         fetchImpl: fetchImpl as unknown as typeof fetch,
       })

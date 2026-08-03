@@ -21,6 +21,7 @@ export const PLUGIN_WORKLOAD_ERROR_CODES = [
   'idempotency_conflict',
   'invalid_request',
   'unauthorized',
+  'protocol_mismatch',
 ] as const
 export type PluginWorkloadErrorCode = (typeof PLUGIN_WORKLOAD_ERROR_CODES)[number]
 
@@ -51,6 +52,7 @@ const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
   idempotency_conflict: 422,
   invalid_request: 400,
   unauthorized: 401,
+  protocol_mismatch: 503,
 }
 
 const ERROR_CODE_SET = new Set<string>(PLUGIN_WORKLOAD_ERROR_CODES)

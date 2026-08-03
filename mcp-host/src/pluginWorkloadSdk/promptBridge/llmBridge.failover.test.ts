@@ -77,6 +77,7 @@ function makeBridge(
 
 const request = {
   invocationId: 'inv-1',
+  attemptGeneration: 1,
   targets: [{ target: primary }, { target: fallback }],
   policyRevision: 1,
   policyHash: 'a'.repeat(64),
@@ -175,12 +176,14 @@ describe('LlmBridge authorized multi-provider fallback', () => {
 
     expect(issue).toHaveBeenNthCalledWith(1, {
       invocationId: 'inv-1',
+      attemptGeneration: 1,
       target: primary,
       policyRevision: 1,
       policyHash: 'a'.repeat(64),
     })
     expect(issue).toHaveBeenNthCalledWith(2, {
       invocationId: 'inv-1',
+      attemptGeneration: 1,
       target: fallback,
       policyRevision: 1,
       policyHash: 'a'.repeat(64),

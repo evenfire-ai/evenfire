@@ -25,7 +25,9 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
     credentialSlot: 'zai-api-key',
   }
   const controlApiClient = {
+    ensurePromptBridgeCapabilities: vi.fn().mockResolvedValue(undefined),
     authorizePromptBridge: vi.fn().mockResolvedValue({
+      contractVersion: 2,
       invocationId: 'inv-1',
       replay: false,
       providerCallRequired: true,
@@ -34,10 +36,12 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       modelPolicy: null,
       selectedTarget: target,
       authorizedTargets: [target],
+      attemptGeneration: 1,
       policyRevision: 1,
       policyHash: 'a'.repeat(64),
       maxOutputTokens: null,
     }),
+    reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
     reportInvocationStatus: vi.fn().mockResolvedValue(undefined),
   } as unknown as PluginWorkloadSdkControlApiClient
   const llmBridge = {

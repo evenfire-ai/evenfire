@@ -2901,6 +2901,14 @@ async function main(): Promise<void> {
       onPluginWorkloadSdkBootstrapConfigured: context => {
         pluginSdkLlmContext = context
       },
+      verifyPluginWorkloadSdkBootstrapV2: async (provider, model) => {
+        if (!pluginWorkloadSdkServer) return null
+        try {
+          return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+        } catch {
+          return null
+        }
+      },
     })
     rpcServer.setWorkflowService(workflowService)
     wireWorkflowApprovalRuntimeRoutes(rpcServer, {

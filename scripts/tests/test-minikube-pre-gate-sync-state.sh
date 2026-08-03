@@ -159,4 +159,11 @@ else
   fail "pre-gate sync can couple unrelated gates to the sibling registry"
 fi
 
+if contains "deployment/control-postgres -- \\" &&
+   contains 'psql -U postgres -d profiles -Atqc "${query}"'; then
+  pass "legacy grant inventory keeps the kubectl exec command intact"
+else
+  fail "legacy grant inventory can execute psql on the host instead of PostgreSQL"
+fi
+
 exit "$FAIL"

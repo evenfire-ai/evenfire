@@ -25,10 +25,14 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     ...actual,
     findGrant: vi.fn(),
     insertInvocation: vi.fn(),
+    reviveFailedInvocation: vi.fn(),
     updateInvocationStatus: vi.fn(),
     consumePeriodQuota: vi.fn(),
     countRecentInvocations: vi.fn(),
     getInvocationById: vi.fn(),
+    getPluginWorkloadSdkAttemptReceipt: vi.fn(),
+    reservePluginWorkloadSdkProviderAttempt: vi.fn(),
+    markPluginWorkloadSdkProviderAttemptStatus: vi.fn(),
     registerPluginWorkloadSdkCredentialTicketJti: vi.fn(),
   }
 })
@@ -76,6 +80,7 @@ function grant(
       },
     ],
     defaultTargetRef: 'primary-zai',
+    policyState: 'active',
     policyRevision: 1,
     createdAt: '2026-06-09T00:00:00.000Z',
     updatedAt: '2026-06-09T00:00:00.000Z',
@@ -100,6 +105,10 @@ function invocation(
     status: 'in_progress',
     quotaConsumed: true,
     authorizationDecision: 'authorized',
+    contractVersion: 2,
+    attemptGeneration: 1,
+    leaseExpiresAt: null,
+    updatedAt: '2026-06-09T00:00:00.000Z',
     createdAt: '2026-06-09T00:00:00.000Z',
     completedAt: null,
     promptAuthorization: null,
@@ -126,18 +135,56 @@ const baseNotificationParams = {
 beforeEach(() => {
   vi.mocked(sdkDb.findGrant).mockReset()
   vi.mocked(sdkDb.insertInvocation).mockReset()
+  vi.mocked(sdkDb.reviveFailedInvocation).mockReset()
   vi.mocked(sdkDb.updateInvocationStatus).mockReset()
   vi.mocked(sdkDb.consumePeriodQuota).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockReset()
   vi.mocked(sdkDb.getInvocationById).mockReset()
+  vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
+  vi.mocked(sdkDb.reservePluginWorkloadSdkProviderAttempt).mockReset()
+  vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
   vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
+  vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
+    invocationId: 'inv-1',
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    attemptGeneration: 1,
+    method: 'promptBridge',
+    targetRefs: ['primary-zai', 'openai-fallback'],
+    policyRevision: 1,
+    policyHash: 'a'.repeat(64),
+    status: 'in_progress',
+    startedAt: '2026-06-09T00:00:00.000Z',
+    leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+    completedAt: null,
+  })
+  vi.mocked(sdkDb.reservePluginWorkloadSdkProviderAttempt).mockResolvedValue({
+    id: '33333333-3333-4333-8333-333333333333',
+    invocationId: 'inv-1',
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    attemptGeneration: 1,
+    attemptIndex: 1,
+    targetRef: 'openai-fallback',
+    provider: 'openai',
+    model: 'gpt-5.4',
+    credentialSlot: 'openai-api-key',
+    status: 'reserved',
+    credentialJti: null,
+    startedAt: '2026-06-09T00:00:00.000Z',
+    leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+    completedAt: null,
+    usageRequestId: null,
+  })
+  vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockResolvedValue(true)
   vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
     kind: 'inserted',
     invocation: invocation(),
   })
+  vi.mocked(sdkDb.reviveFailedInvocation).mockResolvedValue(2)
 })
 
 describe('authorizePromptBridge', () => {
@@ -455,11 +502,16 @@ describe('authorizePromptBridge', () => {
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     expect(result).toMatchObject({ ok: false, error: 'quota_exceeded', retryable: false })
     expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
-    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'failed', {
-      completed: true,
-      recipeNamespace: NS,
-      recipeName: RECIPE,
-    })
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith(
+      'inv-1',
+      'failed',
+      expect.objectContaining({
+        completed: true,
+        recipeNamespace: NS,
+        recipeName: RECIPE,
+        expectedAttemptGeneration: 1,
+      })
+    )
   })
 
   it('allows exactly maxInvocationsPerMinute calls (the limit-th call is not self-rejected)', async () => {
@@ -496,11 +548,16 @@ describe('authorizePromptBridge', () => {
     vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(false)
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     expect(result).toMatchObject({ ok: false, error: 'quota_exceeded' })
-    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'failed', {
-      completed: true,
-      recipeNamespace: NS,
-      recipeName: RECIPE,
-    })
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith(
+      'inv-1',
+      'failed',
+      expect.objectContaining({
+        completed: true,
+        recipeNamespace: NS,
+        recipeName: RECIPE,
+        expectedAttemptGeneration: 1,
+      })
+    )
   })
 
   it('authorizes a valid request and records the invocation', async () => {
@@ -564,7 +621,7 @@ describe('authorizePromptBridge', () => {
   it('re-consumes quota and revives status for a failed-replay retry', async () => {
     const currentGrant = grant({ quotaLimits: { maxRequestsPerRun: 10 } })
     vi.mocked(sdkDb.findGrant).mockResolvedValue(currentGrant)
-    vi.mocked(sdkDb.updateInvocationStatus).mockResolvedValue(true)
+    vi.mocked(sdkDb.reviveFailedInvocation).mockResolvedValue(2)
     vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
       kind: 'replay',
       invocation: invocation({
@@ -577,14 +634,16 @@ describe('authorizePromptBridge', () => {
       }),
     })
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
-    // quota must be re-consumed for a failed retry
-    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledOnce()
-    // status revived to in_progress
-    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'in_progress', {
-      completed: false,
+    // A failed replay is a new physical attempt, but it remains the same
+    // logical idempotent invocation and therefore does not consume period
+    // quota a second time.
+    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    // The retry transition is performed atomically by the DB revive operation.
+    expect(sdkDb.reviveFailedInvocation).toHaveBeenCalledWith({
+      id: 'inv-1',
       recipeNamespace: NS,
       recipeName: RECIPE,
-      expectedCurrentStatus: 'failed',
+      leaseSeconds: expect.any(Number),
     })
     expect(result).toMatchObject({
       ok: true,
@@ -646,6 +705,7 @@ describe('reissuePromptBridgeCredentialTicket', () => {
       claims: claims(),
       invocationId: 'inv-1',
       targetRef: 'openai-fallback',
+      attemptGeneration: 1,
     })
 
     expect(result).toMatchObject({
@@ -683,6 +743,7 @@ describe('reissuePromptBridgeCredentialTicket', () => {
       claims: claims(),
       invocationId: 'inv-1',
       targetRef: 'openai-fallback',
+      attemptGeneration: 1,
     })
     expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
     expect(sdkDb.findGrant).not.toHaveBeenCalled()
@@ -706,6 +767,7 @@ describe('reissuePromptBridgeCredentialTicket', () => {
         claims: claims(),
         invocationId: 'inv-1',
         targetRef: 'openai-fallback',
+        attemptGeneration: 1,
       })
     ).resolves.toMatchObject({ ok: false, error: 'provider_policy_denied' })
 
@@ -717,6 +779,7 @@ describe('reissuePromptBridgeCredentialTicket', () => {
         claims: claims(),
         invocationId: 'inv-1',
         targetRef: 'openai-fallback',
+        attemptGeneration: 1,
       })
     ).resolves.toMatchObject({ ok: false, error: 'provider_policy_denied' })
   })

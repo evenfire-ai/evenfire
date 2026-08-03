@@ -54,6 +54,9 @@ export function buildPromptBridgeUsageEvent(input: {
     credentialSlot: string
     fallbackUsed: boolean
     attemptCount: number
+    attemptGeneration?: number
+    providerAttemptId?: string
+    providerAttemptIndex?: number
   }
   metadata?: Record<string, unknown>
 }): LlmUsageEvent | null {
@@ -88,10 +91,20 @@ export function buildPromptBridgeUsageEvent(input: {
       ...(input.promptBridgeMetadata
         ? {
             prompt_bridge_metadata: {
+              invocation_id: input.invocationId,
               target_ref: input.promptBridgeMetadata.targetRef,
               credential_slot: input.promptBridgeMetadata.credentialSlot,
               fallback_used: input.promptBridgeMetadata.fallbackUsed,
               attempt_count: input.promptBridgeMetadata.attemptCount,
+              ...(input.promptBridgeMetadata.attemptGeneration !== undefined
+                ? { attempt_generation: input.promptBridgeMetadata.attemptGeneration }
+                : {}),
+              ...(input.promptBridgeMetadata.providerAttemptId
+                ? { provider_attempt_id: input.promptBridgeMetadata.providerAttemptId }
+                : {}),
+              ...(input.promptBridgeMetadata.providerAttemptIndex !== undefined
+                ? { provider_attempt_index: input.promptBridgeMetadata.providerAttemptIndex }
+                : {}),
             },
           }
         : {}),
@@ -109,7 +122,7 @@ export function buildPromptBridgeUsageEvent(input: {
       team_id: null,
       provider: input.provider,
       model: input.model,
-      source_kind: 'unknown',
+      source_kind: 'plugin_workload_sdk',
       user_id: null,
       sender: input.callerRef,
       channel_type: 'plugin_workload_sdk',
@@ -128,6 +141,9 @@ export function buildPromptBridgeUsageEvent(input: {
               credential_slot: input.promptBridgeMetadata.credentialSlot,
               fallback_used: input.promptBridgeMetadata.fallbackUsed,
               attempt_count: input.promptBridgeMetadata.attemptCount,
+              attempt_generation: input.promptBridgeMetadata.attemptGeneration,
+              provider_attempt_id: input.promptBridgeMetadata.providerAttemptId,
+              provider_attempt_index: input.promptBridgeMetadata.providerAttemptIndex,
             },
           }
         : {}),
@@ -145,6 +161,9 @@ export function buildPromptBridgeUsageEvent(input: {
     workflowRunIdFromExecutionId(executionId)
   const llmSecretName = nonEmptyMetadataString(input.metadata, ['llmSecretName', 'llm_secret_name'])
   if (!runId || !executionId || !executionId.toLowerCase().startsWith(runId) || !llmSecretName) {
+    return null
+  }
+  if (input.promptBridgeMetadata && !UUID_RE.test(input.invocationId?.trim() ?? '')) {
     return null
   }
 
@@ -171,10 +190,20 @@ export function buildPromptBridgeUsageEvent(input: {
     ...(input.promptBridgeMetadata
       ? {
           prompt_bridge_metadata: {
+            invocation_id: input.invocationId!.trim(),
             target_ref: input.promptBridgeMetadata.targetRef,
             credential_slot: input.promptBridgeMetadata.credentialSlot,
             fallback_used: input.promptBridgeMetadata.fallbackUsed,
             attempt_count: input.promptBridgeMetadata.attemptCount,
+            ...(input.promptBridgeMetadata.attemptGeneration !== undefined
+              ? { attempt_generation: input.promptBridgeMetadata.attemptGeneration }
+              : {}),
+            ...(input.promptBridgeMetadata.providerAttemptId
+              ? { provider_attempt_id: input.promptBridgeMetadata.providerAttemptId }
+              : {}),
+            ...(input.promptBridgeMetadata.providerAttemptIndex !== undefined
+              ? { provider_attempt_index: input.promptBridgeMetadata.providerAttemptIndex }
+              : {}),
           },
         }
       : {}),
@@ -327,6 +356,9 @@ export function maybeCreatePluginWorkloadSdkServer(
           credentialSlot: usage.servedTarget.credentialSlot,
           fallbackUsed: usage.fallbackUsed,
           attemptCount: usage.attemptCount,
+          attemptGeneration: usage.attemptGeneration,
+          providerAttemptId: usage.providerAttemptId,
+          providerAttemptIndex: usage.providerAttemptIndex,
         },
         runtimeMode: config.pluginWorkloadSdkRuntimeMode === 'sdk-only' ? 'sdk-only' : 'workflow',
         invocationId: usage.invocationId,

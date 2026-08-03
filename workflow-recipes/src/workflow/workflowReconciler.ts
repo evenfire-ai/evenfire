@@ -48,6 +48,7 @@ import {
   getPodPhase,
   getPodReadiness,
   isRecoverableContainerWaitingReason,
+  waitForPodDeletion,
 } from './crashRecovery'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
@@ -58,7 +59,14 @@ import {
 import type { ModelConfigHandler } from './modelConfigHandler'
 import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPolicyFactory'
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
-import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
+import {
+  type EagerSdkBootstrapProof,
+  PluginWorkloadSdkProvisioner,
+} from './pluginWorkloadSdkProvisioner'
+import type {
+  PluginWorkloadSdkRevocationClient,
+  PluginWorkloadSdkRevocationReceipt,
+} from './pluginWorkloadSdkRevocationClient'
 import {
   type SnippetRunnerSecretAlias,
   WORKFLOW_OUTPUT_CLAIM_LABEL,
@@ -620,6 +628,10 @@ export interface WorkflowReconcileResult {
    * requeue. Propagated up through WRC's ReconcileResult.
    */
   skipStatusPatch?: boolean
+  /** Fresh Control API v2 proof tied to the current eager mcp-host pod. */
+  pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /** Eager host identity is ready, but prompt policy awaits operator action. */
+  pluginWorkloadSdkPolicyPending?: boolean
 }
 
 function mcpHostReadinessMessage(readiness: PodReadiness): string {
@@ -782,6 +794,12 @@ export interface WorkflowReconcilerDeps {
    * mcp-host stays unconfigured until a triggered run injects a model).
    */
   modelConfigHandler?: ModelConfigHandler
+  /**
+   * Recipe-scoped Control API revocation boundary for SDK-only teardown.
+   * Teardown is fail-closed when this client is absent; production always
+   * wires the HTTP implementation and tests provide a deterministic stub.
+   */
+  pluginWorkloadSdkRevocationClient: PluginWorkloadSdkRevocationClient
 }
 
 export class WorkflowReconciler {
@@ -872,8 +890,9 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     runtimeScopeRecipeName = recipeName
   ): Promise<{
-    phase: 'active' | 'deploying' | 'failed' | 'provider_unavailable'
+    phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
+    pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
       return { phase: 'active', message: 'Plugin Workload SDK runtime disabled' }
@@ -901,9 +920,20 @@ export class WorkflowReconciler {
       runtime,
       { mcpHostPhase }
     )
+    const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
       case 'ready':
-        return { phase: 'active', message: 'Plugin Workload SDK mcp-host registered' }
+        return {
+          phase: 'active',
+          message: 'Plugin Workload SDK mcp-host registered',
+          pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        }
+      case 'awaiting_policy':
+        return {
+          phase: 'awaiting_policy',
+          message: `Plugin Workload SDK operator policy pending (${bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'})`,
+          pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        }
       case 'deploying':
         return { phase: 'deploying', message: 'Plugin Workload SDK mcp-host starting' }
       case 'provider_unavailable':
@@ -933,27 +963,44 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
     ]
+    let revocationError: unknown = null
+    let revocationReceipt: PluginWorkloadSdkRevocationReceipt | null = null
+    const revocationClient = this.deps.pluginWorkloadSdkRevocationClient
+    if (!revocationClient) {
+      revocationError = new Error(
+        'Plugin Workload SDK revocation client is not configured; refusing to report teardown complete'
+      )
+    } else {
+      try {
+        revocationReceipt = await revocationClient.revoke(ns, recipeName)
+        if (revocationReceipt.state === 'conflict') {
+          throw new Error(`Plugin Workload SDK revocation conflict for recipe "${recipeName}"`)
+        }
+      } catch (error) {
+        // Continue with the physical boundary even if control-api is briefly
+        // unavailable. The service/network teardown prevents new ingress;
+        // the original error is rethrown after absence is proven so WRC does
+        // not publish `disabled` and the next reconcile retries the fence.
+        revocationError = error
+        this.log.error('Plugin Workload SDK control-plane revocation failed', {
+          recipeName,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    // Close the service and network-policy edges before removing the pod or
+    // token Secrets. This ordering is the revocation boundary: a live pod
+    // cannot keep receiving broker traffic while its credentials are being
+    // deleted, and a failed delete is requeued instead of reported as disabled.
+    await this.teardownDelete(() =>
+      this.deps.coreApi.deleteNamespacedService({
+        name: buildMcpHostServiceName(recipeName),
+        namespace: ns,
+      })
+    )
     await Promise.all([
-      deletePodIfExists(this.deps.coreApi, `${recipeName}-mcp-host`, ns),
-      this.pluginWorkloadSdkProvisioner.deletePluginWorkloadSdkTokenSecret(recipeName),
-      // The runtime JWT Secret is created for eager SDK hosts as well as
-      // workflow hosts.  A capability removal must revoke it with the host;
-      // leaving it behind would allow a deleted workload to replay broker
-      // requests until token expiry.
-      this.safeDelete(() =>
-        this.deps.coreApi.deleteNamespacedSecret({
-          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
-          namespace: ns,
-        })
-      ),
-      this.safeDelete(() =>
-        this.deps.coreApi.deleteNamespacedService({
-          name: buildMcpHostServiceName(recipeName),
-          namespace: ns,
-        })
-      ),
       ...networkPolicyNames.map(name =>
-        this.safeDelete(() =>
+        this.teardownDelete(() =>
           this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
         )
       ),
@@ -962,19 +1009,122 @@ export class WorkflowReconciler {
       // label set so upgrades and dynamic policy names cannot retain a stale
       // isolation lane. The selector is recipe-scoped and only matches WRC-
       // managed policies, never the namespace-wide baseline policies.
-      this.safeDelete(() =>
+      this.teardownDelete(() =>
         this.deleteNetworkPoliciesByLabelSelector(
           ns,
           `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
         )
       ),
-      this.safeDelete(() =>
+      this.teardownDelete(() =>
         this.deleteNetworkPoliciesByLabelSelector(
           this.deps.config.mcpServerNamespace,
           `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
         )
       ),
     ])
+    await this.teardownDelete(() =>
+      this.deps.coreApi.deleteNamespacedPod({
+        name: `${recipeName}-mcp-host`,
+        namespace: ns,
+        propagationPolicy: 'Background',
+      })
+    )
+    await Promise.all([
+      this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedSecret({
+          name: buildPluginWorkloadSdkTokenSecretName(recipeName),
+          namespace: ns,
+        })
+      ),
+      // The runtime JWT Secret is created for eager SDK hosts as well as
+      // workflow hosts. A capability removal must revoke it with the host;
+      // leaving it behind would allow a deleted workload to replay broker
+      // requests until token expiry.
+      this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedSecret({
+          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+          namespace: ns,
+        })
+      ),
+    ])
+    await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames)
+    if (revocationError) throw revocationError
+    if (revocationClient && revocationReceipt?.state === 'revoking') {
+      if (!revocationReceipt.revocationId) {
+        throw new Error(`Plugin Workload SDK revocation receipt for ${recipeName} has no epoch`)
+      }
+      const finalized = await revocationClient.finalize(
+        ns,
+        recipeName,
+        revocationReceipt.revocationId
+      )
+      if (finalized.state !== 'disabled') {
+        throw new Error(
+          `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled`
+        )
+      }
+    }
+  }
+
+  private async assertPluginWorkloadSdkResourcesAbsent(
+    recipeName: string,
+    namespace: string,
+    networkPolicyNames: string[]
+  ): Promise<void> {
+    const podGone = await waitForPodDeletion(
+      this.deps.coreApi,
+      `${recipeName}-mcp-host`,
+      namespace,
+      {
+        timeoutMs: 5_000,
+        pollIntervalMs: 250,
+      }
+    )
+    if (!podGone)
+      throw new Error(`Plugin Workload SDK pod for ${recipeName} still exists after teardown`)
+    const checks: Array<Promise<unknown>> = [
+      this.deps.coreApi.readNamespacedSecret({
+        name: buildPluginWorkloadSdkTokenSecretName(recipeName),
+        namespace,
+      }),
+      this.deps.coreApi.readNamespacedSecret({
+        name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+        namespace,
+      }),
+      this.deps.coreApi.readNamespacedService({
+        name: buildMcpHostServiceName(recipeName),
+        namespace,
+      }),
+      this.deps.coreApi.readNamespacedEndpoints({
+        name: buildMcpHostServiceName(recipeName),
+        namespace,
+      }),
+      ...networkPolicyNames.map(name =>
+        this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+      ),
+      this.deps.networkingApi.listNamespacedNetworkPolicy({
+        namespace,
+        labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+      }),
+      this.deps.networkingApi.listNamespacedNetworkPolicy({
+        namespace: this.deps.config.mcpServerNamespace,
+        labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+      }),
+    ]
+    const results = await Promise.allSettled(checks)
+    const unexpected = results.find(result => {
+      if (result.status !== 'fulfilled') return false
+      const value = result.value as { items?: unknown[] } | undefined
+      return Array.isArray(value?.items) ? value.items.length > 0 : true
+    })
+    if (unexpected) {
+      throw new Error(`Plugin Workload SDK resource for ${recipeName} still exists after teardown`)
+    }
+    const failed = results.find(
+      (result): result is PromiseRejectedResult =>
+        result.status === 'rejected' && getErrorCode(result.reason) !== 404
+    )
+    if (failed) throw failed.reason
   }
 
   async reconcile(
@@ -1174,6 +1324,8 @@ export class WorkflowReconciler {
             runtime,
             { mcpHostPhase }
           )
+          const eagerBootstrapProof =
+            this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
               phase: 'failed',
@@ -1204,10 +1356,26 @@ export class WorkflowReconciler {
               ],
             }
           }
-          const eagerReady = eagerStatus === 'ready'
-          const eagerMessage = eagerReady
-            ? `Plugin Workload SDK mcp-host registered (${classification})`
-            : `Plugin Workload SDK mcp-host starting (${classification})`
+          const eagerPolicyPending = eagerStatus === 'awaiting_policy'
+          const eagerReady =
+            (eagerStatus === 'ready' || eagerPolicyPending) &&
+            (!spec.pluginWorkloadSdk?.promptBridge || eagerBootstrapProof !== undefined)
+          if (
+            eagerStatus === 'ready' &&
+            spec.pluginWorkloadSdk?.promptBridge &&
+            !eagerBootstrapProof
+          ) {
+            return withWorkflowConditions({
+              phase: 'deploying',
+              message: `Plugin Workload SDK bootstrap policy proof pending (${classification})`,
+              clearWorkflowExecution: true,
+            })
+          }
+          const eagerMessage = eagerPolicyPending
+            ? `Plugin Workload SDK operator policy pending (${eagerBootstrapProof?.policyReason ?? eagerBootstrapProof?.policyState ?? 'unknown'}) (${classification})`
+            : eagerReady
+              ? `Plugin Workload SDK mcp-host registered (${classification})`
+              : `Plugin Workload SDK mcp-host starting (${classification})`
           return withWorkflowConditions({
             // While the eager mcp-host is still booting (eagerStatus ===
             // 'deploying'), return 'deploying' — NOT 'active' — so the watcher
@@ -1221,6 +1389,8 @@ export class WorkflowReconciler {
             phase: eagerReady ? 'active' : 'deploying',
             message: eagerMessage,
             clearWorkflowExecution: true,
+            pluginWorkloadSdkBootstrapProof: eagerBootstrapProof,
+            pluginWorkloadSdkPolicyPending: eagerPolicyPending,
           })
         }
       }
@@ -3086,7 +3256,17 @@ export class WorkflowReconciler {
       (list.items ?? [])
         .map(policy => policy.metadata?.name)
         .filter((name): name is string => Boolean(name))
-        .map(name => this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }))
+        .map(async name => {
+          try {
+            await this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
+          } catch (error: unknown) {
+            // A concurrent reconciler or the API server may have removed the
+            // policy between list and delete. That is already the desired
+            // postcondition; every other error must keep the revocation
+            // transaction in progress and trigger a retry.
+            if (getErrorCode(error) !== 404) throw error
+          }
+        })
     )
   }
 
@@ -3990,6 +4170,21 @@ export class WorkflowReconciler {
           error: error instanceof Error ? error.message : String(error),
         })
       }
+    }
+  }
+
+  /**
+   * SDK capability teardown is a revocation boundary, not best-effort
+   * housekeeping. Ignore only an already-absent object; propagate every other
+   * failure so the reconciler keeps the previous capability state and
+   * requeues instead of publishing a false `disabled` result.
+   */
+  private async teardownDelete(deleteFn: () => Promise<unknown>): Promise<void> {
+    try {
+      await deleteFn()
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return
+      throw error
     }
   }
 

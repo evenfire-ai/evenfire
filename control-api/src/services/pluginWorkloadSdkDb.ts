@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
@@ -41,6 +41,7 @@ export const PLUGIN_WORKLOAD_SDK_ERROR_CODES = [
   'payload_too_large',
   'idempotency_conflict',
   'recipe_binding_mismatch',
+  'protocol_mismatch',
 ] as const
 export type PluginWorkloadSdkErrorCode = (typeof PLUGIN_WORKLOAD_SDK_ERROR_CODES)[number]
 
@@ -70,6 +71,28 @@ export const MAX_USER_REF_LENGTH = 256
 /** Max length for a single admin allowlist entry. */
 export const MAX_ALLOWLIST_ENTRY_LENGTH = 256
 export const MAX_ALLOWLIST_ITEMS = 64
+/**
+ * Maximum number of provider targets an operator may persist in one grant.
+ * This is deliberately separate from the execution budget below: a policy may
+ * contain a catalogue larger than a single invocation's ordered suffix.
+ */
+export const MAX_PROMPT_BRIDGE_TARGETS_PER_GRANT = MAX_ALLOWLIST_ITEMS
+/** Hard cap for physical provider attempts in one logical invocation. */
+export const MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS = 4
+/** Default lease is the prompt timeout plus a bounded recovery grace period. */
+export const DEFAULT_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS = 180
+const MIN_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS = 30
+const MAX_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS = 3600
+
+/** One operator-controlled lease value is shared by issuance and stale sweep. */
+export function getPromptBridgeAttemptLeaseSeconds(): number {
+  const raw = Number(process.env.PLUGIN_WORKLOAD_SDK_ATTEMPT_LEASE_SECONDS)
+  if (!Number.isInteger(raw)) return DEFAULT_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS
+  return Math.min(
+    Math.max(raw, MIN_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS),
+    MAX_PROMPT_BRIDGE_ATTEMPT_LEASE_SECONDS
+  )
+}
 /** Idempotency keys are reusable after this window (OQ-5). */
 const IDEMPOTENCY_TTL_HOURS = 24
 
@@ -121,8 +144,8 @@ export interface PluginWorkloadSdkGrant {
   /**
    * Explicit provider bound to a promptBridge grant (R1). NULL for grants
    * written before the provider column existed and for clientNotifications
-   * grants — the control-ui read path falls back to inferring it from the
-   * model list when NULL.
+   * grants. A NULL value is legacy/unreviewed state; neither the API nor the
+   * Control UI may infer a routable provider from a flat model list.
    */
   provider: string | null
   allowedModels: string[]
@@ -135,7 +158,10 @@ export interface PluginWorkloadSdkGrant {
   /** Empty/null means a legacy grant and is deliberately not routable. */
   promptTargets: PluginWorkloadSdkPromptTarget[]
   defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
   policyRevision: number
+  /** Kill-switch epoch. Non-null while a recipe is revoking or disabled. */
+  revocationId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -155,8 +181,13 @@ export interface PluginWorkloadSdkInvocationRecord {
   status: PluginWorkloadSdkInvocationStatus
   quotaConsumed: boolean
   authorizationDecision: string
+  contractVersion: 1 | 2
   promptAuthorization: PluginWorkloadSdkPromptAuthorization | null
+  /** Monotonic physical-attempt generation; increments on failed replay. */
+  attemptGeneration: number
+  leaseExpiresAt: string | null
   createdAt: string
+  updatedAt: string
   completedAt: string | null
 }
 
@@ -256,10 +287,17 @@ function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
     modelPolicies,
     promptTargets: promptTargets(row.prompt_targets),
     defaultTargetRef: row.default_target_ref == null ? null : String(row.default_target_ref),
+    policyState:
+      row.policy_state === 'legacy_unreviewed' ||
+      row.policy_state === 'revoking' ||
+      row.policy_state === 'disabled'
+        ? (row.policy_state as 'legacy_unreviewed' | 'revoking' | 'disabled')
+        : 'active',
     policyRevision:
       typeof row.policy_revision === 'number' && Number.isInteger(row.policy_revision)
         ? row.policy_revision
         : 0,
+    revocationId: row.revocation_id == null ? null : String(row.revocation_id),
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
   }
@@ -280,8 +318,16 @@ function mapInvocationRow(row: Record<string, unknown>): PluginWorkloadSdkInvoca
     status: row.status as PluginWorkloadSdkInvocationStatus,
     quotaConsumed: row.quota_consumed === true,
     authorizationDecision: String(row.authorization_decision),
+    contractVersion: row.contract_version === 1 ? 1 : 2,
     promptAuthorization: promptAuthorization(row.prompt_authorization),
+    attemptGeneration:
+      typeof row.attempt_generation === 'number' && Number.isInteger(row.attempt_generation)
+        ? Math.max(row.attempt_generation, 1)
+        : 1,
+    leaseExpiresAt:
+      row.lease_expires_at == null ? null : new Date(row.lease_expires_at as string).toISOString(),
     createdAt: new Date(row.created_at as string).toISOString(),
+    updatedAt: new Date((row.updated_at ?? row.created_at) as string).toISOString(),
     completedAt:
       row.completed_at === null ? null : new Date(row.completed_at as string).toISOString(),
   }
@@ -352,16 +398,34 @@ export async function upsertGrant(
   operatorSub: string
 ): Promise<PluginWorkloadSdkGrant> {
   return withTransaction(async db => {
-    const resourceRef = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}:${params.capabilityFamily}`
-    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [resourceRef])
+    // All capability families for a recipe share one lock. A family-scoped
+    // lock permits an SDK-only revoke to race an upsert for the other family.
+    const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
     const previous = await db.query(
-      `SELECT allowed_user_refs
+      `SELECT allowed_user_refs, policy_state, revocation_id
          FROM plugin_workload_sdk_grants
         WHERE recipe_namespace = $1 AND recipe_name = $2 AND capability_family = $3
         FOR UPDATE`,
       [params.recipeNamespace, params.recipeName, params.capabilityFamily]
     )
     const previousRow = previous.rows[0] as { allowed_user_refs?: unknown } | undefined
+    const recipeState = await db.query(
+      `SELECT policy_state, revocation_id
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND policy_state IN ('revoking', 'disabled')
+        ORDER BY updated_at DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [params.recipeNamespace, params.recipeName]
+    )
+    if (recipeState.rows.length > 0) {
+      throw new Error(
+        `Plugin Workload SDK policy for ${params.recipeNamespace}/${params.recipeName} is ${String((recipeState.rows[0] as { policy_state: unknown }).policy_state)} and cannot be reactivated`
+      )
+    }
     const previousUserRefs = Array.isArray(previousRow?.allowed_user_refs)
       ? previousRow.allowed_user_refs.map(String)
       : []
@@ -369,7 +433,7 @@ export async function upsertGrant(
       `INSERT INTO plugin_workload_sdk_grants
          (recipe_namespace, recipe_name, capability_family, provider, allowed_models,
          allowed_event_types, allowed_target_refs, allowed_user_refs, allowed_callers,
-          quota_limits, model_policies, prompt_targets, default_target_ref)
+         quota_limits, model_policies, prompt_targets, default_target_ref)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13)
        ON CONFLICT (recipe_namespace, recipe_name, capability_family)
        DO UPDATE SET
@@ -383,6 +447,19 @@ export async function upsertGrant(
          model_policies = EXCLUDED.model_policies,
          prompt_targets = EXCLUDED.prompt_targets,
          default_target_ref = EXCLUDED.default_target_ref,
+         -- A stale upsert must never undo a kill-switch. The recipe-wide
+         -- lock plus the guard above makes this branch defensive for rows
+         -- created by older binaries that did not know revocation_id.
+         policy_state = CASE
+           WHEN plugin_workload_sdk_grants.policy_state IN ('revoking', 'disabled')
+           THEN plugin_workload_sdk_grants.policy_state
+           ELSE 'active'
+         END,
+         revocation_id = CASE
+           WHEN plugin_workload_sdk_grants.policy_state IN ('revoking', 'disabled')
+           THEN plugin_workload_sdk_grants.revocation_id
+           ELSE NULL
+         END,
          policy_revision = plugin_workload_sdk_grants.policy_revision + 1,
          updated_at = now()
        RETURNING *`,
@@ -414,6 +491,7 @@ export async function upsertGrant(
       ])
       for (const row of users.rows) resolvedUsers.add(String((row as { id: string }).id))
     }
+    const resourceRef = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}:${params.capabilityFamily}`
     const changes: ControlApiPermissionChange[] = [
       {
         action: 'grant' as const,
@@ -471,6 +549,335 @@ export async function listGrants(filter?: {
     values
   )
   return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
+ * Read-only migration gate for promptBridge rows written before the ordered
+ * target policy existed. Legacy rows are intentionally never inferred or
+ * rewritten here; operators get only non-secret identifiers, shape flags, and
+ * reasons that must be resolved by an explicit policy upsert.
+ */
+export interface PluginWorkloadSdkLegacyGrantInventoryItem {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export interface PluginWorkloadSdkLegacyGrantInventory {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
+}
+
+export async function getPluginWorkloadSdkLegacyGrantInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  const clauses = ["capability_family = 'promptBridge'"]
+  const values: unknown[] = []
+  if (filter?.recipeNamespace) {
+    values.push(filter.recipeNamespace)
+    clauses.push(`recipe_namespace = $${values.length}`)
+  }
+  if (filter?.recipeName) {
+    values.push(filter.recipeName)
+    clauses.push(`recipe_name = $${values.length}`)
+  }
+  const result = await pool.query(
+    `SELECT id, recipe_namespace, recipe_name, policy_state, policy_revision,
+            provider, prompt_targets, default_target_ref
+       FROM plugin_workload_sdk_grants
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY recipe_namespace, recipe_name`,
+    values
+  )
+
+  const items = (result.rows as Record<string, unknown>[]).flatMap(row => {
+    const rawTargets = Array.isArray(row.prompt_targets) ? row.prompt_targets : []
+    const targets = promptTargets(row.prompt_targets)
+    const policyState = String(row.policy_state ?? '')
+    const policyRevision =
+      typeof row.policy_revision === 'number' && Number.isInteger(row.policy_revision)
+        ? row.policy_revision
+        : Number(row.policy_revision ?? 0)
+    const providerPresent = typeof row.provider === 'string' && row.provider.trim().length > 0
+    const defaultTargetRefPresent =
+      typeof row.default_target_ref === 'string' && row.default_target_ref.trim().length > 0
+    const reasons: string[] = []
+    if (policyState === 'legacy_unreviewed') reasons.push('legacy_policy_state')
+    if (!providerPresent) reasons.push('missing_provider')
+    if (rawTargets.length !== targets.length) reasons.push('invalid_prompt_targets')
+    if (targets.length === 0) reasons.push('empty_prompt_targets')
+    if (!defaultTargetRefPresent) reasons.push('missing_default_target')
+    if (policyRevision < 1) reasons.push('invalid_policy_revision')
+    if (defaultTargetRefPresent && targets[0]?.targetRef !== String(row.default_target_ref)) {
+      reasons.push('default_target_not_first')
+    }
+    const targetRefs = targets.map(target => target.targetRef)
+    if (new Set(targetRefs).size !== targetRefs.length) reasons.push('duplicate_target_refs')
+    if (reasons.length === 0) return []
+    return [
+      {
+        id: String(row.id),
+        recipeNamespace: String(row.recipe_namespace),
+        recipeName: String(row.recipe_name),
+        policyState,
+        policyRevision: Number.isFinite(policyRevision) ? policyRevision : 0,
+        providerPresent,
+        promptTargetsCount: targets.length,
+        defaultTargetRefPresent,
+        reasons,
+      },
+    ]
+  })
+  return {
+    totalPromptBridgeGrants: result.rows.length,
+    legacyPromptBridgeGrants: items.length,
+    activationReady: items.length === 0,
+    items,
+  }
+}
+
+export type PluginWorkloadSdkRevocationState = 'missing' | 'revoking' | 'disabled' | 'conflict'
+
+export interface PluginWorkloadSdkRevocationReceipt {
+  state: PluginWorkloadSdkRevocationState
+  revocationId?: string
+  revoked: number
+  fencedInvocations: number
+  disabled?: number
+}
+
+/**
+ * Fence every SDK capability for a recipe before its runtime resources are
+ * torn down. This is deliberately recipe-scoped and transactional: the
+ * recipe-wide advisory lock is the linearization point shared with upserts,
+ * authorization, JIT issuance, and ticket redemption. A receipt epoch is
+ * returned so only the reconcile that fenced this exact policy can finalize it.
+ */
+export async function revokePluginWorkloadSdkForRecipe(
+  recipeNamespace: string,
+  recipeName: string,
+  operatorSub: string
+): Promise<PluginWorkloadSdkRevocationReceipt> {
+  return withTransaction(async db => {
+    const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    const grants = await db.query(
+      `SELECT id, capability_family, policy_state, revocation_id
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        FOR UPDATE`,
+      [recipeNamespace, recipeName]
+    )
+    if (grants.rows.length === 0) {
+      return { state: 'missing', revoked: 0, fencedInvocations: 0 }
+    }
+
+    const revocationIds = [
+      ...new Set(
+        grants.rows
+          .map(row => (row as { revocation_id?: unknown }).revocation_id)
+          .filter((value): value is string => typeof value === 'string' && value.length > 0)
+          .map(String)
+      ),
+    ]
+    if (revocationIds.length > 1) {
+      return {
+        state: 'conflict',
+        revoked: 0,
+        fencedInvocations: 0,
+      }
+    }
+    const currentRevocationId = revocationIds[0] ?? randomUUID()
+    const hasActivePolicy = grants.rows.some(row =>
+      ['active', 'legacy_unreviewed'].includes(
+        String((row as { policy_state: unknown }).policy_state)
+      )
+    )
+    const hasRevokingPolicy = grants.rows.some(
+      row => String((row as { policy_state: unknown }).policy_state) === 'revoking'
+    )
+
+    const revoked = await db.query(
+      `UPDATE plugin_workload_sdk_grants
+          SET policy_state = 'revoking',
+              policy_revision = policy_revision + 1,
+              revocation_id = COALESCE(revocation_id, $3::uuid),
+              updated_at = now()
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND policy_state IN ('active', 'legacy_unreviewed')`,
+      [recipeNamespace, recipeName, currentRevocationId]
+    )
+
+    const fenced = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+          SET status = 'failed',
+              authorization_decision = 'revoked',
+              updated_at = now(),
+              lease_expires_at = NULL,
+              completed_at = COALESCE(completed_at, now())
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND status = 'in_progress'
+        RETURNING id`,
+      [recipeNamespace, recipeName]
+    )
+    await db.query(
+      `UPDATE plugin_workload_sdk_invocation_attempts
+          SET status = 'failed',
+              lease_expires_at = NULL,
+              completed_at = COALESCE(completed_at, now())
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND status = 'in_progress'`,
+      [recipeNamespace, recipeName]
+    )
+    await db.query(
+      `UPDATE plugin_workload_sdk_provider_attempts
+          SET status = 'failed',
+              lease_expires_at = NULL,
+              completed_at = COALESCE(completed_at, now())
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND status IN ('reserved', 'in_progress')`,
+      [recipeNamespace, recipeName]
+    )
+
+    const changes: ControlApiPermissionChange[] = grants.rows
+      .filter(row =>
+        ['active', 'legacy_unreviewed'].includes(
+          String((row as { policy_state: unknown }).policy_state)
+        )
+      )
+      .map(row => ({
+        action: 'revoke' as const,
+        resourceClass: 'plugin_workload_sdk_access',
+        resourceRef: `plugin_workload_sdk:${recipeNamespace}/${recipeName}:${String((row as { capability_family: unknown }).capability_family)}`,
+        subject: {
+          kind: 'service' as const,
+          id: String((row as { capability_family: unknown }).capability_family),
+        },
+        namespace: recipeNamespace,
+        sourceAuditRef: `plugin_workload_sdk_grants:${String((row as { id: unknown }).id)}`,
+        status: 'revoking',
+      }))
+    if (changes.length > 0) {
+      await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    }
+    return {
+      state:
+        hasActivePolicy || hasRevokingPolicy || (revoked.rowCount ?? 0) > 0
+          ? 'revoking'
+          : 'disabled',
+      revocationId: currentRevocationId,
+      revoked: revoked.rowCount ?? 0,
+      fencedInvocations: fenced.rowCount ?? 0,
+    }
+  })
+}
+
+/**
+ * Complete a previously fenced revocation only after the caller has proved
+ * that the recipe-bound SDK endpoint and credentials are gone. The state
+ * transition is intentionally impossible from `active`, preventing callers
+ * from declaring a kill-switch success without the teardown boundary.
+ */
+export async function finalizePluginWorkloadSdkRevocation(
+  recipeNamespace: string,
+  recipeName: string,
+  expectedRevocationId: string,
+  operatorSub: string
+): Promise<PluginWorkloadSdkRevocationReceipt> {
+  return withTransaction(async db => {
+    const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    const grants = await db.query(
+      `SELECT id, capability_family, policy_state, revocation_id
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        FOR UPDATE`,
+      [recipeNamespace, recipeName]
+    )
+    if (grants.rows.length === 0) {
+      return { state: 'missing', revoked: 0, fencedInvocations: 0, disabled: 0 }
+    }
+    const hasActive = grants.rows.some(row =>
+      ['active', 'legacy_unreviewed'].includes(
+        String((row as { policy_state: unknown }).policy_state)
+      )
+    )
+    const hasWrongEpoch = grants.rows.some(row => {
+      const state = String((row as { policy_state: unknown }).policy_state)
+      return (
+        (state === 'revoking' || state === 'disabled') &&
+        String((row as { revocation_id?: unknown }).revocation_id ?? '') !== expectedRevocationId
+      )
+    })
+    if (hasActive || hasWrongEpoch) {
+      return {
+        state: 'conflict',
+        revocationId: expectedRevocationId,
+        revoked: 0,
+        fencedInvocations: 0,
+      }
+    }
+    const result = await db.query(
+      `UPDATE plugin_workload_sdk_grants
+          SET policy_state = 'disabled',
+              updated_at = now()
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND policy_state = 'revoking'
+          AND revocation_id = $3::uuid
+        RETURNING id, capability_family`,
+      [recipeNamespace, recipeName, expectedRevocationId]
+    )
+    const disabledRows =
+      result.rows.length > 0
+        ? result.rows
+        : grants.rows.filter(
+            row => String((row as { policy_state: unknown }).policy_state) === 'disabled'
+          )
+    if (disabledRows.length === 0) {
+      return {
+        state: 'conflict',
+        revocationId: expectedRevocationId,
+        revoked: 0,
+        fencedInvocations: 0,
+      }
+    }
+    const changes: ControlApiPermissionChange[] = result.rows.map(row => ({
+      action: 'revoke' as const,
+      resourceClass: 'plugin_workload_sdk_access',
+      resourceRef: `plugin_workload_sdk:${recipeNamespace}/${recipeName}:${String((row as { capability_family: unknown }).capability_family)}`,
+      subject: {
+        kind: 'service' as const,
+        id: String((row as { capability_family: unknown }).capability_family),
+      },
+      namespace: recipeNamespace,
+      sourceAuditRef: `plugin_workload_sdk_grants:${String((row as { id: unknown }).id)}`,
+      status: 'disabled',
+    }))
+    if (changes.length > 0) {
+      await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    }
+    return {
+      state: 'disabled',
+      revocationId: expectedRevocationId,
+      revoked: 0,
+      fencedInvocations: 0,
+      disabled: result.rowCount ?? 0,
+    }
+  })
 }
 
 /**
@@ -575,6 +982,281 @@ export async function resolveRecipientProfiles(
 
 // ─── Invocations ─────────────────────────────────────────────────────────
 
+/**
+ * Immutable identity for one physical provider attempt. The parent invocation
+ * is the idempotent logical request; this row is the receipt/fencing record
+ * used by tickets, usage ingestion, and late-result rejection.
+ */
+export interface PluginWorkloadSdkAttemptReceipt {
+  invocationId: string
+  recipeNamespace: string
+  recipeName: string
+  attemptGeneration: number
+  method: PluginWorkloadSdkFamily
+  targetRefs: string[]
+  policyRevision: number | null
+  policyHash: string | null
+  status: PluginWorkloadSdkInvocationStatus
+  startedAt: string
+  leaseExpiresAt: string | null
+  completedAt: string | null
+}
+
+function mapAttemptReceiptRow(row: Record<string, unknown>): PluginWorkloadSdkAttemptReceipt {
+  return {
+    invocationId: String(row.invocation_id),
+    recipeNamespace: String(row.recipe_namespace),
+    recipeName: String(row.recipe_name),
+    attemptGeneration: Number(row.attempt_generation),
+    method: row.method as PluginWorkloadSdkFamily,
+    targetRefs: stringArray(row.target_refs),
+    policyRevision: row.policy_revision == null ? null : Number(row.policy_revision),
+    policyHash: row.policy_hash == null ? null : String(row.policy_hash),
+    status: row.status as PluginWorkloadSdkInvocationStatus,
+    startedAt: new Date(row.started_at as string).toISOString(),
+    leaseExpiresAt:
+      row.lease_expires_at == null ? null : new Date(row.lease_expires_at as string).toISOString(),
+    completedAt:
+      row.completed_at == null ? null : new Date(row.completed_at as string).toISOString(),
+  }
+}
+
+export async function getPluginWorkloadSdkAttemptReceipt(
+  invocationId: string,
+  attemptGeneration: number,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkAttemptReceipt | null> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_invocation_attempts
+      WHERE invocation_id = $1 AND attempt_generation = $2`,
+    [invocationId, attemptGeneration]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapAttemptReceiptRow(row) : null
+}
+
+export type PluginWorkloadSdkProviderAttemptStatus =
+  | 'reserved'
+  | 'in_progress'
+  | 'complete'
+  | 'failed'
+  | 'provider_unavailable'
+
+export interface PluginWorkloadSdkProviderAttempt {
+  id: string
+  invocationId: string
+  recipeNamespace: string
+  recipeName: string
+  attemptGeneration: number
+  attemptIndex: number
+  targetRef: string
+  provider: string
+  model: string
+  credentialSlot: string
+  status: PluginWorkloadSdkProviderAttemptStatus
+  credentialJti: string | null
+  startedAt: string
+  leaseExpiresAt: string | null
+  completedAt: string | null
+  usageRequestId: string | null
+}
+
+function mapProviderAttemptRow(row: Record<string, unknown>): PluginWorkloadSdkProviderAttempt {
+  return {
+    id: String(row.id),
+    invocationId: String(row.invocation_id),
+    recipeNamespace: String(row.recipe_namespace),
+    recipeName: String(row.recipe_name),
+    attemptGeneration: Number(row.attempt_generation),
+    attemptIndex: Number(row.attempt_index),
+    targetRef: String(row.target_ref),
+    provider: String(row.provider),
+    model: String(row.model),
+    credentialSlot: String(row.credential_slot),
+    status: row.status as PluginWorkloadSdkProviderAttemptStatus,
+    credentialJti: row.credential_jti == null ? null : String(row.credential_jti),
+    startedAt: new Date(row.started_at as string).toISOString(),
+    leaseExpiresAt:
+      row.lease_expires_at == null ? null : new Date(row.lease_expires_at as string).toISOString(),
+    completedAt:
+      row.completed_at == null ? null : new Date(row.completed_at as string).toISOString(),
+    usageRequestId: row.usage_request_id == null ? null : String(row.usage_request_id),
+  }
+}
+
+/** Reserve one physical target before issuing a JIT credential ticket. */
+export async function reservePluginWorkloadSdkProviderAttempt(input: {
+  invocationId: string
+  recipeNamespace: string
+  recipeName: string
+  attemptGeneration: number
+  target: PluginWorkloadSdkPromptTarget
+}): Promise<PluginWorkloadSdkProviderAttempt | null> {
+  return withTransaction(async db => {
+    // Revoke and every capability-creation path use this same recipe lock.
+    // Acquire it before the invocation row lock to keep one global order and
+    // avoid a revoke↔attempt deadlock.
+    const recipeLock = `plugin_workload_sdk:${input.recipeNamespace}/${input.recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    const invocationResult = await db.query(
+      `SELECT id, method, status, attempt_generation, lease_expires_at, prompt_authorization
+         FROM plugin_workload_sdk_invocations
+        WHERE id = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        FOR UPDATE`,
+      [input.invocationId, input.recipeNamespace, input.recipeName]
+    )
+    const invocation = invocationResult.rows[0] as Record<string, unknown> | undefined
+    const authorization = promptAuthorization(invocation?.prompt_authorization)
+    if (
+      !invocation ||
+      invocation.method !== 'promptBridge' ||
+      invocation.status !== 'in_progress' ||
+      Number(invocation.attempt_generation) !== input.attemptGeneration ||
+      !invocation.lease_expires_at ||
+      new Date(invocation.lease_expires_at as string).getTime() <= Date.now() ||
+      !authorization?.authorizedTargetRefs.includes(input.target.targetRef)
+    ) {
+      return null
+    }
+    const grantResult = await db.query(
+      `SELECT policy_state, policy_revision, prompt_targets, default_target_ref
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND capability_family = 'promptBridge'
+        FOR UPDATE`,
+      [input.recipeNamespace, input.recipeName]
+    )
+    const grant = grantResult.rows[0] as Record<string, unknown> | undefined
+    const currentTargets = promptTargets(grant?.prompt_targets)
+    const currentRevision = Number(grant?.policy_revision)
+    const currentHash = hashPromptTargetPolicy({
+      policyRevision: currentRevision,
+      defaultTargetRef: grant?.default_target_ref == null ? null : String(grant.default_target_ref),
+      promptTargets: currentTargets,
+    })
+    const currentTarget = currentTargets.find(target => target.targetRef === input.target.targetRef)
+    if (
+      !grant ||
+      grant.policy_state !== 'active' ||
+      currentRevision !== authorization?.policyRevision ||
+      currentHash !== authorization?.policyHash ||
+      !currentTarget ||
+      currentTarget.provider !== input.target.provider ||
+      currentTarget.model !== input.target.model ||
+      currentTarget.credentialSlot !== input.target.credentialSlot
+    ) {
+      return null
+    }
+    const count = await db.query(
+      `SELECT COUNT(*)::integer AS count
+         FROM plugin_workload_sdk_provider_attempts
+        WHERE invocation_id = $1 AND attempt_generation = $2`,
+      [input.invocationId, input.attemptGeneration]
+    )
+    const attemptIndex = Number((count.rows[0] as { count?: unknown } | undefined)?.count ?? 0) + 1
+    if (attemptIndex > MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS) return null
+    const result = await db.query(
+      `INSERT INTO plugin_workload_sdk_provider_attempts
+         (invocation_id, recipe_namespace, recipe_name, attempt_generation, attempt_index,
+          target_ref, provider, model, credential_slot, status, lease_expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10)
+       RETURNING *`,
+      [
+        input.invocationId,
+        input.recipeNamespace,
+        input.recipeName,
+        input.attemptGeneration,
+        attemptIndex,
+        input.target.targetRef,
+        input.target.provider,
+        input.target.model,
+        input.target.credentialSlot,
+        invocation.lease_expires_at,
+      ]
+    )
+    const row = result.rows[0] as Record<string, unknown> | undefined
+    return row ? mapProviderAttemptRow(row) : null
+  })
+}
+
+export async function getPluginWorkloadSdkProviderAttempt(
+  id: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkProviderAttempt | null> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_provider_attempts WHERE id = $1`,
+    [id]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapProviderAttemptRow(row) : null
+}
+
+export async function markPluginWorkloadSdkProviderAttemptStatus(input: {
+  id: string
+  invocationId: string
+  recipeNamespace: string
+  recipeName: string
+  attemptGeneration: number
+  status: Exclude<PluginWorkloadSdkProviderAttemptStatus, 'reserved' | 'in_progress'>
+}): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE plugin_workload_sdk_provider_attempts
+        SET status = $6,
+            completed_at = now(),
+            lease_expires_at = NULL
+      WHERE id = $1
+        AND invocation_id = $2
+        AND recipe_namespace = $3
+        AND recipe_name = $4
+        AND attempt_generation = $5
+        AND status IN ('reserved', 'in_progress')
+        AND EXISTS (
+          SELECT 1
+            FROM plugin_workload_sdk_invocations inv
+           WHERE inv.id = $2
+             AND inv.status = 'in_progress'
+             AND inv.attempt_generation = $5
+             AND inv.lease_expires_at > now()
+        )`,
+    [
+      input.id,
+      input.invocationId,
+      input.recipeNamespace,
+      input.recipeName,
+      input.attemptGeneration,
+      input.status,
+    ]
+  )
+  return (result.rowCount ?? 0) === 1
+}
+
+async function insertAttemptReceipt(
+  db: DbClient,
+  invocation: PluginWorkloadSdkInvocationRecord
+): Promise<void> {
+  const authorization = invocation.promptAuthorization
+  await db.query(
+    `INSERT INTO plugin_workload_sdk_invocation_attempts
+       (invocation_id, recipe_namespace, recipe_name, attempt_generation, method, target_refs, policy_revision,
+        policy_hash, status, lease_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+     ON CONFLICT (invocation_id, attempt_generation) DO NOTHING`,
+    [
+      invocation.id,
+      invocation.recipeNamespace,
+      invocation.recipeName,
+      invocation.attemptGeneration,
+      invocation.method,
+      JSON.stringify(authorization?.authorizedTargetRefs ?? []),
+      authorization?.policyRevision ?? null,
+      authorization?.policyHash ?? null,
+      invocation.status,
+      invocation.leaseExpiresAt,
+    ]
+  )
+}
+
 export interface InsertInvocationParams {
   recipeNamespace: string
   recipeName: string
@@ -588,6 +1270,14 @@ export interface InsertInvocationParams {
   status: PluginWorkloadSdkInvocationStatus
   authorizationDecision: string
   promptAuthorization?: PluginWorkloadSdkPromptAuthorization
+  contractVersion?: 1 | 2
+  /** Lease for the first physical attempt; terminal transitions clear it. */
+  attemptLeaseSeconds?: number
+  /**
+   * States that may create/replay an invocation. The check runs under the
+   * recipe-wide advisory lock so revoke and authorization have one ordering.
+   */
+  requiredGrantStates?: readonly ('active' | 'legacy_unreviewed')[]
 }
 
 export type InsertInvocationResult =
@@ -599,6 +1289,7 @@ export type InsertInvocationResult =
   // — so the caller maps it to a deterministic idempotency_conflict (409-style)
   // deny instead of a 500. The caller can safely retry with a fresh key.
   | { kind: 'race_unresolved' }
+  | { kind: 'policy_revoked' }
 
 /**
  * Insert an invocation with idempotency semantics: same key + same payload
@@ -608,49 +1299,76 @@ export type InsertInvocationResult =
 export async function insertInvocation(
   params: InsertInvocationParams
 ): Promise<InsertInvocationResult> {
-  const inserted = await pool.query(
-    `INSERT INTO plugin_workload_sdk_invocations
+  return withTransaction(async db => {
+    const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    if (params.requiredGrantStates) {
+      const grant = await db.query(
+        `SELECT policy_state
+           FROM plugin_workload_sdk_grants
+          WHERE recipe_namespace = $1
+            AND recipe_name = $2
+            AND capability_family = $3
+          FOR UPDATE`,
+        [params.recipeNamespace, params.recipeName, params.method]
+      )
+      const state = String(
+        (grant.rows[0] as { policy_state?: unknown } | undefined)?.policy_state ?? ''
+      )
+      if (!params.requiredGrantStates.includes(state as 'active' | 'legacy_unreviewed')) {
+        return { kind: 'policy_revoked' }
+      }
+    }
+    const inserted = await db.query(
+      `INSERT INTO plugin_workload_sdk_invocations
        (recipe_namespace, recipe_name, caller_ref, correlation_id, method, detail, purpose,
-        idempotency_key_hash, payload_hash, status, authorization_decision, prompt_authorization)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        idempotency_key_hash, payload_hash, status, authorization_decision, prompt_authorization,
+        contract_version, attempt_generation, lease_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1,
+        now() + interval '1 second' * $14)
      ON CONFLICT (recipe_namespace, recipe_name, method, idempotency_key_hash) DO NOTHING
      RETURNING *`,
-    [
-      params.recipeNamespace,
-      params.recipeName,
-      params.callerRef,
-      params.correlationId ?? null,
-      params.method,
-      params.detail,
-      params.purpose ?? null,
-      params.idempotencyKeyHash,
-      params.payloadHash,
-      params.status,
-      params.authorizationDecision,
-      params.promptAuthorization ? JSON.stringify(params.promptAuthorization) : null,
-    ]
-  )
-  const insertedRow = inserted.rows[0] as Record<string, unknown> | undefined
-  if (insertedRow) {
-    return { kind: 'inserted', invocation: mapInvocationRow(insertedRow) }
-  }
+      [
+        params.recipeNamespace,
+        params.recipeName,
+        params.callerRef,
+        params.correlationId ?? null,
+        params.method,
+        params.detail,
+        params.purpose ?? null,
+        params.idempotencyKeyHash,
+        params.payloadHash,
+        params.status,
+        params.authorizationDecision,
+        params.promptAuthorization ? JSON.stringify(params.promptAuthorization) : null,
+        params.contractVersion ?? 2,
+        params.attemptLeaseSeconds ?? getPromptBridgeAttemptLeaseSeconds(),
+      ]
+    )
+    const insertedRow = inserted.rows[0] as Record<string, unknown> | undefined
+    if (insertedRow) {
+      const invocation = mapInvocationRow(insertedRow)
+      await insertAttemptReceipt(db, invocation)
+      return { kind: 'inserted', invocation }
+    }
 
-  const existing = await pool.query(
-    `SELECT * FROM plugin_workload_sdk_invocations
+    const existing = await db.query(
+      `SELECT * FROM plugin_workload_sdk_invocations
      WHERE recipe_namespace = $1 AND recipe_name = $2 AND method = $3 AND idempotency_key_hash = $4`,
-    [params.recipeNamespace, params.recipeName, params.method, params.idempotencyKeyHash]
-  )
-  const existingRow = existing.rows[0] as Record<string, unknown> | undefined
-  if (!existingRow) {
-    // Lost the race AND the winner vanished (pruned between statements) —
-    // surface a structured signal so the caller returns a deterministic
-    // idempotency_conflict (NOT a 500) and the workload retries with a fresh key.
-    return { kind: 'race_unresolved' }
-  }
-  const invocation = mapInvocationRow(existingRow)
-  return invocation.payloadHash === params.payloadHash
-    ? { kind: 'replay', invocation }
-    : { kind: 'conflict', invocation }
+      [params.recipeNamespace, params.recipeName, params.method, params.idempotencyKeyHash]
+    )
+    const existingRow = existing.rows[0] as Record<string, unknown> | undefined
+    if (!existingRow) {
+      // Lost the race AND the winner vanished (pruned between statements) —
+      // surface a structured signal so the caller returns a deterministic
+      // idempotency_conflict (NOT a 500) and the workload retries with a fresh key.
+      return { kind: 'race_unresolved' }
+    }
+    const invocation = mapInvocationRow(existingRow)
+    return invocation.payloadHash === params.payloadHash
+      ? { kind: 'replay', invocation }
+      : { kind: 'conflict', invocation }
+  })
 }
 
 export async function getInvocationById(
@@ -668,28 +1386,116 @@ export async function registerPluginWorkloadSdkCredentialTicketJti(input: {
   recipeName: string
   invocationId: string
   targetRef: string
+  attemptGeneration: number
+  providerAttemptId: string
   expiresAt: Date
 }): Promise<boolean> {
-  // Opportunistic cleanup bounds the one-shot registry without retaining any
-  // credentials or ticket bodies.
-  await pool.query(
-    `DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE expires_at <= now()`
-  )
-  const result = await pool.query(
-    `INSERT INTO plugin_workload_sdk_credential_ticket_jtis
-       (jti, recipe_namespace, recipe_name, invocation_id, target_ref, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (jti) DO NOTHING`,
-    [
+  return withTransaction(async db => {
+    const recipeLock = `plugin_workload_sdk:${input.recipeNamespace}/${input.recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    const grant = await db.query(
+      `SELECT policy_state
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND capability_family = 'promptBridge'
+        FOR UPDATE`,
+      [input.recipeNamespace, input.recipeName]
+    )
+    if (
+      String((grant.rows[0] as { policy_state?: unknown } | undefined)?.policy_state ?? '') !==
+      'active'
+    ) {
+      return false
+    }
+    const invocation = await db.query(
+      `SELECT id, status, attempt_generation, lease_expires_at
+         FROM plugin_workload_sdk_invocations
+        WHERE id = $1
+          AND recipe_namespace = $2
+          AND recipe_name = $3
+        FOR UPDATE`,
+      [input.invocationId, input.recipeNamespace, input.recipeName]
+    )
+    const invocationRow = invocation.rows[0] as Record<string, unknown> | undefined
+    if (
+      !invocationRow ||
+      invocationRow.status !== 'in_progress' ||
+      Number(invocationRow.attempt_generation) !== input.attemptGeneration ||
+      !invocationRow.lease_expires_at ||
+      new Date(invocationRow.lease_expires_at as string).getTime() <= Date.now()
+    ) {
+      return false
+    }
+    const providerAttempt = await db.query(
+      `SELECT id
+         FROM plugin_workload_sdk_provider_attempts
+        WHERE id = $1
+          AND invocation_id = $2
+          AND recipe_namespace = $3
+          AND recipe_name = $4
+          AND attempt_generation = $5
+          AND target_ref = $6
+          AND status = 'reserved'
+        FOR UPDATE`,
+      [
+        input.providerAttemptId,
+        input.invocationId,
+        input.recipeNamespace,
+        input.recipeName,
+        input.attemptGeneration,
+        input.targetRef,
+      ]
+    )
+    if (providerAttempt.rows.length !== 1) return false
+    // Opportunistic cleanup bounds the one-shot registry without retaining any
+    // credentials or ticket bodies.
+    await db.query(
+      `DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE expires_at <= now()`
+    )
+    const result = await db.query(
+      `INSERT INTO plugin_workload_sdk_credential_ticket_jtis
+         (jti, recipe_namespace, recipe_name, invocation_id, target_ref, attempt_generation,
+          provider_attempt_id, expires_at)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+        WHERE EXISTS (
+          SELECT 1 FROM plugin_workload_sdk_provider_attempts
+           WHERE id = $7
+             AND invocation_id = $4
+             AND recipe_namespace = $2
+             AND recipe_name = $3
+             AND attempt_generation = $6
+             AND target_ref = $5
+             AND status = 'reserved'
+        )
+       ON CONFLICT (jti) DO NOTHING`,
+      [
+        input.jti,
+        input.recipeNamespace,
+        input.recipeName,
+        input.invocationId,
+        input.targetRef,
+        input.attemptGeneration,
+        input.providerAttemptId,
+        input.expiresAt,
+      ]
+    )
+    if ((result.rowCount ?? 0) !== 1) return false
+    const promoted = await db.query(
+      `UPDATE plugin_workload_sdk_provider_attempts
+          SET credential_jti = $2, status = 'in_progress'
+        WHERE id = $1 AND status = 'reserved'`,
+      [input.providerAttemptId, input.jti]
+    )
+    if ((promoted.rowCount ?? 0) === 1) return true
+    // The JTI insert and the reservation promotion are one state transition.
+    // Remove the orphaned registry row before committing a false result so a
+    // race cannot leave a redeemable ticket with no physical attempt owner.
+    await db.query(`DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE jti = $1`, [
       input.jti,
-      input.recipeNamespace,
-      input.recipeName,
-      input.invocationId,
-      input.targetRef,
-      input.expiresAt,
-    ]
-  )
-  return (result.rowCount ?? 0) === 1
+    ])
+    return false
+  })
 }
 
 /** Atomically consumes a ticket identity after all binding/policy checks pass. */
@@ -699,20 +1505,84 @@ export async function redeemPluginWorkloadSdkCredentialTicketJti(input: {
   recipeName: string
   invocationId: string
   targetRef: string
+  attemptGeneration: number
+  providerAttemptId: string
 }): Promise<boolean> {
-  const result = await pool.query(
-    `UPDATE plugin_workload_sdk_credential_ticket_jtis
-     SET redeemed_at = now()
-     WHERE jti = $1
-       AND recipe_namespace = $2
-       AND recipe_name = $3
-       AND invocation_id = $4
-       AND target_ref = $5
-       AND redeemed_at IS NULL
-       AND expires_at > now()`,
-    [input.jti, input.recipeNamespace, input.recipeName, input.invocationId, input.targetRef]
-  )
-  return (result.rowCount ?? 0) === 1
+  return withTransaction(async db => {
+    const recipeLock = `plugin_workload_sdk:${input.recipeNamespace}/${input.recipeName}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+    const grant = await db.query(
+      `SELECT policy_state
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1
+          AND recipe_name = $2
+          AND capability_family = 'promptBridge'
+        FOR UPDATE`,
+      [input.recipeNamespace, input.recipeName]
+    )
+    if (
+      String((grant.rows[0] as { policy_state?: unknown } | undefined)?.policy_state ?? '') !==
+      'active'
+    ) {
+      return false
+    }
+    const result = await db.query(
+      `UPDATE plugin_workload_sdk_credential_ticket_jtis AS ticket
+          SET redeemed_at = now()
+        WHERE ticket.jti = $1
+          AND ticket.recipe_namespace = $2
+          AND ticket.recipe_name = $3
+          AND ticket.invocation_id = $4
+          AND ticket.target_ref = $5
+          AND ticket.attempt_generation = $6
+          AND ticket.provider_attempt_id = $7
+          AND ticket.redeemed_at IS NULL
+          AND ticket.expires_at > now()
+          AND EXISTS (
+            SELECT 1
+              FROM plugin_workload_sdk_invocations invocation
+             WHERE invocation.id = ticket.invocation_id
+               AND invocation.recipe_namespace = ticket.recipe_namespace
+               AND invocation.recipe_name = ticket.recipe_name
+               AND invocation.method = 'promptBridge'
+               AND invocation.status = 'in_progress'
+               AND invocation.attempt_generation = ticket.attempt_generation
+               AND invocation.lease_expires_at > now()
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM plugin_workload_sdk_invocation_attempts receipt
+             WHERE receipt.invocation_id = ticket.invocation_id
+               AND receipt.recipe_namespace = ticket.recipe_namespace
+               AND receipt.recipe_name = ticket.recipe_name
+               AND receipt.attempt_generation = ticket.attempt_generation
+               AND receipt.method = 'promptBridge'
+               AND receipt.status = 'in_progress'
+               AND receipt.lease_expires_at > now()
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM plugin_workload_sdk_provider_attempts attempt
+             WHERE attempt.id = ticket.provider_attempt_id
+               AND attempt.invocation_id = ticket.invocation_id
+               AND attempt.recipe_namespace = ticket.recipe_namespace
+               AND attempt.recipe_name = ticket.recipe_name
+               AND attempt.attempt_generation = ticket.attempt_generation
+               AND attempt.target_ref = ticket.target_ref
+               AND attempt.status = 'in_progress'
+          )`,
+      [
+        input.jti,
+        input.recipeNamespace,
+        input.recipeName,
+        input.invocationId,
+        input.targetRef,
+        input.attemptGeneration,
+        input.providerAttemptId,
+      ]
+    )
+    return (result.rowCount ?? 0) === 1
+  })
 }
 
 export async function updateInvocationStatus(
@@ -722,6 +1592,8 @@ export async function updateInvocationStatus(
     completed?: boolean
     recipeNamespace?: string
     recipeName?: string
+    expectedAttemptGeneration?: number
+    leaseSeconds?: number
     /**
      * Optimistic-concurrency guard: when set, the UPDATE only applies if the
      * row is currently in this status. Used to transition accepted → delivered
@@ -730,7 +1602,7 @@ export async function updateInvocationStatus(
     expectedCurrentStatus?: PluginWorkloadSdkInvocationStatus
   } = {}
 ): Promise<boolean> {
-  const values: unknown[] = [id, status, opts.completed ?? false]
+  const values: unknown[] = [id, status, opts.completed ?? false, opts.leaseSeconds ?? 0]
   let bindingClause = ''
   if (opts.recipeNamespace !== undefined && opts.recipeName !== undefined) {
     values.push(opts.recipeNamespace, opts.recipeName)
@@ -741,28 +1613,121 @@ export async function updateInvocationStatus(
     values.push(opts.expectedCurrentStatus)
     statusGuardClause = ` AND status = $${values.length}`
   }
-  const result = await pool.query(
-    `UPDATE plugin_workload_sdk_invocations
-     SET status = $2,
-         completed_at = CASE WHEN $3 THEN now() ELSE NULL END
-     WHERE id = $1${bindingClause}${statusGuardClause}`,
-    values
-  )
-  return (result.rowCount ?? 0) > 0
+  let generationGuardClause = ''
+  if (opts.expectedAttemptGeneration !== undefined) {
+    values.push(opts.expectedAttemptGeneration)
+    generationGuardClause = ` AND attempt_generation = $${values.length}`
+  }
+  return withTransaction(async db => {
+    const result = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+       SET status = $2,
+           updated_at = now(),
+           lease_expires_at = CASE
+             WHEN $2 = 'in_progress' AND $4 > 0
+               THEN now() + interval '1 second' * $4
+             ELSE NULL
+           END,
+           completed_at = CASE WHEN $3 THEN now() ELSE NULL END
+       WHERE id = $1${bindingClause}${statusGuardClause}${generationGuardClause}`,
+      values
+    )
+    if ((result.rowCount ?? 0) === 0) return false
+    const generation =
+      opts.expectedAttemptGeneration ??
+      Number(
+        (
+          (
+            await db.query(
+              `SELECT attempt_generation FROM plugin_workload_sdk_invocations WHERE id = $1`,
+              [id]
+            )
+          ).rows[0] as { attempt_generation?: unknown } | undefined
+        )?.attempt_generation ?? 1
+      )
+    await db.query(
+      `UPDATE plugin_workload_sdk_invocation_attempts
+          SET status = $3,
+              lease_expires_at = CASE
+                WHEN $3 = 'in_progress' AND $4 > 0
+                  THEN now() + interval '1 second' * $4
+                ELSE NULL
+              END,
+              completed_at = CASE WHEN $2 THEN now() ELSE NULL END
+        WHERE invocation_id = $1 AND attempt_generation = $5`,
+      [id, opts.completed ?? false, status, opts.leaseSeconds ?? 0, generation]
+    )
+    return true
+  })
+}
+
+/**
+ * Atomically claims the next physical attempt for a failed invocation. The
+ * generation is the fencing token: every ticket, usage receipt, and terminal
+ * status update must carry it, so a late result from an earlier attempt cannot
+ * close a newer retry (ABA protection).
+ */
+export async function reviveFailedInvocation(input: {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  leaseSeconds: number
+}): Promise<number | null> {
+  return withTransaction(async db => {
+    const result = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+          SET status = 'in_progress',
+              attempt_generation = attempt_generation + 1,
+              updated_at = now(),
+              lease_expires_at = now() + interval '1 second' * $4,
+              completed_at = NULL
+        WHERE id = $1
+          AND recipe_namespace = $2
+          AND recipe_name = $3
+          AND status = 'failed'
+        RETURNING *`,
+      [input.id, input.recipeNamespace, input.recipeName, input.leaseSeconds]
+    )
+    const row = result.rows[0] as Record<string, unknown> | undefined
+    if (!row) return null
+    const invocation = mapInvocationRow(row)
+    await insertAttemptReceipt(db, invocation)
+    return invocation.attemptGeneration
+  })
 }
 
 /**
  * Mark stale in_progress invocations as failed (mcp-host restart recovery —
  * plan §2.4). Returns the number of rows transitioned.
  */
-export async function failStaleInvocations(olderThanSeconds: number): Promise<number> {
-  const result = await pool.query(
-    `UPDATE plugin_workload_sdk_invocations
-     SET status = 'failed', completed_at = now()
-     WHERE status = 'in_progress' AND created_at < now() - interval '1 second' * $1`,
-    [olderThanSeconds]
-  )
-  return result.rowCount ?? 0
+export async function failStaleInvocations(_olderThanSeconds: number): Promise<number> {
+  return withTransaction(async db => {
+    const result = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+       SET status = 'failed', updated_at = now(), completed_at = now()
+       WHERE status = 'in_progress'
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at < now()
+       RETURNING id, attempt_generation`
+    )
+    for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
+      await db.query(
+        `UPDATE plugin_workload_sdk_invocation_attempts
+            SET status = 'failed', lease_expires_at = NULL, completed_at = now()
+          WHERE invocation_id = $1 AND attempt_generation = $2`,
+        [row.id, row.attempt_generation]
+      )
+      await db.query(
+        `UPDATE plugin_workload_sdk_provider_attempts
+            SET status = 'provider_unavailable', lease_expires_at = NULL, completed_at = now()
+          WHERE invocation_id = $1
+            AND attempt_generation = $2
+            AND status IN ('reserved', 'in_progress')`,
+        [row.id, row.attempt_generation]
+      )
+    }
+    return result.rowCount ?? 0
+  })
 }
 
 export interface ListInvocationsFilter {
@@ -808,13 +1773,42 @@ export async function listInvocations(
  * failStaleInvocations.
  */
 export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number> {
-  const result = await pool.query(
-    `DELETE FROM plugin_workload_sdk_invocations
-     WHERE created_at < now() - interval '1 hour' * $1
-       AND status <> 'in_progress'`,
-    [IDEMPOTENCY_TTL_HOURS]
-  )
-  return result.rowCount ?? 0
+  return withTransaction(async db => {
+    // Child receipts and one-shot JTIs have no useful life once the parent
+    // idempotency reservation expires. Delete them in one transaction so
+    // usage and ticket lookups cannot observe orphaned authority.
+    await db.query(
+      `DELETE FROM plugin_workload_sdk_credential_ticket_jtis jt
+        USING plugin_workload_sdk_invocations inv
+       WHERE jt.invocation_id = inv.id
+         AND inv.created_at < now() - interval '1 hour' * $1
+         AND inv.status <> 'in_progress'`,
+      [IDEMPOTENCY_TTL_HOURS]
+    )
+    await db.query(
+      `DELETE FROM plugin_workload_sdk_invocation_attempts attempts
+        USING plugin_workload_sdk_invocations inv
+       WHERE attempts.invocation_id = inv.id
+         AND inv.created_at < now() - interval '1 hour' * $1
+         AND inv.status <> 'in_progress'`,
+      [IDEMPOTENCY_TTL_HOURS]
+    )
+    await db.query(
+      `DELETE FROM plugin_workload_sdk_provider_attempts attempts
+        USING plugin_workload_sdk_invocations inv
+       WHERE attempts.invocation_id = inv.id
+         AND inv.created_at < now() - interval '1 hour' * $1
+         AND inv.status <> 'in_progress'`,
+      [IDEMPOTENCY_TTL_HOURS]
+    )
+    const result = await db.query(
+      `DELETE FROM plugin_workload_sdk_invocations
+       WHERE created_at < now() - interval '1 hour' * $1
+         AND status <> 'in_progress'`,
+      [IDEMPOTENCY_TTL_HOURS]
+    )
+    return result.rowCount ?? 0
+  })
 }
 
 // ─── Quota counters ──────────────────────────────────────────────────────

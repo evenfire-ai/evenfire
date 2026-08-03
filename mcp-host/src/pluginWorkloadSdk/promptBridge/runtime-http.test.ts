@@ -137,6 +137,7 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
       )
     }
     return {
+      contractVersion: 2,
       invocationId: 'inv-runtime-http',
       replay: false,
       providerCallRequired: true,
@@ -145,18 +146,23 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
       modelPolicy: null,
       selectedTarget: PRIMARY,
       authorizedTargets: [PRIMARY, FALLBACK],
+      attemptGeneration: 1,
       policyRevision: 9,
       policyHash: POLICY_HASH,
       maxOutputTokens: 256,
     }
   })
   const controlApiClient = {
+    ensurePromptBridgeCapabilities: vi.fn().mockResolvedValue(undefined),
     authorizePromptBridge,
     reissuePromptBridgeCredentialTicket: vi.fn(
       async ({ target }: { target: PromptBridgeTarget }) => {
         issuedTickets.push(target.targetRef)
         return {
           invocationId: 'inv-runtime-http',
+          attemptGeneration: 1,
+          providerAttemptId: `attempt-${target.targetRef}`,
+          providerAttemptIndex: issuedTickets.length,
           targetRef: target.targetRef,
           credentialTicket: `ticket-${target.targetRef}`,
           policyRevision: 9,
@@ -165,6 +171,7 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
         }
       }
     ),
+    reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
     reportInvocationStatus: vi.fn(
       async (_id: string, _ns: string, _recipe: string, status: string) => {
         reportedStatuses.push(status)

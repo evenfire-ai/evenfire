@@ -21,7 +21,7 @@ export type LlmUsageEvent = {
   provider: string
   model: string
   llm_secret_name: string | null
-  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown' | 'plugin_workload_sdk'
   user_id: string | null
   sender: string | null
   channel_type: string | null
@@ -52,6 +52,9 @@ export type LlmUsageEvent = {
     credential_slot: string
     fallback_used: boolean
     attempt_count: number
+    attempt_generation?: number
+    provider_attempt_id?: string
+    provider_attempt_index?: number
   }
 }
 

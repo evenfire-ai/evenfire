@@ -40,6 +40,7 @@ const grant = (
   modelPolicies: {},
   promptTargets: [],
   defaultTargetRef: null,
+  policyState: 'active',
   policyRevision: 0,
   createdAt: '',
   updatedAt: '',

@@ -1023,7 +1023,7 @@ spec:
 
 **What gets rejected**
 
-- **CEL R1** — `agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge`. An agent remains invalid for an ordinary workloads-only recipe, but a stepless `promptBridge` recipe uses `spec.agent` as the eager mcp-host bootstrap binding rather than as a workflow agent.
+- **CEL R1** — `agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge`. An agent remains invalid for an ordinary workloads-only recipe, but a stepless `promptBridge` recipe uses `spec.agent` as the eager mcp-host bootstrap binding rather than as a workflow agent.
 - A `provider` outside the four-value enum.
 - An `instruction` step with no resolvable agent: _"step requires an agent configuration"_.
 
@@ -1332,7 +1332,7 @@ spec:
 
 Opts plugin workloads into two **controlled side-effect channels**:
 
-- **`promptBridge`** — a one-shot LLM call routed through the recipe's `mcp-host`. A request may select a model within `allowedModels` but never the provider: the provider bound to the recipe's `mcp-host` wins.
+- **`promptBridge`** — a one-shot LLM call routed through the recipe's `mcp-host`. `spec.agent` supplies the host bootstrap identity; the operator's Control UI grant is the only authority for ordered `{provider, model, credentialSlot}` targets, default selection, and authorized fallback.
 - **`clientNotifications`** — notification _intent_ authorized by control-api and delivered by the Notification Service. Targets are opaque refs, never raw channel addresses.
 
 Declaring this block forces an always-on `mcp-host`. Runtime enforcement is additionally gated by the `PLUGIN_WORKLOAD_SDK_ENABLED` flag.
@@ -1360,7 +1360,7 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 - **CEL PS1** — at least one of `promptBridge` / `clientNotifications`.
 - **CEL PS2 / PS3** — no wildcards in `allowedEventTypes` or `allowedModels`. Only explicit admin grants (control-api) may use wildcards.
 - **PS4** (reconciler) — `allowedCallers` entries must reference existing `workloads[].id`.
-- `promptBridge` needs a resolvable agent. A stepless SDK recipe may provide the complete provider/model binding in `spec.agent`; it is not a workflow and creates no coordinator, run, step graph, or workflow output PVC. A `clientNotifications`-only recipe needs no agent.
+- `promptBridge` needs a resolvable provider/model binding. A stepless SDK recipe provides it in `spec.agent`; it is not a workflow and creates no coordinator, run, step graph, or workflow output PVC. Runtime provider selection remains grant-authorized and per-attempt. A `clientNotifications`-only recipe needs no agent.
 - A stepless SDK recipe must not declare `triggers`, `scheduling`, or `coordinatorImage`; these are workflow-only fields and fail closed at admission and in WRC defence in depth.
 
 ### 3.20 Global File System (`spec.gfs`)

@@ -536,11 +536,19 @@ export interface PluginWorkloadSdkSnippetConfig {
  * actually has active (vs merely declared in spec).
  */
 export interface PluginWorkloadSdkCapabilityStatus {
-  state: 'validated' | 'disabled' | 'degraded'
+  state: 'validated' | 'disabled' | 'degraded' | 'awaiting_policy'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string
   validatedAt?: string
+  bootstrapContractVersion?: 2
+  bootstrapPodUid?: string
+  bootstrapProvider?: string
+  bootstrapModel?: string
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  verifiedAt?: string
 }
 
 // ─── WorkflowRecipe CRD ─────────────────────────────────────────────────

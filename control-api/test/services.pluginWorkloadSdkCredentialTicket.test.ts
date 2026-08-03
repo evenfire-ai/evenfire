@@ -9,6 +9,12 @@ import {
 } from '../src/services/pluginWorkloadSdkCredentialTicket.js'
 
 describe('plugin workload SDK credential ticket', () => {
+  const ticketBinding = {
+    attemptGeneration: 1,
+    providerAttemptId: '33333333-3333-4333-8333-333333333333',
+    providerAttemptIndex: 1,
+  }
+
   afterEach(() => {
     vi.useRealTimers()
   })
@@ -18,6 +24,7 @@ describe('plugin workload SDK credential ticket', () => {
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'prompt-notify',
       invocationId: 'invocation-1',
+      ...ticketBinding,
       target: {
         targetRef: 'openai-fallback',
         provider: 'openai',
@@ -59,6 +66,7 @@ describe('plugin workload SDK credential ticket', () => {
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'prompt-notify',
       invocationId: 'invocation-slow-primary',
+      ...ticketBinding,
       target: {
         targetRef: 'openai-fallback',
         provider: 'openai',
@@ -80,6 +88,7 @@ describe('plugin workload SDK credential ticket', () => {
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'prompt-notify',
       invocationId: 'invocation-1',
+      ...ticketBinding,
       target: {
         targetRef: 'openai-fallback',
         provider: 'openai',

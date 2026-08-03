@@ -282,7 +282,7 @@ export function createWorkflowRouter(service: WorkflowService): Router {
     '/plugin-workload-sdk/bootstrap',
     requireWorkflowAuth('configure'),
     workflowControlRateLimit,
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       if (!validateWorkflowBinding(req, res, { expectedSub: 'wrc' })) return
       const raw = req.body as PluginWorkloadSdkBootstrapRequest
       // Deliberately project the request to the identity-only contract. Any
@@ -292,8 +292,17 @@ export function createWorkflowRouter(service: WorkflowService): Router {
         provider: raw?.provider,
         model: raw?.model,
       }
-      const result = service.configurePluginWorkloadSdkBootstrap(body)
-      res.status(result.configured ? 200 : 400).json(result)
+      try {
+        const result = await service.configurePluginWorkloadSdkBootstrap(body)
+        res.status(result.configured ? 200 : result.ready === false ? 503 : 400).json(result)
+      } catch {
+        res.status(503).json({
+          configured: false,
+          ready: false,
+          contractVersion: 2,
+          message: 'Plugin Workload SDK identity bootstrap contract is not ready',
+        })
+      }
     }
   )
 

@@ -1,7 +1,13 @@
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
 
-export type UsageSourceKind = 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+export type UsageSourceKind =
+  | 'channel'
+  | 'desktop'
+  | 'workflow'
+  | 'cron'
+  | 'unknown'
+  | 'plugin_workload_sdk'
 
 export type LlmUsageEvent = {
   request_id: string
@@ -32,6 +38,9 @@ export type LlmUsageEvent = {
     credential_slot: string
     fallback_used: boolean
     attempt_count: number
+    attempt_generation?: number
+    provider_attempt_id?: string
+    provider_attempt_index?: number
   } | null
 }
 
@@ -46,8 +55,36 @@ export type UsageIngestTransactionResult = {
   acceptedEvents: LlmUsageEvent[]
 }
 
+type PromptBridgeAttemptBinding = {
+  invocation_id: string
+  recipe_name: string
+  contract_version: number
+  attempt_generation: number
+  method: string
+  target_refs: unknown
+}
+
+type ProviderAttemptBinding = {
+  id: string
+  invocation_id: string
+  attempt_generation: number
+  attempt_index: number
+  target_ref: string
+  provider: string
+  model: string
+  credential_slot: string
+  status: string
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const SOURCE_KINDS: Set<string> = new Set(['channel', 'desktop', 'workflow', 'cron', 'unknown'])
+const SOURCE_KINDS: Set<string> = new Set([
+  'channel',
+  'desktop',
+  'workflow',
+  'cron',
+  'unknown',
+  'plugin_workload_sdk',
+])
 const CONTROL_PLANE_ADMIN_USAGE_TEAM_ID = 'control-plane-admin-ui'
 const CONTROL_PLANE_ADMIN_USAGE_USER_PREFIX = 'admin-ui/'
 
@@ -88,6 +125,19 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
     typeof record.credential_slot === 'string' ? record.credential_slot.trim() : ''
   const fallbackUsed = record.fallback_used
   const attemptCount = intOrNull(record.attempt_count)
+  const attemptGeneration =
+    record.attempt_generation === undefined ? null : intOrNull(record.attempt_generation)
+  const providerAttemptId =
+    record.provider_attempt_id === undefined
+      ? null
+      : typeof record.provider_attempt_id === 'string' &&
+          UUID_REGEX.test(record.provider_attempt_id)
+        ? record.provider_attempt_id
+        : null
+  const providerAttemptIndex =
+    record.provider_attempt_index === undefined ? null : intOrNull(record.provider_attempt_index)
+  const hasProviderAttemptId = record.provider_attempt_id !== undefined
+  const hasProviderAttemptIndex = record.provider_attempt_index !== undefined
   if (
     !targetRef ||
     targetRef.length > 256 ||
@@ -96,7 +146,11 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
     typeof fallbackUsed !== 'boolean' ||
     attemptCount === null ||
     attemptCount < 1 ||
-    attemptCount > 4
+    attemptCount > 4 ||
+    (attemptGeneration !== null && attemptGeneration < 1) ||
+    hasProviderAttemptId !== hasProviderAttemptIndex ||
+    (hasProviderAttemptId && providerAttemptId === null) ||
+    (hasProviderAttemptIndex && (providerAttemptIndex === null || providerAttemptIndex < 1))
   ) {
     return null
   }
@@ -106,6 +160,9 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
     credential_slot: credentialSlot,
     fallback_used: fallbackUsed,
     attempt_count: attemptCount,
+    ...(attemptGeneration !== null ? { attempt_generation: attemptGeneration } : {}),
+    ...(providerAttemptId !== null ? { provider_attempt_id: providerAttemptId } : {}),
+    ...(providerAttemptIndex !== null ? { provider_attempt_index: providerAttemptIndex } : {}),
   }
 }
 
@@ -168,6 +225,14 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   const run_id = trimOrNull(r.run_id)
   if (run_id && !UUID_REGEX.test(run_id)) return null
   const isSdkOnly =
+    source_kind_raw === 'plugin_workload_sdk' &&
+    r.channel_type === 'plugin_workload_sdk' &&
+    recipe_name !== null &&
+    run_id === null &&
+    task_id === null &&
+    llm_secret_name !== null &&
+    prompt_bridge_metadata?.invocation_id !== undefined
+  const isLegacySdkOnly =
     source_kind_raw === 'unknown' &&
     r.channel_type === 'plugin_workload_sdk' &&
     recipe_name !== null &&
@@ -175,13 +240,34 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
     task_id === null &&
     llm_secret_name !== null &&
     prompt_bridge_metadata?.invocation_id !== undefined
+  const isWorkflowSdk = source_kind_raw === 'workflow' && r.channel_type === 'plugin_workload_sdk'
   if (source_kind_raw === 'workflow') {
     const taskRunId = workflowRunIdFromTaskId(task_id)
     if (!recipe_name || !llm_secret_name || !run_id || !taskRunId) return null
     if (taskRunId.toLowerCase() !== run_id.toLowerCase()) return null
   }
-  if (r.channel_type === 'plugin_workload_sdk' && !isSdkOnly) return null
-  if (isSdkOnly && !UUID_REGEX.test(prompt_bridge_metadata?.invocation_id ?? '')) return null
+  // Workflow promptBridge calls use the same channel marker as SDK-only calls,
+  // but retain their canonical workflow run/task/secret binding above. Reject
+  // only an unrecognised shape; otherwise the usage emitted by a step-bearing
+  // host would be dropped before it can be metered.
+  if (
+    r.channel_type === 'plugin_workload_sdk' &&
+    !isSdkOnly &&
+    !isLegacySdkOnly &&
+    !isWorkflowSdk
+  ) {
+    return null
+  }
+  if (
+    (isSdkOnly || isWorkflowSdk) &&
+    !UUID_REGEX.test(prompt_bridge_metadata?.invocation_id ?? '')
+  ) {
+    return null
+  }
+  // Contract v2 physical-attempt fields are checked against the persisted
+  // receipt during ingestion. A v1 host may omit generation/attempt fields;
+  // retaining the event here lets the binding layer classify it explicitly as
+  // the narrow legacy lane instead of confusing it with malformed JSON.
 
   return {
     request_id,
@@ -265,6 +351,142 @@ function buildInsertParams(events: LlmUsageEvent[]): unknown[] {
   return params
 }
 
+/**
+ * Bind SDK-only usage to an immutable attempt receipt rather than the mutable
+ * parent invocation status. A delayed reporter remains valid for the attempt
+ * that actually executed, while a stale generation or forged target is
+ * rejected before it can enter the usage ledger.
+ */
+async function filterEventsByAttemptReceipt(
+  events: LlmUsageEvent[],
+  db: DbClient
+): Promise<{ accepted: LlmUsageEvent[]; rejected: number }> {
+  // Both runtime lanes use the same immutable attempt receipt.  SDK-only
+  // hosts emit source_kind=plugin_workload_sdk; step-bearing hosts retain
+  // source_kind=workflow for run attribution but mark the channel as the
+  // Plugin Workload SDK.  Treating the latter as ordinary workflow usage
+  // would leave the target/generation binding unaudited.
+  const isPromptBridgeSdkEvent = (event: LlmUsageEvent): boolean =>
+    event.channel_type === 'plugin_workload_sdk' &&
+    (event.source_kind === 'unknown' ||
+      event.source_kind === 'plugin_workload_sdk' ||
+      event.source_kind === 'workflow')
+  const sdkEvents = events.filter(isPromptBridgeSdkEvent)
+  if (sdkEvents.length === 0) return { accepted: events, rejected: 0 }
+  const invocationIds = [
+    ...new Set(
+      sdkEvents
+        .map(event => event.prompt_bridge_metadata?.invocation_id)
+        .filter((value): value is string => typeof value === 'string')
+    ),
+  ]
+  if (invocationIds.length === 0) {
+    return {
+      accepted: events.filter(event => !isPromptBridgeSdkEvent(event)),
+      rejected: sdkEvents.length,
+    }
+  }
+  const result = await db.query(
+    `SELECT attempts.invocation_id::text, attempts.attempt_generation, attempts.method,
+            attempts.target_refs, attempts.recipe_name, invocations.contract_version
+       FROM plugin_workload_sdk_invocation_attempts attempts
+       JOIN plugin_workload_sdk_invocations invocations
+         ON invocations.id = attempts.invocation_id
+      WHERE attempts.invocation_id = ANY($1::uuid[])`,
+    [invocationIds]
+  )
+  const receipts = new Map<string, PromptBridgeAttemptBinding>()
+  for (const row of result.rows as PromptBridgeAttemptBinding[]) {
+    receipts.set(`${row.invocation_id}:${row.attempt_generation}`, row)
+  }
+  const providerAttemptIds = sdkEvents
+    .map(event => event.prompt_bridge_metadata?.provider_attempt_id)
+    .filter((value): value is string => typeof value === 'string')
+  const providerAttempts = providerAttemptIds.length
+    ? await db.query(
+        `SELECT id::text, invocation_id::text, attempt_generation, attempt_index,
+                target_ref, provider, model, credential_slot, status
+           FROM plugin_workload_sdk_provider_attempts
+          WHERE id = ANY($1::uuid[])`,
+        [[...new Set(providerAttemptIds)]]
+      )
+    : { rows: [] }
+  const providerAttemptById = new Map<string, ProviderAttemptBinding>()
+  for (const row of providerAttempts.rows as ProviderAttemptBinding[]) {
+    providerAttemptById.set(row.id, row)
+  }
+  const accepted: LlmUsageEvent[] = []
+  let rejected = 0
+  for (const event of events) {
+    if (!isPromptBridgeSdkEvent(event)) {
+      accepted.push(event)
+      continue
+    }
+    const metadata = event.prompt_bridge_metadata
+    const invocationId = metadata?.invocation_id
+    const generation = metadata?.attempt_generation
+    const providerAttemptId = metadata?.provider_attempt_id
+    const providerAttemptIndex = metadata?.provider_attempt_index
+    const receipt =
+      typeof invocationId === 'string' && Number.isInteger(generation)
+        ? receipts.get(`${invocationId}:${generation}`)
+        : undefined
+    const targetRefs = receipt && Array.isArray(receipt.target_refs) ? receipt.target_refs : []
+    const targetRef = metadata?.target_ref
+    const legacyInvocation =
+      typeof invocationId === 'string'
+        ? await db.query(
+            `SELECT contract_version, method, status, authorization_decision, detail,
+                    recipe_namespace, recipe_name
+               FROM plugin_workload_sdk_invocations
+              WHERE id = $1`,
+            [invocationId]
+          )
+        : { rows: [] }
+    const legacy = legacyInvocation.rows[0] as
+      | {
+          contract_version?: unknown
+          method?: unknown
+          status?: unknown
+          authorization_decision?: unknown
+          detail?: unknown
+          recipe_namespace?: unknown
+          recipe_name?: unknown
+        }
+      | undefined
+    const hasPhysicalAttempt =
+      typeof providerAttemptId === 'string' && Number.isInteger(providerAttemptIndex)
+    const legacyCompatible =
+      !hasPhysicalAttempt &&
+      legacy?.contract_version === 1 &&
+      legacy.method === 'promptBridge' &&
+      ['in_progress', 'complete'].includes(String(legacy.status)) &&
+      legacy.authorization_decision === 'authorized' &&
+      legacy.recipe_name === event.recipe_name &&
+      legacy.detail === event.model
+    const physicalCompatible =
+      hasPhysicalAttempt &&
+      receipt?.method === 'promptBridge' &&
+      receipt.recipe_name === event.recipe_name &&
+      typeof targetRef === 'string' &&
+      targetRefs.some(ref => ref === targetRef) &&
+      providerAttemptById.get(providerAttemptId!)?.invocation_id === invocationId &&
+      providerAttemptById.get(providerAttemptId!)?.attempt_generation === generation &&
+      providerAttemptById.get(providerAttemptId!)?.attempt_index === providerAttemptIndex &&
+      providerAttemptById.get(providerAttemptId!)?.target_ref === targetRef &&
+      providerAttemptById.get(providerAttemptId!)?.provider === event.provider &&
+      providerAttemptById.get(providerAttemptId!)?.model === event.model &&
+      providerAttemptById.get(providerAttemptId!)?.credential_slot === metadata?.credential_slot &&
+      providerAttemptById.get(providerAttemptId!)?.status === 'complete'
+    if (physicalCompatible || legacyCompatible) {
+      accepted.push(event)
+    } else {
+      rejected += 1
+    }
+  }
+  return { accepted, rejected }
+}
+
 export async function ingestUsageEvents(
   rawEvents: unknown[],
   db: DbClient = pool
@@ -277,12 +499,22 @@ export async function ingestUsageEventsInTransaction(
   db: DbClient
 ): Promise<UsageIngestTransactionResult> {
   const total = rawEvents.length
-  const validated: LlmUsageEvent[] = []
+  let validated: LlmUsageEvent[] = []
   for (const raw of rawEvents) {
     const ev = validateUsageEvent(raw)
     if (ev) validated.push(ev)
   }
-  const rejected = total - validated.length
+  let rejected = total - validated.length
+  if (validated.length === 0) {
+    return {
+      result: { accepted: 0, duplicates: 0, rejected },
+      acceptedEvents: [],
+    }
+  }
+
+  const receiptFilter = await filterEventsByAttemptReceipt(validated, db)
+  validated = receiptFilter.accepted
+  rejected += receiptFilter.rejected
   if (validated.length === 0) {
     return {
       result: { accepted: 0, duplicates: 0, rejected },

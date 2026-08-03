@@ -176,6 +176,28 @@ describe('validateUsageEvent', () => {
       })
     ).toBeNull()
   })
+
+  it('accepts workflow promptBridge usage with the SDK channel marker', () => {
+    const workflowEvent = {
+      ...VALID_EVENT,
+      source_kind: 'workflow',
+      channel_type: 'plugin_workload_sdk',
+      run_id: '00000000-0000-4000-8000-000000000001',
+      host_ref: 'sandbox-recipes/e2e-recipe',
+      context_ref: null,
+      recipe_name: 'e2e-recipe',
+      task_id: '00000000-0000-4000-8000-000000000001:e2e-recipe:2026-05-09T00:00:00.000Z',
+      llm_secret_name: 'openai-key',
+      prompt_bridge_metadata: {
+        invocation_id: '00000000-0000-4000-8000-000000000099',
+        target_ref: 'openai-primary',
+        credential_slot: 'openai-api-key',
+        fallback_used: false,
+        attempt_count: 1,
+      },
+    }
+    expect(validateUsageEvent(workflowEvent)).not.toBeNull()
+  })
 })
 
 describe('ingestUsageEvents', () => {

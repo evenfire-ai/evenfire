@@ -23,6 +23,7 @@ export const DEFAULT_IDEMPOTENCY_KEY_PATTERN = '^[a-zA-Z0-9_-]{1,128}$'
 export const PLUGIN_WORKLOAD_SDK_CONDITION_TYPE = 'PluginWorkloadSdkCapability'
 export const PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE =
   'PluginWorkloadSdkProviderUnavailable'
+export const PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE = 'PluginWorkloadSdkPolicyPending'
 
 /**
  * WorkflowRecipe remains the CRD that carries Plugin Workload SDK, but an SDK
@@ -120,13 +121,23 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
     errors
   )
 
+  if (spec.agent !== undefined) {
+    if (!spec.agent.provider) {
+      errors.push('spec.agent.provider is required when spec.agent is declared')
+    }
+    if (!isRunnableLlmModelId(spec.agent.model)) {
+      errors.push('spec.agent.model must be a valid runnable model id when spec.agent is declared')
+    }
+  }
+
   // promptBridge issues real LLM calls, so the recipe must declare a resolvable
-  // agent (provider + model) — either spec.agent or a step agent. The WRC uses
-  // it to broker the provider API key into the eager mcp-host. clientNotifications
-  // needs no provider, so this rule is scoped to promptBridge only.
+  // agent (provider + model). A stepless SDK recipe uses spec.agent as the
+  // eager mcp-host bootstrap binding; a workflow may instead resolve a step
+  // agent. clientNotifications needs no provider, so this rule is scoped to
+  // promptBridge only.
   if (sdk.promptBridge && !hasResolvableAgent(spec)) {
     errors.push(
-      'pluginWorkloadSdk.promptBridge requires a resolvable agent (spec.agent or a step agent with provider + model)'
+      'pluginWorkloadSdk.promptBridge requires spec.agent or a step agent with provider + model'
     )
   }
 
@@ -168,6 +179,23 @@ export interface PluginWorkloadSdkStatusProjection {
   capability: PluginWorkloadSdkCapabilityStatus | null | undefined
 }
 
+export interface PluginWorkloadSdkBootstrapProofInput {
+  ready: true
+  contractVersion: 2
+  podUid: string
+  provider: string
+  model: string
+  policyReady?: boolean
+  policyState?: string
+  policyReason?: string
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+  verifiedAt: string
+}
+
 /**
  * Project `spec.pluginWorkloadSdk` + feature flag + reconcile outcome into
  * the status condition and capability record.
@@ -178,7 +206,10 @@ export interface PluginWorkloadSdkStatusProjection {
  * - reconcile failed → carry forward existing owned conditions untouched and
  *   leave the persisted capability as-is (a transient infra failure must not
  *   flip an already-validated capability)
- * - reconcile succeeded → condition True/Validated, state 'validated'
+ * - eager host identity is ready but the operator prompt policy is absent or
+ *   unusable → condition False/PolicyNotConfigured, state 'awaiting_policy'
+ * - reconcile succeeded with an active prompt policy → condition True/Validated,
+ *   state 'validated'
  */
 export function buildPluginWorkloadSdkStatus(args: {
   spec: WorkflowRecipeSpec
@@ -186,9 +217,22 @@ export function buildPluginWorkloadSdkStatus(args: {
   phase: RecipePhase
   featureFlagEnabled: boolean
   providerUnavailable?: boolean
+  policyPending?: boolean
+  teardownConfirmed?: boolean
+  bootstrapProof?: PluginWorkloadSdkBootstrapProofInput
   now: string
 }): PluginWorkloadSdkStatusProjection {
-  const { spec, existingConditions, phase, featureFlagEnabled, providerUnavailable, now } = args
+  const {
+    spec,
+    existingConditions,
+    phase,
+    featureFlagEnabled,
+    providerUnavailable,
+    policyPending,
+    teardownConfirmed,
+    bootstrapProof,
+    now,
+  } = args
   const sdk = spec.pluginWorkloadSdk
 
   if (!sdk) {
@@ -197,6 +241,17 @@ export function buildPluginWorkloadSdkStatus(args: {
 
   const promptBridge = sdk.promptBridge !== undefined
   const clientNotifications = sdk.clientNotifications !== undefined
+
+  // A failed reconcile must never be projected as a successful disable. In
+  // particular, the SDK kill-switch performs cleanup before this projection;
+  // if cleanup failed, reporting `disabled` could leave an old host reachable
+  // while claiming revocation completed.
+  if (phase === 'failed' && !(teardownConfirmed === true && !featureFlagEnabled)) {
+    const carried = (existingConditions ?? []).filter(
+      c => c.type === PLUGIN_WORKLOAD_SDK_CONDITION_TYPE
+    )
+    return { conditions: carried, capability: undefined }
+  }
 
   if (!featureFlagEnabled) {
     const message = 'Disabled (feature flag off)'
@@ -219,13 +274,6 @@ export function buildPluginWorkloadSdkStatus(args: {
     }
   }
 
-  if (phase === 'failed') {
-    const carried = (existingConditions ?? []).filter(
-      c => c.type === PLUGIN_WORKLOAD_SDK_CONDITION_TYPE
-    )
-    return { conditions: carried, capability: undefined }
-  }
-
   if (providerUnavailable) {
     const message = 'Capability validated, but the configured provider is unavailable'
     return {
@@ -241,6 +289,67 @@ export function buildPluginWorkloadSdkStatus(args: {
           type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
           status: 'True',
           reason: 'ProviderUnavailable',
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'degraded',
+        promptBridge,
+        clientNotifications,
+        message,
+      },
+    }
+  }
+
+  if (promptBridge && policyPending) {
+    const message =
+      bootstrapProof?.policyReason === 'grant_missing'
+        ? 'Plugin Workload SDK promptBridge is awaiting an operator grant'
+        : `Plugin Workload SDK promptBridge policy is not ready (${bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'})`
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'PolicyNotConfigured',
+          message,
+          lastTransitionTime: now,
+        },
+        {
+          type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+          status: 'True',
+          reason: bootstrapProof?.policyReason ?? 'PolicyNotReady',
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'awaiting_policy',
+        promptBridge,
+        clientNotifications,
+        message,
+        ...(bootstrapProof
+          ? {
+              bootstrapContractVersion: bootstrapProof.contractVersion,
+              bootstrapPodUid: bootstrapProof.podUid,
+              bootstrapProvider: bootstrapProof.provider,
+              bootstrapModel: bootstrapProof.model,
+              verifiedAt: bootstrapProof.verifiedAt,
+            }
+          : {}),
+      },
+    }
+  }
+
+  if (promptBridge && !bootstrapProof?.ready) {
+    const message = 'promptBridge bootstrap policy proof is not ready'
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'BootstrapNotReady',
           message,
           lastTransitionTime: now,
         },
@@ -276,6 +385,24 @@ export function buildPluginWorkloadSdkStatus(args: {
       promptBridge,
       clientNotifications,
       validatedAt: now,
+      ...(bootstrapProof
+        ? {
+            bootstrapContractVersion: bootstrapProof.contractVersion,
+            bootstrapPodUid: bootstrapProof.podUid,
+            bootstrapProvider: bootstrapProof.provider,
+            bootstrapModel: bootstrapProof.model,
+            verifiedAt: bootstrapProof.verifiedAt,
+            ...(bootstrapProof.policyRevision !== undefined
+              ? { policyRevision: bootstrapProof.policyRevision }
+              : {}),
+            ...(bootstrapProof.policyHash !== undefined
+              ? { policyHash: bootstrapProof.policyHash }
+              : {}),
+            ...(bootstrapProof.defaultTargetRef !== undefined
+              ? { defaultTargetRef: bootstrapProof.defaultTargetRef }
+              : {}),
+          }
+        : {}),
     },
   }
 }

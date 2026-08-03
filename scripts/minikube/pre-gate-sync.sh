@@ -200,6 +200,36 @@ provision_gfs_serving() {
   sync_mcp_host_auth_key
 }
 
+assert_no_legacy_prompt_bridge_grants() {
+  # Target-aware promptBridge authorization is fail-closed for legacy rows.
+  # Inventory them after migrations and before any target-aware mcp-host rollout
+  # so an operator gets an actionable gate failure instead of a silent outage.
+  # This check deliberately does not infer a provider, model, slot, or order;
+  # migration remains an explicit operator-reviewed action.
+  local legacy_count query
+  query="
+    SELECT count(*)::int
+     FROM plugin_workload_sdk_grants
+     WHERE capability_family = 'promptBridge'
+       AND policy_state <> 'active';
+  "
+  # Keep the command after `kubectl exec --` on the same continued shell
+  # command. A bare newline after `--` makes kubectl receive no command and
+  # then runs `psql` on the host, producing a misleading local-socket error.
+  legacy_count="$(${KC} exec -n control-plane deployment/control-postgres -- \
+    psql -U postgres -d profiles -Atqc "${query}")"
+  legacy_count="$(printf '%s' "${legacy_count}" | tr -d '[:space:]')"
+  if [[ ! "${legacy_count}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: unable to inventory legacy promptBridge grants; refusing target-aware rollout"
+    return 1
+  fi
+  if [[ "${legacy_count}" != "0" ]]; then
+    log "ERROR: ${legacy_count} legacy promptBridge grant(s) require operator-reviewed target migration before mcp-host rollout"
+    return 1
+  fi
+  log "Legacy promptBridge grant inventory is empty"
+}
+
 log "Evaluating sync requirements for ${GATE_NAME}"
 preflight_host_lifecycle_probe
 
@@ -312,6 +342,9 @@ if [[ "${cluster_changed}" == "true" ]]; then
     provision_gfs_serving
   fi
 
+  # Release invariant: every path that can restart/serve mcp-host proves that
+  # no legacy grant is routable, not only the migration path.
+  assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
   incremental_restart_targets
 
@@ -343,6 +376,7 @@ if [[ "${cluster_changed}" == "true" ]]; then
   log "Pre-gate cluster sync complete"
 else
   log "No cluster sync required before ${GATE_NAME}"
+  assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true
 fi

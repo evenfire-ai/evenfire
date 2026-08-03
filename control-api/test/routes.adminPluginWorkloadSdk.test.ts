@@ -23,6 +23,7 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     upsertGrant: vi.fn(),
     deleteGrant: vi.fn(),
     getQuotaCounters: vi.fn(),
+    getPluginWorkloadSdkLegacyGrantInventory: vi.fn(),
     listInvocations: vi.fn(),
   }
 })
@@ -63,6 +64,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.upsertGrant).mockReset()
   vi.mocked(sdkDb.deleteGrant).mockReset()
   vi.mocked(sdkDb.getQuotaCounters).mockReset()
+  vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
   // R3 allowlist cross-check (listEnabledModelNamesForProvider) queries pool.
   // Default to the seed model so the valid-grant success paths pass; individual
@@ -80,6 +82,24 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
     expect(sdkDb.listGrants).toHaveBeenCalledWith({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+    })
+  })
+
+  it('exposes the read-only legacy migration gate with optional recipe filters', async () => {
+    vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockResolvedValue({
+      totalPromptBridgeGrants: 1,
+      legacyPromptBridgeGrants: 0,
+      activationReady: true,
+      items: [],
+    })
+    const res = await request(buildApp()).get(
+      '/admin/plugin-workload-sdk/legacy-inventory?recipeNamespace=sandbox-recipes&recipeName=r1'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.activationReady).toBe(true)
+    expect(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).toHaveBeenCalledWith({
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'r1',
     })
@@ -112,7 +132,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         promptTargets: [{ ...validGrantBody.promptTargets[0], model: oversized }],
       })
     expect(res.status).toBe(400)
-    expect(res.body.error).toContain('promptTargets[0].model')
+    expect(res.body.error).toContain('allowedModels entries')
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
@@ -196,6 +216,33 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       '11111111-1111-4111-8111-111111111111'
     )
     expect(JSON.stringify(vi.mocked(sdkDb.upsertGrant).mock.calls)).not.toContain('secret-value')
+  })
+
+  it('accepts a policy catalogue larger than the bounded execution suffix', async () => {
+    const targets = Array.from({ length: 5 }, (_, index) => ({
+      targetRef: `target-${index}`,
+      provider: 'zai',
+      model: `glm-4.${index + 7}`,
+      credentialSlot: 'zai-api-key',
+    }))
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'catalogue' } as never)
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: targets.map(target => ({ model: target.model })),
+      rowCount: targets.length,
+    } as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        allowedModels: targets.map(target => target.model),
+        promptTargets: targets,
+        defaultTargetRef: targets[0]!.targetRef,
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({ promptTargets: targets }),
+      '11111111-1111-4111-8111-111111111111'
+    )
   })
 
   it('requires an explicit provider for promptBridge grants (R1)', async () => {

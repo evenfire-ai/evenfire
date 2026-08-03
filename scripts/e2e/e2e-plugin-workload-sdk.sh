@@ -31,78 +31,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 #   process environment > canonical root .env > safe test defaults
 #
-# The dotenv file is parsed as data without sourcing or evaluating it. Values
-# supplied by the caller remain authoritative, and shell expressions in the
-# canonical file are preserved literally.
-load_canonical_root_env() {
-  local repo_root env_file common_dir main_repo_dir raw_line line key
-  repo_root="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-  env_file=""
-
-  if [ -f "${repo_root}/.env" ]; then
-    env_file="${repo_root}/.env"
-  else
-    common_dir="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)"
-    if [ -n "$common_dir" ]; then
-      case "$common_dir" in
-        /*) main_repo_dir="$(cd "${common_dir}/.." && pwd)" ;;
-        *) main_repo_dir="$(cd "${repo_root}/${common_dir}/.." && pwd)" ;;
-      esac
-      if [ -f "${main_repo_dir}/.env" ]; then
-        env_file="${main_repo_dir}/.env"
-      fi
-    fi
-  fi
-
-  if [ -z "$env_file" ]; then
-    return 0
-  fi
-
-  local line_number=0 value quote
-  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
-    line_number=$((line_number + 1))
-    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
-    case "$line" in
-      ''|'#'*) continue ;;
-    esac
-    if [[ "$line" == export[[:space:]]* ]]; then
-      line="${line#export}"
-      line="${line#"${line%%[![:space:]]*}"}"
-    fi
-    if [[ "$line" != *=* ]]; then
-      printf 'Ignoring invalid canonical .env line %s (expected KEY=value)\n' "$line_number" >&2
-      return 1
-    fi
-    key="${line%%=*}"
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-      printf 'Ignoring invalid canonical .env key on line %s\n' "$line_number" >&2
-      return 1
-    fi
-    if [ "${!key+x}" = x ]; then
-      continue
-    fi
-    value="${line#*=}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
-      quote="${value:0:1}"
-      if [[ "${value: -1}" != "$quote" ]]; then
-        printf 'Ignoring unterminated quoted value on canonical .env line %s\n' "$line_number" >&2
-        return 1
-      fi
-      value="${value:1:${#value}-2}"
-    fi
-    # Treat dotenv as data. In particular, command substitutions, backticks,
-    # globbing and variable references remain literal text and are never
-    # evaluated by a shell.
-    printf -v "$key" '%s' "$value"
-    export "$key"
-  done < "$env_file"
-}
-
-load_canonical_root_env
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
 # shellcheck source=e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
@@ -114,11 +45,10 @@ EVENT_TYPE="e2e.test.notification"
 E2E_DESKTOP_USER_EMAIL="${E2E_DESKTOP_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
 
 # The host-wide CLERUM_MODEL_PROVIDER may legitimately remain Z.AI for other
-# local workloads, but this gate must not spend its T3 calls against the
-# provider currently limited by 429s. Inherit the host provider/model only
-# when it is an allowed OpenAI/Claude target; otherwise use the deterministic
-# OpenAI default and make the fallback Claude. An explicit E2E_* value still
-# wins and is validated below.
+# local workloads, but this gate must not silently redirect a paid call. An
+# explicit E2E provider/model is required when the root environment selects an
+# unavailable provider; only an entirely absent provider uses the documented
+# local OpenAI default.
 E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-}"
 E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-}"
 if [ -z "$E2E_WORKFLOW_MODEL_PROVIDER" ]; then
@@ -133,8 +63,7 @@ if [ -z "$E2E_WORKFLOW_MODEL_PROVIDER" ]; then
       E2E_WORKFLOW_MODEL_PROVIDER="openai"
       ;;
     *)
-      warn "CLERUM_MODEL_PROVIDER=${CLERUM_MODEL_PROVIDER} is not used by this Plugin Workload SDK gate; selecting the OpenAI default because the Z.AI lane is unavailable"
-      E2E_WORKFLOW_MODEL_PROVIDER="openai"
+      die "CLERUM_MODEL_PROVIDER=${CLERUM_MODEL_PROVIDER} is not permitted for this gate while that provider is unavailable; set E2E_WORKFLOW_MODEL_PROVIDER and E2E_WORKFLOW_MODEL_NAME explicitly to OpenAI or Claude"
       ;;
   esac
 fi
@@ -177,17 +106,25 @@ E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
 
 load_branch_profile_ports() {
   local ctx="${KUBECONTEXT:-${E2E_K8S_CONTEXT:-}}"
-  local ports_env="${CLERUM_PROFILE_PORTS_ENV:-}"
-  if [ -z "$ports_env" ] && [ -n "$ctx" ]; then
+  local ports_env="${CLERUM_PROFILE_PORTS_ENV:-${E2E_PROFILE_PORTS_ENV:-}}"
+  if [[ "$ctx" =~ ^clerum-(codex|detached)- ]] || [[ "$ctx" =~ ^clerum-.+-[0-9a-f]{7,8}$ ]]; then
+    if [ -z "$ports_env" ]; then
+      die "Branch-owned context ${ctx} requires ports.env generated by clerum/.local-notes/minikube-profiles/branch.mk; set CLERUM_PROFILE_PORTS_ENV or E2E_PROFILE_PORTS_ENV before running this gate"
+    fi
+  elif [ -z "$ports_env" ] && [ -n "$ctx" ]; then
     ports_env="${HOME}/.cache/clerum/minikube-profiles/${ctx}/ports.env"
   fi
-  if [ -f "$ports_env" ]; then
-    # shellcheck disable=SC1090
-    . "$ports_env"
+  if [[ -n "$ports_env" ]]; then
+    [[ -f "$ports_env" ]] || die "profile ports file not found: ${ports_env}"
+    dotenv_load_file "$ports_env"
   fi
 }
 load_branch_profile_ports
-E2E_EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_URL:-http://127.0.0.1:8091}}"
+E2E_CONTROL_API_URL="${E2E_CONTROL_API_URL:-${CONTROL_API_URL:-${CONTROL_API_BASE_URL:-http://127.0.0.1:8090}}}"
+E2E_EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}}}"
+E2E_RPC_PROXY_URL="${E2E_RPC_PROXY_URL:-${RPC_PROXY_URL:-${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}}}"
+MCP_HOST_BASE_URL="${MCP_HOST_BASE_URL:-${MCP_HOST_RUNTIME_BASE_URL:-${MCP_HOST_RUNTIME_URL:-http://127.0.0.1:8080}}}"
+export E2E_CONTROL_API_URL E2E_EXTERNAL_REST_API_URL E2E_RPC_PROXY_URL MCP_HOST_BASE_URL
 FIXTURE="${SCRIPT_DIR}/../../tests/e2e/fixtures/plugin-workload-sdk-recipe.yaml"
 E2E_CREATED_RECIPE=0
 ADMIN_CURL_HTTP_STATUS=""
@@ -276,7 +213,10 @@ gate_assert_deadline() {
 }
 
 stop_sdk_caller_fixture() {
-  kctl delete pod "$caller_pod" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! kctl delete pod "$caller_pod" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1; then
+    warn "could not delete sdk-caller pod before recycling it"
+    return 1
+  fi
   if wait_for_pod "$SANDBOX_NS" "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${WORKLOAD_ID}" "$TIMEOUT_POD"; then
     caller_pod="$(ready_pod_name "$SANDBOX_NS" "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${WORKLOAD_ID}")"
     return 0
@@ -285,9 +225,41 @@ stop_sdk_caller_fixture() {
 }
 
 reset_sdk_runtime_state_for_happy_path() {
-  psql_query "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';" >/dev/null 2>&1 || true
+  local cleanup_status=0 count table query
+  local -a delete_queries=(
+    "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_provider_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocation_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  )
+  for query in "${delete_queries[@]}"; do
+    if ! psql_query "$query" >/dev/null; then
+      cleanup_status=1
+      warn "could not reset SDK runtime state before happy path"
+    fi
+  done
+  local -a count_tables=(
+    plugin_workload_sdk_quota_counters
+    plugin_workload_sdk_provider_attempts
+    plugin_workload_sdk_credential_ticket_jtis
+    plugin_workload_sdk_invocation_attempts
+    plugin_workload_sdk_invocations
+  )
+  for table in "${count_tables[@]}"; do
+    query="SELECT count(*) FROM ${table} WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    if ! count="$(psql_query "$query" | tr -d '[:space:]')" || [ "$count" != "0" ]; then
+      cleanup_status=1
+      warn "SDK runtime reset postcondition failed for ${table}"
+    fi
+  done
+  query="SELECT count(*) FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  if ! count="$(psql_query "$query" | tr -d '[:space:]')" || [ "$count" != "0" ]; then
+    cleanup_status=1
+    warn "SDK notification delivery reset postcondition failed"
+  fi
+  return "$cleanup_status"
 }
 
 wait_for_caller_logs_matching() {
@@ -345,10 +317,52 @@ notifications_desktop_first_enabled() {
 # ─── cleanup ─────────────────────────────────────────────────────────────
 
 cleanup_plugin_workload_sdk_db() {
-  psql_query "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';" >/dev/null 2>&1 || true
+  local cleanup_status=0 count query label
+  local -a delete_queries=(
+    "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_provider_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocation_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  )
+  for query in "${delete_queries[@]}"; do
+    if ! psql_query "$query" >/dev/null; then
+      cleanup_status=1
+      warn "SDK DB cleanup query failed (recipe=${RECIPE_NS}/${RECIPE_NAME}); refusing to claim a clean fixture"
+    fi
+  done
+
+  local -a count_queries=(
+    "plugin_workload_sdk_quota_counters"
+    "plugin_workload_sdk_invocations"
+    "plugin_workload_sdk_credential_ticket_jtis"
+    "plugin_workload_sdk_invocation_attempts"
+    "plugin_workload_sdk_provider_attempts"
+    "plugin_workload_sdk_grants"
+  )
+  for label in "${count_queries[@]}"; do
+    query="SELECT count(*) FROM ${label} WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    if ! count="$(psql_query "$query" | tr -d '[:space:]')"; then
+      cleanup_status=1
+      warn "SDK DB cleanup verification failed for ${label}; refusing to claim zero rows"
+      continue
+    fi
+    if [ "$count" != "0" ]; then
+      cleanup_status=1
+      warn "SDK DB cleanup postcondition failed for ${label}: ${count} rows remain"
+    fi
+  done
+  query="SELECT count(*) FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  if ! count="$(psql_query "$query" | tr -d '[:space:]')"; then
+    cleanup_status=1
+    warn "notification delivery cleanup verification failed; refusing to claim zero rows"
+  elif [ "$count" != "0" ]; then
+    cleanup_status=1
+    warn "notification delivery cleanup postcondition failed: ${count} rows remain"
+  fi
+  return "$cleanup_status"
 }
 
 prune_recipe_owned_resources() {
@@ -368,7 +382,9 @@ prune_recipe_owned_resources() {
 
 cleanup_sdk_recipe() {
   local cleanup_status=0
-  cleanup_plugin_workload_sdk_db
+  if ! cleanup_plugin_workload_sdk_db; then
+    cleanup_status=1
+  fi
   kctl delete workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
   wait_for_workflowrecipe_deleted "$RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" || cleanup_status=1
   if ! prune_recipe_owned_resources; then
@@ -620,6 +636,41 @@ resolve_e2e_desktop_user_id() {
     | tr -d '[:space:]'
 }
 
+wait_for_sdk_protocol_ready() {
+  local deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
+  local state=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    gate_assert_deadline "waiting for Plugin Workload SDK identity bootstrap"
+    state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
+    # A missing/unreviewed operator grant is an expected control-plane state,
+    # not a provider outage. The eager host identity is usable enough for the
+    # operator to create the grant; only the later validated state authorizes
+    # prompt traffic.
+    if [ "$state" = "awaiting_policy" ] || [ "$state" = "validated" ]; then
+      printf '%s\n' "$state"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  printf '%s\n' "$state"
+  return 1
+}
+
+wait_for_sdk_policy_validated() {
+  local deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
+  local state=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    gate_assert_deadline "waiting for status.pluginWorkloadSdk.state=validated after operator grant"
+    state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
+    if [ "$state" = "validated" ]; then
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  printf '%s\n' "$state"
+  return 1
+}
+
 ensure_external_rest_api_reachable() {
   local url="${E2E_EXTERNAL_REST_API_URL}/health"
   if curl -sf -m 5 "$url" >/dev/null 2>&1; then
@@ -739,20 +790,13 @@ ok "applied WorkflowRecipe ${RECIPE_NAME}"
 
 header "Infrastructure invariants"
 
-# 1. Capability validated + projected to status.
-status_ok=0
-state=""
-status_deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
-while [ "$SECONDS" -lt "$status_deadline" ]; do
-  gate_assert_deadline "waiting for status.pluginWorkloadSdk.state=validated"
-  state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
-  if [ "$state" = "validated" ]; then status_ok=1; break; fi
-  sleep "$POLL_INTERVAL"
-done
-if [ "$status_ok" = "1" ]; then
-  ok "status.pluginWorkloadSdk.state == validated"
+# 1. Identity bootstrap is ready. A new recipe normally reports awaiting_policy
+# until the operator grant journey below completes; it must not be forced to
+# manufacture a grant before the eager host can be observed.
+if state="$(wait_for_sdk_protocol_ready)"; then
+  ok "Plugin Workload SDK identity bootstrap ready (state=${state})"
 else
-  fail "status.pluginWorkloadSdk.state did not reach 'validated' (got '${state:-<empty>}')"
+  fail "Plugin Workload SDK identity bootstrap did not reach awaiting_policy/validated (got '${state:-<empty>}')"
   exit 1
 fi
 
@@ -936,6 +980,16 @@ else
   exit 1
 fi
 
+# The grant is now active and the WRC's next live capability probe must move
+# the recipe from awaiting_policy to validated. This is the point at which the
+# data plane is authorized; protocol readiness alone never authorizes a call.
+if wait_for_sdk_policy_validated; then
+  ok "status.pluginWorkloadSdk.state == validated after operator grants"
+else
+  fail "status.pluginWorkloadSdk.state did not reach 'validated' after operator grants (got '${state:-<empty>}')"
+  exit 1
+fi
+
 # Read back only the persisted policy metadata. This proves the operator's
 # two-provider order/default contract without ever logging a Secret value,
 # bearer token, or credential ticket.
@@ -1073,7 +1127,10 @@ ok "restored promptBridge grant after caller_not_allowed probe"
 
 header "Authorized happy path"
 
-reset_sdk_runtime_state_for_happy_path
+if ! reset_sdk_runtime_state_for_happy_path; then
+  fail "could not prove a clean SDK runtime state before the happy-path fixture"
+  exit 1
+fi
 ok "reset SDK invocation/quota/delivery state before happy-path fixture"
 
 # Restart the caller so the fixture re-runs against the restored grants.

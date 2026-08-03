@@ -14,7 +14,10 @@ import {
   pluginSdkPromptBridgeRequestsTotal,
   pluginSdkPromptBridgeTokensTotal,
 } from '../metrics'
-import type { PluginWorkloadSdkControlApiClient } from './controlApiClient'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkControlApiClient,
+} from './controlApiClient'
 import type { LlmBridge } from './llmBridge'
 
 /**
@@ -44,11 +47,14 @@ export interface PromptBridgeHandlerDeps {
   getBootstrapTarget?: () => { provider: string; model: string } | null
   onUsage?: (usage: {
     invocationId: string
+    attemptGeneration: number
     provider: string
     model: string
     servedTarget: PromptBridgeTarget
     fallbackUsed: boolean
     attemptCount: number
+    providerAttemptId?: string
+    providerAttemptIndex?: number
     llmSecretName: string
     inputTokens: number
     outputTokens: number
@@ -155,6 +161,18 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
 export class PromptBridgeHandler {
   constructor(private readonly deps: PromptBridgeHandlerDeps) {}
 
+  /**
+   * Verify the live Control API policy without issuing a provider request.
+   * WRC uses this during eager bootstrap so Pod Ready cannot masquerade as a
+   * validated SDK binding when the grant/default target is stale.
+   */
+  verifyBootstrapV2(
+    expectedProvider: string,
+    expectedModel: string
+  ): Promise<PluginWorkloadSdkBootstrapProof> {
+    return this.deps.controlApiClient.verifyPromptBridgeBootstrapV2(expectedProvider, expectedModel)
+  }
+
   async handle(rawBody: unknown, callerRef: string): Promise<PromptBridgeResult> {
     const startedAt = process.hrtime.bigint()
     try {
@@ -207,6 +225,7 @@ export class PromptBridgeHandler {
         true
       )
     }
+    await this.deps.controlApiClient.ensurePromptBridgeCapabilities()
     const authorized = await this.deps.controlApiClient.authorizePromptBridge({
       recipeNamespace: this.deps.recipeNamespace,
       recipeName: this.deps.recipeName,
@@ -249,6 +268,7 @@ export class PromptBridgeHandler {
     try {
       const completion = await this.deps.llmBridge.complete({
         invocationId: authorized.invocationId,
+        attemptGeneration: authorized.attemptGeneration,
         targets: authorized.authorizedTargets.map(target => ({ target })),
         messages: request.messages,
         policyRevision: authorized.policyRevision,
@@ -259,9 +279,22 @@ export class PromptBridgeHandler {
               recipeNamespace: this.deps.recipeNamespace,
               recipeName: this.deps.recipeName,
               invocationId: input.invocationId,
+              attemptGeneration: authorized.attemptGeneration,
               target: input.target,
               policyRevision: input.policyRevision,
               policyHash: input.policyHash,
+            }),
+        },
+        providerAttemptReporter: {
+          report: async input =>
+            this.deps.controlApiClient.reportProviderAttemptStatus({
+              invocationId: authorized.invocationId,
+              recipeNamespace: this.deps.recipeNamespace,
+              recipeName: this.deps.recipeName,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId: input.providerAttemptId,
+              providerAttemptIndex: input.providerAttemptIndex,
+              status: input.status,
             }),
         },
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
@@ -269,26 +302,37 @@ export class PromptBridgeHandler {
         timeoutMs: this.deps.promptTimeoutMs,
       })
 
+      await this.deps.controlApiClient.reportInvocationStatus(
+        authorized.invocationId,
+        this.deps.recipeNamespace,
+        this.deps.recipeName,
+        'complete',
+        authorized.attemptGeneration
+      )
+
+      // Usage is emitted only after the generation-fenced terminal ACK. A
+      // result whose audit transition was rejected must not enter metering as
+      // if the provider call had completed authoritatively.
       this.deps.onUsage?.({
         invocationId: authorized.invocationId,
+        attemptGeneration: authorized.attemptGeneration,
         provider: completion.servedTarget.provider,
         model: completion.model,
         servedTarget: completion.servedTarget,
         fallbackUsed: completion.fallbackUsed,
         attemptCount: completion.attemptCount,
+        ...(completion.providerAttemptId
+          ? { providerAttemptId: completion.providerAttemptId }
+          : {}),
+        ...(completion.providerAttemptIndex !== undefined
+          ? { providerAttemptIndex: completion.providerAttemptIndex }
+          : {}),
         llmSecretName: completion.llmSecretName,
         inputTokens: completion.usage.inputTokens,
         outputTokens: completion.usage.outputTokens,
         callerRef,
         ...(request.metadata ? { metadata: request.metadata } : {}),
       })
-
-      await this.deps.controlApiClient.reportInvocationStatus(
-        authorized.invocationId,
-        this.deps.recipeNamespace,
-        this.deps.recipeName,
-        'complete'
-      )
 
       return {
         invocationId: authorized.invocationId,
@@ -311,7 +355,8 @@ export class PromptBridgeHandler {
         authorized.invocationId,
         this.deps.recipeNamespace,
         this.deps.recipeName,
-        status
+        status,
+        authorized.attemptGeneration
       )
       throw err
     }

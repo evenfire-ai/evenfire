@@ -10,6 +10,7 @@ import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModel
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
   MAX_ALLOWLIST_ITEMS,
+  MAX_PROMPT_BRIDGE_TARGETS_PER_GRANT,
   PLUGIN_WORKLOAD_SDK_FAMILIES,
   PLUGIN_WORKLOAD_SDK_INVOCATION_STATUSES,
   type PluginWorkloadSdkFamily,
@@ -18,6 +19,7 @@ import {
   type PluginWorkloadSdkPromptTarget,
   type PluginWorkloadSdkQuotaLimits,
   deleteGrant,
+  getPluginWorkloadSdkLegacyGrantInventory,
   getQuotaCounters,
   listGrants,
   listInvocations,
@@ -32,6 +34,7 @@ import { isPlainObject } from '../../utils/isPlainObject.js'
 //   GET    /admin/plugin-workload-sdk/grants
 //   POST   /admin/plugin-workload-sdk/grants            (upsert by recipe+family)
 //   DELETE /admin/plugin-workload-sdk/grants/:id
+//   GET    /admin/plugin-workload-sdk/legacy-inventory (read-only migration gate)
 //   GET    /admin/plugin-workload-sdk/quota/:recipeNamespace/:recipeName
 //   GET    /admin/plugin-workload-sdk/invocations       (audit search)
 
@@ -86,6 +89,29 @@ function parseStringArray(value: unknown, field: string, res: Response): string[
     }
   }
   return value as string[]
+}
+
+function parseModelArray(value: unknown, field: string, res: Response): string[] | null {
+  const values = parseStringArray(value, field, res)
+  if (values === null) return null
+  // Keep wildcard rejection distinct from the runnable-model grammar error.
+  // Wildcards are a policy-boundary violation, not a malformed model id, and
+  // callers/tests rely on the stable structured error for that case.
+  if (values.some(model => model.includes('*'))) {
+    res.status(400).json({ error: 'wildcard_not_allowed' })
+    return null
+  }
+  const invalid = values.find(
+    model => !isRunnableLlmModelId(model.trim()) || model.trim() !== model
+  )
+  if (invalid !== undefined) {
+    res.status(400).json({
+      error: `${field} entries must be valid runnable model ids`,
+      value: invalid,
+    })
+    return null
+  }
+  return values
 }
 
 const QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
@@ -162,10 +188,10 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       .json({ error: 'promptTargets must be a non-empty array for promptBridge grants' })
     return null
   }
-  if (value.length > MAX_ALLOWLIST_ITEMS) {
-    res
-      .status(400)
-      .json({ error: `promptTargets must contain at most ${MAX_ALLOWLIST_ITEMS} entries` })
+  if (value.length > MAX_PROMPT_BRIDGE_TARGETS_PER_GRANT) {
+    res.status(400).json({
+      error: `promptTargets must contain at most ${MAX_PROMPT_BRIDGE_TARGETS_PER_GRANT} entries`,
+    })
     return null
   }
   const targets: PluginWorkloadSdkPromptTarget[] = []
@@ -258,7 +284,7 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
         return
       }
 
-      const allowedModels = parseStringArray(body.allowedModels, 'allowedModels', res)
+      const allowedModels = parseModelArray(body.allowedModels, 'allowedModels', res)
       if (allowedModels === null) return
       const allowedEventTypes = parseStringArray(body.allowedEventTypes, 'allowedEventTypes', res)
       if (allowedEventTypes === null) return
@@ -431,6 +457,21 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
         return
       }
       res.status(200).json({ deleted: true })
+    })
+  )
+
+  router.get(
+    '/admin/plugin-workload-sdk/legacy-inventory',
+    asyncHandler(async (req, res) => {
+      const recipeNamespace =
+        typeof req.query.recipeNamespace === 'string' ? req.query.recipeNamespace.trim() : undefined
+      const recipeName =
+        typeof req.query.recipeName === 'string' ? req.query.recipeName.trim() : undefined
+      const inventory = await getPluginWorkloadSdkLegacyGrantInventory({
+        ...(recipeNamespace ? { recipeNamespace } : {}),
+        ...(recipeName ? { recipeName } : {}),
+      })
+      res.status(200).json(inventory)
     })
   )
 

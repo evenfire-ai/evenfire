@@ -25,8 +25,11 @@ class ClassifiedProviderError extends Error {
 export interface PromptBridgeCredentialResolver {
   resolve(input: {
     invocationId: string
+    attemptGeneration: number
     target: PromptBridgeTarget
     credentialTicket: string
+    providerAttemptId?: string
+    providerAttemptIndex?: number
     timeoutMs?: number
   }): Promise<BrokeredCredential>
 }
@@ -34,18 +37,33 @@ export interface PromptBridgeCredentialResolver {
 export interface PromptBridgeCredentialTicketIssuer {
   issue(input: {
     invocationId: string
+    attemptGeneration: number
     target: PromptBridgeTarget
     policyRevision: number
     policyHash: string
-  }): Promise<{ credentialTicket: string }>
+  }): Promise<{
+    credentialTicket: string
+    providerAttemptId?: string
+    providerAttemptIndex?: number
+  }>
+}
+
+export interface PromptBridgeProviderAttemptReporter {
+  report(input: {
+    providerAttemptId: string
+    providerAttemptIndex: number
+    status: 'complete' | 'failed' | 'provider_unavailable'
+  }): Promise<void>
 }
 
 export interface LlmBridgeRequest {
   invocationId: string
+  attemptGeneration: number
   targets: Array<{ target: PromptBridgeTarget }>
   policyRevision: number
   policyHash: string
   credentialTicketIssuer: PromptBridgeCredentialTicketIssuer
+  providerAttemptReporter?: PromptBridgeProviderAttemptReporter
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
   temperature?: number
@@ -59,6 +77,8 @@ export interface LlmBridgeResult {
   fallbackUsed: boolean
   attemptCount: number
   llmSecretName: string
+  providerAttemptId?: string
+  providerAttemptIndex?: number
   content: string
   usage: { inputTokens: number; outputTokens: number }
   finishReason: 'complete' | 'length' | 'content_filter'
@@ -214,6 +234,7 @@ export class LlmBridge {
         () =>
           request.credentialTicketIssuer.issue({
             invocationId: request.invocationId,
+            attemptGeneration: request.attemptGeneration,
             target: authorized.target,
             policyRevision: request.policyRevision,
             policyHash: request.policyHash,
@@ -221,17 +242,42 @@ export class LlmBridge {
         remainingTimeoutMs(deadlineAt),
         'timeout'
       )
-      const credential = await withinDeadline(
-        () =>
-          this.credentials.resolve({
-            invocationId: request.invocationId,
-            target: authorized.target,
-            credentialTicket: ticket.credentialTicket,
-            timeoutMs: remainingTimeoutMs(deadlineAt),
-          }),
-        remainingTimeoutMs(deadlineAt),
-        'timeout'
-      )
+      let credential: BrokeredCredential
+      try {
+        credential = await withinDeadline(
+          () =>
+            this.credentials.resolve({
+              invocationId: request.invocationId,
+              attemptGeneration: request.attemptGeneration,
+              target: authorized.target,
+              credentialTicket: ticket.credentialTicket,
+              ...(ticket.providerAttemptId ? { providerAttemptId: ticket.providerAttemptId } : {}),
+              ...(ticket.providerAttemptIndex !== undefined
+                ? { providerAttemptIndex: ticket.providerAttemptIndex }
+                : {}),
+              timeoutMs: remainingTimeoutMs(deadlineAt),
+            }),
+          remainingTimeoutMs(deadlineAt),
+          'timeout'
+        )
+      } catch (error) {
+        // A ticket has already reserved a physical attempt by this point. Do
+        // not leave that row in_progress until the lease sweep when the broker
+        // rejects the Secret read; close it before surfacing the terminal
+        // credential/configuration failure to the caller.
+        if (
+          request.providerAttemptReporter &&
+          ticket.providerAttemptId &&
+          ticket.providerAttemptIndex !== undefined
+        ) {
+          await request.providerAttemptReporter.report({
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: 'failed',
+          })
+        }
+        throw error
+      }
 
       try {
         const completion = await this.attempt(
@@ -239,14 +285,40 @@ export class LlmBridge {
           { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
           breaker
         )
+        if (
+          request.providerAttemptReporter &&
+          ticket.providerAttemptId &&
+          ticket.providerAttemptIndex !== undefined
+        ) {
+          await request.providerAttemptReporter.report({
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: 'complete',
+          })
+        }
         return {
           ...completion,
           servedTarget: authorized.target,
           fallbackUsed: index > 0,
           attemptCount: index + 1,
           llmSecretName: credential.llmSecretName,
+          ...(ticket.providerAttemptId ? { providerAttemptId: ticket.providerAttemptId } : {}),
+          ...(ticket.providerAttemptIndex !== undefined
+            ? { providerAttemptIndex: ticket.providerAttemptIndex }
+            : {}),
         }
       } catch (error) {
+        if (
+          request.providerAttemptReporter &&
+          ticket.providerAttemptId &&
+          ticket.providerAttemptIndex !== undefined
+        ) {
+          await request.providerAttemptReporter.report({
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: error instanceof ClassifiedProviderError ? 'provider_unavailable' : 'failed',
+          })
+        }
         if (!(error instanceof ClassifiedProviderError)) throw error
         lastProviderError = error
         const failureClass = classifyFailoverClass(

@@ -39,7 +39,7 @@ describe('pluginWorkloadSdkMaintenanceCron (plan §5.1, OQ-5)', () => {
   it('sweeps stale invocations and prunes expired idempotency rows on each tick', async () => {
     startPluginWorkloadSdkMaintenanceCron(60_000)
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(sdkDb.failStaleInvocations).toHaveBeenCalledWith(150)
+    expect(sdkDb.failStaleInvocations).toHaveBeenCalledWith(180)
     expect(sdkDb.prunePluginWorkloadSdkExpiredIdempotency).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(sdkDb.prunePluginWorkloadSdkExpiredIdempotency).toHaveBeenCalledTimes(2)

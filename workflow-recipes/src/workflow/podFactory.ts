@@ -558,7 +558,7 @@ export interface McpHostPodOptions {
 
 export function buildMcpHostPod(
   recipeName: string,
-  agent: AgentSpec,
+  agent: AgentSpec | undefined,
   config: WorkflowConfig,
   approvalRecipeName: string | undefined,
   approvalRecipeNamespace: string | undefined,
@@ -658,8 +658,12 @@ export function buildMcpHostPod(
                 },
               },
             },
-            { name: 'CLERUM_MODEL_PROVIDER', value: agent.provider },
-            { name: 'CLERUM_MODEL', value: agent.model },
+            ...(agent
+              ? [
+                  { name: 'CLERUM_MODEL_PROVIDER', value: agent.provider },
+                  { name: 'CLERUM_MODEL', value: agent.model },
+                ]
+              : []),
             // mcpHost runtime tokens — mcp-host uses these to call the approval gateway.
             // Coordinator does NOT get these env vars (least privilege).
             {

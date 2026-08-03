@@ -29,7 +29,9 @@ function loadEnvContents(contents: string): void {
     ) {
       value = value.slice(1, -1)
     }
-    if (!process.env[key]) process.env[key] = value
+    // Presence, not truthiness: an explicit empty process value is still an
+    // operator decision and must not be replaced by a lane default.
+    if (!(key in process.env)) process.env[key] = value
   }
 }
 
@@ -50,40 +52,49 @@ function loadCanonicalRootEnv(): void {
   // This matters when Playwright is launched directly from a secondary
   // worktree: the canonical .env lives in the primary Evenfire checkout.
   const repoRoot = path.resolve(__dirname, '../../..')
-  const localEnv = path.join(repoRoot, '.env')
-  const localEnvContents = readOptionalFile(localEnv)
-  if (localEnvContents !== null) {
-    loadEnvContents(localEnvContents)
-    return
-  }
-
   const gitFile = path.join(repoRoot, '.git')
   let gitFileContents: string
   try {
     gitFileContents = fs.readFileSync(gitFile, 'utf8')
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      loadEnvFile(path.join(repoRoot, '.env'))
+      return
+    }
     // A normal checkout has a file-form worktree pointer here. If `.git` is a
     // directory (for example in a non-worktree checkout), there is no safe
     // common-dir traversal to perform from this config file.
-    if ((error as NodeJS.ErrnoException).code === 'EISDIR') return
+    if ((error as NodeJS.ErrnoException).code === 'EISDIR') {
+      loadEnvFile(path.join(repoRoot, '.env'))
+      return
+    }
     throw error
   }
   const gitdirMatch = gitFileContents.trim().match(/^gitdir:\s*(.+)$/)
-  if (!gitdirMatch) return
+  if (!gitdirMatch) {
+    loadEnvFile(path.join(repoRoot, '.env'))
+    return
+  }
   const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1])
   const commonDirFile = path.join(worktreeGitDir, 'commondir')
   const commonDirValue = readOptionalFile(commonDirFile)
-  if (commonDirValue === null) return
+  if (commonDirValue === null) {
+    loadEnvFile(path.join(repoRoot, '.env'))
+    return
+  }
   const commonDir = path.resolve(worktreeGitDir, commonDirValue.trim())
+  // For a linked worktree, the canonical root is the parent of Git's common
+  // directory (the primary checkout), not the secondary worktree containing
+  // this config. This keeps seeded credentials and endpoint policy aligned
+  // with the operator lane.
   loadEnvFile(path.join(commonDir, '..', '.env'))
 }
 
 loadCanonicalRootEnv()
-// A lane-specific file may supply values missing from the canonical root env,
-// but never overrides an explicit shell value or a value already loaded from
-// the root. It is optional; the root .env remains the primary contract.
-loadEnvFile(path.resolve(__dirname, '../../../.env.e2e'))
+// The Desktop lane-specific file is optional and only fills values missing
+// from the canonical root env. Do not read a second root-level `.env.e2e`: that
+// file belongs to another lane and previously masked desktop-app/.env.e2e.
+loadEnvFile(path.resolve(__dirname, '../../.env.e2e'))
 
 export default defineConfig({
   testDir: '.',

@@ -3,9 +3,11 @@ import {
   type PluginWorkloadSdkFamily,
   type PluginWorkloadSdkInvocationStatus,
   type PluginWorkloadSdkPromptAuthorization,
+  getPromptBridgeAttemptLeaseSeconds,
   hashIdempotencyKey,
   hashPayload,
   insertInvocation,
+  reviveFailedInvocation,
   updateInvocationStatus,
 } from './pluginWorkloadSdkDb.js'
 
@@ -37,6 +39,8 @@ export interface RecordInvocationParams {
   status: PluginWorkloadSdkInvocationStatus
   authorizationDecision: string
   promptAuthorization?: PluginWorkloadSdkPromptAuthorization
+  contractVersion?: 1 | 2
+  requiredGrantStates?: readonly ('active' | 'legacy_unreviewed')[]
 }
 
 export async function recordInvocation(
@@ -55,6 +59,9 @@ export async function recordInvocation(
     status: params.status,
     authorizationDecision: params.authorizationDecision,
     promptAuthorization: params.promptAuthorization,
+    contractVersion: params.contractVersion,
+    attemptLeaseSeconds: getPromptBridgeAttemptLeaseSeconds(),
+    requiredGrantStates: params.requiredGrantStates,
   })
 }
 
@@ -66,6 +73,8 @@ export async function markInvocationStatus(
     recipeName?: string
     /** Optimistic guard: only transition when the row is in this status. */
     expectedCurrentStatus?: PluginWorkloadSdkInvocationStatus
+    expectedAttemptGeneration?: number
+    leaseSeconds?: number
   }
 ): Promise<boolean> {
   const terminal = status !== 'in_progress' && status !== 'accepted'
@@ -74,6 +83,21 @@ export async function markInvocationStatus(
     recipeNamespace: binding?.recipeNamespace,
     recipeName: binding?.recipeName,
     expectedCurrentStatus: binding?.expectedCurrentStatus,
+    expectedAttemptGeneration: binding?.expectedAttemptGeneration,
+    leaseSeconds: binding?.leaseSeconds,
+  })
+}
+
+export async function reviveFailedSdkInvocation(input: {
+  invocationId: string
+  recipeNamespace: string
+  recipeName: string
+}): Promise<number | null> {
+  return reviveFailedInvocation({
+    id: input.invocationId,
+    recipeNamespace: input.recipeNamespace,
+    recipeName: input.recipeName,
+    leaseSeconds: getPromptBridgeAttemptLeaseSeconds(),
   })
 }
 

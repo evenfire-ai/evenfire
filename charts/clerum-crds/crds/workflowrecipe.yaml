@@ -47,7 +47,7 @@ spec:
                 # R1: agent{} binds either an executable workflow or the eager
                 # Plugin Workload SDK promptBridge host. Empty steps[] is not a workflow.
                 - rule: "!has(self.agent) || (has(self.steps) && size(self.steps) > 0) || (has(self.pluginWorkloadSdk) && has(self.pluginWorkloadSdk.promptBridge))"
-                  message: "agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge"
+                  message: "agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge"
                 # SDK-only recipes are a capability runtime, not a dormant workflow.
                 # Keep resolved workflow-only fields fail-closed in this mode.
                 - rule: "!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))"
@@ -269,10 +269,14 @@ spec:
                 agent:
                   type: object
                   description: >-
-                    Default agent configuration for workflow execution.
+                    Default agent configuration for workflow execution, or the
+                    provider/model bootstrap binding for a stepless
+                    spec.pluginWorkloadSdk.promptBridge runtime.
                   properties:
                     model:
                       type: string
+                      maxLength: 128
+                      pattern: "^[A-Za-z0-9._:/-]{1,128}$"
                       description: LLM model name (e.g., glm-4.7, gpt-4o, claude-3-opus).
                     provider:
                       type: string
@@ -547,6 +551,8 @@ spec:
                         properties:
                           model:
                             type: string
+                            maxLength: 128
+                            pattern: "^[A-Za-z0-9._:/-]{1,128}$"
                           provider:
                             type: string
                             # bedrock AND azure intentionally absent (mono-credential
@@ -1683,9 +1689,10 @@ spec:
                     promptBridge:
                       type: object
                       description: >-
-                        One-shot LLM bridge capability. Requests can select a
-                        model within allowedModels but never the provider —
-                        the provider bound to the recipe's mcp-host wins.
+                        One-shot LLM bridge capability. The recipe's spec.agent
+                        supplies the eager host bootstrap identity; Control UI
+                        grants authorize the ordered provider/model/credential-slot
+                        targets that a backend may select at runtime.
                       properties:
                         allowedModels:
                           type: array
@@ -2132,7 +2139,7 @@ spec:
                   properties:
                     state:
                       type: string
-                      enum: [validated, disabled, degraded]
+                      enum: [validated, disabled, degraded, awaiting_policy]
                     promptBridge:
                       type: boolean
                     clientNotifications:
@@ -2140,6 +2147,26 @@ spec:
                     message:
                       type: string
                     validatedAt:
+                      type: string
+                      format: date-time
+                    bootstrapContractVersion:
+                      type: integer
+                      enum: [2]
+                    bootstrapPodUid:
+                      type: string
+                    bootstrapProvider:
+                      type: string
+                    bootstrapModel:
+                      type: string
+                    policyRevision:
+                      type: integer
+                      minimum: 1
+                    policyHash:
+                      type: string
+                      pattern: '^[a-f0-9]{64}$'
+                    defaultTargetRef:
+                      type: string
+                    verifiedAt:
                       type: string
                       format: date-time
                 conditions:

@@ -17,6 +17,7 @@ import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import type { PluginWorkloadSdkBootstrapProof } from '../pluginWorkloadSdk/promptBridge/controlApiClient'
 import type { ApiKeys } from '../types'
 import { type LlmUsageEvent, type UsageReporter, newRequestId } from '../usage/usageReporter'
 import {
@@ -301,6 +302,10 @@ export class WorkflowService {
         provider: import('../types').ModelConfig['provider']
         defaultModel: string
       }) => void
+      verifyPluginWorkloadSdkBootstrapV2?: (
+        provider: string,
+        model: string
+      ) => Promise<PluginWorkloadSdkBootstrapProof | null>
     }
   ) {
     this.recipeName = recipeName
@@ -319,6 +324,7 @@ export class WorkflowService {
     this.onLlmConfigured = opts?.onLlmConfigured ?? null
     this.onPluginWorkloadSdkBootstrapConfigured =
       opts?.onPluginWorkloadSdkBootstrapConfigured ?? null
+    this.verifyPluginWorkloadSdkBootstrapV2 = opts?.verifyPluginWorkloadSdkBootstrapV2 ?? null
   }
 
   private readonly onLlmConfigured:
@@ -334,6 +340,10 @@ export class WorkflowService {
         provider: import('../types').ModelConfig['provider']
         defaultModel: string
       }) => void)
+    | null = null
+
+  private readonly verifyPluginWorkloadSdkBootstrapV2:
+    | ((provider: string, model: string) => Promise<PluginWorkloadSdkBootstrapProof | null>)
     | null = null
 
   private notifyLlmConfigured(provider: string, model: string, apiKey: string): void {
@@ -353,7 +363,9 @@ export class WorkflowService {
    * workflow readiness: stepless SDK traffic resolves credentials per attempt
    * through the WRC broker rather than loading them into this service.
    */
-  configurePluginWorkloadSdkBootstrap(req?: PluginWorkloadSdkBootstrapRequest): ConfigureResponse {
+  async configurePluginWorkloadSdkBootstrap(
+    req?: PluginWorkloadSdkBootstrapRequest
+  ): Promise<ConfigureResponse> {
     if (!req?.provider) {
       return { configured: false, message: 'provider is required' }
     }
@@ -364,11 +376,37 @@ export class WorkflowService {
     if (!isRunnableLlmModelId(model)) {
       return { configured: false, message: 'model is required and has an invalid format' }
     }
+    const proof = this.verifyPluginWorkloadSdkBootstrapV2
+      ? await this.verifyPluginWorkloadSdkBootstrapV2(req.provider, model)
+      : null
+    if (this.verifyPluginWorkloadSdkBootstrapV2 && !proof) {
+      return {
+        configured: false,
+        ready: false,
+        contractVersion: 2,
+        message: 'Plugin Workload SDK identity bootstrap contract is not ready',
+      }
+    }
     this.onPluginWorkloadSdkBootstrapConfigured?.({
       provider: req.provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
     })
-    return { configured: true, provider: req.provider, model }
+    return {
+      configured: true,
+      ready: true,
+      provider: req.provider,
+      model,
+      contractVersion: 2,
+      ...(proof ? { policyReady: proof.policyReady, policyState: proof.policyState } : {}),
+      ...(proof?.policyReason ? { policyReason: proof.policyReason } : {}),
+      ...(proof?.policyRevision !== undefined ? { policyRevision: proof.policyRevision } : {}),
+      ...(proof?.policyHash !== undefined ? { policyHash: proof.policyHash } : {}),
+      ...(proof?.defaultTargetRef !== undefined
+        ? { defaultTargetRef: proof.defaultTargetRef }
+        : {}),
+      ...(proof?.defaultProvider !== undefined ? { defaultProvider: proof.defaultProvider } : {}),
+      ...(proof?.defaultModel !== undefined ? { defaultModel: proof.defaultModel } : {}),
+    }
   }
 
   isReady(): boolean {

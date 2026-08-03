@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PluginWorkloadSdkSpec, WorkflowRecipeSpec } from '../types'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
@@ -163,7 +164,22 @@ describe('validatePluginWorkloadSdkSpec', () => {
       baseSpec({ promptBridge: {} }, { agent: undefined })
     )
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('promptBridge requires a resolvable agent')
+    expect(errors[0]).toContain(
+      'promptBridge requires spec.agent or a step agent with provider + model'
+    )
+  })
+
+  it('rejects promptBridge when the resolved agent model is outside the runnable grammar', () => {
+    const errors = validatePluginWorkloadSdkSpec(
+      baseSpec({ promptBridge: {} }, { agent: { provider: 'openai', model: 'model with spaces' } })
+    )
+    expect(errors).toHaveLength(2)
+    expect(errors).toContain(
+      'spec.agent.model must be a valid runnable model id when spec.agent is declared'
+    )
+    expect(errors).toContain(
+      'pluginWorkloadSdk.promptBridge requires spec.agent or a step agent with provider + model'
+    )
   })
 
   it('accepts promptBridge when only a step agent provides provider + model', () => {
@@ -271,6 +287,19 @@ describe('buildPluginWorkloadSdkStatus', () => {
       existingConditions: undefined,
       phase: 'active',
       featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyRevision: 1,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'primary-zai',
+        defaultProvider: 'zai',
+        defaultModel: 'glm-4.7',
+        verifiedAt: NOW,
+      },
       now: NOW,
     })
     expect(projection.conditions).toEqual([
@@ -283,10 +312,18 @@ describe('buildPluginWorkloadSdkStatus', () => {
       },
     ])
     expect(projection.capability).toEqual({
+      bootstrapContractVersion: 2,
+      bootstrapModel: 'glm-4.7',
+      bootstrapPodUid: 'pod-uid-1',
+      bootstrapProvider: 'zai',
+      clientNotifications: true,
+      defaultTargetRef: 'primary-zai',
+      policyHash: 'a'.repeat(64),
+      policyRevision: 1,
       state: 'validated',
       promptBridge: true,
-      clientNotifications: true,
       validatedAt: NOW,
+      verifiedAt: NOW,
     })
   })
 
@@ -323,6 +360,49 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
   })
 
+  it('projects a missing operator grant as awaiting_policy, not provider_unavailable', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      policyPending: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        policyReady: false,
+        policyState: 'missing',
+        policyReason: 'grant_missing',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'PolicyNotConfigured',
+        message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+        lastTransitionTime: NOW,
+      },
+      {
+        type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+        status: 'True',
+        reason: 'grant_missing',
+        message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toMatchObject({
+      state: 'awaiting_policy',
+      promptBridge: true,
+      clientNotifications: false,
+    })
+  })
+
   it('carries forward existing owned conditions when reconcile failed', () => {
     const existing = {
       type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
@@ -340,5 +420,17 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
     expect(projection.conditions).toEqual([existing])
     expect(projection.capability).toBeUndefined()
+  })
+
+  it('does not project disabled when flag-off teardown failed', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'failed',
+      featureFlagEnabled: false,
+      now: NOW,
+    })
+    expect(projection.capability).toBeUndefined()
+    expect(projection.conditions).toEqual([])
   })
 })

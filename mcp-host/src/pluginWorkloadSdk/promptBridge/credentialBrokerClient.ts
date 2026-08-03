@@ -27,6 +27,9 @@ export class PluginWorkloadSdkCredentialBrokerClient {
 
   async resolve(input: {
     invocationId: string
+    attemptGeneration: number
+    providerAttemptId?: string
+    providerAttemptIndex?: number
     target: PromptBridgeTarget
     credentialTicket: string
     timeoutMs?: number
@@ -51,6 +54,11 @@ export class PluginWorkloadSdkCredentialBrokerClient {
         body: JSON.stringify({
           recipeNamespace: this.opts.recipeNamespace,
           invocationId: input.invocationId,
+          attemptGeneration: input.attemptGeneration,
+          ...(input.providerAttemptId ? { providerAttemptId: input.providerAttemptId } : {}),
+          ...(input.providerAttemptIndex !== undefined
+            ? { providerAttemptIndex: input.providerAttemptIndex }
+            : {}),
           target: input.target,
           credentialTicket: input.credentialTicket,
         }),

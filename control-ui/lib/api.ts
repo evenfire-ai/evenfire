@@ -3219,8 +3219,9 @@ export type PluginWorkloadSdkGrant = {
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
   // Explicit provider bound to a promptBridge grant (R1). `null` for older
-  // grants written before the column existed (and for clientNotifications) —
-  // the form falls back to inferProviderFromModels when reading a null provider.
+  // grants written before the column existed (and for clientNotifications).
+  // Null promptBridge grants are legacy/unreviewed; the editor must require an
+  // explicit operator resave and never infer a routable provider from models.
   provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]

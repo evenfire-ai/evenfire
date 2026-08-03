@@ -108,7 +108,18 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
       configure: vi.fn(async () => ({ status: 500, body: {} })),
       configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
         status: 200,
-        body: { configured: true },
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          contractVersion: 2,
+          policyRevision: 1,
+          policyHash: 'a'.repeat(64),
+          defaultTargetRef: 'primary-openai',
+          defaultProvider: 'openai',
+          defaultModel: 'gpt-5.4-mini',
+        },
       })),
     }
     const k8s = reader()
@@ -122,13 +133,68 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
 
     expect(result).toEqual({
       status: 202,
-      body: { configured: true, provider: 'openai', model: 'gpt-5.4-mini' },
+      body: {
+        configured: true,
+        ready: true,
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        contractVersion: 2,
+        policyRevision: 1,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'primary-openai',
+        defaultProvider: 'openai',
+        defaultModel: 'gpt-5.4-mini',
+      },
     })
     expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
       'http://mcp-host:8090',
       'wrc-token',
       { provider: 'openai', model: 'gpt-5.4-mini' }
     )
+    expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('publishes identity readiness while an operator prompt grant is still missing', async () => {
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          contractVersion: 2,
+          policyReady: false,
+          policyState: 'missing',
+          policyReason: 'grant_missing',
+        },
+      })),
+    }
+    const k8s = reader()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'openai',
+      'gpt-5.4-mini',
+      'http://mcp-host:8090',
+      'wrc-token'
+    )
+
+    expect(result).toEqual({
+      status: 202,
+      body: {
+        configured: true,
+        ready: true,
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        contractVersion: 2,
+        policyReady: false,
+        policyState: 'missing',
+        policyReason: 'grant_missing',
+      },
+    })
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
   })

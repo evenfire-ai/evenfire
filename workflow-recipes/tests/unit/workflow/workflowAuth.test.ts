@@ -99,6 +99,9 @@ describe('workflow auth token verification', () => {
       recipeName: 'recipe-one',
       recipeNamespace: 'sandbox-recipes',
       invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'provider-attempt-1',
+      providerAttemptIndex: 1,
       targetRef: 'primary-zai',
       provider: 'zai',
       model: 'glm-5.1',
@@ -117,6 +120,9 @@ describe('workflow auth token verification', () => {
 
     await expect(auth.verifyPluginSdkCredentialTicket(ticket)).resolves.toMatchObject({
       invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'provider-attempt-1',
+      providerAttemptIndex: 1,
       targetRef: 'primary-zai',
       policyRevision: 4,
       policyHash: 'a'.repeat(64),
