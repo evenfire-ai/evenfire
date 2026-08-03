@@ -250,7 +250,7 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
     if (!controlApiUp || !adminToken) return
 
     const out = await waitForKubectlOutput(
-      `get pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host -o jsonpath='{.items[0].spec.containers[0].env}'`
+      `get pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host -o jsonpath={.items[0].spec.containers[0].env}`
     )
     // mcp_host should have CLERUM_WORKFLOW_ENABLED in its env
     // Soft assertion: pod may still be in ContainerCreating, skip check if not ready yet
