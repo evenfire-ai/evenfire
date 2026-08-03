@@ -36,6 +36,12 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
+// Edge caps on the client-supplied page size before forwarding upstream. The
+// host enforces its own identical caps independently; these are the proxy's
+// own copy (the two services share no package, so each names its own).
+const SESSIONS_LIMIT_CAP = 100
+const MESSAGES_LIMIT_CAP = 200
+
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
     value.length > 0 &&
@@ -689,7 +695,7 @@ export function createRpcRouter(): Router {
         const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
         if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
         if (sessionLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, 100)))
+          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, SESSIONS_LIMIT_CAP)))
         }
         if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
@@ -788,7 +794,7 @@ export function createRpcRouter(): Router {
           `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
         )
         if (rawLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, 200)))
+          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, MESSAGES_LIMIT_CAP)))
         }
         if (beforeTurn !== undefined) {
           upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
