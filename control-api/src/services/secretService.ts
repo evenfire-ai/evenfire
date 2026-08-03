@@ -11,6 +11,8 @@ export interface SecretSummary {
   name: string
   namespace: string
   keys: string[]
+  data?: never
+  stringData?: never
 }
 
 // Trim a k8s write response to a names-only summary. `name`/`namespace` come from
@@ -38,7 +40,6 @@ export class SecretService {
         name: s.metadata?.name,
         namespace: s.metadata?.namespace,
         labels: s.metadata?.labels || {},
-        annotations: s.metadata?.annotations || {},
       },
       type: s.type,
       keys: Object.keys(s.data || {}).sort((a, b) => a.localeCompare(b)),

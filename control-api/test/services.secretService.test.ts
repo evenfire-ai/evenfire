@@ -156,6 +156,71 @@ describe('SecretService — write ops return names-only summaries (no secret val
     })) as { namespace: string }
     expect(result.namespace).toBe('default-ns')
   })
+
+  it('summarizeSecret handles k8s returning a Secret with .data undefined (empty Secret)', async () => {
+    const { svc, core } = makeService()
+    core.createNamespacedSecret.mockResolvedValueOnce({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'empty-sec', namespace: 'ns' },
+      type: 'Opaque',
+    })
+    const result = await svc.createSecret({
+      name: 'empty-sec',
+      namespace: 'ns',
+      type: 'Opaque',
+      stringData: { k: 'v' },
+    })
+    expect(result).toEqual({ name: 'empty-sec', namespace: 'ns', keys: [] })
+  })
+
+  it('summarizeSecret handles k8s returning a Secret with .data as empty object', async () => {
+    const { svc, core } = makeService()
+    core.createNamespacedSecret.mockResolvedValueOnce({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'empty-data', namespace: 'ns' },
+      type: 'Opaque',
+      data: {},
+    })
+    const result = await svc.createSecret({
+      name: 'empty-data',
+      namespace: 'ns',
+      type: 'Opaque',
+      stringData: { k: 'v' },
+    })
+    expect(result).toEqual({ name: 'empty-data', namespace: 'ns', keys: [] })
+  })
+
+  it('summarizeSecret handles k8s returning a Secret with .data as null', async () => {
+    const { svc, core } = makeService()
+    core.createNamespacedSecret.mockResolvedValueOnce({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'null-data', namespace: 'ns' },
+      type: 'Opaque',
+      data: null,
+    })
+    const result = await svc.createSecret({
+      name: 'null-data',
+      namespace: 'ns',
+      type: 'Opaque',
+      stringData: { k: 'v' },
+    })
+    expect(result).toEqual({ name: 'null-data', namespace: 'ns', keys: [] })
+  })
+
+  it('summarizeSecret handles k8s returning null/undefined result', async () => {
+    const { svc, core } = makeService()
+    core.createNamespacedSecret.mockResolvedValueOnce(null)
+    const result = await svc.createSecret({
+      name: 'null-result',
+      namespace: 'ns',
+      type: 'Opaque',
+      stringData: { k: 'v' },
+    })
+    expect(result).toEqual({ name: 'null-result', namespace: 'ns', keys: [] })
+  })
 })
 
 // A key the Kubernetes apiserver rejects (IsConfigMapKey). Feeding any of these

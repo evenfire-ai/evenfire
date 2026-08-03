@@ -224,21 +224,13 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           res.status(400).json({ error: llmSlotError })
           return
         }
-        await gateway.updateSecret({
+        const summary = await gateway.updateSecret({
           name: name.trim(),
           namespace: config.secretsNamespace,
           type: (req.body as { type?: string }).type,
           data: mergedData,
         } as SecretUpsertRequest)
-        // Never echo the k8s Secret object here: the merged Secret carries the
-        // base64 VALUES of every stored key — including keys the caller did NOT
-        // send (other providers' credentials). The R4 contract is names-only
-        // everywhere, so the response returns only the resulting key names.
-        res.status(200).json({
-          name: name.trim(),
-          namespace: config.secretsNamespace,
-          keys: Object.keys(mergedData).sort((a, b) => a.localeCompare(b)),
-        })
+        res.status(200).json(summary)
         return
       }
 
@@ -448,11 +440,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
-
-      const keys = [...new Set([...Object.keys(existing.data || {}), ...Object.keys(data)])].sort(
-        (a, b) => a.localeCompare(b)
-      )
+      const merged = await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
 
       // The credential IS rotated at this point. Emit the audit record NOW,
       // before anything that could throw — a rotation that actually happened
@@ -495,7 +483,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         )
       }
 
-      res.status(200).json({ name, namespace: targetNs, keys, affectedConnectors })
+      res.status(200).json({ name, namespace: targetNs, keys: merged.keys, affectedConnectors })
     })
   )
 
