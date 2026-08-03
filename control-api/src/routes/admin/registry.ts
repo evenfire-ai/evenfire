@@ -35,6 +35,10 @@ import {
 } from '../../services/registryClient.js'
 import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
 import {
+  PullSecretProvisionError,
+  ensureRegistryPullSecret,
+} from '../../services/registryPullSecretService.js'
+import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
 } from '../../services/workflowRecipeLimits.js'
@@ -43,7 +47,6 @@ import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
-import { ensureRegistryPullSecret } from '../../services/registryPullSecretService.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
 
 /** Validate a Kubernetes resource name (RFC 1123 DNS subdomain). */
@@ -298,6 +301,56 @@ async function loadRegistryCredentialSchema(entry: {
     return isValidCredentialSchema(raw) ? raw : null
   } catch {
     return embeddedCredentialSchema
+  }
+}
+
+/**
+ * Map an image-pull-secret provisioning failure onto an actionable HTTP response.
+ *
+ * The three classes are meaningfully different to an operator, and collapsing them all to
+ * a bare 500 (as a generic K8s-error mapping does — `extractK8sError` cannot read
+ * `RegistryProxyError.status`) makes a deploy-ordering or connect-flow problem look like a
+ * control-api bug:
+ *   - PullSecretProvisionError → a precondition the operator can fix (wrong namespace,
+ *     registry not connected, org not yet bound); carries its own status + reason code.
+ *   - RegistryProxyError       → the registry rejected us (e.g. 403 because the
+ *     pull-credential endpoint has not been upgraded, or this client lacks
+ *     `registry:manage-keys`); surfaced as 502 with the upstream status.
+ *   - anything else            → 500.
+ */
+function pullSecretErrorResponse(err: unknown): {
+  status: number
+  body: Record<string, unknown>
+} {
+  if (err instanceof PullSecretProvisionError) {
+    return {
+      status: err.status,
+      body: {
+        error: 'registry_pull_secret_provision_failed',
+        reason: err.reason,
+        detail: err.message,
+      },
+    }
+  }
+  if (err instanceof RegistryProxyError) {
+    return {
+      status: 502,
+      body: {
+        error: 'registry_pull_secret_provision_failed',
+        reason: 'registry_rejected',
+        upstreamStatus: err.status,
+        detail: `the registry rejected the image-pull credential request (${err.status}); confirm the registry supports tenant pull-credential minting and that this deployment holds registry:manage-keys`,
+      },
+    }
+  }
+  const k8sErr = extractK8sError(err)
+  return {
+    status: 500,
+    body: {
+      error: 'registry_pull_secret_provision_failed',
+      reason: 'unexpected_error',
+      detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
+    },
   }
 }
 
@@ -1224,11 +1277,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           try {
             await ensureRegistryPullSecret(gateway, targetNs)
           } catch (err) {
-            const k8sErr = extractK8sError(err)
-            res.status(k8sErr?.status && k8sErr.status < 500 ? 502 : 500).json({
-              error: 'registry_pull_secret_provision_failed',
-              detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
-            })
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
             return
           }
         }
@@ -1836,21 +1886,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           delete updatedSpec.imagePullSecrets
         }
 
-        // Ensure the shared pull secret exists before the CRD update references it
-        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud).
-        if (attachEvenfirePullSecret) {
-          try {
-            await ensureRegistryPullSecret(gateway, namespace)
-          } catch (err) {
-            const k8sErr = extractK8sError(err)
-            res.status(k8sErr?.status && k8sErr.status < 500 ? 502 : 500).json({
-              error: 'registry_pull_secret_provision_failed',
-              detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
-            })
-            return
-          }
-        }
-
         const preflightErrors = await validateMcpServerSpecPreflight(updatedSpec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
           enforceImageAllowlist: config.enforcePluginImageAllowlist,
@@ -1858,6 +1893,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         if (preflightErrors.length > 0) {
           res.status(422).json({ errors: preflightErrors })
           return
+        }
+
+        // Ensure the shared pull secret exists before the CRD update references it
+        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud). Runs
+        // AFTER preflight — matching install — so a request that will 422 never mints a
+        // rotate-on-call credential.
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, namespace)
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
         }
 
         // 4. Update credentials if provided

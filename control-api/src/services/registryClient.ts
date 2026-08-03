@@ -606,12 +606,21 @@ export async function createOrgGrant(
  * Rotate-on-call: each call revokes the org's prior pull key, so callers MUST
  * read-before-mint (only call when the on-cluster Secret is absent or broken) or they
  * orphan a working credential.
+ *
+ * Carries an explicit timeout: `authedFetch` only bounds GETs, and this POST sits on the
+ * install path behind an in-process dedupe — a stalled origin would otherwise hang every
+ * concurrent install for that namespace. The response is validated because a missing
+ * `key` would otherwise render a valid-LOOKING dockerconfigjson (`_:undefined`) that gets
+ * written as a permanently unusable credential which later reads classify as healthy.
  */
 export async function mintOrgPullCredential(orgName: string): Promise<{ key: string }> {
   const res = await orgRegistryFetch<{ username: string; key: string; dockerconfigjson: string }>(
     `/org/${encodeURIComponent(orgName)}/registry-pull-credential`,
-    { method: 'POST' }
+    { method: 'POST', signal: AbortSignal.timeout(READ_TIMEOUT_MS) }
   )
+  if (!res || typeof res.key !== 'string' || res.key.length === 0) {
+    throw new Error('registry returned no pull key for the image-pull credential')
+  }
   return { key: res.key }
 }
 

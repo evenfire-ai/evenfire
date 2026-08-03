@@ -470,16 +470,21 @@ never for an `'exists-ours'`/`'exists-foreign'` hit.
 
 ### 7.6 Rotation & lifecycle
 
-- **Rotation & liveness.** `'exists-ours'` reuse (§7.1 step 2) serves the embedded
-  key indefinitely, so the key must not silently die. The pull key carries no
-  expiry (`mintPullKey` sets none), so reuse is safe by construction. Treat an
-  observed `401`/`ImagePullBackOff` (or an admin "re-provision" action) as the
-  reactive rotation trigger — which re-mints (the endpoint rotates the org's pull
-  key) and **replaces** the `'exists-ours'` Secret in place (never a foreign one). A
-  scheduled proactive rotation may be deferred, but the *reactive* trigger is
-  **required**, else a revoked-out-of-band key strands the cluster with no self-heal.
-  Posture in one line: *control-api owns rotation for Secrets it owns and never
-  touches a foreign Secret.*
+- **Rotation & liveness.** The pull key carries no expiry (`mintPullKey` sets none), so
+  reuse is safe by construction. `'exists-ours'` is **not** a presence-only check: the
+  stored blob is decoded and its `auths` map must contain the currently-configured
+  registry host, so a Secret minted before `CLERUM_REGISTRY_URL` changed is detected as
+  broken and repaired on the next install. A wrong-`type` Secret is likewise detected and
+  recreated (`Secret.type` is immutable, so an in-place update would 422).
+  Posture in one line: *control-api owns rotation for Secrets it owns and never touches a
+  foreign Secret.*
+
+  **Not shipped (accepted gap):** there is no reactive trigger on an observed
+  `401`/`ImagePullBackOff`, and no admin "re-provision" action. A key revoked
+  **out-of-band** is therefore not self-healed — the stored blob still decodes and still
+  matches the host, so it reads as healthy. Today's remedy is to delete the Secret and
+  re-install, which re-provisions. A re-provision endpoint is the natural follow-up; it is
+  deliberately out of scope here rather than documented as if it exists.
 - **GC.** Plugin uninstall deletes the per-plugin `<name>-credentials` Secret by name
   and does **not** touch the shared pull Secret (§7.9) — correct, since other plugins
   may still need it. The Secret is therefore a standing namespace credential for the
@@ -643,6 +648,17 @@ future scope.
 1. **Deploy the registry gate change (§6.2) first or together** — control-api's mint
    `403`s until the relaxed endpoint is live, so the `evenfire-registry` deploy must
    land before (or with) the control-api rollout. Both are part of this release.
+
+   > **Precondition the gate alone does not satisfy.** The relaxed endpoint authorizes on
+   > `registry:manage-keys`, but only the registry's **auto-approve** path grants that
+   > scope (`routes/deployments.ts`). A deployment approved through the **admin approve**
+   > route (`POST /deployments/:id/approve`) falls back to `approveDeployment`'s default
+   > scope set, which omits it — and the backfill migration is scoped
+   > `WHERE created_by = 'mcc-admin'` while that path writes `created_by =
+   > 'deployment-approval'`, so it is not covered either. Those deployments 403 forever
+   > with no self-service remedy. **Registry-side fix required:** pass the same scope set
+   > from the admin approve route and widen the backfill. Until then, self-provisioning
+   > only works for auto-approved (open-registration) deployments.
 2. **Ship control-api self-provisioning** gated on `self-hosted`, with the comment/doc
    scrub (§7.8). Managed clusters are inert (the managed operator keeps owning the
    Secret) — the mode gate guarantees no double-writer, so no cross-repo coordination
