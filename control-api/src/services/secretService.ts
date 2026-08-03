@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
+import { SecretConstraintOptions, assertValidSecretConstraints } from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 export class SecretService {
@@ -30,7 +31,8 @@ export class SecretService {
     return this.coreApi.readNamespacedSecret({ namespace, name })
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async createSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    assertValidSecretConstraints(req, opts)
     assertValidSecretWriteKeys(req)
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -63,7 +65,8 @@ export class SecretService {
    * inter-service token rotation. For multi-owner Secrets where individual
    * keys must survive a partial update, use `mergeSecret` instead.
    */
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async updateSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    assertValidSecretConstraints(req, opts)
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
@@ -106,7 +109,8 @@ export class SecretService {
    * from a route targeting any OTHER namespace unless that namespace's Role
    * has been granted `patch`.
    */
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    assertValidSecretConstraints(req, opts)
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 

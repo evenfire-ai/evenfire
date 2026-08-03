@@ -1226,7 +1226,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               stringData: secretData,
             }
             try {
-              await gateway.createSecret(secretReq)
+              await gateway.createSecret(secretReq, { allowPlatformAnnotations: true })
             } catch (err) {
               const k8sErr = extractK8sError(err)
               if (k8sErr) {
@@ -1858,7 +1858,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
 
           if (previousSecretSnapshot) {
-            await gateway.updateSecret(secretRequest)
+            await gateway.updateSecret(secretRequest, { allowPlatformAnnotations: true })
             auditLog('secret_updated', {
               secretName,
               namespace,
@@ -1866,7 +1866,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               version: body.registryEntryVersion,
             })
           } else {
-            await gateway.createSecret(secretRequest)
+            await gateway.createSecret(secretRequest, { allowPlatformAnnotations: true })
             secretCreatedDuringUpgrade = true
             auditLog('secret_created', {
               secretName,
@@ -1910,15 +1910,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                   `Secret/${secretName}`
                 )
               } else if (previousSecretSnapshot) {
-                await gateway.updateSecret({
-                  name: previousSecretSnapshot.name,
-                  namespace: previousSecretSnapshot.namespace,
-                  type: previousSecretSnapshot.type || 'Opaque',
-                  labels: previousSecretSnapshot.labels,
-                  annotations: previousSecretSnapshot.annotations,
-                  data: previousSecretSnapshot.data,
-                  stringData: previousSecretSnapshot.stringData,
-                })
+                await gateway.updateSecret(
+                  {
+                    name: previousSecretSnapshot.name,
+                    namespace: previousSecretSnapshot.namespace,
+                    type: previousSecretSnapshot.type || 'Opaque',
+                    labels: previousSecretSnapshot.labels,
+                    annotations: previousSecretSnapshot.annotations,
+                    data: previousSecretSnapshot.data,
+                    stringData: previousSecretSnapshot.stringData,
+                  },
+                  { allowPlatformAnnotations: true }
+                )
               }
             } catch {
               // Best-effort rollback; preserve the original upgrade error.

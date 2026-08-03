@@ -7,6 +7,7 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
+import { SecretConstraintOptions } from './services/secretConstraints.js'
 import { SecretService } from './services/secretService.js'
 import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
 
@@ -390,16 +391,16 @@ export class K8sGateway {
     return this.secrets.getSecret(name, namespace)
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.createSecret(req)
+  async createSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    return this.secrets.createSecret(req, opts)
   }
 
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.updateSecret(req)
+  async updateSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    return this.secrets.updateSecret(req, opts)
   }
 
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.mergeSecret(req)
+  async mergeSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
+    return this.secrets.mergeSecret(req, opts)
   }
 
   async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
