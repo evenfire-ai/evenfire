@@ -792,9 +792,26 @@ export type HostResource = {
     conditions?: HostStatusCondition[]
   }
 }
+/**
+ * Condition entry on `status.conditions[]` of the McpServer CRD, as written by
+ * the HCC reconciler (host-context-controller/src/reconciler.ts). `status` is
+ * the K8s-standard string tri-state, not a boolean. `lastTransitionTime` only
+ * advances when `status` itself changes (writeStatusCondition) — the UI relies
+ * on that to tell "this rollout" apart from a stale prior condition (issue #223,
+ * Fase 3 requisito 6).
+ */
+export type McpServerCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason: string
+  message: string
+  lastTransitionTime: string
+}
+
 export type McpServerResource = {
   metadata?: Metadata
   spec?: AnyRecord
+  status?: { conditions?: McpServerCondition[] }
 }
 export type ContextUser = {
   id: string
@@ -1314,6 +1331,29 @@ export async function deleteMcpSecret(name: string) {
   return apiSend('DELETE', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`) as Promise<{
     name: string
     namespace: string
+  }>
+}
+
+/**
+ * Rotates one or more keys on an EXISTING MCP Server Secret (issue #223).
+ * `data` carries only the keys the operator wants to rotate — every other key
+ * already on the Secret survives untouched (server-side merge-patch). The
+ * response is names-only: `keys` lists the resulting key names (never
+ * values), and `affectedConnectors` names every McpServer whose
+ * `spec.envSecret.name` matches this Secret, so the UI can tell the operator
+ * exactly what is about to restart. Saving does NOT restart anything itself —
+ * the HCC's SecretInformer reacts to the Secret change and rolls the affected
+ * Deployments; the caller must poll getMcpServer() for DeploymentReady to know
+ * whether the rollout actually landed (see control-ui/components/UpdateConnectorCredentials).
+ */
+export async function updateMcpSecret(name: string, data: Record<string, string>) {
+  return apiSend('PUT', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`, {
+    data,
+  }) as Promise<{
+    name: string
+    namespace: string
+    keys: string[]
+    affectedConnectors: string[]
   }>
 }
 
