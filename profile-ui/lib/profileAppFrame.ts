@@ -6,6 +6,12 @@ export function isPublicProfileUiPath(pathname: string): boolean {
   )
 }
 
+export function isPublicProfileUiRequest(pathname: string, searchParams: URLSearchParams): boolean {
+  if (isPublicProfileUiPath(pathname)) return true
+  const inviteToken = searchParams.get('inviteToken')
+  return pathname === '/' && inviteToken !== null && inviteToken.length > 0
+}
+
 export type ProfileRouteKey =
   | 'home'
   | 'members'

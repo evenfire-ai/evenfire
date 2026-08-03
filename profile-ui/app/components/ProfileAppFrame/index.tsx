@@ -1,16 +1,17 @@
 'use client'
 
 import type { ReactNode } from 'react'
-import { usePathname } from 'next/navigation'
+import { usePathname, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { ProfileAccessProvider } from '@components/ProfileAccessContext'
 import { ProfileShell } from '@components/ProfileShell'
-import { isPublicProfileUiPath } from '@lib/profileAppFrame'
+import { isPublicProfileUiRequest } from '@lib/profileAppFrame'
 
 export function ProfileAppFrame({ children }: { children: ReactNode }) {
   const pathname = usePathname()
+  const searchParams = useSearchParams()
 
-  if (isPublicProfileUiPath(pathname)) {
+  if (isPublicProfileUiRequest(pathname, searchParams)) {
     return <>{children}</>
   }
 

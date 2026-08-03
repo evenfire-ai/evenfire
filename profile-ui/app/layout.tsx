@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { Suspense } from 'react'
 import type { Metadata } from 'next'
 import { AuthProvider } from '@components/AuthContext'
 import { ProfileAppFrame } from '@components/ProfileAppFrame'
@@ -27,7 +28,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="cu-body">
         <ToastProvider>
           <AuthProvider>
-            <ProfileAppFrame>{children}</ProfileAppFrame>
+            <Suspense fallback={null}>
+              <ProfileAppFrame>{children}</ProfileAppFrame>
+            </Suspense>
           </AuthProvider>
         </ToastProvider>
       </body>
