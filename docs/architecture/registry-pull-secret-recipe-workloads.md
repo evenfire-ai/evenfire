@@ -228,9 +228,12 @@ control-api's `shouldAttachEvenfirePullSecret` becomes
 `isLocal && isPlatformRegistryImage(...)`, preserving its current semantics exactly. WRC
 calls `isPlatformRegistryImage` directly (recipe workloads have no `isLocal` notion).
 
-**New WRC config:** `CONTEXT_*`-style registry URL (WRC has none today). It must be the
-same value control-api uses; document that a mismatch means recipe pods get no credential
-while MCP servers do.
+**New WRC config: reuse `CLERUM_REGISTRY_URL` verbatim** (WRC has no registry config
+today). Deliberately the *same* variable name control-api reads, not a WRC-prefixed alias:
+the two values must agree, and a shared name makes a mismatch a deployment error rather
+than a silent divergence. If they ever drift, recipe pods get no credential while MCP
+servers do — the hardest failure in this design to diagnose (R3), so the config is kept
+impossible to set inconsistently by accident.
 
 ### 6.3 One mint, fanned out — the core correctness rule
 
@@ -267,33 +270,75 @@ the three **platform** workload namespaces (`mcpServersNamespace`, `sandboxNames
 `sandboxUiNamespace`) — still a fixed allowlist derived from config, never from
 `body.namespace`. control-api already holds `secrets:create` in all three.
 
-### 6.4 Provisioning trigger
+### 6.4 Provisioning trigger — eager across all platform namespaces
 
-Provision into **all three** platform workload namespaces whenever provisioning runs at
-all, rather than computing per-recipe which namespaces a given manifest touches.
+**Decision: provision into all three platform workload namespaces** whenever provisioning
+runs, rather than computing per-recipe which namespaces a manifest touches. Triggered from
+both `install` and `install-recipe`, and only when the entry actually references a
+platform-registry image (same lazy principle as #243).
 
-Rationale: the invariant becomes global ("the platform credential is present everywhere it
-could be needed") instead of per-install, so a recipe *upgraded* into a new workload shape
-cannot outrun provisioning. The cost is two extra Secret copies of a credential the cluster
-already holds — no extra mint (§6.3), and no extra registry calls.
+The alternatives, and why they lose:
 
-Triggered from both `install` and `install-recipe`, on the same lazy principle as #243: only
-when the entry actually references a platform-registry image.
+| Option | Verdict |
+| --- | --- |
+| **Eager — all three** | **Chosen.** One fan-out, one global invariant. |
+| Per-recipe — namespaces computed from the manifest | Rejected — see below. |
+| Hybrid — `mcp-server` always, sandboxes once recipes exist | Rejected: saves two Secret copies, adds deployment-state tracking. |
+| Reconcile-driven — WRC requests the credential when it needs one | Rejected: WRC holds no registry credentials (the same argument that ruled out HCC in #243 §5); adds a control-plane callback. |
 
-### 6.5 Fix the `Opaque` trap
+**Rotate-on-call is what actually decides this.** Because every mint revokes the org's
+previous key, provisioning a *new* namespace later forces a re-mint — which invalidates
+the namespaces already provisioned, so all of them must be rewritten anyway (§6.3 step 4).
+Per-recipe provisioning therefore does **not** reduce mints; it multiplies cluster-wide
+credential churn, once per recipe that introduces a workload class the cluster has not seen.
 
-`POST /admin/recipes/secrets` hardcodes `type: 'Opaque'` (`recipes.ts:1654`), so an
-operator creating a *third-party* registry pull secret through the documented flow gets a
-silently unusable object. Either:
+It is also fragile across the control-api/WRC seam: control-api provisions at **install**,
+WRC reconciles **continuously**. A recipe later edited to add a `spec.ui.workloadRef` needs
+`sandbox-ui`, which was never provisioned and which nothing re-triggers — a silent
+`ImagePullBackOff` with no failing request to attribute it to. Eager provisioning removes
+that class of gap entirely.
 
-- **(a)** accept an optional `type`, allowing `kubernetes.io/dockerconfigjson` with the
-  matching `.dockerconfigjson` key — makes §4's non-goal (BYO registries) a first-class
-  supported path; or
-- **(b)** keep it Opaque-only but **reject** a request whose payload looks like a docker
-  config, pointing at the right mechanism.
+Cost: two extra copies of a pull-only, org-scoped credential in namespaces the operator
+already controls. **No extra mint, no extra registry calls** (§8.2).
 
-Recommend **(a)**: it completes the BYO story that the #637 owner-recipe model already
-implies, and it removes the only silent-failure mode in that endpoint.
+### 6.5 Fix the silent `Opaque` failure
+
+`POST /admin/recipes/secrets` hardcodes `type: 'Opaque'` (`recipes.ts:1654`). The kubelet
+honors only `kubernetes.io/dockerconfigjson` / `dockercfg` for image pulls, so a request
+that intends to create a pull Secret is accepted, written, returns `201` — and is then
+**silently ignored at pull time**. The user sees `ImagePullBackOff` with nothing pointing
+at the cause.
+
+**The silent failure is the bug**, and it must not survive regardless of how much of the
+third-party story we choose to support.
+
+Two cases must stay separate:
+
+- **Platform-registry images** — fully automatic, zero user input. That is this entire
+  spec; the recipe-secrets endpoint is not involved at all.
+- **Third-party registries** (ghcr.io, private Docker Hub, …) — the platform cannot invent
+  these credentials; someone must supply them once.
+
+For the third-party case, **do not ask anyone to paste a base64 `dockerconfigjson`.**
+Nobody will, and it is not a credential format humans should handle. Instead accept
+**structured input** and let the server assemble it:
+
+```
+POST /admin/recipes/secrets   { kind: 'imagePull', registry, username, password, ownership }
+  → type: kubernetes.io/dockerconfigjson
+  → data['.dockerconfigjson'] = buildDockerconfigjson(registry, username, password)
+  → labels: clerum.io/owner-recipe=<recipe>   (so #637 admits it for THAT recipe only)
+```
+
+This reuses the same blob builder the platform path already has
+(`registryPullSecretService.buildDockerconfigjson`), generalized from the fixed
+`username: '_'` form to an arbitrary username. The user supplies a registry, a username and
+a token — never base64.
+
+**Minimum bar if the structured endpoint is deferred:** reject a request that is evidently
+trying to create a pull Secret (a `.dockerconfigjson` key, or a docker-config-shaped
+payload) with an error naming the supported path. Accepting it and writing an object the
+kubelet ignores is the one outcome that must not remain.
 
 ---
 
@@ -400,13 +445,21 @@ Existing recipes that already declare their own third-party pull secrets are una
 
 ## 12. Open questions
 
-1. **Config plumbing for WRC** — reuse `CLERUM_REGISTRY_URL` verbatim, or a WRC-prefixed
-   variable? Reusing the same name reduces drift risk (R3) but couples the deployments.
-2. **Eager vs per-recipe namespaces (§6.4)** — is provisioning all three acceptable, or
-   should it be computed from the manifest's actual workloads?
-3. **`recipes.ts` `Opaque` fix (§6.5)** — accept `dockerconfigjson` (a), or reject with
-   guidance (b)?
-4. **Reserved-name declaration (§6.1)** — hard-reject at validation, or accept-and-ignore
+**Resolved**
+
+- ~~WRC config plumbing~~ — **reuse `CLERUM_REGISTRY_URL` verbatim** (§6.2).
+- ~~Eager vs per-recipe namespaces~~ — **eager, all three** (§6.4). Rotate-on-call means
+  per-recipe provisioning increases credential churn rather than reducing it.
+- ~~How much of the third-party story to support~~ — **structured input, server builds the
+  blob** (§6.5). Never ask a human for base64. Silent acceptance of an unusable Secret is
+  the bug being fixed, independent of scope.
+
+**Still open**
+
+1. **Scope of the third-party path (§6.5)** — ship the structured `kind: 'imagePull'`
+   endpoint in this slice, or ship only the hard rejection now and the endpoint when a
+   real BYO-registry recipe appears?
+2. **Reserved-name declaration (§6.1)** — hard-reject at validation, or accept-and-ignore
    with a warning for backwards compatibility?
-5. Should HCC gain the presence-validation from #243 §7.7 now that more namespaces
+3. Should HCC gain the presence-validation from #243 §7.7 now that more namespaces
    reference the same Secret name?
