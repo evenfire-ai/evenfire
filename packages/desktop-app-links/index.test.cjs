@@ -55,7 +55,12 @@ test('shared app links carry only client-side pathnames', () => {
     '//outside.example',
     '/safe/../admin',
     '/safe/%2e%2e/admin',
+    '/safe/%252e%252e/admin',
+    '/safe/%25252e%25252e/admin',
+    '/safe/%2F..%2Fadmin',
     '/safe\\admin',
+    '/tasks\u2028admin',
+    '/tasks\u2029admin',
   ]) {
     assert.throws(
       () =>
@@ -66,6 +71,17 @@ test('shared app links carry only client-side pathnames', () => {
         }),
       /Cannot create a deep link/
     )
+  }
+})
+
+test('parser rejects recursively encoded route traversal payloads', () => {
+  for (const rawUrl of [
+    'evenfire://app/sandbox-recipes/task-board?path=%2Fsafe%2F%25252e%25252e%2Fadmin',
+    'evenfire://app/sandbox-recipes/task-board?path=%2Fsafe%2F%252F..%252Fadmin',
+    'evenfire://app/sandbox-recipes/task-board?path=%2Ftasks%25E2%2580%25A8admin',
+    'evenfire://app/sandbox-recipes/task-board?path=%2Ftasks%25E2%2580%25A9admin',
+  ]) {
+    assert.equal(links.parseSandboxUiDeepLink(rawUrl), null)
   }
 })
 

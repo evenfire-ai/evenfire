@@ -9,7 +9,11 @@ const MAX_APP_ROUTE_LENGTH = 4096
 const MAX_TEAM_ID_LENGTH = 255
 const APP_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 const TEAM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
-const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
+const ROUTE_UNSAFE_CHAR_PATTERN = /[\u0000-\u001f\u007f\u2028\u2029]/
+const PERCENT_ESCAPE_PATTERN = /%[0-9a-f]{2}/i
+const RECURSIVE_ROUTE_ESCAPE_PATTERN =
+  /%(?:25)*(?:00|0a|0d|1c|1d|1e|1f|23|2e|2f|3f|5c|7f|e2%80%a8|e2%80%a9)/i
+const MAX_ROUTE_SEGMENT_DECODE_DEPTH = 6
 
 function isValidAppSegment(value) {
   return (
@@ -24,6 +28,32 @@ function normalizeTeamId(rawTeamId) {
   return teamId
 }
 
+function isUnsafeRouteSegment(rawSegment) {
+  let segment = rawSegment
+  for (let depth = 0; depth <= MAX_ROUTE_SEGMENT_DECODE_DEPTH; depth += 1) {
+    if (segment === '.' || segment === '..') return true
+    if (
+      segment.includes('/') ||
+      segment.includes('\\') ||
+      segment.includes('?') ||
+      segment.includes('#') ||
+      ROUTE_UNSAFE_CHAR_PATTERN.test(segment)
+    ) {
+      return true
+    }
+    if (!PERCENT_ESCAPE_PATTERN.test(segment)) return false
+    let decoded
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return true
+    }
+    if (decoded === segment) return false
+    segment = decoded
+  }
+  return RECURSIVE_ROUTE_ESCAPE_PATTERN.test(segment)
+}
+
 function normalizeSandboxUiRoute(rawPath) {
   const routePath = String(rawPath || '').trim()
   if (!routePath) return undefined
@@ -34,11 +64,11 @@ function normalizeSandboxUiRoute(rawPath) {
     routePath.includes('\\') ||
     routePath.includes('?') ||
     routePath.includes('#') ||
-    /[\u0000-\u001f\u007f]/.test(routePath)
+    ROUTE_UNSAFE_CHAR_PATTERN.test(routePath)
   ) {
     return null
   }
-  if (routePath.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))) return null
+  if (routePath.split('/').some(isUnsafeRouteSegment)) return null
   return routePath
 }
 
