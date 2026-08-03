@@ -27,6 +27,7 @@ export type LlmUsageEvent = {
   cache_write_tokens: number
   cache_tokens_reported: boolean
   prompt_bridge_metadata: {
+    invocation_id?: string
     target_ref: string
     credential_slot: string
     fallback_used: boolean
@@ -82,6 +83,7 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
   if (typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
   const targetRef = typeof record.target_ref === 'string' ? record.target_ref.trim() : ''
+  const invocationId = typeof record.invocation_id === 'string' ? record.invocation_id.trim() : ''
   const credentialSlot =
     typeof record.credential_slot === 'string' ? record.credential_slot.trim() : ''
   const fallbackUsed = record.fallback_used
@@ -94,11 +96,12 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
     typeof fallbackUsed !== 'boolean' ||
     attemptCount === null ||
     attemptCount < 1 ||
-    attemptCount > 64
+    attemptCount > 4
   ) {
     return null
   }
   return {
+    ...(invocationId ? { invocation_id: invocationId } : {}),
     target_ref: targetRef,
     credential_slot: credentialSlot,
     fallback_used: fallbackUsed,
@@ -164,11 +167,21 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   const task_id = trimOrNull(r.task_id)
   const run_id = trimOrNull(r.run_id)
   if (run_id && !UUID_REGEX.test(run_id)) return null
+  const isSdkOnly =
+    source_kind_raw === 'unknown' &&
+    r.channel_type === 'plugin_workload_sdk' &&
+    recipe_name !== null &&
+    run_id === null &&
+    task_id === null &&
+    llm_secret_name !== null &&
+    prompt_bridge_metadata?.invocation_id !== undefined
   if (source_kind_raw === 'workflow') {
     const taskRunId = workflowRunIdFromTaskId(task_id)
     if (!recipe_name || !llm_secret_name || !run_id || !taskRunId) return null
     if (taskRunId.toLowerCase() !== run_id.toLowerCase()) return null
   }
+  if (r.channel_type === 'plugin_workload_sdk' && !isSdkOnly) return null
+  if (isSdkOnly && !UUID_REGEX.test(prompt_bridge_metadata?.invocation_id ?? '')) return null
 
   return {
     request_id,

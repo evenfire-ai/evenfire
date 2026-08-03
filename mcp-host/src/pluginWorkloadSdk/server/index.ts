@@ -20,6 +20,7 @@ export { shouldStartPluginWorkloadSdk } from './sdkServer'
 
 const WORKFLOW_RECIPE_NAMESPACE = 'sandbox-recipes'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export type PluginWorkloadSdkRuntimeMode = 'workflow' | 'sdk-only'
 
 function nonEmptyMetadataString(
   metadata: Record<string, unknown> | undefined,
@@ -41,6 +42,8 @@ function workflowRunIdFromExecutionId(value: string | null): string | null {
 
 export function buildPromptBridgeUsageEvent(input: {
   binding: { hostRef: string; recipeNamespace: string; recipeName: string }
+  runtimeMode?: PluginWorkloadSdkRuntimeMode
+  invocationId?: string
   provider: string
   model: string
   inputTokens: number
@@ -54,8 +57,14 @@ export function buildPromptBridgeUsageEvent(input: {
   }
   metadata?: Record<string, unknown>
 }): LlmUsageEvent | null {
-  const isWorkflowRecipe = input.binding.recipeNamespace === WORKFLOW_RECIPE_NAMESPACE
-  if (!isWorkflowRecipe) {
+  // Explicit runtime mode is authoritative for recipe-bound hosts. The
+  // namespace fallback remains only for older non-recipe callers that do not
+  // yet inject the mode into their pod.
+  const isSdkOnly = input.runtimeMode === 'sdk-only'
+  const isWorkflowRecipe = input.runtimeMode
+    ? input.runtimeMode === 'workflow'
+    : input.binding.recipeNamespace === WORKFLOW_RECIPE_NAMESPACE
+  if (!isWorkflowRecipe && !isSdkOnly) {
     return {
       request_id: randomUUID(),
       ts: new Date().toISOString(),
@@ -79,6 +88,42 @@ export function buildPromptBridgeUsageEvent(input: {
       ...(input.promptBridgeMetadata
         ? {
             prompt_bridge_metadata: {
+              target_ref: input.promptBridgeMetadata.targetRef,
+              credential_slot: input.promptBridgeMetadata.credentialSlot,
+              fallback_used: input.promptBridgeMetadata.fallbackUsed,
+              attempt_count: input.promptBridgeMetadata.attemptCount,
+            },
+          }
+        : {}),
+    }
+  }
+  if (isSdkOnly) {
+    const invocationId = input.invocationId?.trim() ?? ''
+    if (!UUID_RE.test(invocationId)) return null
+    return {
+      request_id: randomUUID(),
+      ts: new Date().toISOString(),
+      run_id: null,
+      host_ref: input.binding.hostRef,
+      context_ref: null,
+      team_id: null,
+      provider: input.provider,
+      model: input.model,
+      source_kind: 'unknown',
+      user_id: null,
+      sender: input.callerRef,
+      channel_type: 'plugin_workload_sdk',
+      recipe_name: input.binding.recipeName,
+      cron_job_id: null,
+      task_id: null,
+      iteration: null,
+      input_tokens: input.inputTokens,
+      output_tokens: input.outputTokens,
+      llm_secret_name: input.metadata?.llmSecretName ? String(input.metadata.llmSecretName) : null,
+      ...(input.promptBridgeMetadata
+        ? {
+            prompt_bridge_metadata: {
+              invocation_id: invocationId,
               target_ref: input.promptBridgeMetadata.targetRef,
               credential_slot: input.promptBridgeMetadata.credentialSlot,
               fallback_used: input.promptBridgeMetadata.fallbackUsed,
@@ -283,6 +328,8 @@ export function maybeCreatePluginWorkloadSdkServer(
           fallbackUsed: usage.fallbackUsed,
           attemptCount: usage.attemptCount,
         },
+        runtimeMode: config.pluginWorkloadSdkRuntimeMode === 'sdk-only' ? 'sdk-only' : 'workflow',
+        invocationId: usage.invocationId,
         metadata: { ...usage.metadata, llmSecretName: usage.llmSecretName },
       })
       if (event) usageReporter.enqueue(event)

@@ -52,6 +52,15 @@ const PROVIDER_IDS = Object.freeze([
   'azure',
 ])
 
+// Model identifiers are transport selectors, not arbitrary user text. Keep
+// one executable grammar shared by authoring, WRC admission and mcp-host.
+const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH = 128
+const RUNNABLE_LLM_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
+
+function isRunnableLlmModelId(value) {
+  return typeof value === 'string' && RUNNABLE_LLM_MODEL_ID_PATTERN.test(value)
+}
+
 /** A single-API-key slot: `<provider>-api-key` → `<PROVIDER>_API_KEY`. */
 function apiKeySlot(dataKey, envName) {
   return Object.freeze([Object.freeze({ dataKey, envName, required: true })])
@@ -203,9 +212,12 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
 
 module.exports = {
   PROVIDER_IDS,
+  RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
+  RUNNABLE_LLM_MODEL_ID_PATTERN,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_NON_SECRET_ENV,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
+  isRunnableLlmModelId,
 }

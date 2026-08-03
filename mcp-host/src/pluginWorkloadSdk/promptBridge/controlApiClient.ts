@@ -40,6 +40,7 @@ export interface ControlApiClientOptions {
 export interface AuthorizePromptBridgeResponse {
   invocationId: string
   replay: boolean
+  providerCallRequired: boolean
   status: string
   model: string
   modelPolicy: { provider: string; model: string; temperature?: number; maxCostUsd?: number } | null
@@ -84,6 +85,7 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
   return (
     typeof r.invocationId === 'string' &&
     typeof r.replay === 'boolean' &&
+    (r.providerCallRequired === undefined || typeof r.providerCallRequired === 'boolean') &&
     typeof r.status === 'string' &&
     typeof r.model === 'string' &&
     (r.modelPolicy === null ||
@@ -329,7 +331,19 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    return result
+    // N/N-1 compatibility: control-api versions predating the explicit
+    // provider-call disposition omitted this field. Their idempotency contract
+    // already made non-replay responses executable and replay responses
+    // non-executable, so derive the same fail-closed decision while rejecting
+    // any malformed non-boolean value.
+    return {
+      ...result,
+      providerCallRequired:
+        typeof (result as unknown as { providerCallRequired?: unknown }).providerCallRequired ===
+        'boolean'
+          ? result.providerCallRequired
+          : !result.replay,
+    }
   }
 
   /**

@@ -31,6 +31,7 @@ import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js
 //      flipped to failed so the trail shows the denied attempt.
 
 const PLUGIN_WORKLOAD_SDK_SCOPE = 'plugin-workload-sdk'
+const MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS = 4
 
 export type PluginWorkloadSdkAuthzError = {
   ok: false
@@ -104,6 +105,8 @@ export interface AuthorizedPromptBridge {
   invocationId: string
   /** True when this idempotency key already produced an invocation. */
   replay: boolean
+  /** Whether this response won authorization for a provider execution. */
+  providerCallRequired: boolean
   status: string
   model: string | null
   modelPolicy: PluginWorkloadSdkModelPolicy | null
@@ -290,7 +293,13 @@ async function authorizePromptBridgeInner(
   const resolution = resolvePromptTarget(grant, params)
   if (!resolution.ok) return resolution.error
   const selectedTarget = grant.promptTargets[resolution.selectedIndex]!
-  const authorizedTargets = grant.promptTargets.slice(resolution.selectedIndex)
+  // A grant may list many targets for operator choice, but one logical
+  // invocation must never fan out across an unbounded suffix. The hard cap is
+  // independent of the persisted allowlist size and applies to every retry.
+  const authorizedTargets = grant.promptTargets.slice(
+    resolution.selectedIndex,
+    resolution.selectedIndex + MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS
+  )
   const resolvedPolicyHash = hashPromptTargetPolicy(grant)
 
   const recorded = await recordInvocation({
@@ -331,6 +340,7 @@ async function authorizePromptBridgeInner(
       value: {
         invocationId: recorded.invocation.id,
         replay: true,
+        providerCallRequired: false,
         status: recorded.invocation.status,
         model: selectedTarget.model,
         modelPolicy: resolution.modelPolicy,
@@ -340,6 +350,43 @@ async function authorizePromptBridgeInner(
         policyHash: resolvedPolicyHash,
         maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
       },
+    }
+  }
+
+  // A failed idempotency record may be retried, but only under the exact
+  // policy snapshot that created it. Compare before charging quota, then use
+  // a conditional status transition so concurrent retries cannot both win.
+  let providerCallRequired = true
+  if (recorded.kind === 'replay') {
+    const snapshot = recorded.invocation.promptAuthorization
+    const currentTargetRefs = authorizedTargets.map(target => target.targetRef)
+    const sameTargetRefs =
+      snapshot?.authorizedTargetRefs.length === currentTargetRefs.length &&
+      snapshot.authorizedTargetRefs.every((ref, index) => ref === currentTargetRefs[index])
+    if (
+      !snapshot ||
+      snapshot.policyRevision !== grant.policyRevision ||
+      snapshot.policyHash !== resolvedPolicyHash ||
+      !sameTargetRefs
+    ) {
+      return deny(
+        'idempotency_conflict',
+        'idempotency key belongs to an older promptBridge policy; retry with a new idempotency key'
+      )
+    }
+    const revived = await markInvocationStatus(recorded.invocation.id, 'in_progress', {
+      recipeNamespace: claims.recipeNamespace,
+      recipeName: claims.recipeName,
+      expectedCurrentStatus: 'failed',
+    })
+    // Older unit doubles did not return a boolean. Treat only an explicit
+    // false as a lost CAS; the real DB helper always returns true/false.
+    if (revived === false) {
+      return deny(
+        'idempotency_conflict',
+        'idempotent retry is already being handled; use a new idempotency key if it fails again',
+        true
+      )
     }
   }
 
@@ -353,6 +400,7 @@ async function authorizePromptBridgeInner(
     await markInvocationStatus(recorded.invocation.id, 'failed', {
       recipeNamespace: claims.recipeNamespace,
       recipeName: claims.recipeName,
+      ...(recorded.kind === 'replay' ? { expectedCurrentStatus: 'in_progress' as const } : {}),
     })
     return deny(rate.error, rate.message)
   }
@@ -362,16 +410,9 @@ async function authorizePromptBridgeInner(
     await markInvocationStatus(recorded.invocation.id, 'failed', {
       recipeNamespace: claims.recipeNamespace,
       recipeName: claims.recipeName,
+      ...(recorded.kind === 'replay' ? { expectedCurrentStatus: 'in_progress' as const } : {}),
     })
     return deny(quota.error, quota.message)
-  }
-
-  // Revive a previously-failed invocation that has now passed quota.
-  if (recorded.kind === 'replay') {
-    await markInvocationStatus(recorded.invocation.id, 'in_progress', {
-      recipeNamespace: claims.recipeNamespace,
-      recipeName: claims.recipeName,
-    })
   }
 
   return {
@@ -379,6 +420,7 @@ async function authorizePromptBridgeInner(
     value: {
       invocationId: recorded.invocation.id,
       replay: recorded.kind === 'replay',
+      providerCallRequired,
       status: recorded.kind === 'replay' ? 'in_progress' : recorded.invocation.status,
       model: selectedTarget.model,
       modelPolicy: resolution.modelPolicy,

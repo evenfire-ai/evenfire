@@ -165,6 +165,45 @@ function validateWorkflowBinding(
 }
 
 const EXECUTE_HEARTBEAT_MS = 15_000
+const WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS = 60_000
+const WORKFLOW_CONTROL_RATE_LIMIT_MAX = 60
+const WORKFLOW_CONTROL_RATE_LIMIT_MAX_BUCKETS = 10_000
+const workflowControlRateLimitBuckets = new Map<string, { windowStart: number; count: number }>()
+
+/**
+ * Bound WRC-only control operations (including SDK bootstrap) per recipe.
+ * Authentication runs first, so the bucket key is server-verified JWT
+ * identity rather than a request header or body field. The unauthenticated
+ * key is retained only for the local auth-disabled mode and remains bounded.
+ */
+function workflowControlRateLimit(req: Request, res: Response, next: NextFunction): void {
+  const claims = workflowClaims(req)
+  const key = claims
+    ? `workflow-control:${claims.recipeNamespace}/${claims.recipeName}:${claims.sub}`
+    : 'workflow-control:unauthenticated'
+  const now = Date.now()
+  const existing = workflowControlRateLimitBuckets.get(key)
+  const bucket =
+    existing && now - existing.windowStart < WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS
+      ? existing
+      : { windowStart: now, count: 0 }
+  if (bucket.count >= WORKFLOW_CONTROL_RATE_LIMIT_MAX) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((bucket.windowStart + WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS - now) / 1000)
+    )
+    res.setHeader('Retry-After', String(retryAfterSeconds))
+    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+    return
+  }
+  bucket.count += 1
+  workflowControlRateLimitBuckets.set(key, bucket)
+  if (workflowControlRateLimitBuckets.size > WORKFLOW_CONTROL_RATE_LIMIT_MAX_BUCKETS) {
+    const oldest = workflowControlRateLimitBuckets.keys().next().value
+    if (typeof oldest === 'string') workflowControlRateLimitBuckets.delete(oldest)
+  }
+  next()
+}
 
 function writeSse(res: Response, event: string, data: unknown): void {
   res.write(`event: ${event}\n`)
@@ -242,6 +281,7 @@ export function createWorkflowRouter(service: WorkflowService): Router {
   router.post(
     '/plugin-workload-sdk/bootstrap',
     requireWorkflowAuth('configure'),
+    workflowControlRateLimit,
     (req: Request, res: Response) => {
       if (!validateWorkflowBinding(req, res, { expectedSub: 'wrc' })) return
       const raw = req.body as PluginWorkloadSdkBootstrapRequest

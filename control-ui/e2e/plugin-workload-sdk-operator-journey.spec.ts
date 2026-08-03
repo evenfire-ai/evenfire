@@ -22,15 +22,16 @@
  * must be loaded in the profile (built by scripts/minikube/build-images.sh).
  */
 import { type Page, expect, test } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const BASE_API =
   process.env.CONTROL_API_BASE_URL ||
   process.env.CONTROL_API_URL ||
   process.env.E2E_CONTROL_API_URL ||
-  'http://localhost:8090'
-const REGISTRY_BASE =
-  process.env.REGISTRY_API_BASE_URL || process.env.REGISTRY_URL || 'http://localhost:8085'
+  ''
+const REGISTRY_BASE = process.env.REGISTRY_API_BASE_URL || process.env.REGISTRY_URL || ''
+const CONTROL_UI_BASE = process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || ''
 const ADMIN_USER =
   process.env.E2E_ADMIN_USERNAME ||
   process.env.ADMIN_USER ||
@@ -66,6 +67,44 @@ const sessionHeaderName = ['Coo', 'kie'].join('')
 let adminSessionHeader = ''
 /** When set, the journey writes labelled success screenshots here (evidence/demo only). */
 const EVIDENCE_DIR = process.env.E2E_EVIDENCE_DIR
+
+function assertMutableBranchProfile(): void {
+  if (process.env.E2E_PLUGIN_SDK_WRITE_CONFIRM !== '1') {
+    throw new Error('Mutable Plugin Workload SDK E2E requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1.')
+  }
+  const context =
+    process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
+  if (!context) throw new Error('E2E_K8S_CONTEXT is required for the mutable operator journey.')
+  const currentContext = execFileSync(
+    'kubectl',
+    ['--context', context, 'config', 'current-context'],
+    { encoding: 'utf8', timeout: 15_000 }
+  ).trim()
+  if (currentContext !== context) {
+    throw new Error(`kubectl context mismatch: expected ${context}, got ${currentContext}`)
+  }
+
+  const urls = [
+    ['CONTROL_UI_BASE_URL', CONTROL_UI_BASE],
+    ['CONTROL_API_BASE_URL', BASE_API],
+    ['REGISTRY_API_BASE_URL', REGISTRY_BASE],
+  ] as const
+  for (const [name, raw] of urls) {
+    if (!raw) throw new Error(`${name} is required; shared localhost defaults are forbidden.`)
+    let parsed: URL
+    try {
+      parsed = new URL(raw)
+    } catch {
+      throw new Error(`${name} must be a valid loopback URL.`)
+    }
+    if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) {
+      throw new Error(`${name} must target loopback for a mutable branch profile.`)
+    }
+    if ([3000, 8085, 8090].includes(Number(parsed.port))) {
+      throw new Error(`${name} uses a shared fixed port (${parsed.port}); use branch ports.env.`)
+    }
+  }
+}
 
 function uniqueName(base: string): string {
   return `${base}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -201,33 +240,6 @@ function recipeManifest(name: string, userRef: string): Record<string, unknown> 
   }
 }
 
-async function publishRecipeToMarketplace(
-  token: string,
-  entryName: string,
-  manifest: Record<string, unknown>
-): Promise<void> {
-  // Mirrors PublishToRegistryForm: entryType=recipe, recipe is a YAML string
-  // (JSON is valid YAML), published through control-api's admin registry proxy.
-  const entry = {
-    name: entryName,
-    version: '1.0.0',
-    entryType: 'recipe',
-    description: 'Operator-journey SDK recipe (promptBridge + clientNotifications).',
-    author: 'e2e-test',
-    origin: 'human-authored',
-    category: 'tools',
-    tags: ['sdk', 'e2e'],
-    contentCreatorTag: 'community',
-    configCreatorTag: 'community',
-    visibility: 'public',
-    recipe: JSON.stringify(manifest),
-  }
-  const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/entries', entry)
-  if (status >= 300) {
-    throw new Error(`publish failed: ${status} ${JSON.stringify(data)}`)
-  }
-}
-
 async function waitForSdkValidated(token: string, recipeName: string): Promise<void> {
   for (let attempt = 1; attempt <= 60; attempt += 1) {
     const { status, data } = await api(token, 'GET', `/api/v1/admin/recipes/${recipeName}`)
@@ -242,8 +254,11 @@ async function waitForSdkValidated(token: string, recipeName: string): Promise<v
 }
 
 test.describe('Plugin Workload SDK — operator journey (Marketplace → install → grants)', () => {
-  test('operator publishes, installs and grants an SDK recipe end to end', async ({ page }) => {
+  test('operator publishes, installs and grants an SDK recipe end to end', async ({
+    page,
+  }, testInfo) => {
     test.setTimeout(240_000)
+    assertMutableBranchProfile()
     if (PROVIDER === 'zai' || FALLBACK_PROVIDER === 'zai') {
       throw new Error(
         'Plugin Workload SDK T3 requires OpenAI or Claude targets; Z.AI is disabled for this lane.'
@@ -253,15 +268,43 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
     const token = await loginApiToken()
     const userRef = await resolveUserRef(token)
     let installedRecipeName = ''
+    const cleanupErrors: string[] = []
 
     try {
-      // 1. Publish to the Marketplace (through control-api's admin registry proxy).
-      await publishRecipeToMarketplace(token, entryName, recipeManifest(entryName, userRef))
+      // 1. Publish to the Marketplace through the operator's visible form.
+      await uiLogin(page)
+      await page.locator('text=Marketplace').first().click()
+      await expect(page.getByRole('button', { name: '+ Publish to Marketplace' })).toBeVisible({
+        timeout: 15_000,
+      })
+      await page.getByRole('button', { name: '+ Publish to Marketplace' }).click()
+      await expect(page.getByRole('heading', { name: 'Publish to Marketplace' })).toBeVisible({
+        timeout: 15_000,
+      })
+      await page.getByRole('radio', { name: 'Plugin' }).click()
+      await page.locator('#pub-name').fill(entryName)
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await page.locator('#pub-author').fill('e2e-test')
+      await page
+        .locator('#pub-description')
+        .fill('Operator-journey SDK recipe (promptBridge + clientNotifications).')
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await page
+        .locator('#pub-recipe-yaml')
+        .fill(JSON.stringify(recipeManifest(entryName, userRef)))
+      await page.getByRole('button', { name: 'Continue' }).click()
+      const publishResponse = page.waitForResponse(
+        response =>
+          response.url().includes('/api/v1/admin/registry/entries') &&
+          response.request().method() === 'POST',
+        { timeout: 60_000 }
+      )
+      await page.getByRole('button', { name: 'Publish to Marketplace' }).click()
+      expect((await publishResponse).status()).toBeLessThan(300)
+      await expect(page.getByText('Published successfully.')).toBeVisible({ timeout: 15_000 })
 
       // 2. Operator instantiates it from the Marketplace UI. Recipe entries install
       //    directly from the catalog, unlike connector entries that open the wizard.
-      await uiLogin(page)
-      await page.locator('text=Marketplace').first().click()
       const pluginsTab = page.getByRole('tab', { name: 'Plugins', exact: true })
       await expect(pluginsTab).toBeVisible({ timeout: 15_000 })
       await pluginsTab.click()
@@ -424,37 +467,72 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       expect(JSON.stringify(promptGrant)).not.toMatch(/secret|token/i)
     } finally {
       if (installedRecipeName) {
-        const grantList = await api(
-          token,
-          'GET',
-          `/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${installedRecipeName}`
-        ).catch(() => ({ status: 0, data: {} as Record<string, unknown> }))
-        const residualGrants = (grantList.data.data ??
-          grantList.data.items ??
-          grantList.data.grants ??
-          []) as Array<{ id?: string }>
-        for (const grant of residualGrants) {
-          if (grant.id) {
-            const deleted = await api(
-              token,
-              'DELETE',
-              `/api/v1/admin/plugin-workload-sdk/grants/${encodeURIComponent(grant.id)}?recipeNamespace=${encodeURIComponent(RECIPE_NS)}&recipeName=${encodeURIComponent(installedRecipeName)}`
-            )
-            if (deleted.status !== 200) {
-              throw new Error(`operator journey cleanup failed to delete grant: ${deleted.status}`)
+        try {
+          const grantList = await api(
+            token,
+            'GET',
+            `/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${installedRecipeName}`
+          )
+          if (grantList.status >= 300) {
+            cleanupErrors.push(`list grants: ${grantList.status}`)
+          } else {
+            const residualGrants = (grantList.data.data ??
+              grantList.data.items ??
+              grantList.data.grants ??
+              []) as Array<{ id?: string }>
+            for (const grant of residualGrants) {
+              if (!grant.id) continue
+              try {
+                const deleted = await api(
+                  token,
+                  'DELETE',
+                  `/api/v1/admin/plugin-workload-sdk/grants/${encodeURIComponent(grant.id)}?recipeNamespace=${encodeURIComponent(RECIPE_NS)}&recipeName=${encodeURIComponent(installedRecipeName)}`
+                )
+                if (deleted.status >= 300) {
+                  cleanupErrors.push(`delete grant ${grant.id}: ${deleted.status}`)
+                }
+              } catch (error) {
+                cleanupErrors.push(`delete grant ${grant.id}: ${String(error)}`)
+              }
             }
           }
+        } catch (error) {
+          cleanupErrors.push(`list/delete grants: ${String(error)}`)
         }
-        await api(
-          token,
-          'DELETE',
-          `/api/v1/admin/registry/uninstall/${installedRecipeName}?type=recipe`
-        ).catch(() => undefined)
+        try {
+          const uninstalled = await api(
+            token,
+            'DELETE',
+            `/api/v1/admin/registry/uninstall/${installedRecipeName}?type=recipe`
+          )
+          if (uninstalled.status >= 300 && uninstalled.status !== 404) {
+            cleanupErrors.push(`uninstall ${installedRecipeName}: ${uninstalled.status}`)
+          }
+        } catch (error) {
+          cleanupErrors.push(`uninstall ${installedRecipeName}: ${String(error)}`)
+        }
       }
-      await fetch(
-        `${REGISTRY_BASE}/api/v1/entries/${encodeURIComponent(entryName)}/versions/1.0.0`,
-        { method: 'DELETE' }
-      ).catch(() => undefined)
+      try {
+        const deletedEntry = await fetch(
+          `${REGISTRY_BASE}/api/v1/entries/${encodeURIComponent(entryName)}/versions/1.0.0`,
+          { method: 'DELETE' }
+        )
+        if (!deletedEntry.ok && deletedEntry.status !== 404) {
+          cleanupErrors.push(`delete registry entry ${entryName}: ${deletedEntry.status}`)
+        }
+      } catch (error) {
+        cleanupErrors.push(`delete registry entry ${entryName}: ${String(error)}`)
+      }
+      if (cleanupErrors.length > 0) {
+        await testInfo.attach('operator-journey-cleanup-errors', {
+          body: cleanupErrors.join('\n'),
+          contentType: 'text/plain',
+        })
+        if (testInfo.errors.length === 0) {
+          throw new Error(`operator journey cleanup failed:\n${cleanupErrors.join('\n')}`)
+        }
+        console.error(`operator journey cleanup failed:\n${cleanupErrors.join('\n')}`)
+      }
     }
   })
 })

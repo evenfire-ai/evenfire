@@ -43,6 +43,7 @@ export interface PromptBridgeHandlerDeps {
   /** Public provider/model identity from the live spec.agent binding. */
   getBootstrapTarget?: () => { provider: string; model: string } | null
   onUsage?: (usage: {
+    invocationId: string
     provider: string
     model: string
     servedTarget: PromptBridgeTarget
@@ -230,7 +231,10 @@ export class PromptBridgeHandler {
     // A successful replay is never sent to a provider again. The current
     // audit API does not persist completion content, so surface a stable
     // conflict instead of creating a duplicate billable call.
-    if (authorized.replay && authorized.status !== 'failed') {
+    if (!authorized.replay && !authorized.providerCallRequired) {
+      throw unexpectedAuthorizationResponse()
+    }
+    if (authorized.replay && !authorized.providerCallRequired) {
       throw new PluginWorkloadError(
         'idempotency_conflict',
         'idempotent invocation already exists; no provider call was repeated',
@@ -266,6 +270,7 @@ export class PromptBridgeHandler {
       })
 
       this.deps.onUsage?.({
+        invocationId: authorized.invocationId,
         provider: completion.servedTarget.provider,
         model: completion.model,
         servedTarget: completion.servedTarget,

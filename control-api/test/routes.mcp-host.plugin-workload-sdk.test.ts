@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { pool } from '../src/db.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
 import * as notificationEmitter from '../src/services/notificationEmitter.js'
 import * as authorizer from '../src/services/pluginWorkloadSdkAuthorizer.js'
@@ -786,5 +787,16 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
       .send(body)
     expect(replay.status).toBe(403)
     expect(replay.body).toEqual({ error: 'provider_policy_denied', retryable: false })
+  })
+
+  it('rate-limits credential-ticket introspection before expensive ticket work', async () => {
+    vi.mocked(pool.query).mockResolvedValueOnce({ rows: [{ count: 121 }], rowCount: 1 } as never)
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ credentialTicket: 'not-a-ticket', invocationId: 'inv-1', targetRef: 'primary-zai' })
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBeTruthy()
+    expect(authorizer.authorizePromptBridge).not.toHaveBeenCalled()
   })
 })

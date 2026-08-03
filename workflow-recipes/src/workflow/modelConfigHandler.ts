@@ -13,6 +13,7 @@ import {
   PROVIDER_CREDENTIAL_SLOTS,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
+  isRunnableLlmModelId,
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 
@@ -168,7 +169,7 @@ function parseAllowedModels(raw: string | undefined, provider: string): Set<stri
       entry &&
       typeof entry === 'object' &&
       typeof (entry as { model?: unknown }).model === 'string' &&
-      (entry as { model: string }).model.length > 0
+      isRunnableLlmModelId((entry as { model: string }).model)
     ) {
       allowed.add((entry as { model: string }).model)
     }
@@ -195,8 +196,7 @@ export class ModelConfigHandler {
     mcpHostEndpoint: string,
     wrcConfigureToken: string
   ): Promise<ConfigureModelResult> {
-    const MODEL_PATTERN = /^[a-zA-Z0-9._:/-]{1,128}$/
-    if (!isLlmProviderId(provider) || !MODEL_PATTERN.test(model)) {
+    if (!isLlmProviderId(provider) || !isRunnableLlmModelId(model)) {
       return { status: 400, body: { error: 'Invalid Plugin Workload SDK bootstrap target' } }
     }
     if (!this.mcpHost.configurePluginWorkloadSdkBootstrap) {
@@ -225,11 +225,10 @@ export class ModelConfigHandler {
   async resolvePluginSdkCredential(
     target: PluginSdkCredentialTarget
   ): Promise<ConfigureModelResult> {
-    const MODEL_PATTERN = /^[a-zA-Z0-9._:/-]{1,128}$/
     const SECRET_KEY_PATTERN = /^[A-Za-z0-9._-]{1,253}$/
     if (
       !isLlmProviderId(target.provider) ||
-      !MODEL_PATTERN.test(target.model) ||
+      !isRunnableLlmModelId(target.model) ||
       !SECRET_KEY_PATTERN.test(target.credentialSlot)
     ) {
       return { status: 400, body: { error: 'Invalid credential target' } }

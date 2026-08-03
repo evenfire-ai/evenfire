@@ -102,6 +102,20 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
+  it('rejects model ids outside the shared runnable grammar', async () => {
+    const oversized = 'm'.repeat(129)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        allowedModels: [oversized],
+        promptTargets: [{ ...validGrantBody.promptTargets[0], model: oversized }],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('promptTargets[0].model')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
   it('rejects allowedUserRefs that are not control-plane UUIDs', async () => {
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')

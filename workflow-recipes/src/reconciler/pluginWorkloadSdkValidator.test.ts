@@ -111,6 +111,14 @@ describe('validatePluginWorkloadSdkSpec', () => {
     expect(errors[0]).toContain('must not contain wildcards')
   })
 
+  it('rejects model ids outside the shared runnable grammar', () => {
+    const errors = validatePluginWorkloadSdkSpec(
+      baseSpec({ promptBridge: { allowedModels: ['model with spaces'] } })
+    )
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('invalid runnable model id')
+  })
+
   it('rejects wildcard entries in clientNotifications.allowedTargetRefs', () => {
     const errors = validatePluginWorkloadSdkSpec(
       baseSpec({

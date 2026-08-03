@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { pool, withTransaction } from '../db.js'
+import { type DbClient, pool, withTransaction } from '../db.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
   type ControlApiPermissionChange,
@@ -654,11 +654,10 @@ export async function insertInvocation(
 }
 
 export async function getInvocationById(
-  id: string
+  id: string,
+  db: DbClient = pool
 ): Promise<PluginWorkloadSdkInvocationRecord | null> {
-  const result = await pool.query(`SELECT * FROM plugin_workload_sdk_invocations WHERE id = $1`, [
-    id,
-  ])
+  const result = await db.query(`SELECT * FROM plugin_workload_sdk_invocations WHERE id = $1`, [id])
   const row = result.rows[0] as Record<string, unknown> | undefined
   return row ? mapInvocationRow(row) : null
 }

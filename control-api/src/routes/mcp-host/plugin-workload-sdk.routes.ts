@@ -2,6 +2,7 @@ import { type Response, Router } from 'express'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
 import {
@@ -50,6 +51,20 @@ const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 /** Opaque refs must not smuggle raw channel addresses (spec §17). */
 const EMAIL_LIKE_RE = /@/
 const PHONE_LIKE_RE = /^\+?[0-9][0-9\s().-]{6,}$/
+
+// Credential-ticket introspection and reissue both perform signature checks,
+// database reads, and (for reissue) signing work before the provider call.
+// Bound the cost per recipe after JWT authentication, while the authorizer's
+// grant rate/quota remains the product-level invocation limit.
+const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
+  bucketType: 'plugin_workload_sdk_credential',
+  maxPerMinute: 120,
+  getBucketKey: req => {
+    const claims = req.mcpHostJwt
+    if (!claims) return null
+    return `plugin_workload_sdk_credential:${claims.recipeNamespace}/${claims.recipeName}`
+  },
+})
 
 const AUTHZ_HTTP_STATUS: Record<PluginWorkloadSdkErrorCode, number> = {
   capability_not_declared: 403,
@@ -404,6 +419,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     // invocation, verifies current policy, and emits a new one-shot jti.
     '/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket',
     requireMcpHostJwt,
+    pluginWorkloadSdkCredentialRateLimit,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}
@@ -467,6 +483,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       res.status(result.value.replay ? 200 : 201).json({
         invocationId: result.value.invocationId,
         replay: result.value.replay,
+        providerCallRequired: result.value.providerCallRequired,
         status: result.value.status,
         model: result.value.model,
         modelPolicy: result.value.modelPolicy,
@@ -585,6 +602,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   router.post(
     '/mcp-host/plugin-workload-sdk/credential-ticket/introspect',
     requireMcpHostJwt,
+    pluginWorkloadSdkCredentialRateLimit,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}

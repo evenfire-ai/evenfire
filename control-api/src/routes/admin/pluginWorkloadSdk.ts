@@ -1,5 +1,9 @@
 import { type Response, Router } from 'express'
-import { isCredentialSlotOwnedByProvider, isLlmProviderId } from '@clerum/llm-providers'
+import {
+  isCredentialSlotOwnedByProvider,
+  isLlmProviderId,
+  isRunnableLlmModelId,
+} from '@clerum/llm-providers'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModels.js'
@@ -127,7 +131,7 @@ function parseModelPolicies(
       typeof raw.provider !== 'string' ||
       !raw.provider.trim() ||
       typeof raw.model !== 'string' ||
-      !raw.model.trim()
+      !isRunnableLlmModelId(raw.model.trim())
     ) {
       res.status(400).json({
         error: `modelPolicies.${ref} must declare provider and model`,
@@ -190,7 +194,7 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       res.status(400).json({ error: `promptTargets[${index}].provider is invalid` })
       return null
     }
-    if (!model || model.length > 400 || model.includes('*')) {
+    if (!isRunnableLlmModelId(model) || model.includes('*')) {
       res
         .status(400)
         .json({ error: `promptTargets[${index}].model must be a non-wildcard model id` })

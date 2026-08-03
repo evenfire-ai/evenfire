@@ -577,6 +577,25 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
       .poll(() => notificationDeliverySignal(notificationId!), { timeout: 30_000 })
       .toMatch(/^plugin_workload_sdk\.notification\|(queued|retrying|sent)$/)
 
+    // Prove the end-user journey in the Desktop shell, not only the embedded
+    // app response or the persisted delivery signal: the notification must be
+    // visible in the authenticated inbox with the unique marker from this run.
+    await test.step('open the Desktop notification inbox and read the delivered item', async () => {
+      const bell = page!.getByTestId('notification-bell')
+      await expect(bell).toBeVisible({ timeout: 20_000 })
+      await bell.click()
+      await expect(bell).toHaveAttribute('aria-expanded', 'true', { timeout: 20_000 })
+      const inbox = page!.getByRole('dialog', { name: 'Notifications and approvals' })
+      await expect(inbox).toBeVisible({ timeout: 20_000 })
+      const deliveredItem = inbox
+        .getByTestId('notification-menu-item')
+        .filter({ hasText: `Evenfire E2E ${marker}` })
+      await expect(deliveredItem).toBeVisible({ timeout: 30_000 })
+      await expect(inbox).not.toContainText('No notifications or pending approvals right now.')
+      await bell.click()
+      await expect(bell).toHaveAttribute('aria-expanded', 'false', { timeout: 20_000 })
+    })
+
     if (CAPTURE_VISUALS) {
       await page.screenshot({
         path: testInfo.outputPath('desktop-app-sandbox-ui-complete.png'),

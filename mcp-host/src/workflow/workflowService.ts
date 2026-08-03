@@ -7,6 +7,7 @@
  * - Model/provider can be swapped per-step without restart
  * - SOUL content can be overridden per-step, reverted after execution
  */
+import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import { BudgetClient } from '../budget/budgetClient'
 import type { BudgetVerdict } from '../budget/types'
 import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
@@ -360,7 +361,7 @@ export class WorkflowService {
       return { configured: false, message: `Unknown provider: ${req.provider}` }
     }
     const model = typeof req.model === 'string' ? req.model.trim() : ''
-    if (!/^[a-zA-Z0-9._:/-]{1,128}$/.test(model)) {
+    if (!isRunnableLlmModelId(model)) {
       return { configured: false, message: 'model is required and has an invalid format' }
     }
     this.onPluginWorkloadSdkBootstrapConfigured?.({

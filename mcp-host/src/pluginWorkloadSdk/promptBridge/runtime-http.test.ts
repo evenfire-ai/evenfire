@@ -139,6 +139,7 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
     return {
       invocationId: 'inv-runtime-http',
       replay: false,
+      providerCallRequired: true,
       status: 'in_progress',
       model: PRIMARY.model,
       modelPolicy: null,

@@ -46,6 +46,8 @@ export type LlmUsageEvent = {
    * event.
    */
   prompt_bridge_metadata?: {
+    /** Server-issued Plugin Workload SDK invocation identity, when applicable. */
+    invocation_id?: string
     target_ref: string
     credential_slot: string
     fallback_used: boolean

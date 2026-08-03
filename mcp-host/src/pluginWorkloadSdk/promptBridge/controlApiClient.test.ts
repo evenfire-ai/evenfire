@@ -22,6 +22,7 @@ function authorizedBody(invocationId: string) {
   return {
     invocationId,
     replay: false,
+    providerCallRequired: true,
     status: 'in_progress',
     model: target.model,
     modelPolicy: null,
@@ -82,6 +83,16 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     await expect(client.authorizePromptBridge(promptBody)).resolves.toMatchObject({
       invocationId: 'inv-1',
       authorizedTargets: [target],
+    })
+  })
+
+  it('derives the provider-call disposition for an older control-api response', async () => {
+    const { providerCallRequired: _omitted, ...legacyBody } = authorizedBody('legacy-invocation')
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, legacyBody))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(client.authorizePromptBridge(promptBody)).resolves.toMatchObject({
+      replay: false,
+      providerCallRequired: true,
     })
   })
 

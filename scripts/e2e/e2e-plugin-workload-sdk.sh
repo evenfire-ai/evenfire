@@ -31,11 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 #   process environment > canonical root .env > safe test defaults
 #
-# The filtered temporary file lets us source the trusted dotenv file without
-# allowing it to overwrite a value supplied by the caller. It is removed
-# before this function returns and never appears in test output.
+# The dotenv file is parsed as data without sourcing or evaluating it. Values
+# supplied by the caller remain authoritative, and shell expressions in the
+# canonical file are preserved literally.
 load_canonical_root_env() {
-  local repo_root env_file common_dir main_repo_dir filtered raw_line line key
+  local repo_root env_file common_dir main_repo_dir raw_line line key
   repo_root="$(cd "${SCRIPT_DIR}/../.." && pwd)"
   env_file=""
 
@@ -58,8 +58,9 @@ load_canonical_root_env() {
     return 0
   fi
 
-  filtered="$(mktemp "${TMPDIR:-/tmp}/evenfire-plugin-sdk-env.XXXXXX")"
+  local line_number=0 value quote
   while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line_number=$((line_number + 1))
     line="${raw_line#"${raw_line%%[![:space:]]*}"}"
     case "$line" in
       ''|'#'*) continue ;;
@@ -68,36 +69,37 @@ load_canonical_root_env() {
       line="${line#export}"
       line="${line#"${line%%[![:space:]]*}"}"
     fi
-    case "$line" in
-      *=*) ;;
-      *) continue ;;
-    esac
+    if [[ "$line" != *=* ]]; then
+      printf 'Ignoring invalid canonical .env line %s (expected KEY=value)\n' "$line_number" >&2
+      return 1
+    fi
     key="${line%%=*}"
-    key="$(printf '%s' "$key" | tr -d '[:space:]')"
-    case "$key" in
-      [A-Za-z_][A-Za-z0-9_]*) ;;
-      *) continue ;;
-    esac
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf 'Ignoring invalid canonical .env key on line %s\n' "$line_number" >&2
+      return 1
+    fi
     if [ "${!key+x}" = x ]; then
       continue
     fi
-    printf '%s\n' "$raw_line" >> "$filtered"
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+      quote="${value:0:1}"
+      if [[ "${value: -1}" != "$quote" ]]; then
+        printf 'Ignoring unterminated quoted value on canonical .env line %s\n' "$line_number" >&2
+        return 1
+      fi
+      value="${value:1:${#value}-2}"
+    fi
+    # Treat dotenv as data. In particular, command substitutions, backticks,
+    # globbing and variable references remain literal text and are never
+    # evaluated by a shell.
+    printf -v "$key" '%s' "$value"
+    export "$key"
   done < "$env_file"
-
-  # Temporarily disable errexit so the temporary file is removed even when a
-  # malformed local dotenv assignment is encountered.
-  set +e
-  set -a
-  # shellcheck disable=SC1090
-  . "$filtered"
-  local source_status=$?
-  set +a
-  set -e
-  rm -f "$filtered"
-  if [ "$source_status" -ne 0 ]; then
-    printf 'Failed to load canonical .env from %s\n' "$env_file" >&2
-    return "$source_status"
-  fi
 }
 
 load_canonical_root_env

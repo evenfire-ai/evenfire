@@ -32,6 +32,15 @@ export declare const PROVIDER_IDS: readonly [
 /** Union of the canonical provider ids. */
 export type LlmProviderId = (typeof PROVIDER_IDS)[number]
 
+/** Maximum length accepted by all runnable provider/model selectors. */
+export declare const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH: 128
+
+/** Executable grammar for provider model identifiers. */
+export declare const RUNNABLE_LLM_MODEL_ID_PATTERN: RegExp
+
+/** Returns true when a model identifier is executable by the runtime contract. */
+export declare function isRunnableLlmModelId(value: unknown): value is string
+
 /**
  * One credential a provider loads from the K8s LLM Secret, mapped to a
  * shell-style env var name.

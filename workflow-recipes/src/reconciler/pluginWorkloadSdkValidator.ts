@@ -1,3 +1,4 @@
+import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import type {
   PluginWorkloadSdkCapabilityStatus,
   RecipePhase,
@@ -36,6 +37,14 @@ function rejectWildcards(field: string, values: string[] | undefined, errors: st
   for (const value of values ?? []) {
     if (value.includes('*')) {
       errors.push(`${field} entry "${value}" must not contain wildcards`)
+    }
+  }
+}
+
+function rejectInvalidModels(field: string, values: string[] | undefined, errors: string[]): void {
+  for (const value of values ?? []) {
+    if (!value.includes('*') && !isRunnableLlmModelId(value)) {
+      errors.push(`${field} entry "${value}" has an invalid runnable model id`)
     }
   }
 }
@@ -101,6 +110,11 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
   }
 
   rejectWildcards(
+    'pluginWorkloadSdk.promptBridge.allowedModels',
+    sdk.promptBridge?.allowedModels,
+    errors
+  )
+  rejectInvalidModels(
     'pluginWorkloadSdk.promptBridge.allowedModels',
     sdk.promptBridge?.allowedModels,
     errors

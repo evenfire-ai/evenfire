@@ -214,6 +214,7 @@ export interface Config {
   // (flag + runtime JWT recipeNamespace + downward-API pod namespace, all
   // fail-closed — see pluginWorkloadSdk/server/sdkServer.ts).
   pluginWorkloadSdkEnabled: boolean
+  pluginWorkloadSdkRuntimeMode: 'workflow' | 'sdk-only'
   pluginWorkloadSdkPort: number
   /** Pod namespace via Kubernetes downward API (defense-in-depth). */
   podNamespace: string
@@ -258,6 +259,14 @@ function getEnvNumber(key: string, defaultValue: number): number {
     return defaultValue
   }
   return parsed
+}
+
+function getPluginWorkloadSdkRuntimeMode(): 'workflow' | 'sdk-only' {
+  const mode = getEnv('PLUGIN_WORKLOAD_SDK_RUNTIME_MODE', 'workflow')
+  if (mode === 'workflow' || mode === 'sdk-only') return mode
+  throw new Error(
+    `Invalid PLUGIN_WORKLOAD_SDK_RUNTIME_MODE="${mode}"; expected workflow or sdk-only`
+  )
 }
 
 /**
@@ -746,6 +755,9 @@ export const config: Config = {
 
   // Plugin Workload SDK (plan §3.5 config table)
   pluginWorkloadSdkEnabled: getEnvBool('PLUGIN_WORKLOAD_SDK_ENABLED', false),
+  // Workflow is the backwards-compatible default for pre-runtime-mode pods;
+  // WRC explicitly sets sdk-only on the stepless adapter.
+  pluginWorkloadSdkRuntimeMode: getPluginWorkloadSdkRuntimeMode(),
   pluginWorkloadSdkPort: parseInt(getEnv('MCP_HOST_PLUGIN_SDK_PORT', '8099')!, 10),
   podNamespace: getEnv('MCP_HOST_POD_NAMESPACE', '')!,
   pluginWorkloadSdkGatewayUrl: getEnv('CONTROL_API_GATEWAY_URL', ''),

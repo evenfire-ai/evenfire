@@ -3,10 +3,19 @@ import { defineConfig } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 
-/** Load a dotenv-style file without overwriting an explicit process value. */
-function loadEnvFile(envPath: string): void {
-  if (!fs.existsSync(envPath)) return
-  const lines = fs.readFileSync(envPath, 'utf8').split('\n')
+/** Read a local file once, treating a missing optional file as absent. */
+function readOptionalFile(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/** Parse dotenv data without overwriting an explicit process value. */
+function loadEnvContents(contents: string): void {
+  const lines = contents.split('\n')
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
@@ -24,6 +33,12 @@ function loadEnvFile(envPath: string): void {
   }
 }
 
+/** Load a dotenv-style file without a check-then-read race. */
+function loadEnvFile(envPath: string): void {
+  const contents = readOptionalFile(envPath)
+  if (contents !== null) loadEnvContents(contents)
+}
+
 /**
  * Resolve the canonical repository .env for a secondary worktree. Direct
  * Playwright invocations do not inherit the shell wrapper's environment, so
@@ -36,22 +51,31 @@ function loadCanonicalRootEnv(): void {
   // worktree: the canonical .env lives in the primary Evenfire checkout.
   const repoRoot = path.resolve(__dirname, '../../..')
   const localEnv = path.join(repoRoot, '.env')
-  if (fs.existsSync(localEnv)) {
-    loadEnvFile(localEnv)
+  const localEnvContents = readOptionalFile(localEnv)
+  if (localEnvContents !== null) {
+    loadEnvContents(localEnvContents)
     return
   }
 
   const gitFile = path.join(repoRoot, '.git')
-  if (!fs.existsSync(gitFile) || !fs.statSync(gitFile).isFile()) return
-  const gitdirMatch = fs
-    .readFileSync(gitFile, 'utf8')
-    .trim()
-    .match(/^gitdir:\s*(.+)$/)
+  let gitFileContents: string
+  try {
+    gitFileContents = fs.readFileSync(gitFile, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    // A normal checkout has a file-form worktree pointer here. If `.git` is a
+    // directory (for example in a non-worktree checkout), there is no safe
+    // common-dir traversal to perform from this config file.
+    if ((error as NodeJS.ErrnoException).code === 'EISDIR') return
+    throw error
+  }
+  const gitdirMatch = gitFileContents.trim().match(/^gitdir:\s*(.+)$/)
   if (!gitdirMatch) return
   const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1])
   const commonDirFile = path.join(worktreeGitDir, 'commondir')
-  if (!fs.existsSync(commonDirFile)) return
-  const commonDir = path.resolve(worktreeGitDir, fs.readFileSync(commonDirFile, 'utf8').trim())
+  const commonDirValue = readOptionalFile(commonDirFile)
+  if (commonDirValue === null) return
+  const commonDir = path.resolve(worktreeGitDir, commonDirValue.trim())
   loadEnvFile(path.join(commonDir, '..', '.env'))
 }
 

@@ -43,6 +43,7 @@ describe('Plugin Workload SDK — §6.2 response-shape security invariants', () 
       authorizePromptBridge: vi.fn().mockResolvedValue({
         invocationId: 'inv-1',
         replay: false,
+        providerCallRequired: true,
         status: 'in_progress',
         model: 'glm-4.7',
         // Even if control-api leaked a key into the authorization envelope,

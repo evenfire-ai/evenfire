@@ -1233,6 +1233,22 @@ export class WorkflowRecipeReconciler {
     }
 
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
+    // The feature flag is a kill switch for SDK-only runtimes. Reconcile this
+    // before the non-deployable phase guard so a previously-created host cannot
+    // remain reachable merely because the recipe was already latched failed.
+    // Workflow recipes keep their normal mcp-host lifecycle; this cleanup is
+    // intentionally restricted to the stepless adapter.
+    if (!isWorkflow && recipe.spec.pluginWorkloadSdk && !this.config.pluginWorkloadSdkEnabled) {
+      try {
+        await this.workflowReconciler?.cleanupPluginWorkloadSdkOnly(name)
+      } catch (error) {
+        return {
+          phase: 'failed' as RecipePhase,
+          message: `Plugin Workload SDK teardown failed while the feature flag is disabled: ${String(error)}`,
+          workloadStatuses: [],
+        }
+      }
+    }
     if (isWorkflow) {
       // Revocation must precede spec/policy validation: an invalid edit that also
       // removes publishTargets must still close the previously opened lane.

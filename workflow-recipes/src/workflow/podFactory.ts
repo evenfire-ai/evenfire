@@ -552,6 +552,8 @@ export interface McpHostPodOptions {
    * downward API leg of the gate must exist even when the flag is off.
    */
   pluginWorkloadSdkEnabled?: boolean
+  /** Runtime contract used by mcp-host usage attribution. */
+  pluginWorkloadSdkRuntimeMode?: 'workflow' | 'sdk-only'
 }
 
 export function buildMcpHostPod(
@@ -706,6 +708,10 @@ export function buildMcpHostPod(
             ...(options.pluginWorkloadSdkEnabled
               ? [
                   { name: 'PLUGIN_WORKLOAD_SDK_ENABLED', value: 'true' },
+                  {
+                    name: 'PLUGIN_WORKLOAD_SDK_RUNTIME_MODE',
+                    value: options.pluginWorkloadSdkRuntimeMode ?? 'workflow',
+                  },
                   {
                     name: 'PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR',
                     value: PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR,

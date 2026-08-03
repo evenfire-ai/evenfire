@@ -384,6 +384,11 @@ export class ClerumMcpServer {
       // different audience from the workflow REST API: an mcp-host runtime JWT
       // authenticates the caller and a second short-lived signed ticket binds
       // the exact target that control-api already authorized.
+      // lgtm[js/user-controlled-bypass]
+      // The request path only selects the handler. Before any Secret read, the
+      // handler verifies the JWT issuer/audience/scope, binds the token claims
+      // to the server-owned namespace and recipe, and then validates the
+      // signed invocation/target ticket against the current control-api policy.
       if (req.method === 'POST' && subPath === '/plugin-workload-sdk/credentials') {
         const authHeader = req.headers.authorization
         const runtimeToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
@@ -451,14 +456,24 @@ export class ClerumMcpServer {
           res.end(JSON.stringify({ error: 'Credential ticket denied' }))
           return
         }
+        // The request body is only an equality check. Once the signed ticket
+        // is verified, use its claims as the sole identity passed to the
+        // Secret resolver and to all subsequent policy revalidation calls.
+        const boundInvocationId = ticket.invocationId
+        const boundTarget: PluginSdkCredentialTarget = {
+          targetRef: ticket.targetRef,
+          provider: ticket.provider,
+          model: ticket.model,
+          credentialSlot: ticket.credentialSlot,
+        }
         // TOCTOU gate: ticket signature proves what was authorized, while this
         // control-api read proves that the invocation and policy revision/hash
         // are still current immediately before the Secret lookup.
         const ticketStillActive = await revalidatePluginSdkCredentialTicket({
           runtimeToken,
           credentialTicket: body.credentialTicket,
-          invocationId: body.invocationId,
-          targetRef: target.targetRef,
+          invocationId: boundInvocationId,
+          targetRef: boundTarget.targetRef,
         })
         if (!ticketStillActive) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -470,7 +485,7 @@ export class ClerumMcpServer {
           res.end(JSON.stringify({ error: 'Credential broker unavailable' }))
           return
         }
-        const result = await this.modelConfigHandler.resolvePluginSdkCredential(target)
+        const result = await this.modelConfigHandler.resolvePluginSdkCredential(boundTarget)
         // Re-check after the Secret read as well as before it.  Control API
         // and the WRC Secret store are separate systems, so a single remote
         // check cannot be atomic with the read; the post-read gate ensures a
@@ -479,8 +494,8 @@ export class ClerumMcpServer {
           const ticketStillActiveAfterResolve = await revalidatePluginSdkCredentialTicket({
             runtimeToken,
             credentialTicket: body.credentialTicket,
-            invocationId: body.invocationId,
-            targetRef: target.targetRef,
+            invocationId: boundInvocationId,
+            targetRef: boundTarget.targetRef,
             redeem: true,
           })
           if (!ticketStillActiveAfterResolve) {

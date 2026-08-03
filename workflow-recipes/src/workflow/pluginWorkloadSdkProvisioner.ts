@@ -236,6 +236,7 @@ export class PluginWorkloadSdkProvisioner {
         {
           mountWorkflowOutput: false,
           pluginWorkloadSdkEnabled: true,
+          pluginWorkloadSdkRuntimeMode: 'sdk-only',
         }
       )
       await this.deps.createIfNotExists(

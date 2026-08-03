@@ -58,6 +58,41 @@ describe('PluginWorkloadSdk server usage attribution', () => {
     })
   })
 
+  it('emits a server-bound SDK-only usage shape without inventing a workflow run', () => {
+    const invocationId = '00000000-0000-4000-8000-000000000099'
+    const event = buildPromptBridgeUsageEvent({
+      binding: {
+        hostRef: 'sandbox-recipes/stepless',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'stepless',
+      },
+      runtimeMode: 'sdk-only',
+      invocationId,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      inputTokens: 10,
+      outputTokens: 5,
+      callerRef: 'backend-worker',
+      promptBridgeMetadata: {
+        targetRef: 'openai-primary',
+        credentialSlot: 'openai-api-key',
+        fallbackUsed: false,
+        attemptCount: 1,
+      },
+      metadata: { llmSecretName: 'openai-api-key' },
+    })
+
+    expect(event).toMatchObject({
+      source_kind: 'unknown',
+      channel_type: 'plugin_workload_sdk',
+      recipe_name: 'stepless',
+      run_id: null,
+      task_id: null,
+      llm_secret_name: 'openai-api-key',
+      prompt_bridge_metadata: { invocation_id: invocationId },
+    })
+  })
+
   it('records actual promptBridge target attribution without credential values', () => {
     const event = buildPromptBridgeUsageEvent({
       binding: {

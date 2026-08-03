@@ -27,6 +27,7 @@ function authorization(overrides: Record<string, unknown> = {}) {
   return {
     invocationId: 'inv-1',
     replay: false,
+    providerCallRequired: true,
     status: 'in_progress',
     model: primary.model,
     modelPolicy: null,
@@ -171,7 +172,11 @@ describe('PromptBridgeHandler', () => {
   })
 
   it('does not repeat a provider charge for an existing non-failed replay', async () => {
-    const authorize = vi.fn().mockResolvedValue(authorization({ replay: true, status: 'complete' }))
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(
+        authorization({ replay: true, providerCallRequired: false, status: 'complete' })
+      )
     const { handler, complete } = makeDeps({ authorize })
     await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
       code: 'idempotency_conflict',

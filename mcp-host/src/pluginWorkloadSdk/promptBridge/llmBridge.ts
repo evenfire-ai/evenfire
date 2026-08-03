@@ -1,12 +1,7 @@
 import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { type SingleTurnProvider, createLLMProvider } from '../../llm'
-import {
-  ALL_FAILOVER_CLASSES,
-  type ClassifiedLike,
-  type FailoverClass,
-  classifyFailoverClass,
-} from '../../llm/failover'
+import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
 import { isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
@@ -70,6 +65,13 @@ export interface LlmBridgeResult {
 }
 
 const DEFAULT_MAX_LLM_RESPONSE_BYTES = 1024 * 1024
+// Authentication and quota failures are operator/configuration signals, not
+// safe automatic failover triggers. Provider-unavailable and rate-limited are
+// the only conservative defaults until an explicit grant-level policy exists.
+const DEFAULT_PROMPT_BRIDGE_FAILOVER_CLASSES: readonly FailoverClass[] = [
+  'provider_unavailable',
+  'rate_limited',
+]
 
 function remainingTimeoutMs(deadlineAt: number): number {
   return deadlineAt - Date.now()
@@ -171,7 +173,7 @@ export class LlmBridge {
         'configuration'
       )
     }
-    const triggerOn = new Set(request.triggerOn ?? ALL_FAILOVER_CLASSES)
+    const triggerOn = new Set(request.triggerOn ?? DEFAULT_PROMPT_BRIDGE_FAILOVER_CLASSES)
     const deadlineAt = Date.now() + request.timeoutMs
     let lastProviderError: ClassifiedProviderError | null = null
 

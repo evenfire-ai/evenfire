@@ -466,6 +466,7 @@ spec:
                                         items:
                                           type: string
                                           maxLength: 128
+                                          pattern: "^[A-Za-z0-9._:/-]{1,128}$"
                                       maxOutputTokens:
                                         type: integer
                                         minimum: 1
@@ -1692,6 +1693,7 @@ spec:
                           items:
                             type: string
                             maxLength: 128
+                            pattern: "^[A-Za-z0-9._:/-]{1,128}$"
                         maxOutputTokens:
                           type: integer
                           minimum: 1

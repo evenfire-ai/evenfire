@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import type { DbClient } from '../../db.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
+import { getInvocationById } from '../../services/pluginWorkloadSdkDb.js'
 import { withTraceIngestTransaction } from '../../services/tracing/pools.js'
 import { projectAcceptedUsageEvents } from '../../services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../../services/usageEvents.js'
@@ -25,6 +26,7 @@ type BindingViolation = {
     | 'recipe_token_host_ref_mismatch'
     | 'recipe_token_missing_canonical_task_id'
     | 'recipe_token_missing_llm_secret_name'
+    | 'recipe_token_invalid_sdk_usage_binding'
     | 'unrecognized_token_binding'
 }
 
@@ -125,14 +127,23 @@ function checkClaimBinding(
       if (recipeName !== claims.recipeName) {
         return { index: i, reason: 'recipe_token_recipe_name_mismatch' }
       }
-      if (sourceKind !== 'workflow') {
+      if (sourceKind === 'workflow') {
+        if (!UUID_PREFIX_REGEX.test(taskId)) {
+          return { index: i, reason: 'recipe_token_missing_canonical_task_id' }
+        }
+        if (!llmSecretName) {
+          return { index: i, reason: 'recipe_token_missing_llm_secret_name' }
+        }
+      } else if (
+        sourceKind !== 'unknown' ||
+        (e as { channel_type?: unknown }).channel_type !== 'plugin_workload_sdk' ||
+        taskId ||
+        !llmSecretName ||
+        typeof (e as { prompt_bridge_metadata?: unknown }).prompt_bridge_metadata !== 'object' ||
+        (e as { prompt_bridge_metadata?: { invocation_id?: unknown } }).prompt_bridge_metadata
+          ?.invocation_id === undefined
+      ) {
         return { index: i, reason: 'recipe_token_non_workflow_source' }
-      }
-      if (!UUID_PREFIX_REGEX.test(taskId)) {
-        return { index: i, reason: 'recipe_token_missing_canonical_task_id' }
-      }
-      if (!llmSecretName) {
-        return { index: i, reason: 'recipe_token_missing_llm_secret_name' }
       }
     }
 
@@ -149,6 +160,41 @@ function checkClaimBinding(
             : 'recipe_token_host_ref_mismatch',
         }
       }
+    }
+  }
+  return null
+}
+
+async function checkSdkOnlyUsageBinding(
+  events: unknown[],
+  claims: McpHostAccessClaims,
+  db: DbClient
+): Promise<BindingViolation | null> {
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (!event || typeof event !== 'object') continue
+    const record = event as Record<string, unknown>
+    if (record.source_kind !== 'unknown') continue
+    const metadata = record.prompt_bridge_metadata
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) continue
+    const invocationId = (metadata as { invocation_id?: unknown }).invocation_id
+    if (typeof invocationId !== 'string') continue
+    const invocation = await getInvocationById(invocationId, db)
+    if (
+      !invocation ||
+      invocation.recipeNamespace !== claims.recipeNamespace ||
+      invocation.recipeName !== claims.recipeName ||
+      invocation.method !== 'promptBridge' ||
+      // UsageReporter enqueues before the handler's terminal status POST; an
+      // in-flight invocation is therefore a valid server-bound usage source.
+      !['in_progress', 'complete'].includes(invocation.status) ||
+      invocation.authorizationDecision !== 'authorized' ||
+      !invocation.promptAuthorization ||
+      !invocation.promptAuthorization.authorizedTargetRefs.includes(
+        String((metadata as { target_ref?: unknown }).target_ref ?? '')
+      )
+    ) {
+      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
     }
   }
   return null
@@ -262,6 +308,8 @@ export function createInternalUsageEventsRouter(): Router {
         return res.status(403).json({ error: 'claim_binding_mismatch', ...violation })
       }
       const transactionResult = await withTraceIngestTransaction(async db => {
+        const sdkBinding = await checkSdkOnlyUsageBinding(events, req.mcpHostJwt!, db)
+        if (sdkBinding) return { violation: sdkBinding }
         const workflowBinding = await checkWorkflowRunBinding(events, req.mcpHostJwt!, db)
         if (workflowBinding.violation) return { violation: workflowBinding.violation }
 

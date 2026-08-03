@@ -28,6 +28,7 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
     authorizePromptBridge: vi.fn().mockResolvedValue({
       invocationId: 'inv-1',
       replay: false,
+      providerCallRequired: true,
       status: 'in_progress',
       model: 'glm-4.7',
       modelPolicy: null,

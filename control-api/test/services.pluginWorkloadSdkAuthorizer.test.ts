@@ -266,6 +266,34 @@ describe('authorizePromptBridge', () => {
     expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
   })
 
+  it('caps the authorized provider suffix even when the grant lists many targets', async () => {
+    const targets = [
+      ['primary-zai', 'zai', 'glm-4.7', 'zai-api-key'],
+      ['fallback-openai', 'openai', 'gpt-5.4', 'openai-api-key'],
+      ['fallback-claude', 'claude', 'claude-sonnet-4-6', 'claude-api-key'],
+      ['fallback-gemini', 'gemini', 'gemini-2.5-pro', 'gemini-api-key'],
+      ['fallback-groq', 'groq', 'llama-3.3-70b', 'groq-api-key'],
+      ['fallback-mistral', 'mistral', 'mistral-large', 'mistral-api-key'],
+    ].map(([targetRef, provider, model, credentialSlot]) => ({
+      targetRef,
+      provider,
+      model,
+      credentialSlot,
+    }))
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ promptTargets: targets, defaultTargetRef: 'primary-zai' })
+    )
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) return
+    expect(result.value.authorizedTargets.map(target => target.targetRef)).toEqual([
+      'primary-zai',
+      'fallback-openai',
+      'fallback-claude',
+      'fallback-gemini',
+    ])
+  })
+
   it('rejects a bare model shared by two authorized providers before recording an invocation', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(
       grant({
@@ -534,10 +562,19 @@ describe('authorizePromptBridge', () => {
   })
 
   it('re-consumes quota and revives status for a failed-replay retry', async () => {
-    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 10 } }))
+    const currentGrant = grant({ quotaLimits: { maxRequestsPerRun: 10 } })
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(currentGrant)
+    vi.mocked(sdkDb.updateInvocationStatus).mockResolvedValue(true)
     vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
       kind: 'replay',
-      invocation: invocation({ status: 'failed' }),
+      invocation: invocation({
+        status: 'failed',
+        promptAuthorization: {
+          policyRevision: currentGrant.policyRevision,
+          policyHash: sdkDb.hashPromptTargetPolicy(currentGrant),
+          authorizedTargetRefs: currentGrant.promptTargets.map(target => target.targetRef),
+        },
+      }),
     })
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     // quota must be re-consumed for a failed retry
@@ -547,10 +584,16 @@ describe('authorizePromptBridge', () => {
       completed: false,
       recipeNamespace: NS,
       recipeName: RECIPE,
+      expectedCurrentStatus: 'failed',
     })
     expect(result).toMatchObject({
       ok: true,
-      value: { invocationId: 'inv-1', replay: true, status: 'in_progress' },
+      value: {
+        invocationId: 'inv-1',
+        replay: true,
+        providerCallRequired: true,
+        status: 'in_progress',
+      },
     })
   })
 

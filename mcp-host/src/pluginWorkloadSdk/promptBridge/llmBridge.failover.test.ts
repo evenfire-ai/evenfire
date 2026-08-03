@@ -223,6 +223,25 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
   })
 
+  it('does not use auth failures as an implicit fallback trigger', async () => {
+    const first = new FakeProvider(() => Promise.reject(new Error('401')), {
+      code: LlmErrorCode.AuthenticationFailed,
+      retryable: false,
+    })
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      [primary.model]: first,
+      [fallback.model]: second,
+    })
+
+    await expect(bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+      reason: 'auth',
+    })
+    expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+  })
+
   it('surfaces only a safe provider reason and never the provider body', async () => {
     const failing = new FakeProvider(() =>
       Promise.reject(new Error('provider secret response body must stay private'))

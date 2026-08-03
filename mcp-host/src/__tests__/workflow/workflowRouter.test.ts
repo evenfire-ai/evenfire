@@ -391,6 +391,36 @@ describe('workflowRouter — JWT auth middleware', () => {
     }
   })
 
+  it('rate-limits repeated SDK bootstrap calls per verified recipe', async () => {
+    const recipeName = 'rate-limit-wf'
+    const previousRecipe = process.env.CLERUM_WORKFLOW_RECIPE
+    process.env.CLERUM_WORKFLOW_RECIPE = recipeName
+    const token = await signWorkflowToken({
+      sub: 'wrc',
+      recipeName,
+      scopes: ['configure'],
+    })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true)
+    try {
+      const request = () =>
+        fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ provider: 'openai', model: 'gpt-5.4-mini' }),
+        })
+      for (let index = 0; index < 60; index += 1) {
+        expect((await request()).status).toBe(200)
+      }
+      const limited = await request()
+      expect(limited.status).toBe(429)
+      expect(limited.headers.get('retry-after')).toBeTruthy()
+    } finally {
+      server.close()
+      if (previousRecipe === undefined) delete process.env.CLERUM_WORKFLOW_RECIPE
+      else process.env.CLERUM_WORKFLOW_RECIPE = previousRecipe
+    }
+  })
+
   it('GET /mode with missing mode_read scope returns 403', async () => {
     const token = await signWorkflowToken({ scopes: ['execute'] })
     const { baseUrl, server } = await createTestApp(publicKeyPem)
