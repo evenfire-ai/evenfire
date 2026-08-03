@@ -31,7 +31,10 @@ function loadEnvFile(envPath: string): void {
  * explicit process values, then the canonical root .env, then test defaults.
  */
 function loadCanonicalRootEnv(): void {
-  const repoRoot = path.resolve(__dirname, '../..')
+  // __dirname is desktop-app/test/e2e-playwright; walk to the worktree root.
+  // This matters when Playwright is launched directly from a secondary
+  // worktree: the canonical .env lives in the primary Evenfire checkout.
+  const repoRoot = path.resolve(__dirname, '../../..')
   const localEnv = path.join(repoRoot, '.env')
   if (fs.existsSync(localEnv)) {
     loadEnvFile(localEnv)
@@ -53,9 +56,10 @@ function loadCanonicalRootEnv(): void {
 }
 
 loadCanonicalRootEnv()
-// A lane-specific file may refine the canonical root env, but never overrides
-// an explicit shell value or a value already loaded from the root.
-loadEnvFile(path.resolve(__dirname, '../../.env.e2e'))
+// A lane-specific file may supply values missing from the canonical root env,
+// but never overrides an explicit shell value or a value already loaded from
+// the root. It is optional; the root .env remains the primary contract.
+loadEnvFile(path.resolve(__dirname, '../../../.env.e2e'))
 
 export default defineConfig({
   testDir: '.',
