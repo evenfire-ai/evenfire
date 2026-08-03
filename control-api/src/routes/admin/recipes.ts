@@ -1609,6 +1609,22 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(400).json({ error: 'at least one secret key/value is required' })
         return
       }
+      // This endpoint writes `type: Opaque` (below). The kubelet only honors
+      // `kubernetes.io/dockerconfigjson` / `dockercfg` Secrets for image pulls, so a
+      // pull-secret-shaped payload written here would be accepted, stored, and then
+      // SILENTLY ignored at pull time — surfacing much later as an unexplained
+      // ImagePullBackOff. Refuse it instead of writing an object that cannot work.
+      if (Object.keys(stringData).some(k => k === '.dockerconfigjson' || k === '.dockercfg')) {
+        res.status(400).json({
+          error:
+            'this endpoint creates Opaque secrets, which Kubernetes ignores for image pulls. ' +
+            'Images on the evenfire registry are handled automatically — no pull secret is ' +
+            'needed. For a third-party registry, create a kubernetes.io/dockerconfigjson ' +
+            'Secret in the workload namespace and label it clerum.io/owner-recipe=<recipe>.',
+          key: '.dockerconfigjson',
+        })
+        return
+      }
       const ownershipParse = parseWorkflowSecretOwnershipBody(body)
       if (!ownershipParse.ok) {
         res.status(400).json({ error: ownershipParse.error })

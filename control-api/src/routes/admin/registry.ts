@@ -37,6 +37,8 @@ import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
 import {
   PullSecretProvisionError,
   ensureRegistryPullSecret,
+  ensureRegistryPullSecrets,
+  platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import {
   validateWorkflowRecipeEgressPreflight,
@@ -45,6 +47,7 @@ import {
 import { SecretUpsertRequest } from '../../types.js'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+  isPlatformRegistryImage,
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
@@ -352,6 +355,23 @@ function pullSecretErrorResponse(err: unknown): {
       detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
     },
   }
+}
+
+/**
+ * True when any workload in a recipe spec runs an image hosted on our own registry, and
+ * therefore needs the platform pull credential.
+ *
+ * Uses the same shared predicate WRC applies at reconcile time
+ * (`isPlatformRegistryImage`), so control-api cannot decide to provision for a workload
+ * WRC will not attach the secret to, or vice versa — that mismatch would surface as an
+ * ImagePullBackOff with no failing request to attribute it to.
+ */
+function recipeReferencesPlatformImage(recipeSpec: Record<string, unknown>): boolean {
+  const workloads = recipeSpec.workloads
+  if (!Array.isArray(workloads)) return false
+  return workloads.some(w =>
+    isPlatformRegistryImage((w as { image?: unknown } | null)?.image, config.registryUrl)
+  )
 }
 
 /** Audit log for security-sensitive operations (finding #10). */
@@ -1580,6 +1600,24 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryName,
           body.registryEntryVersion
         )
+
+        // Ensure the platform pull credential before the CRD that will need it.
+        //
+        // Recipe workloads do NOT all land in the plugin namespace — they split by kind
+        // (transport -> mcp-server, spec.ui.workloadRef -> sandbox-ui, rest ->
+        // sandbox-recipes) — and WRC injects the pull-secret reference at reconcile time
+        // for any workload whose image is ours. So provision the whole platform set: the
+        // credential is per-org and the mint is rotate-on-call, so one pass covers every
+        // namespace with a single mint (see registryPullSecretService).
+        if (recipeReferencesPlatformImage(recipeSpec)) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
 
         // Step 4: Apply WorkflowRecipe CRD
         try {

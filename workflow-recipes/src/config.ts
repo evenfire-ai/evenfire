@@ -36,6 +36,14 @@ export interface OperatorConfig {
    */
   sandboxUiNamespace: string
   hostNamespace: string
+  /**
+   * Base URL of the evenfire registry. Deliberately the SAME variable control-api reads
+   * (`CLERUM_REGISTRY_URL`), because both services must agree on which images are ours:
+   * control-api provisions the platform pull credential for those images, WRC attaches it.
+   * A divergence here means recipe pods silently get no credential while MCP servers do.
+   * Empty (the default) disables platform pull-secret injection entirely.
+   */
+  registryUrl: string
   selfName: string
   internalControlJwtWrcHmacSecret: string
   enableCustomCoordinatorImage: boolean
@@ -248,6 +256,7 @@ export function loadConfig(): OperatorConfig {
     sandboxNamespace: getEnv('CLERUM_SANDBOX_NAMESPACE', 'sandbox-recipes'),
     sandboxUiNamespace: getEnv('CLERUM_SANDBOX_UI_NAMESPACE', 'sandbox-ui'),
     hostNamespace: getEnv('CLERUM_HOST_NAMESPACE', 'mcp-host'),
+    registryUrl: getEnv('CLERUM_REGISTRY_URL', ''),
     selfName: getEnv('CLERUM_OPERATOR_NAME', 'workflow-recipes'),
     internalControlJwtWrcHmacSecret: getEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', ''),
     enableCustomCoordinatorImage: getEnvBool('WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE', false),

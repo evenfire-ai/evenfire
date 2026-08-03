@@ -1,6 +1,6 @@
 # Platform image-pull credentials for recipe workloads
 
-**Status:** Draft / proposed
+**Status:** Implemented (see PR #243)
 **Date:** 2026-08-04
 **Area:** control-api · workflow-recipes (WRC) · workflow-runtime-core · image pull · self-hosted
 **Follows:** [`registry-pull-secret-self-provisioning.md`](registry-pull-secret-self-provisioning.md)
@@ -343,6 +343,21 @@ kubelet ignores is the one outcome that must not remain.
 ---
 
 ## 7. Implementation
+
+> **As-built note.** Shipped in PR #243 alongside the MCP-server slice. Two deviations
+> from the plan below, both deliberate:
+> - **`buildSecretReq` carries a key fingerprint annotation**
+>   (`clerum.io/pull-key-fingerprint`), and a copy *without* one is treated as broken. This
+>   is what makes cross-namespace divergence detectable — and it means Secrets written by
+>   the pre-fan-out code are re-minted once on upgrade, converging the cluster onto the
+>   annotated form.
+> - **Wrong-typed Secrets are deleted BEFORE the single mint**, not during the per-namespace
+>   write. A delete that fails must not leave us holding a freshly-minted key that has
+>   already revoked the credential the cluster was using.
+>
+> WRC reads the registry URL via `loadConfig().registryUrl` at the point of use, matching
+> the existing pattern in `restEndpoints.ts` rather than threading a new parameter through
+> every builder call site.
 
 **`packages/workflow-runtime-core`**
 - Add `registry-image.ts`: the name constant + `registryHostFromUrl` / `imageRefHost` /

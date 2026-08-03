@@ -218,3 +218,85 @@ describe('POST /admin/registry/install — pull-secret provisioning (self-hosted
     expect(mcp.spec.imagePullSecrets).toBeUndefined()
   })
 })
+
+describe('POST /admin/registry/install-recipe — pull-secret provisioning (self-hosted)', () => {
+  const PLATFORM_NAMESPACES = ['mcp-server', 'sandbox-recipes', 'sandbox-ui']
+
+  function recipeEntry(image: string) {
+    return {
+      id: 'r1',
+      name: 'intel-report',
+      version: '1.0.0',
+      entry_type: 'recipe',
+      description: 'Research + PDF report',
+      author: 'acme',
+      server_mode: null,
+      transport: null,
+      recipe_type: 'workflow',
+      mcp_server_meta: null,
+      recipe_meta: {
+        recipeYaml: JSON.stringify({
+          spec: {
+            description: 'Intel',
+            steps: [{ id: 'research', description: 'Research step' }],
+            workloads: [{ id: 'w1', type: 'deployment', image }],
+          },
+        }),
+        stepCount: 1,
+        hasAgent: true,
+      },
+    }
+  }
+
+  function recipeBody() {
+    return { registryEntryName: 'intel-report', registryEntryVersion: '1.0.0' }
+  }
+
+  it('provisions the credential in EVERY platform namespace, minting once', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
+    )
+    const { app, gw } = makeInstallApp()
+
+    await request(app).post('/admin/registry/install-recipe').send(recipeBody()).expect(201)
+
+    // Recipe workloads split across namespaces by kind, and WRC injects the reference at
+    // reconcile time — so all three must hold the credential, from ONE mint (the registry
+    // mint is rotate-on-call; a second would revoke the first).
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    for (const ns of PLATFORM_NAMESPACES) {
+      const secret = (await gw.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)) as {
+        type?: string
+      }
+      expect(secret.type).toBe('kubernetes.io/dockerconfigjson')
+    }
+  })
+
+  it('does not provision for a recipe with no platform-registry image', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry('ghcr.io/acme/plugin:1.0') as never
+    )
+    const { app, gw } = makeInstallApp()
+
+    await request(app).post('/admin/registry/install-recipe').send(recipeBody()).expect(201)
+
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    await expect(
+      gw.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, 'sandbox-recipes')
+    ).rejects.toBeTruthy()
+  })
+
+  it('fails the recipe install loudly when provisioning fails', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
+    )
+    vi.mocked(mintOrgPullCredential).mockRejectedValueOnce(new Error('registry unavailable'))
+    const { app, gw } = makeInstallApp()
+
+    const res = await request(app).post('/admin/registry/install-recipe').send(recipeBody())
+    expect(res.status).toBeGreaterThanOrEqual(500)
+    expect(res.body.error).toBe('registry_pull_secret_provision_failed')
+    // No WorkflowRecipe may be persisted referencing a credential that does not exist.
+    await expect(gw.getResource('workflowrecipes', 'intel-report', NS)).rejects.toBeTruthy()
+  })
+})
