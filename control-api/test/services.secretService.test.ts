@@ -526,6 +526,10 @@ describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', ()
     expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
   })
 
+  // The {} vs undefined distinction is a load-bearing contract: {} means "caller
+  // wants zero annotations" while undefined means "caller didn't provide
+  // annotations". Collapsing {} to undefined would silently turn an explicit
+  // clear into a no-op.
   it('returns {} for empty object (truthy but no entries)', () => {
     expect(stripBlockedAnnotationKeys({})).toEqual({})
   })
@@ -591,38 +595,6 @@ describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', ()
       'my-annotation': 'value',
     }
     expect(stripBlockedAnnotationKeys(annotations)).toEqual(annotations)
-  })
-})
-
-// The {} vs undefined distinction is a load-bearing contract: {} means "caller
-// wants zero annotations" while undefined means "caller didn't provide
-// annotations". Collapsing {} to undefined would silently turn an explicit
-// clear into a no-op.
-describe('stripBlockedAnnotationKeys — edge cases', () => {
-  it('returns {} for an empty annotations object (never collapses to undefined)', () => {
-    expect(stripBlockedAnnotationKeys({})).toEqual({})
-  })
-
-  it('returns undefined for undefined input', () => {
-    expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
-  })
-
-  it('returns {} when all keys are blocked', () => {
-    expect(
-      stripBlockedAnnotationKeys({
-        'kubectl.kubernetes.io/last-applied-configuration': '{}',
-        'kubernetes.io/service-account.name': 'default',
-      })
-    ).toEqual({})
-  })
-
-  it('strips only blocked keys, preserves safe keys', () => {
-    expect(
-      stripBlockedAnnotationKeys({
-        'kubectl.kubernetes.io/last-applied-configuration': '{}',
-        'my-custom-annotation': 'keep-me',
-      })
-    ).toEqual({ 'my-custom-annotation': 'keep-me' })
   })
 })
 

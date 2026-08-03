@@ -1919,10 +1919,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                     namespace: previousSecretSnapshot.namespace,
                     type: previousSecretSnapshot.type || 'Opaque',
                     labels: previousSecretSnapshot.labels,
-                    annotations: stripBlockedAnnotationKeys(
-                      previousSecretSnapshot.annotations,
-                      rollbackOpts
-                    ),
+                    annotations:
+                      stripBlockedAnnotationKeys(
+                        previousSecretSnapshot.annotations,
+                        rollbackOpts
+                      ) ?? {},
                     data: previousSecretSnapshot.data,
                     stringData: previousSecretSnapshot.stringData,
                   },
