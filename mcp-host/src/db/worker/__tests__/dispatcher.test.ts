@@ -756,6 +756,107 @@ describe('dbWorker dispatcher', () => {
     expect(mismatch).toEqual({ state: 'idle', active_task_id: null })
   })
 
+  it('R1-M1 — processing reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-reap-proc', 'u-reap:rpc:agent:proc'),
+      state: 'processing',
+      active_task_id: 'task-proc',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    // A pre-existing message that never carried a turn number (e.g. a legacy
+    // system row). MAX(turn_number) over it is SQL NULL — the reaper must not
+    // coalesce that to a real turn 0.
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'system',
+          content: 'legacy untracked message',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 5,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: null,
+        },
+      },
+      deps
+    )
+
+    await dispatch({ kind: 'reap_processing_sessions', nowEpoch: Date.now() }, deps)
+
+    const page = (await dispatch(
+      { kind: 'load_session_message_page', sessionKey: session.session_key },
+      deps
+    )) as {
+      total_turns: number
+      first_turn_number: number | null
+      last_turn_number: number | null
+    }
+    expect(page.total_turns).toBe(0)
+    expect(page.first_turn_number).toBeNull()
+    expect(page.last_turn_number).toBeNull()
+  })
+
+  it('R1-M1 — awaiting-approval reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
+    const deps = createDispatcher(db)
+    // Orphan awaiting_approval session (no live approval row) with only an
+    // untracked-turn message — the same MAX(turn_number) IS NULL path.
+    const session = {
+      ...makeSession('conv-reap-appr', 'u-reap:rpc:agent:appr'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-appr',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'system',
+          content: 'legacy untracked message',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 5,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: null,
+        },
+      },
+      deps
+    )
+
+    const reaped = (await dispatch(
+      { kind: 'reap_awaiting_approval_sessions', nowEpoch: Date.now() },
+      deps
+    )) as ReapedSession[]
+    expect(reaped.map(row => row.sessionId)).toEqual(['conv-reap-appr'])
+
+    const page = (await dispatch(
+      { kind: 'load_session_message_page', sessionKey: session.session_key },
+      deps
+    )) as {
+      total_turns: number
+      first_turn_number: number | null
+      last_turn_number: number | null
+    }
+    expect(page.total_turns).toBe(0)
+    expect(page.first_turn_number).toBeNull()
+    expect(page.last_turn_number).toBeNull()
+  })
+
   it('integrity_check returns ok', async () => {
     const deps = createDispatcher(db)
     const r = (await dispatch({ kind: 'integrity_check' }, deps)) as {

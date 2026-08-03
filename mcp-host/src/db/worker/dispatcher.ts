@@ -189,7 +189,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             for (const sess of sessions) {
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
-                max_turn: number
+                max_turn: number | null
               }
               // Synthetic assistant message on the open turn. The marker lives
               // in content_parts JSON (machine-detectable) while finish_reason
@@ -315,7 +315,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             for (const sess of sessions) {
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
-                max_turn: number
+                max_turn: number | null
               }
               s.insertMessage.run({
                 session_id: sess.id,

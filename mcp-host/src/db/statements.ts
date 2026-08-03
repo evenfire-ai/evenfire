@@ -113,8 +113,8 @@ export function prepareStatements(db: Database): PreparedStatements {
        LIMIT @limit
     `),
     selectSessionMaxOrdinalTurn: db.prepare(`
-      SELECT COALESCE(MAX(ordinal), -1)    AS max_ordinal,
-             COALESCE(MAX(turn_number), 0) AS max_turn
+      SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal,
+             MAX(turn_number)           AS max_turn
         FROM messages
        WHERE session_id = @session_id
     `),
