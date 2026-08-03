@@ -1,6 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
-import { SecretConstraintOptions, assertValidSecretConstraints } from './secretConstraints.js'
+import { type SecretConstraintOptions, assertValidSecretConstraints } from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 export class SecretService {

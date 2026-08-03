@@ -2178,7 +2178,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     let authActive: boolean
     try {
       authActive = await isRegistryAuthActive()
-    } catch {
+    } catch (err) {
+      console.error('[REGISTRY] isRegistryAuthActive failed:', err)
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2200,7 +2201,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       orgName = (await resolvePublishScope()).orgName
       if (!orgName) orgName = (await resolvePublishScope({ force: true })).orgName
-    } catch {
+    } catch (err) {
+      console.error('[REGISTRY] resolvePublishScope failed:', err)
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2287,7 +2289,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     let authActive: boolean
     try {
       authActive = await isRegistryAuthActive()
-    } catch {
+    } catch (err) {
+      console.error('[REGISTRY] isRegistryAuthActive failed:', err)
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2313,7 +2316,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       if (!scope.curator && !scope.orgName) {
         scope = await resolvePublishScope({ force: true })
       }
-    } catch {
+    } catch (err) {
+      console.error('[REGISTRY] resolvePublishScope failed:', err)
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }

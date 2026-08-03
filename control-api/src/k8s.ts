@@ -7,7 +7,7 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
-import { SecretConstraintOptions } from './services/secretConstraints.js'
+import type { SecretConstraintOptions } from './services/secretConstraints.js'
 import { SecretService } from './services/secretService.js'
 import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
 
