@@ -69,6 +69,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const checkAuth = useCallback(async () => {
     try {
       const response = await getControlUIAuthMe()
+      sessionExpiredToastShownRef.current = false
       setAuthState(prev => ({
         ...prev,
         id: response.me.id || prev.id,

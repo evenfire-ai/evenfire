@@ -27,10 +27,19 @@ function ExpireSessionButton() {
     <button
       type="button"
       onClick={() => {
-        void Promise.allSettled([apiGet('/api/v1/admin/hosts'), apiGet('/api/v1/admin/contexts')])
+        void apiGet('/api/v1/admin/hosts').catch(() => undefined)
       }}
     >
       Expire session
+    </button>
+  )
+}
+
+function CheckAuthButton() {
+  const { checkAuth } = useAuth()
+  return (
+    <button type="button" onClick={() => void checkAuth()}>
+      Check auth
     </button>
   )
 }
@@ -86,6 +95,40 @@ describe('AuthProvider session expiry handling', () => {
     })
     expect(replaceMock).toHaveBeenCalledWith('/?next=%2Fagents%2Fchatllm%2Fenv%23runtime')
     expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
+  })
+
+  it('re-arms the session-expired toast after a successful auth check', async () => {
+    window.history.pushState({}, '', '/agents')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { me: { id: 'admin', role: 'admin' } }))
+      .mockResolvedValueOnce(response(401, { error: 'expired' }))
+      .mockResolvedValueOnce(response(200, { me: { id: 'admin', role: 'admin' } }))
+      .mockResolvedValueOnce(response(401, { error: 'expired' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <ExpireSessionButton />
+          <CheckAuthButton />
+        </AuthProvider>
+      </ToastProvider>
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: /expire session/i }))
+    await waitFor(() =>
+      expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(1)
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /check auth/i }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    fireEvent.click(screen.getByRole('button', { name: /expire session/i }))
+    await waitFor(() =>
+      expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(2)
+    )
   })
 
   it('clears legacy storage without a toast when no cookie session exists on mount', async () => {
