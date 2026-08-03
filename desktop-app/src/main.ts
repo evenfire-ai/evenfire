@@ -13,6 +13,7 @@ import {
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
+import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -197,7 +198,8 @@ function handleEvenfireUrl(rawUrl: string): void {
 
   const hostname = parsed.hostname.toLowerCase()
   if (hostname === SANDBOX_UI_DEEP_LINK_HOST) {
-    if (!handleSandboxUiDeepLink(rawUrl)) requestMainWindow()
+    if (!shouldAcceptSandboxUiProtocolLink(rawUrl)) return
+    handleSandboxUiDeepLink(rawUrl)
     return
   }
 
