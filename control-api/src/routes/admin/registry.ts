@@ -34,6 +34,7 @@ import {
   uploadArtifacts,
 } from '../../services/registryClient.js'
 import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
+import { stripBlockedAnnotationKeys } from '../../services/secretConstraints.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -554,9 +555,10 @@ function extractK8sError(err: unknown): { status: number; message: string } | nu
       body?: string | { message?: string }
       httpStatus?: number
       statusCode?: number
+      status?: number
       message?: string
     }
-    const status = e.code ?? e.statusCode ?? e.httpStatus
+    const status = e.code ?? e.statusCode ?? e.httpStatus ?? e.status
     if (typeof status === 'number' && status >= 400 && status < 600) {
       let msg = ''
       if (typeof e.body === 'string') {
@@ -1910,17 +1912,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                   `Secret/${secretName}`
                 )
               } else if (previousSecretSnapshot) {
+                const rollbackOpts = { allowPlatformAnnotations: true } as const
                 await gateway.updateSecret(
                   {
                     name: previousSecretSnapshot.name,
                     namespace: previousSecretSnapshot.namespace,
                     type: previousSecretSnapshot.type || 'Opaque',
                     labels: previousSecretSnapshot.labels,
-                    annotations: previousSecretSnapshot.annotations,
+                    annotations: stripBlockedAnnotationKeys(
+                      previousSecretSnapshot.annotations,
+                      rollbackOpts
+                    ),
                     data: previousSecretSnapshot.data,
                     stringData: previousSecretSnapshot.stringData,
                   },
-                  { allowPlatformAnnotations: true }
+                  rollbackOpts
                 )
               }
             } catch {

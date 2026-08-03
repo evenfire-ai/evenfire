@@ -6,6 +6,7 @@ import {
   InvalidSecretTypeError,
   dangerousAnnotationKeyReason,
   invalidSecretTypeReason,
+  stripBlockedAnnotationKeys,
 } from '../src/services/secretConstraints.js'
 import {
   InvalidSecretKeyError,
@@ -184,6 +185,8 @@ const DANGEROUS_ANNOTATION_KEYS: readonly string[] = [
   'kubectl.kubernetes.io/restartedAt',
   'kubernetes.io/service-account.name',
   'kubernetes.io/service-account.uid',
+  'meta.helm.sh/release-name',
+  'meta.helm.sh/release-namespace',
 ]
 
 // Platform-prefix annotation keys — blocked by default, allowed with allowPlatformAnnotations.
@@ -531,6 +534,75 @@ describe('dangerousAnnotationKeyReason — the shared rule', () => {
       expect(reason).not.toBeNull()
       expect(reason).toContain('is not allowed')
     }
+  })
+})
+
+describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', () => {
+  it('returns undefined for undefined input', () => {
+    expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
+  })
+
+  it('returns undefined when all keys are blocked', () => {
+    const annotations = {
+      'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      'kubernetes.io/service-account.name': 'default',
+    }
+    expect(stripBlockedAnnotationKeys(annotations)).toBeUndefined()
+  })
+
+  it('strips infra-prefixed keys and keeps safe keys', () => {
+    const annotations = {
+      'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      'app.example.com/version': '1.0',
+      'my-annotation': 'value',
+    }
+    expect(stripBlockedAnnotationKeys(annotations)).toEqual({
+      'app.example.com/version': '1.0',
+      'my-annotation': 'value',
+    })
+  })
+
+  it('strips both infra and platform keys by default', () => {
+    const annotations = {
+      'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      'clerum.io/catalog-id': '@clerum/slack',
+      'safe-key': 'val',
+    }
+    expect(stripBlockedAnnotationKeys(annotations)).toEqual({
+      'safe-key': 'val',
+    })
+  })
+
+  it('keeps platform keys when allowPlatformAnnotations is true', () => {
+    const annotations = {
+      'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      'clerum.io/catalog-id': '@clerum/slack',
+      'safe-key': 'val',
+    }
+    expect(stripBlockedAnnotationKeys(annotations, { allowPlatformAnnotations: true })).toEqual({
+      'clerum.io/catalog-id': '@clerum/slack',
+      'safe-key': 'val',
+    })
+  })
+
+  it('still strips infra keys even with allowPlatformAnnotations', () => {
+    const annotations = {
+      'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      'kubernetes.io/service-account.name': 'default',
+      'clerum.io/catalog-version': '2.0',
+    }
+    const result = stripBlockedAnnotationKeys(annotations, {
+      allowPlatformAnnotations: true,
+    })
+    expect(result).toEqual({ 'clerum.io/catalog-version': '2.0' })
+  })
+
+  it('returns all keys unchanged when none are blocked', () => {
+    const annotations = {
+      'app.example.com/version': '1.0',
+      'my-annotation': 'value',
+    }
+    expect(stripBlockedAnnotationKeys(annotations)).toEqual(annotations)
   })
 })
 

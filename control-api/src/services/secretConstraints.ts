@@ -6,10 +6,22 @@ export const ALLOWED_SECRET_TYPES: readonly string[] = [
   'kubernetes.io/dockerconfigjson',
 ]
 
-const INFRA_ANNOTATION_PREFIXES: readonly string[] = ['kubectl.kubernetes.io/', 'kubernetes.io/']
+const INFRA_ANNOTATION_PREFIXES: readonly string[] = [
+  'kubectl.kubernetes.io/',
+  'kubernetes.io/',
+  'meta.helm.sh/',
+]
 
 const PLATFORM_ANNOTATION_PREFIXES: readonly string[] = ['clerum.io/']
 
+/**
+ * Options for Secret write-path constraint validation.
+ *
+ * Only platform-internal routes (registry install/upgrade) should set
+ * `allowPlatformAnnotations: true`. User-facing endpoints (admin/secrets,
+ * recipe-secrets, communication-channel-credentials) MUST leave this unset
+ * to prevent callers from claiming platform ownership via annotations.
+ */
 export interface SecretConstraintOptions {
   allowPlatformAnnotations?: boolean
 }
@@ -87,10 +99,28 @@ export function assertValidSecretAnnotations(
   }
 }
 
+export function stripBlockedAnnotationKeys(
+  annotations: Record<string, string> | undefined,
+  opts?: SecretConstraintOptions
+): Record<string, string> | undefined {
+  if (!annotations) return annotations
+  const prefixes = blockedPrefixes(opts)
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(annotations)) {
+    if (!prefixes.some(p => key.startsWith(p))) {
+      result[key] = value
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
 export function assertValidSecretConstraints(
   req: SecretUpsertRequest,
   opts?: SecretConstraintOptions
 ): void {
+  // Type validation fires only on explicit type assignment. When req.type is
+  // undefined, the write method defaults to 'Opaque' (create) or preserves
+  // the existing type (update/merge) — no attacker-controlled type enters.
   if (req.type !== undefined) {
     assertValidSecretType(req.type)
   }
