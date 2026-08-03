@@ -542,6 +542,10 @@ describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', ()
     expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
   })
 
+  it('returns undefined for empty object (truthy but no entries)', () => {
+    expect(stripBlockedAnnotationKeys({})).toBeUndefined()
+  })
+
   it('returns undefined when all keys are blocked', () => {
     const annotations = {
       'kubectl.kubernetes.io/last-applied-configuration': '{}',

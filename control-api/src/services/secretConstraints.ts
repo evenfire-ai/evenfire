@@ -93,7 +93,7 @@ export function assertValidSecretAnnotations(
   if (!annotations) return
   const prefixes = blockedPrefixes(opts)
   for (const key of Object.keys(annotations)) {
-    if (dangerousAnnotationKeyReason(key, opts) !== null) {
+    if (prefixes.some(p => key.startsWith(p))) {
       throw new DangerousAnnotationError(key, prefixes)
     }
   }

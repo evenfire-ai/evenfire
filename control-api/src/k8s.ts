@@ -673,6 +673,8 @@ export function extractHttpStatus(err: unknown): number | null {
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
+  if (typeof (err as { status?: unknown }).status === 'number')
+    return (err as { status: number }).status
   return null
 }
 
