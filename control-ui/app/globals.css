@@ -8717,6 +8717,18 @@ textarea.cu-input {
   animation: cu-spin 0.85s linear infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .cu-skeleton,
+  .cu-spin,
+  .cu-btn__spinner,
+  .cu-identity-skeleton__tabs,
+  .cu-identity-skeleton__header,
+  .cu-identity-skeleton__line,
+  .cu-identity-skeleton__box {
+    animation: none;
+  }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

@@ -1238,6 +1238,18 @@ code {
   }
 }
 
+.cu-skeleton {
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.14),
+    rgba(255, 255, 255, 0.06)
+  );
+  background-size: 200% 100%;
+  animation: profile-skeleton-pulse 1.35s ease-in-out infinite;
+}
+
 .member-email {
   display: inline-flex;
   align-items: center;
@@ -1869,6 +1881,14 @@ code {
 
   100% {
     background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-skeleton,
+  .profile-skeleton__line,
+  .cu-btn__spinner {
+    animation: none;
   }
 }
 
