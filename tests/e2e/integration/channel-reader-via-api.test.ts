@@ -41,7 +41,7 @@
  *   cd tests/e2e && npx vitest run integration/channel-reader-via-api
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { randomBytes } from 'crypto'
 import {
   CONTROL_API_URL,
@@ -77,7 +77,8 @@ const TG_CONNECT_TIMEOUT_MS = 90_000
 // ─── kubectl wrappers (subprocess, returns stdout or null on error) ─────────
 
 function kubectl(args: string): string {
-  return execSync(`kubectl --context=${KUBECTL_CONTEXT} ${args}`, {
+  const parts = args.split(/\s+/).filter(Boolean)
+  return execFileSync('kubectl', [`--context=${KUBECTL_CONTEXT}`, ...parts], {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
@@ -92,7 +93,7 @@ function kubectlSafe(args: string): string | null {
 }
 
 function kubectlApply(yaml: string): string {
-  return execSync(`kubectl --context=${KUBECTL_CONTEXT} apply -f -`, {
+  return execFileSync('kubectl', [`--context=${KUBECTL_CONTEXT}`, 'apply', '-f', '-'], {
     encoding: 'utf-8',
     input: yaml,
   }).trim()

@@ -19,7 +19,7 @@
  * Model: zai / glm-4.7 (default for all steps)
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   CONTROL_API_URL,
   deleteJson,
@@ -54,7 +54,8 @@ let adminToken = ''
 function kubectl(args: string): string | null {
   try {
     const ctx = process.env.KUBECTL_CONTEXT ?? 'clerum-test'
-    return execSync(`kubectl ${args} --context ${ctx}`, {
+    const parts = args.split(/\s+/).filter(Boolean)
+    return execFileSync('kubectl', [...parts, '--context', ctx], {
       encoding: 'utf-8',
       timeout: 10_000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -106,7 +107,7 @@ async function waitForPod(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const out = kubectl(`get pods -n ${namespace} -l ${labelSelector} --no-headers 2>/dev/null`)
+    const out = kubectl(`get pods -n ${namespace} -l ${labelSelector} --no-headers`)
     if (out && out.trim().length > 0) return true
     await new Promise(r => setTimeout(r, 3_000))
   }
