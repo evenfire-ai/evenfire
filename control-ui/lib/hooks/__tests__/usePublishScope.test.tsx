@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../api'
 import {
   PublishScopeProvider,
@@ -22,8 +22,38 @@ function Probe() {
   )
 }
 
+function RefreshProbe() {
+  const { scope, loading, refresh } = usePublishScope()
+  return (
+    <div>
+      <div data-testid="scope">{loading ? 'loading' : (scope?.scope ?? 'none')}</div>
+      <button type="button" onClick={() => void refresh({ force: true })}>
+        Refresh
+      </button>
+    </div>
+  )
+}
+
 function renderWithProvider(children: React.ReactNode = <Probe />) {
   return render(<PublishScopeProvider cacheKey="admin-1">{children}</PublishScopeProvider>)
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, reject, resolve }
+}
+
+function scope(value: string | null) {
+  return {
+    scope: value,
+    curator: value === null,
+    orgName: value,
+  }
 }
 
 afterEach(cleanup)
@@ -115,5 +145,98 @@ describe('usePublishScope / isPublisherEnabled', () => {
 
     expect(await screen.findByTestId('next-route')).toBeInTheDocument()
     expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not expose a stale keyed request that resolves after reset', async () => {
+    const stale = deferred<api.PublishScope>()
+    const fresh = deferred<api.PublishScope>()
+    vi.mocked(api.getPublishScope)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(fresh.promise)
+
+    const view = renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('loading')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+
+    resetPublishScopeCache('admin-1')
+    await act(async () => {
+      stale.resolve(scope('@stale'))
+      await stale.promise
+    })
+    expect(screen.queryByText('@stale')).toBeNull()
+    expect(screen.getByText('none')).toBeInTheDocument()
+    view.unmount()
+
+    renderWithProvider(<RefreshProbe />)
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+
+    await act(async () => {
+      fresh.resolve(scope('@fresh'))
+      await fresh.promise
+    })
+    expect(await screen.findByText('@fresh')).toBeInTheDocument()
+  })
+
+  it('does not expose a stale request that resolves after a full reset', async () => {
+    const stale = deferred<api.PublishScope>()
+    const fresh = deferred<api.PublishScope>()
+    vi.mocked(api.getPublishScope)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(fresh.promise)
+
+    const view = renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('loading')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+
+    resetPublishScopeCache()
+    await act(async () => {
+      stale.resolve(scope('@stale'))
+      await stale.promise
+    })
+    expect(screen.queryByText('@stale')).toBeNull()
+    expect(screen.getByText('none')).toBeInTheDocument()
+    view.unmount()
+
+    renderWithProvider(<RefreshProbe />)
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+
+    await act(async () => {
+      fresh.resolve(scope('@fresh'))
+      await fresh.promise
+    })
+    expect(await screen.findByText('@fresh')).toBeInTheDocument()
+  })
+
+  it('keeps an older request from overwriting a newer provider refresh', async () => {
+    const stale = deferred<api.PublishScope>()
+    const fresh = deferred<api.PublishScope>()
+    vi.mocked(api.getPublishScope)
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(fresh.promise)
+
+    const view = renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('loading')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+
+    await act(async () => {
+      fresh.resolve(scope('@fresh'))
+      await fresh.promise
+    })
+    expect(await screen.findByText('@fresh')).toBeInTheDocument()
+
+    await act(async () => {
+      stale.resolve(scope('@stale'))
+      await stale.promise
+    })
+    expect(screen.getByText('@fresh')).toBeInTheDocument()
+    expect(screen.queryByText('@stale')).toBeNull()
+
+    view.unmount()
+    renderWithProvider(<RefreshProbe />)
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('@fresh')).toBeInTheDocument()
   })
 })

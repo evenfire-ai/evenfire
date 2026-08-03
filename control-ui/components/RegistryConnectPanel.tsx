@@ -9,6 +9,7 @@ import {
   requestRegistryConnection,
   submitRegistryClaim,
 } from '../lib/api'
+import { usePublishScope } from '../lib/hooks/usePublishScope'
 import { useConfirmDialog } from './ConfirmDialog'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
@@ -34,6 +35,7 @@ type View =
 export default function RegistryConnectPanel() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const { refresh: refreshPublishScope } = usePublishScope()
   const [view, setView] = useState<View>({ kind: 'loading' })
   // request-form fields
   const [orgName, setOrgName] = useState('')
@@ -125,6 +127,7 @@ export default function RegistryConnectPanel() {
       // approve it by hand (pending, the original claim-token flow).
       if (s.state === 'connected') {
         setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
+        void refreshPublishScope({ force: true })
         showToast(`Connected to @${s.org}.`, { tone: 'success' })
       } else if (s.state === 'connecting') {
         setView({
@@ -182,6 +185,7 @@ export default function RegistryConnectPanel() {
       const { org } = await submitRegistryClaim({ claimToken: claimToken.trim() })
       setClaimToken('')
       setView({ kind: 'connected', org })
+      void refreshPublishScope({ force: true })
       showToast(`Connected to @${org}.`, { tone: 'success' })
     } catch (e) {
       const code = (e as { code?: string }).code
@@ -213,6 +217,7 @@ export default function RegistryConnectPanel() {
       const s = await recoverRegistryConnection()
       if (s.state === 'connected') {
         setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
+        void refreshPublishScope({ force: true })
         showToast(`Connected to @${s.org}.`, { tone: 'success' })
       } else {
         await load()
@@ -241,6 +246,7 @@ export default function RegistryConnectPanel() {
     setBusy(true)
     try {
       await disconnectRegistryConnection()
+      void refreshPublishScope({ force: true })
     } catch {
       /* best-effort — the next GET reports disconnected once the row is gone */
     } finally {
@@ -268,6 +274,7 @@ export default function RegistryConnectPanel() {
     setBusy(true)
     try {
       await disconnectRegistryConnection()
+      void refreshPublishScope({ force: true })
     } catch {
       /* best-effort — the next GET reports disconnected once the row is gone */
     } finally {
@@ -289,6 +296,7 @@ export default function RegistryConnectPanel() {
     if (!ok) return
     try {
       await disconnectRegistryConnection()
+      void refreshPublishScope({ force: true })
       showToast('Disconnected from the Evenfire Registry.', { tone: 'success' })
     } catch {
       showToast('Could not disconnect.', { tone: 'error' })

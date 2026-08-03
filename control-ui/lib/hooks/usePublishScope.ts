@@ -1,52 +1,93 @@
 'use client'
 
 import type { ReactNode } from 'react'
-import { createContext, createElement, useContext, useEffect, useMemo, useState } from 'react'
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { type PublishScope, getPublishScope, isSilentApiError } from '../api'
 
-export type PublishScopeState = {
+type RefreshOptions = { force?: boolean }
+
+type PublishScopeSnapshot = {
   scope: PublishScope | null
   loading: boolean
   error: boolean
 }
 
-const EMPTY_STATE: PublishScopeState = {
+export type PublishScopeState = PublishScopeSnapshot & {
+  refresh: (options?: RefreshOptions) => Promise<PublishScope | null>
+}
+
+const EMPTY_SNAPSHOT: PublishScopeSnapshot = {
   scope: null,
   loading: true,
   error: false,
 }
 
+const EMPTY_STATE: PublishScopeState = {
+  ...EMPTY_SNAPSHOT,
+  refresh: async () => null,
+}
+
 const PublishScopeContext = createContext<PublishScopeState | null>(null)
-const resolvedScopes = new Map<string, PublishScope>()
-const pendingScopes = new Map<string, Promise<PublishScope>>()
+type PublishScopeCacheEntry = {
+  request?: Promise<PublishScope | null>
+  scope?: PublishScope
+}
 
-function requestPublishScope(cacheKey: string): Promise<PublishScope> {
-  const resolved = resolvedScopes.get(cacheKey)
-  if (resolved) return Promise.resolve(resolved)
+const scopeCache = new Map<string, PublishScopeCacheEntry>()
 
-  const pending = pendingScopes.get(cacheKey)
-  if (pending) return pending
+function entryFor(cacheKey: string): PublishScopeCacheEntry {
+  const cached = scopeCache.get(cacheKey)
+  if (cached) return cached
+  const next: PublishScopeCacheEntry = {}
+  scopeCache.set(cacheKey, next)
+  return next
+}
+
+function requestPublishScope(
+  cacheKey: string,
+  options: RefreshOptions = {}
+): Promise<PublishScope | null> {
+  let entry = entryFor(cacheKey)
+  if (options.force) {
+    entry = {}
+    scopeCache.set(cacheKey, entry)
+  }
+
+  if (!options.force && entry.scope) return Promise.resolve(entry.scope)
+  if (entry.request) return entry.request
 
   const request = getPublishScope()
     .then(scope => {
-      resolvedScopes.set(cacheKey, scope)
-      return scope
+      const liveEntry = scopeCache.get(cacheKey) === entry
+      if (liveEntry) {
+        entry.scope = scope
+      }
+      return liveEntry ? scope : null
     })
     .finally(() => {
-      pendingScopes.delete(cacheKey)
+      if (scopeCache.get(cacheKey) === entry && entry.request === request) {
+        delete entry.request
+      }
     })
-  pendingScopes.set(cacheKey, request)
+  entry.request = request
   return request
 }
 
 export function resetPublishScopeCache(cacheKey?: string): void {
   if (cacheKey) {
-    resolvedScopes.delete(cacheKey)
-    pendingScopes.delete(cacheKey)
+    scopeCache.delete(cacheKey)
     return
   }
-  resolvedScopes.clear()
-  pendingScopes.clear()
+  scopeCache.clear()
 }
 
 export function PublishScopeProvider({
@@ -56,40 +97,52 @@ export function PublishScopeProvider({
   cacheKey: string
   children: ReactNode
 }) {
-  const cachedScope = cacheKey ? resolvedScopes.get(cacheKey) : undefined
-  const [state, setState] = useState<PublishScopeState>(() =>
-    cachedScope ? { scope: cachedScope, loading: false, error: false } : EMPTY_STATE
+  const cachedScope = cacheKey ? scopeCache.get(cacheKey)?.scope : undefined
+  const [state, setState] = useState<PublishScopeSnapshot>(() =>
+    cachedScope ? { scope: cachedScope, loading: false, error: false } : EMPTY_SNAPSHOT
+  )
+  const requestSequenceRef = useRef(0)
+
+  const refresh = useCallback(
+    async (options: RefreshOptions = {}) => {
+      const requestSequence = ++requestSequenceRef.current
+      if (!cacheKey) {
+        setState(EMPTY_SNAPSHOT)
+        return null
+      }
+
+      const nextCachedScope = options.force ? undefined : scopeCache.get(cacheKey)?.scope
+      if (nextCachedScope) {
+        setState({ scope: nextCachedScope, loading: false, error: false })
+        return nextCachedScope
+      }
+
+      setState(EMPTY_SNAPSHOT)
+      try {
+        const scope = await requestPublishScope(cacheKey, options)
+        if (requestSequenceRef.current === requestSequence) {
+          setState({ scope, loading: false, error: false })
+        }
+        return scope
+      } catch (error) {
+        if (requestSequenceRef.current === requestSequence) {
+          setState({ scope: null, loading: false, error: !isSilentApiError(error) })
+        }
+        return null
+      }
+    },
+    [cacheKey]
   )
 
   useEffect(() => {
-    let cancelled = false
-    if (!cacheKey) {
-      setState(EMPTY_STATE)
-      return
-    }
-
-    const nextCachedScope = resolvedScopes.get(cacheKey)
-    if (nextCachedScope) {
-      setState({ scope: nextCachedScope, loading: false, error: false })
-      return
-    }
-
-    setState(EMPTY_STATE)
-    void requestPublishScope(cacheKey)
-      .then(scope => {
-        if (!cancelled) setState({ scope, loading: false, error: false })
-      })
-      .catch(error => {
-        if (cancelled || isSilentApiError(error)) return
-        setState({ scope: null, loading: false, error: true })
-      })
+    void refresh()
 
     return () => {
-      cancelled = true
+      requestSequenceRef.current += 1
     }
-  }, [cacheKey])
+  }, [refresh])
 
-  const value = useMemo(() => state, [state])
+  const value = useMemo(() => ({ ...state, refresh }), [refresh, state])
   return createElement(PublishScopeContext.Provider, { value }, children)
 }
 
