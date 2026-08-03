@@ -45,12 +45,12 @@ import { execSync } from 'child_process'
 import { randomBytes } from 'crypto'
 import {
   CONTROL_API_URL,
-  bearer,
   deleteJson,
   isServiceUp,
   postJson,
   putJson,
 } from './helpers.integration.js'
+import { adminLogin, adminSessionHeader } from './mcpCredentialRotation.helpers.js'
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -146,23 +146,7 @@ beforeAll(async () => {
     )
   }
 
-  // Login. Uses default admin/changeme123! — override via TEST_ADMIN_*.
-  const adminUsername = process.env.TEST_ADMIN_USERNAME ?? 'admin'
-  const adminPassword = process.env.TEST_ADMIN_PASSWORD ?? 'changeme123!'
-  const { status, data } = await postJson<{ token?: string }>(
-    `${CONTROL_API_URL}/api/v1/admin/auth/login`,
-    { username: adminUsername, password: adminPassword }
-  )
-  if (status === 200 && data.token) {
-    adminToken = data.token
-  } else {
-    // Login failure with a reachable control-api always fails — there is no
-    // valid scenario where the suite should pass with no admin token.
-    throw new Error(
-      `[channel-reader-via-api] admin login failed (status=${status}). ` +
-        `Override credentials with TEST_ADMIN_USERNAME / TEST_ADMIN_PASSWORD if defaults are wrong.`
-    )
-  }
+  adminToken = await adminLogin()
 
   // Pre-create supporting fixtures (Host CRD requires both).
   // We trust the cluster has TEST_CONTEXT_REF + TEST_HOST_SECRET_REF
@@ -258,8 +242,9 @@ describe('channel-reader via control-api', () => {
             },
           ],
         },
+        credentials: { 'telegram-bot-token': TG_BOT_TOKEN },
       },
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
     expect([200, 201]).toContain(status)
 
@@ -287,7 +272,7 @@ describe('channel-reader via control-api', () => {
           ],
         },
       },
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
     expect(status).toBe(200)
 
@@ -297,7 +282,7 @@ describe('channel-reader via control-api', () => {
     expect(userIds).toContain('999999999')
   })
 
-  it('PUT /admin/communication-channels/:name/credentials creates the credentials Secret and CC ref', async () => {
+  it('PUT /admin/communication-channels/:name/credentials rotates existing credentials', async () => {
     if (!controlApiUp || !adminToken) return
 
     const { status, data } = await putJson<{
@@ -308,13 +293,13 @@ describe('channel-reader via control-api', () => {
     }>(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}/credentials`,
       { 'telegram-bot-token': TG_BOT_TOKEN },
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
     expect(status).toBe(200)
     expect(data.name).toBe(CHANNEL_NAME)
     expect(data.secretName).toBe(SECRET_NAME)
     expect(data.namespace).toBe(CHANNELS_NAMESPACE)
-    expect(data.rotated).toBe(false)
+    expect(data.rotated).toBe(true)
 
     const secret = kubectl(
       `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.metadata.name}'`
@@ -428,7 +413,7 @@ describe('channel-reader via control-api', () => {
     const { status, data } = await putJson<{ rotated: boolean }>(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}/credentials`,
       { 'telegram-bot-token': TG_BOT_TOKEN },
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
     expect(status).toBe(200)
     expect(data.rotated).toBe(true)
@@ -449,7 +434,7 @@ describe('channel-reader via control-api', () => {
       const { status, data } = await putJson<{ rotated: boolean }>(
         `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}/credentials`,
         { 'telegram-bot-token': TG_BOT_TOKEN_ROTATED },
-        bearer(adminToken)
+        adminSessionHeader(adminToken)
       )
       expect(status).toBe(200)
       expect(data.rotated).toBe(true)
@@ -484,7 +469,7 @@ describe('channel-reader via control-api', () => {
 
     const { status } = await deleteJson(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}`,
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
     expect(status).toBe(200)
 

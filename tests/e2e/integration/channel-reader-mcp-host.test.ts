@@ -1,14 +1,12 @@
 /**
- * Integration: channel-reader → mcp-host
+ * Integration: channel-reader → rpc-proxy → mcp-host
  *
- * Validates the RPC forward path from channel-reader to mcp-host.
- * NOTE: mcp-host POST /v1/runtime/messages is synchronous — it waits for the
- * full LLM response before returning. Tests use a short AbortSignal (8s) so
- * they verify the endpoint ACCEPTS the connection without waiting for LLM
- * completion. Full LLM flow is covered by the bash E2E suite.
+ * Validates the RPC forward path. Authenticated requests go through
+ * rpc-proxy (mcp-host rejects direct Bearer auth). Health and
+ * rejection tests hit mcp-host directly. Tests use a short
+ * AbortSignal (8s) — timeout counts as "accepted" (202-like).
  *
- * Requires: minikube cluster with mcp-host port-forwarded on :8080
- *   make minikube-pf-all
+ * Requires: minikube cluster with port-forwards active (make minikube-pf-all)
  */
 import { beforeAll, describe, expect, it } from 'vitest'
 import { issueRealRpcToken } from '../mcp-host/runtimeAuth.js'
@@ -19,6 +17,8 @@ import {
   fetchJson,
   isServiceUp,
 } from './helpers.integration.js'
+
+const HOST_REF = process.env.TEST_HOST_REF ?? 'chatllm'
 
 let mchUp = false
 let runtimeAuthReady = false
@@ -40,17 +40,14 @@ beforeAll(async () => {
     return
   }
 
-  runtimeToken = await issueRealRpcToken(
-    ['host:message:invoke', 'host:status:read'],
-    [process.env.TEST_HOST_REF ?? 'chatllm']
-  )
+  runtimeToken = await issueRealRpcToken(['host:message:invoke', 'host:status:read'], [HOST_REF])
   runtimeAuthReady = true
 })
 
 function makeMessage(overrides: Record<string, unknown> = {}) {
   return {
     content: 'integration test ping',
-    hostRef: process.env.TEST_HOST_REF ?? 'chatllm',
+    hostRef: HOST_REF,
     channelId: 'integration-test',
     sender: 'integration-test-user',
     channelType: 'telegram',
@@ -61,16 +58,17 @@ function makeMessage(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * Posts to mcp-host with a short timeout (8s).
- * Returns the HTTP status, or 202 if the request times out (meaning
- * the endpoint accepted the connection but LLM is still processing).
+ * Posts a message via rpc-proxy → mcp-host with a short timeout (8s).
+ * mcp-host rejects direct Bearer auth; authenticated requests must go
+ * through rpc-proxy which validates the RPC token and forwards.
  */
 async function postMessageQuick(
   body: unknown,
   token = runtimeToken
 ): Promise<{ status: number; timedOut: boolean }> {
+  const url = `${RPC_PROXY_URL}/api/v1/rpc/hosts/${encodeURIComponent(HOST_REF)}/messages`
   try {
-    const res = await fetch(`${MCP_HOST_URL}/v1/runtime/messages`, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -82,8 +80,6 @@ async function postMessageQuick(
     return { status: res.status, timedOut: false }
   } catch (err: unknown) {
     if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
-      // Request was accepted by the server — LLM just took longer than 8s.
-      // This is expected behavior for mcp-host; count as "accepted" (202-like).
       return { status: 202, timedOut: true }
     }
     throw err
@@ -126,14 +122,11 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
   })
 
   it('returns 400 immediately for a message with invalid JSON body', async () => {
-    if (!mchUp || !runtimeAuthReady) return
+    if (!mchUp) return
 
     const res = await fetch(`${MCP_HOST_URL}/v1/runtime/messages`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${runtimeToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: '{ invalid json',
       signal: AbortSignal.timeout(5000),
     })
@@ -145,7 +138,7 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
 
     const { status } = await postMessageQuick({
       content: 'minimal message',
-      hostRef: 'chatllm',
+      hostRef: HOST_REF,
       channelId: 'test',
       sender: 'test-user',
       channelType: 'telegram',
@@ -166,17 +159,13 @@ describe('channel-reader → mcp-host: GET /v1/runtime/status', () => {
     expect(status).toBe(401)
   })
 
-  it('returns 200 with a non-empty status object', async () => {
+  it('returns 200 with a non-empty status object via rpc-proxy', async () => {
     if (!mchUp || !runtimeAuthReady) return
 
-    const { status, data } = await fetchJson<Record<string, unknown>>(
-      `${MCP_HOST_URL}/v1/runtime/status`,
-      {
-        headers: {
-          Authorization: `Bearer ${runtimeToken}`,
-        },
-      }
-    )
+    const url = `${RPC_PROXY_URL}/api/v1/rpc/hosts/${encodeURIComponent(HOST_REF)}/status`
+    const { status, data } = await fetchJson<Record<string, unknown>>(url, {
+      headers: { Authorization: `Bearer ${runtimeToken}` },
+    })
     expect(status).toBe(200)
     expect(Object.keys(data).length).toBeGreaterThan(0)
   })

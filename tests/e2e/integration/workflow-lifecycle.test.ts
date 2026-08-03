@@ -22,12 +22,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execSync } from 'node:child_process'
 import {
   CONTROL_API_URL,
-  bearer,
   deleteJson,
   fetchJson,
   isServiceUp,
   postJson,
 } from './helpers.integration.js'
+import { adminLogin, adminSessionHeader } from './mcpCredentialRotation.helpers.js'
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -53,7 +53,8 @@ let adminToken = ''
  */
 function kubectl(args: string): string | null {
   try {
-    return execSync(`kubectl ${args} --context clerum-test`, {
+    const ctx = process.env.KUBECTL_CONTEXT ?? 'clerum-test'
+    return execSync(`kubectl ${args} --context ${ctx}`, {
       encoding: 'utf-8',
       timeout: 10_000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -77,7 +78,9 @@ async function waitForWorkflowPhase(
     // control-api /status returns resource.status directly (not wrapped in { status: ... })
     const { status, data } = await fetchJson<{
       workflowExecution?: { phase?: string }
-    }>(`${CONTROL_API_URL}/api/v1/admin/recipes/${recipeName}/status`, { headers: bearer(token) })
+    }>(`${CONTROL_API_URL}/api/v1/admin/recipes/${recipeName}/status`, {
+      headers: adminSessionHeader(token),
+    })
 
     if (status === 200 && data) {
       const phase = (data as { workflowExecution?: { phase?: string } }).workflowExecution?.phase
@@ -130,23 +133,18 @@ beforeAll(async () => {
     return
   }
 
-  const adminUsername = process.env.TEST_ADMIN_USERNAME ?? 'admin'
-  const adminPassword = process.env.TEST_ADMIN_PASSWORD ?? 'changeme123!'
-  const { status, data } = await postJson<{ token?: string }>(
-    `${CONTROL_API_URL}/api/v1/admin/auth/login`,
-    { username: adminUsername, password: adminPassword }
-  )
-
-  if (status === 200 && data.token) {
-    adminToken = data.token
-  } else {
-    console.log('[workflow-lifecycle] Admin login failed — tests will be skipped')
+  try {
+    adminToken = await adminLogin()
+  } catch (err) {
+    throw new Error(`[workflow-lifecycle] Admin login failed: ${(err as Error).message}`)
   }
 
   // Pre-cleanup: remove leftover recipe from a previous crashed run
   if (adminToken) {
-    await deleteJson(`${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}`, bearer(adminToken))
-    // Remove any leftover Pods — ignore errors
+    await deleteJson(
+      `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}`,
+      adminSessionHeader(adminToken)
+    )
     kubectl(
       `delete pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE} --ignore-not-found=true`
     )
@@ -155,8 +153,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!adminToken) return
-  // Best-effort cleanup
-  await deleteJson(`${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}`, bearer(adminToken))
+  await deleteJson(
+    `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}`,
+    adminSessionHeader(adminToken)
+  )
   kubectl(
     `delete pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE} --ignore-not-found=true`
   )
@@ -202,6 +202,7 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
             dependsOn: ['step-hello'],
           },
         ],
+        triggers: { onDemand: {} },
         // Provider + model applied to ALL steps (no per-step override)
         agent: {
           provider: 'zai',
@@ -213,7 +214,7 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
     const { status, data } = await postJson<{ metadata?: { name: string } }>(
       `${CONTROL_API_URL}/api/v1/admin/recipes`,
       recipeBody,
-      bearer(adminToken)
+      adminSessionHeader(adminToken)
     )
 
     expect(status).toBe(201)
@@ -306,7 +307,7 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
 
     const { status, data } = await fetchJson<Record<string, unknown>>(
       `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}/status`,
-      { headers: bearer(adminToken) }
+      { headers: adminSessionHeader(adminToken) }
     )
 
     expect([200, 404]).toContain(status)
