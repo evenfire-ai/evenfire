@@ -87,7 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const result = await loginWithPassword(email, password)
       resetProfileAccessCache()
-      const current = await getMe().catch(error => {
+      const current = await getMe().catch(() => {
         return meFromPasswordLoginResponse(result.me)
       })
       sessionExpiredHandledRef.current = false
