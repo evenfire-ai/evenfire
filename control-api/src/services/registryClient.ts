@@ -7,6 +7,9 @@
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
 import { resolveMachineCreds } from './registryConnectionDb.js'
+import { getRegistryIdentityCacheGeneration } from './registryIdentityCache.js'
+
+export { invalidateRegistryIdentityCaches } from './registryIdentityCache.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
@@ -38,7 +41,7 @@ function isTransientFetchError(err: unknown): boolean {
 // process. Refreshed ~30s before expiry so we never hit 401 from expiry in
 // the steady state. On a real 401 (e.g. registry key rotation), authedFetch
 // evicts the cache and retries once.
-let cached: { token: string; expiresAt: number } | null = null
+let cached: { token: string; expiresAt: number; generation: number } | null = null
 
 // ── Catalog cache (declared here so __resetTokenCacheForTests can clear it;
 // populated/consumed by withReadThroughCache below). ─────────────────────────
@@ -73,7 +76,9 @@ export function __resetTokenCacheForTests(): void {
 export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string> {
   const env = envOverride ?? process.env
   const now = Date.now()
-  if (cached && now < cached.expiresAt - 30_000) return cached.token
+  const cacheGeneration = getRegistryIdentityCacheGeneration()
+  if (cached && cached.generation === cacheGeneration && now < cached.expiresAt - 30_000)
+    return cached.token
 
   // An explicit override is a test-only path and remains fully env-driven. In
   // production, credentials MUST come from the mode-aware resolver: managed
@@ -134,8 +139,13 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
     throw new Error(`registry credential rejected: ${res.status} ${body}`)
   }
   const json = (await res.json()) as { access_token: string; expires_in: number }
-  cached = { token: json.access_token, expiresAt: now + json.expires_in * 1000 }
-  return cached.token
+  const next = {
+    token: json.access_token,
+    expiresAt: now + json.expires_in * 1000,
+    generation: cacheGeneration,
+  }
+  if (getRegistryIdentityCacheGeneration() === cacheGeneration) cached = next
+  return next.token
 }
 
 interface RegistrySearchParams {
@@ -626,9 +636,10 @@ export async function listOrgEntries(
 }
 
 // ── Publish scope (who is this control-api, and where do its publishes land) ──
-// Resolved once from the registry's /whoami (the registry maps our machine
-// OAuth client to its bound org / curator status). control-api is one-per-deploy
-// so this is static for the process lifetime — hence the module-level cache.
+// Resolved from the registry's /whoami (the registry maps our machine OAuth
+// client to its bound org / curator status). The module-level cache is scoped to
+// the current registry identity generation and is invalidated when the local
+// registry connection row or credentials change.
 
 export interface PublishScope {
   curator: boolean
@@ -636,7 +647,7 @@ export interface PublishScope {
   scope: string | null
 }
 
-let _scopeCache: PublishScope | null = null
+let _scopeCache: { generation: number; scope: PublishScope } | null = null
 
 export async function whoami(): Promise<{
   clientId?: string
@@ -648,9 +659,11 @@ export async function whoami(): Promise<{
 }
 
 export async function resolvePublishScope(opts?: { force?: boolean }): Promise<PublishScope> {
-  if (_scopeCache && !opts?.force) return _scopeCache
+  const cacheGeneration = getRegistryIdentityCacheGeneration()
+  if (_scopeCache && _scopeCache.generation === cacheGeneration && !opts?.force)
+    return _scopeCache.scope
   const w = await whoami()
-  _scopeCache = {
+  const scope = {
     curator: w.curator,
     orgName: w.orgName,
     // Curator publishes stay unscoped (the registry maps them to @clerum).
@@ -658,7 +671,10 @@ export async function resolvePublishScope(opts?: { force?: boolean }): Promise<P
     // (scope_required), so we derive the @<org> prefix here.
     scope: w.curator || !w.orgName ? null : `@${w.orgName}`,
   }
-  return _scopeCache
+  if (getRegistryIdentityCacheGeneration() === cacheGeneration) {
+    _scopeCache = { generation: cacheGeneration, scope }
+  }
+  return scope
 }
 
 export function __resetScopeCacheForTests(): void {

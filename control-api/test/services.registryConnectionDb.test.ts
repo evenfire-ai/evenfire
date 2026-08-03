@@ -20,6 +20,10 @@ import {
 // authoritative home). Task 4 re-exports it from registryVoucher.js and flips
 // this import to match the production path.
 import { VoucherUnavailableError } from '../src/services/registryConnectionDb.js'
+import {
+  __resetRegistryIdentityCacheGenerationForTests,
+  getRegistryIdentityCacheGeneration,
+} from '../src/services/registryIdentityCache.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
@@ -84,6 +88,7 @@ function makeRawRow(encKeyHex: string, overrides: Partial<RawRowShape> = {}): Ra
 
 afterEach(() => {
   __resetRegistryConnectionCacheForTests()
+  __resetRegistryIdentityCacheGenerationForTests()
   dbQuery.mockReset()
   cfg.registryConnectionMode = 'managed'
   cfg.registryVoucherPrivateKey = ''
@@ -217,6 +222,7 @@ describe('upsertPendingConnection — writes ciphertext, never plaintext (C-I3a)
     expect(decryptOAuthSecret(deriveOAuthEncryptionKey(encKeyHex), storedPriv)).toBe(privateKey)
     // The public key is NOT encrypted (it is public material).
     expect(params[2]).toBe('PUB-PEM')
+    expect(getRegistryIdentityCacheGeneration()).toBe(1)
   })
 })
 
@@ -255,10 +261,12 @@ describe('markConnected — writes ciphertext for the client secret (C-I3a)', ()
 describe('deleteConnection', () => {
   it('deletes the singleton row and evicts the cache', async () => {
     dbQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    const before = getRegistryIdentityCacheGeneration()
     await deleteConnection()
     expect(
       dbQuery.mock.calls.some(([sql]) => /DELETE FROM registry_connection/.test(String(sql)))
     ).toBe(true)
+    expect(getRegistryIdentityCacheGeneration()).toBe(before + 1)
   })
 })
 
@@ -385,6 +393,7 @@ describe('markConnected — scoped write', () => {
       orgName: 'acme',
     })
     expect(ok).toBe(true)
+    expect(getRegistryIdentityCacheGeneration()).toBe(1)
     const upd = dbQuery.mock.calls.find(([sql]) =>
       String(sql).includes('UPDATE registry_connection')
     )
@@ -408,6 +417,7 @@ describe('markConnected — scoped write', () => {
       orgName: 'acme',
     })
     expect(ok).toBe(false)
+    expect(getRegistryIdentityCacheGeneration()).toBe(0)
   })
 })
 

@@ -21,13 +21,16 @@ function response(status: number, body: unknown = {}) {
   } as Response
 }
 
-function ExpireSessionButton() {
+function ExpireSessionButton({ repeated = false }: { repeated?: boolean }) {
   useAuth()
   return (
     <button
       type="button"
       onClick={() => {
-        void apiGet('/api/v1/admin/hosts').catch(() => undefined)
+        const requests = repeated
+          ? [apiGet('/api/v1/admin/hosts'), apiGet('/api/v1/admin/llm-models')]
+          : [apiGet('/api/v1/admin/hosts')]
+        void Promise.allSettled(requests)
       }}
     >
       Expire session
@@ -82,7 +85,7 @@ describe('AuthProvider session expiry handling', () => {
     render(
       <ToastProvider>
         <AuthProvider>
-          <ExpireSessionButton />
+          <ExpireSessionButton repeated />
         </AuthProvider>
       </ToastProvider>
     )
@@ -94,6 +97,7 @@ describe('AuthProvider session expiry handling', () => {
       expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(1)
     })
     expect(replaceMock).toHaveBeenCalledWith('/?next=%2Fagents%2Fchatllm%2Fenv%23runtime')
+    expect(replaceMock).toHaveBeenCalledTimes(1)
     expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
   })
 
@@ -129,6 +133,40 @@ describe('AuthProvider session expiry handling', () => {
     await waitFor(() =>
       expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(2)
     )
+  })
+
+  it('does not re-arm the session-expired toast after a failed auth check', async () => {
+    window.history.pushState({}, '', '/agents')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { me: { id: 'admin', role: 'admin' } }))
+      .mockResolvedValueOnce(response(401, { error: 'expired' }))
+      .mockResolvedValueOnce(response(401, { error: 'expired' }))
+      .mockResolvedValueOnce(response(401, { error: 'expired' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <ExpireSessionButton />
+          <CheckAuthButton />
+        </AuthProvider>
+      </ToastProvider>
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: /expire session/i }))
+    await waitFor(() =>
+      expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(1)
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /check auth/i }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    fireEvent.click(screen.getByRole('button', { name: /expire session/i }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+    expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(1)
+    expect(replaceMock).toHaveBeenCalledTimes(1)
   })
 
   it('clears legacy storage without a toast when no cookie session exists on mount', async () => {

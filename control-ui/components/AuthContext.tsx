@@ -56,11 +56,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // this singleton registration tied to them if either provider is remounted.
   useEffect(() => {
     const handleAuthError = () => {
+      if (sessionExpiredToastShownRef.current) return
+      sessionExpiredToastShownRef.current = true
       resetPublishScopeCache()
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
       router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
-      if (sessionExpiredToastShownRef.current) return
-      sessionExpiredToastShownRef.current = true
       showToast('Session expired. Please sign in again.', { tone: 'error' })
     }
     setGlobalAuthErrorHandler(handleAuthError)

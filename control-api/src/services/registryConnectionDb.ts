@@ -6,6 +6,7 @@ import {
   deriveOAuthEncryptionKey,
   encryptOAuthSecret,
 } from '../oauth/encryption.js'
+import { invalidateRegistryIdentityCaches } from './registryIdentityCache.js'
 
 /**
  * Thrown when no voucher signing key/kid is resolvable (route maps to 500
@@ -147,6 +148,7 @@ export async function upsertPendingConnection(
   if (db) await run(db)
   else await withTransaction(run)
   cached = undefined
+  invalidateRegistryIdentityCaches()
 }
 
 export async function markConnected(
@@ -167,12 +169,15 @@ export async function markConnected(
     [input.clientId, encSecret, input.orgName, input.deploymentId]
   )
   cached = undefined
-  return (res.rowCount ?? 0) > 0
+  const wrote = (res.rowCount ?? 0) > 0
+  if (wrote) invalidateRegistryIdentityCaches()
+  return wrote
 }
 
 export async function deleteConnection(db: DbClient = pool): Promise<void> {
   await db.query(`DELETE FROM registry_connection`)
   cached = undefined
+  invalidateRegistryIdentityCaches()
 }
 
 /** Mode-aware voucher signing material (spec §14.2). */
