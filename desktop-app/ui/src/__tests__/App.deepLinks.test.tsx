@@ -1,10 +1,35 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+
+const confirmDialogHarness = vi.hoisted(() => ({
+  props: null as null | {
+    title: string
+    onCancel: () => void
+    onConfirm: () => void
+  },
+}))
+
+const sandboxUiPageHarness = vi.hoisted(() => ({
+  props: null as null | {
+    shortcutOpenRequestId?: number
+    onEmbeddedAppOpening?: (app: {
+      appRef: string
+      label: string
+      icon?: string | null
+      defaultPath: string
+      routePath?: string
+    }) => void
+    onShortcutOpenResult?: (
+      requestId: number,
+      result: { status: 'mounted' } | { status: 'failed'; message: string }
+    ) => void | Promise<void>
+  },
+}))
 
 vi.mock('@hooks/useAppController', () => ({
   useAppController: vi.fn(),
@@ -17,7 +42,12 @@ vi.mock('@hooks/useAgentChatActionsValue', () => ({
 vi.mock('@components/AppHeader', () => ({ AppHeader: () => null }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
-vi.mock('@components/ConfirmDialog', () => ({ ConfirmDialog: () => null }))
+vi.mock('@components/ConfirmDialog', () => ({
+  ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
+    confirmDialogHarness.props = props
+    return null
+  },
+}))
 vi.mock('@components/SidebarNav', () => ({ SidebarNav: () => null }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
@@ -26,7 +56,12 @@ vi.mock('@pages/ContextDetailsPage', () => ({ ContextDetailsPage: () => null }))
 vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
-vi.mock('@pages/SandboxUiPage', () => ({ SandboxUiPage: () => null }))
+vi.mock('@pages/SandboxUiPage', () => ({
+  SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
+    sandboxUiPageHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/SettingsPage', () => ({ SettingsPage: () => null }))
 vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
 vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
@@ -38,13 +73,17 @@ type AppController = ReturnType<typeof useAppController>
 function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let liveTeamId = String(overrides.currentTeamId || 'team-a')
+  let controller: AppController
   const ensureTeamContext = vi.fn(async (target: { teamId?: string }): Promise<boolean> => {
     const targetTeamId = String(target.teamId || '').trim()
     if (!targetTeamId || targetTeamId === liveTeamId) return false
     liveTeamId = targetTeamId
     return true
   })
-  return {
+  const handleNavSelect = vi.fn((item: AppController['navItem']) => {
+    controller.navItem = item
+  })
+  controller = {
     booting: false,
     initialExperienceLoading: true,
     busy: false,
@@ -96,7 +135,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
     handleSelectChatAgent: vi.fn(),
-    handleNavSelect: vi.fn(),
+    handleNavSelect,
     pushToast: vi.fn(),
     setStatus: noop,
     setBooting: noop,
@@ -110,6 +149,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setDesktopEnvironmentSetupComplete: noop,
     ...overrides,
   } as unknown as AppController
+  return controller
 }
 
 describe('App deep-link orchestration', () => {
@@ -119,12 +159,16 @@ describe('App deep-link orchestration', () => {
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
   const listPendingDeepLinks = vi.fn().mockResolvedValue({ links: [] })
+  const closeSandboxUi = vi.fn().mockResolvedValue(undefined)
 
   beforeEach(() => {
     vi.clearAllMocks()
+    confirmDialogHarness.props = null
+    sandboxUiPageHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
+    closeSandboxUi.mockResolvedValue(undefined)
     emitDeepLink = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => currentController)
@@ -140,6 +184,7 @@ describe('App deep-link orchestration', () => {
           listPendingDeepLinks,
           clearPendingDeepLinks,
           acknowledgeDeepLink,
+          close: closeSandboxUi,
           onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
             emitDeepLink = callback
             return vi.fn()
@@ -147,6 +192,68 @@ describe('App deep-link orchestration', () => {
         },
       } as unknown as Window['clerum'],
     })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function reportShortcutOpenResult(
+    result: { status: 'mounted' } | { status: 'failed'; message: string } = {
+      status: 'mounted',
+    }
+  ): Promise<void> {
+    await waitFor(() => {
+      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
+    })
+    const props = sandboxUiPageHarness.props
+    if (!props?.shortcutOpenRequestId) throw new Error('Sandbox UI shortcut was not requested')
+    await act(async () => {
+      await props.onShortcutOpenResult?.(props.shortcutOpenRequestId, result)
+      await Promise.resolve()
+    })
+  }
+
+  it('keeps logged-out app links pending until the user confirms after login', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: false,
+      authenticatedPrincipalIdentity: null,
+      me: null,
+      currentTeamId: '',
+    } as unknown as Partial<AppController>)
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    const { rerender } = render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    currentController = makeController({ initialExperienceLoading: false })
+    rerender(<App />)
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
   it('purges user A links synchronously before user B can process them', async () => {
@@ -238,6 +345,36 @@ describe('App deep-link orchestration', () => {
     )
   })
 
+  it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
+    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
+
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/current',
+        label: 'Current App',
+        defaultPath: '/',
+      })
+    })
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
+    expect(closeSandboxUi.mock.invocationCallOrder[0]).toBeLessThan(
+      ensureTeamContext.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
+    )
+  })
+
   it('lets the server authorize a linked team even when the local directory is empty', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
@@ -263,6 +400,7 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
 
+    await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
@@ -334,11 +472,124 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
 
+    await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('bridge unavailable'),
       'error'
     )
     consoleWarn.mockRestore()
+  })
+
+  it('acks a ready app link only after the native mount succeeds', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => {
+      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
+    })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+  })
+
+  it('retries a starting app link and opens it when the app becomes ready', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    currentController = makeController({ initialExperienceLoading: false })
+    let ready = false
+    listApps.mockImplementation(async () => ({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready,
+          phase: ready ? 'active' : 'deploying',
+        },
+      ],
+    }))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    ready = true
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+  })
+
+  it('keeps a failed native mount unacked and continues with later links', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+        {
+          appRef: 'ns/next',
+          title: 'Next App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
+
+    act(() => {
+      emitDeepLink?.({ id: 2, appRef: 'ns/next' })
+    })
+    await waitFor(() => {
+      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(1)
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(2))
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
   })
 })

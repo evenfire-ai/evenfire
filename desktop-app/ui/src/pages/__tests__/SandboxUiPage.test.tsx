@@ -168,6 +168,7 @@ describe('SandboxUiPage', () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
     sandboxUi.open.mockResolvedValueOnce(undefined)
     const onEmbeddedAppOpening = vi.fn()
+    const onShortcutOpenResult = vi.fn()
 
     render(
       <SandboxUiPage
@@ -179,6 +180,7 @@ describe('SandboxUiPage', () => {
         }}
         shortcutOpenRequestId={1}
         onEmbeddedAppOpening={onEmbeddedAppOpening}
+        onShortcutOpenResult={onShortcutOpenResult}
       />
     )
 
@@ -202,6 +204,34 @@ describe('SandboxUiPage', () => {
       label: 'Agentic Task Board',
       defaultPath: '/',
       routePath: '/tasks/task-42',
+    })
+    await waitFor(() => {
+      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, { status: 'mounted' })
+    })
+  })
+
+  it('reports a failed deep-linked shortcut open without acknowledging success', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+    sandboxUi.open.mockRejectedValueOnce(new Error('native mount failed'))
+    const onShortcutOpenResult = vi.fn()
+
+    render(
+      <SandboxUiPage
+        shortcutApp={{
+          appRef: 'sandbox-recipes/task-board',
+          label: 'Agentic Task Board',
+          defaultPath: '/',
+        }}
+        shortcutOpenRequestId={1}
+        onShortcutOpenResult={onShortcutOpenResult}
+      />
+    )
+
+    await waitFor(() => {
+      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, {
+        status: 'failed',
+        message: 'native mount failed',
+      })
     })
   })
 

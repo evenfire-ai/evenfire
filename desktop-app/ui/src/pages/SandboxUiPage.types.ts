@@ -11,6 +11,10 @@ export type SandboxUiLaunchApp = ActiveSandboxUiApp & {
   ready?: boolean
 }
 
+export type SandboxUiShortcutOpenResult =
+  | { status: 'mounted' }
+  | { status: 'failed'; message: string }
+
 export type SandboxUiPageProps = {
   boundsRefreshKey?: string | number
   conversationOrigin?: SandboxUiConversationOrigin | null
@@ -26,4 +30,8 @@ export type SandboxUiPageProps = {
   onEmbeddedAppRemoved?: () => void
   onEmbedBoundsApplied?: () => void
   onNotify?: (message: string, tone: Tone) => void
+  onShortcutOpenResult?: (
+    requestId: number,
+    result: SandboxUiShortcutOpenResult
+  ) => void | Promise<void>
 }

@@ -9,7 +9,11 @@ import {
 } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
-import type { SandboxUiLaunchApp, SandboxUiPageProps } from './SandboxUiPage.types'
+import type {
+  SandboxUiLaunchApp,
+  SandboxUiPageProps,
+  SandboxUiShortcutOpenResult,
+} from './SandboxUiPage.types'
 
 type PhasePillTone = 'allowed' | 'warning' | 'denied' | 'info' | 'muted'
 
@@ -156,6 +160,7 @@ export function SandboxUiPage({
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
   onNotify,
+  onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
   const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -224,10 +229,14 @@ export function SandboxUiPage({
   }, [onEmbeddedAppBack])
 
   const openApp = useCallback(
-    async (app: SandboxUiLaunchApp) => {
-      if (app.ready === false) return
+    async (app: SandboxUiLaunchApp): Promise<SandboxUiShortcutOpenResult> => {
+      if (app.ready === false) {
+        return { status: 'failed', message: 'This app is starting up. Try again in a moment.' }
+      }
       const [recipeNs, recipeName] = app.appRef.split('/', 2)
-      if (!recipeNs || !recipeName) return
+      if (!recipeNs || !recipeName) {
+        return { status: 'failed', message: 'Invalid app reference' }
+      }
       // Transition to 'minting' so the slot div mounts. Wait for the next
       // layout commit so getBoundingClientRect() reflects the slot's real
       // position (otherwise we'd be reading before React has rendered the
@@ -255,6 +264,7 @@ export function SandboxUiPage({
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
+        return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
         const userFacing =
@@ -267,6 +277,7 @@ export function SandboxUiPage({
                 : message
         setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
         onEmbeddedAppRemoved?.()
+        return { status: 'failed', message: userFacing }
       }
     },
     [onEmbeddedAppOpening, onEmbeddedAppRemoved]
@@ -338,8 +349,10 @@ export function SandboxUiPage({
     if (shortcutOpenRequestId === lastShortcutOpenRequestIdRef.current) return
     lastShortcutOpenRequestIdRef.current = shortcutOpenRequestId
     if (shortcutOpenRequestId <= 0 || !shortcutApp) return
-    void openApp(shortcutApp)
-  }, [openApp, shortcutApp, shortcutOpenRequestId])
+    void openApp(shortcutApp).then(result => {
+      void onShortcutOpenResult?.(shortcutOpenRequestId, result)
+    })
+  }, [onShortcutOpenResult, openApp, shortcutApp, shortcutOpenRequestId])
 
   // Track bounds while mounted; also during 'minting' so onOpen can read
   // the slot's rect AFTER the layout pass that renders the slot div.
