@@ -67,8 +67,7 @@ export type RouteHandlers = {
 
 function isSessionOwnershipError(error: unknown): boolean {
   return (
-    error instanceof ConversationError &&
-    error.code === ConversationErrorCode.OwnershipMismatch
+    error instanceof ConversationError && error.code === ConversationErrorCode.OwnershipMismatch
   )
 }
 
@@ -91,6 +90,12 @@ function parseUnsignedIntegerParam(value: unknown): number | undefined | null {
 function hasBracketedQueryVariant(query: Request['query'], names: string[]): boolean {
   return Object.keys(query).some(key => names.some(name => key.startsWith(`${name}[`)))
 }
+
+// Server-side hard caps on client-supplied page sizes. The proxy applies its
+// own caps at the edge; these are the host's independent enforcement (the two
+// services share no package, so each names its own constants).
+const SESSIONS_LIMIT_CAP = 100
+const MESSAGES_LIMIT_CAP = 200
 
 function isSafeRouteSegment(value: string): boolean {
   return (
@@ -1163,7 +1168,8 @@ export async function handleSessionsListRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const limit = rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(rawLimit, 100)
+    const limit =
+      rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(rawLimit, SESSIONS_LIMIT_CAP)
     const result = await handlers.sessionsListHandler(caller.userId, { agent, limit, cursor })
     json(res, 200, result)
   } catch (error) {
@@ -1284,7 +1290,7 @@ export async function handleSessionMessagesRoute(
         ? rawBeforeTurn !== undefined || rawAfterTurn !== undefined
           ? 80
           : undefined
-        : Math.min(rawLimit, 200)
+        : Math.min(rawLimit, MESSAGES_LIMIT_CAP)
     const beforeTurn = rawBeforeTurn
     const afterTurn = rawAfterTurn
     const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId, {
