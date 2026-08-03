@@ -753,3 +753,86 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 
 **evenfire-managed-cluster-control (out of repo; sequenced retirement)**
 - `packages/backend/src/operations/handlers/tenant-install-shared.ts:476-496`, `evenfire-install.ts:356-378`, `install/secrets.ts:110-121,181-212`, `install/registry.ts:48-95` — the `install_registry_pull_secret` behavior being superseded.
+
+---
+
+## 14. Implementation plan
+
+Two phases. **Phase 1** unblocks self-hosted with **no registry change** (publish-scoped
+key). **Phase 2** swaps in a least-privilege pull-only credential and requires a small
+`evenfire-registry` change. control-api reads the *same* Secret in both; only the mint
+call and the key's scope/lifecycle change.
+
+### Phase 1 — control-api self-provisioning (evenfire repo)
+
+Ordered so each task is independently reviewable; **P1.1–P1.3** are the functional core,
+**P1.4–P1.7** are decoupling/quality.
+
+- **P1.1 — `registryClient.mintOrgMachineKey(orgName)`** (`control-api/src/services/registryClient.ts`).
+  New exported fn built on the private `orgRegistryFetch` (machine Bearer, prefixes
+  `/api/v1`), mirroring `createOrgGrant`. `POST /org/${orgName}/keys` with a **fixed
+  description marker** (e.g. `evenfire-registry-pull (auto)`); returns
+  `{ keyId, key }`. Do **not** consume the response's `dockerconfigjson` (wrong host,
+  §7.9-2). Add `revokeOrgMachineKey(orgName, keyId)` (`DELETE /org/:org/keys/:id`) and a
+  `listOrgMachineKeys(orgName)` filtered to the marker (for revoke-prior + repair).
+  *Accept:* unit test hits a mocked registry, asserts machine-Bearer + marker.
+- **P1.2 — `registryPullSecretService.ensureRegistryPullSecret(targetNs)`**
+  (`control-api/src/services/registryPullSecretService.ts`, **new**). The §7.1 state
+  machine: gate (mode/auth/url/non-null `orgName`) → read (404→absent, 403→abort,
+  classify ours/foreign/repair) → revoke-prior (marker-scoped) → mint (P1.1) → **build
+  dockerconfigjson locally** keyed on `registryHostFromUrl(config.registryUrl)` →
+  `createSecret`/`updateSecret` with `managed-by:control-api` + key-id annotation. In-process
+  mutex on the Secret name. Deps injected: `K8sGateway`, the P1.1 mint fns, `config`.
+  *Accept:* the §11 unit matrix (absent/ours/foreign/repair/409/gate-off) green.
+- **P1.3 — Wire into install + upgrade** (`control-api/src/routes/admin/registry.ts`).
+  Call `ensureRegistryPullSecret(targetNs)` when `shouldAttachEvenfirePullSecret` is true,
+  **outside the `if (credRequired)` block** (§7.9-1), in the Step-3 window **before** the
+  Step-4 CRD create, and **outside** the per-plugin `secretCreated`/rollback bookkeeping
+  (§7.3). Fail-loud (`registry_pull_secret_provision_failed`, `5xx`) — do not attach an
+  unresolvable ref. Same in the upgrade handler's credentials phase.
+  *Accept:* e2e (minikube, self-hosted) — a private plugin pulls; a credential-less
+  private plugin pulls; re-install idempotent; a pre-seeded foreign Secret is preserved.
+- **P1.4 — Revise existing tests** (`control-api/test/routes.registryInstall.test.ts`).
+  Update the `createSecret` call-count assertions (`:864`, `:1148`, `:1204`) and extend the
+  `evenfire imagePullSecrets attach` block (`:1424`) to assert the pull-Secret create,
+  shape, namespace (`targetNs`), and host-keying.
+- **P1.5 — Remove MCC knowledge** (§7.8). Rewrite comments at
+  `registryImagePullSecret.ts:6,12-13` and `registry.ts:1114-1116`; reword the test name at
+  `registryImagePullSecret.test.ts:10`; scrub the adjacent managed-mode "MCC" wording
+  (keep the `registryConnectionMode` behavior). *Gate:* `grep -rn '\bMCC\b' control-api/src
+  control-api/test` returns only intentional, neutral phrasings.
+- **P1.6 — Docs** — fix `docs/how-to/connect-to-registry.md:59,70` to describe
+  self-provisioning; add the node-level registry-egress note for remote-registry
+  self-hosters (§7.8).
+- **P1.7 — (optional) HCC presence-validation** (§7.7) — separate PR; read-validate the
+  pull Secret and emit a `SecretResolved`-style condition instead of silent
+  `ImagePullBackOff`.
+
+### Phase 2 — least-privilege pull-only mint (evenfire-registry + control-api)
+
+- **P2.1 — Registry: relax the pull-credential gate** (`evenfire-registry/src/routes/org.ts`).
+  In `POST /:org/registry-pull-credential`, replace the `*`-admin gate (`:376`) with
+  `authorizeMachineForOrg(auth, orgName, 'registry:manage-keys')` (option §6.2(a)) so an
+  org-bound machine can mint a pull-only key for its **own** org. Keep `mintPullKey`
+  (rotate-on-call, `kind:'pull'`) and the audit log; no change to `buildDockerconfigjson`.
+  *Accept:* an org-bound `manage-keys` machine gets `201`; a foreign org still `403`s;
+  `*`-admin still works (MCC unaffected).
+- **P2.2 — control-api: switch the mint call** (`registryClient.ts` + `registryPullSecretService.ts`).
+  Point the mint at the pull-only endpoint, extract `key`, build the dockerconfigjson
+  locally keyed on the `registryUrl` host (unchanged from P1). Since the pull endpoint is
+  **rotate-on-call** (revokes the org's prior pull key), the explicit revoke-prior (P1.1)
+  becomes redundant — but keep the **read-before-mint** discipline strict (a blind re-mint
+  now *orphans* the on-cluster key). This flips the key-lifecycle tradeoff: accumulation
+  (R3) disappears, the rotate-on-call footgun returns and is handled by read-before-mint.
+  *Accept:* the minted key carries only pull scope (`kind:'pull'`); re-provision with the
+  Secret present does not rotate.
+- **P2.3 — Security sign-off** on retiring the interim publish-scoped key (§6.3, §12-1);
+  once P2 ships, existing Phase-1 Secrets are replaced on next ensure/rotation.
+
+### Sequencing (see §9)
+
+`P1.1 → P1.2 → P1.3` land the fix; `P1.4–P1.6` land with them. `P2.*` is a fast follow.
+Retiring the managed operator's `install_registry_pull_secret` step (§9.3) is a separate,
+later change in that repo — **not** part of this plan, and only once managed-mode
+provisioning is guaranteed by another actor; until then the `registryConnectionMode` gate
+keeps managed and self-hosted cleanly partitioned.
