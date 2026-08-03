@@ -74,6 +74,23 @@ import {
 // the wake scope never widens a caller who was not granted it.
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 
+function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
+  const value = rawValue.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    return null
+  }
+  if (url.pathname !== '/' || url.search) return null
+  url.hash = ''
+  return url.toString().replace(/\/$/, '')
+}
+
 /**
  * Finite-operation scope matrix — the single source of truth for the exact
  * scope array each finite (single request/response) Host RPC operation requests,
@@ -726,6 +743,13 @@ export class AppService {
     options: { fallbackOnLookupError?: boolean } = {}
   ): Promise<string> {
     const { fallbackOnLookupError = true } = options
+    if (config.desktopProfileUiBaseUrlExplicit) {
+      const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+      if (!explicitBaseUrl) {
+        throw new Error('Cannot resolve the configured Profile UI URL for this desktop session')
+      }
+      return explicitBaseUrl
+    }
     const normalizedEmail = String(email || this.me?.email || '')
       .trim()
       .toLowerCase()
