@@ -216,7 +216,12 @@ export const config: Config = {
   ),
   hccBaseUrl: requiredOrDevDefault(
     'RPC_PROXY_HCC_BASE_URL',
-    'http://host-context-controller.mcp-server.svc.cluster.local:8081'
+    // Must mirror the real topology: rpc-proxy reaches HCC only through the
+    // nginx api-gateway in control-plane. The egress NetworkPolicy in
+    // deploy/base/rpc-proxy/networkpolicies.yaml only allows that peer, and no
+    // host-context-controller Service exists in mcp-server. Kept in sync with
+    // the deployed configmap by config.hccBaseUrl.test.ts.
+    'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   ),
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
