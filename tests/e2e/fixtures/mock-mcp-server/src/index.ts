@@ -9,7 +9,18 @@
  *   - fetch_http: fetches an allowlisted public HTTPS URL for egress tests
  *   - hang: sleeps long enough for timeout-bound workflow tests
  *
- * Health check on a separate port.
+ * Health check on a separate port. Also serves two additive, opt-in routes
+ * used by the issue #223 credential-rotation E2E suites (see
+ * tests/e2e/integration/mcpCredentialRotation.helpers.ts):
+ *   - GET /whoami-credential : echoes E2E_ROTATION_API_KEY as currently
+ *     injected into THIS pod's env — proves a rotated credential actually
+ *     reached a running container after rollout.
+ *   - GET /echo-headers      : echoes received request headers as JSON — used
+ *     as the upstream target for a remote connector's authHeaders, to prove
+ *     the rotated value reaches the nginx egress proxy's outbound request.
+ * Neither route is used by any existing consumer of this image, and the
+ * startup gate below only fires for a reserved sentinel value no other
+ * suite sets — both are inert unless a test opts in.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -27,6 +38,25 @@ const FETCH_ALLOWED_HOSTS = new Set(
     .filter(Boolean)
 )
 const records = new Map<string, string>()
+
+// ─── Issue #223: opt-in credential-rotation test gate ───────────────────────
+// Must match ROTATION_CREDENTIAL_ENV_VAR / ROTATION_INVALID_SENTINEL in
+// tests/e2e/integration/mcpCredentialRotation.helpers.ts. When the E2E
+// scenario for a FAILED rollout (E2) rotates this env var to the reserved
+// sentinel, the process refuses to start — a real crash-loop, not a
+// simulated one, so the Deployment's rolling update genuinely never
+// converges and host-context-controller's generation-aware readiness check
+// has something true to observe. Absent (the default for every other
+// consumer of this image), this is a no-op.
+const ROTATION_CREDENTIAL_ENV_VAR = 'E2E_ROTATION_API_KEY'
+const ROTATION_INVALID_SENTINEL = '__E2E_INVALID_CREDENTIAL__'
+if (process.env[ROTATION_CREDENTIAL_ENV_VAR] === ROTATION_INVALID_SENTINEL) {
+  console.error(
+    `[MockMCP] ${ROTATION_CREDENTIAL_ENV_VAR} is the reserved invalid-credential sentinel — ` +
+      'refusing to start (issue #223 E2 fixture gate).'
+  )
+  process.exit(1)
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -238,9 +268,23 @@ mcpHttpServer.listen(MCP_PORT, '0.0.0.0', () => {
   console.log(`[MockMCP] StreamableHTTP server listening on port ${MCP_PORT}`)
 })
 
-// --- Health Check ---
+// --- Health Check (+ issue #223 credential-rotation probe routes) ---
 
-const healthServer = createServer((_req, res) => {
+const healthServer = createServer((req, res) => {
+  const url = req.url ?? '/'
+
+  if (url === '/whoami-credential') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ key: process.env[ROTATION_CREDENTIAL_ENV_VAR] ?? null }))
+    return
+  }
+
+  if (url === '/echo-headers') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ headers: req.headers }))
+    return
+  }
+
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(
     JSON.stringify({
