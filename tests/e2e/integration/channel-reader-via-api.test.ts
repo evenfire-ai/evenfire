@@ -206,7 +206,7 @@ describe('channel-reader via control-api', () => {
         `Deployment ${DEPLOY_NAME} in ${CHANNELS_NAMESPACE}`,
         () =>
           kubectlSafe(
-            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.metadata.uid}'`
+            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.uid}`
           ),
         HCC_TIMEOUT_MS
       )
@@ -214,7 +214,7 @@ describe('channel-reader via control-api', () => {
       initialDeployUid = dep
 
       const labels = kubectl(
-        `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.metadata.labels}'`
+        `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.labels}`
       )
       expect(labels).toContain('"clerum.io/host":"' + TEST_HOST + '"')
       expect(labels).toContain('"clerum.io/managed-by":"host-context-controller"')
@@ -251,7 +251,7 @@ describe('channel-reader via control-api', () => {
 
     // Verify the CRD landed
     const cc = kubectl(
-      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.hostRef}'`
+      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.hostRef}`
     )
     expect(cc).toBe(TEST_HOST)
   })
@@ -278,7 +278,7 @@ describe('channel-reader via control-api', () => {
     expect(status).toBe(200)
 
     const userIds = kubectl(
-      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.telegram[0].userIds}'`
+      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.telegram[0].userIds}`
     )
     expect(userIds).toContain('999999999')
   })
@@ -303,12 +303,12 @@ describe('channel-reader via control-api', () => {
     expect(data.rotated).toBe(true)
 
     const secret = kubectl(
-      `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.metadata.name}'`
+      `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.name}`
     )
     expect(secret).toBe(SECRET_NAME)
 
     const ref = kubectl(
-      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.credentialsSecretRef.name}'`
+      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
     )
     expect(ref).toBe(SECRET_NAME)
   })
@@ -322,7 +322,7 @@ describe('channel-reader via control-api', () => {
         `clerum.io/credentials-revision annotation on ${DEPLOY_NAME}`,
         () => {
           const ann = kubectlSafe(
-            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.template.metadata.annotations.clerum\\.io/credentials-revision}'`
+            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.template.metadata.annotations.clerum\\.io/credentials-revision}`
           )
           return ann && /^[0-9a-f]{64}$/.test(ann) ? ann : null
         },
@@ -344,10 +344,10 @@ describe('channel-reader via control-api', () => {
         `pod for ${DEPLOY_NAME} Running 1/1`,
         () => {
           const phase = kubectlSafe(
-            `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.items[0].status.phase}'`
+            `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath={.items[0].status.phase}`
           )
           const ready = kubectlSafe(
-            `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.items[0].status.containerStatuses[0].ready}'`
+            `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath={.items[0].status.containerStatuses[0].ready}`
           )
           return phase === 'Running' && ready === 'true' ? 'ok' : null
         },
@@ -357,11 +357,11 @@ describe('channel-reader via control-api', () => {
       // Per-CC credentials stay behind credentialsSecretRef and are not
       // projected into the pod as static credential env vars.
       const env = kubectl(
-        `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.items[0].spec.containers[0].env}'`
+        `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath={.items[0].spec.containers[0].env}`
       )
       const envFrom =
         kubectlSafe(
-          `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.items[0].spec.containers[0].envFrom}'`
+          `get pod -l clerum.io/host=${TEST_HOST} -n ${CHANNELS_NAMESPACE} -o jsonpath={.items[0].spec.containers[0].envFrom}`
         ) ?? ''
       expect(env).toContain(`"name":"CLERUM_HOST_REF"`)
       expect(env).toContain(`"value":"${TEST_HOST}"`)
@@ -422,7 +422,7 @@ describe('channel-reader via control-api', () => {
     // Wait briefly for HCC to (potentially) react, then assert no change
     await new Promise(r => setTimeout(r, 5_000))
     const ann = kubectl(
-      `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.template.metadata.annotations.clerum\\.io/credentials-revision}'`
+      `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.template.metadata.annotations.clerum\\.io/credentials-revision}`
     )
     expect(ann).toBe(initialAnnotationHash)
   })
@@ -444,7 +444,7 @@ describe('channel-reader via control-api', () => {
         `credentials-revision annotation to change`,
         () => {
           const ann = kubectlSafe(
-            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.template.metadata.annotations.clerum\\.io/credentials-revision}'`
+            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.template.metadata.annotations.clerum\\.io/credentials-revision}`
           )
           return ann && ann !== initialAnnotationHash ? ann : null
         },
@@ -460,7 +460,7 @@ describe('channel-reader via control-api', () => {
     if (!controlApiUp || !adminToken) return
 
     const ref = kubectl(
-      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath='{.spec.credentialsSecretRef.name}'`
+      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
     )
     expect(ref).toBe(SECRET_NAME)
   })
@@ -478,7 +478,7 @@ describe('channel-reader via control-api', () => {
       `CommunicationChannel ${CHANNEL_NAME} to be gone`,
       () => {
         const result = kubectlSafe(
-          `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath='{.metadata.name}'`
+          `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath={.metadata.name}`
         )
         return result === '' || result === null ? 'gone' : null
       },
@@ -489,7 +489,7 @@ describe('channel-reader via control-api', () => {
       `Secret ${SECRET_NAME} to be gone`,
       () => {
         const result = kubectlSafe(
-          `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath='{.metadata.name}'`
+          `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath={.metadata.name}`
         )
         return result === '' || result === null ? 'gone' : null
       },
@@ -508,7 +508,7 @@ describe('channel-reader via control-api', () => {
         `Deployment ${DEPLOY_NAME} to be gone`,
         () => {
           const result = kubectlSafe(
-            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath='{.metadata.name}'`
+            `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found -o jsonpath={.metadata.name}`
           )
           return result === '' || result === null ? 'gone' : null
         },
