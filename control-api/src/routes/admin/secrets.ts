@@ -616,18 +616,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   }
 
   async function recipeExists(recipeName: string): Promise<boolean> {
-    try {
-      const items = (await gateway.listResource(
-        'workflowrecipes',
-        config.sandboxNamespace
-      )) as Array<{ metadata?: { name?: string } }>
-      return items.some(r => r.metadata?.name === recipeName)
-    } catch {
-      // List failure: don't block Secret creation on a transient apiserver
-      // hiccup — the WRC reconciler is the second line of defense (it rejects
-      // owner-recipe Secrets that don't match the requesting recipe).
-      return true
-    }
+    const items = (await gateway.listResource(
+      'workflowrecipes',
+      config.sandboxNamespace
+    )) as Array<{ metadata?: { name?: string } }>
+    return items.some(r => r.metadata?.name === recipeName)
   }
 
   async function isRecipeSecret(
