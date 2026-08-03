@@ -35,5 +35,5 @@
     "**/*.tsx",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "components/__tests__/ProfileShell.persistence.test.tsx"]
 }

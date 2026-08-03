@@ -1,14 +1,17 @@
 'use client'
 
 import type { ReactNode } from 'react'
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '@components/AuthContext'
 import { isSilentApiError } from '@lib/api'
+import { requestApprovalTargets, requestManageableTeams } from '@lib/profileAccess'
 import {
-  readProfileAccessCache,
-  requestApprovalTargets,
-  requestManageableTeams,
-} from '@lib/profileAccess'
+  type ProfileAccessDataState,
+  canManageMembersForAccess,
+  profileAccessStateAfterApprovalTargetsError,
+  profileAccessStateAfterManageableTeamsError,
+  profileAccessStateForUser,
+} from '@lib/profileAccessState'
 import type { ApprovalChannelTarget } from '@/app/types/approvalChannels'
 import type { ManageableTeam } from '@/app/types/profile'
 
@@ -31,36 +34,47 @@ const ProfileAccessContext = createContext<ProfileAccessContextValue | null>(nul
 export function ProfileAccessProvider({ children }: { children: ReactNode }) {
   const { authState } = useAuth()
   const userId = authState.me?.id || ''
-  const cached = readProfileAccessCache(userId)
-  const [manageableTeams, setManageableTeams] = useState<ManageableTeam[]>(
-    () => cached.manageableTeams ?? []
+  const [accessState, setAccessState] = useState<ProfileAccessDataState & { userId: string }>(
+    () => ({
+      userId,
+      ...profileAccessStateForUser(userId),
+    })
   )
-  const [approvalTargets, setApprovalTargets] = useState<ApprovalChannelTarget[]>(
-    () => cached.approvalTargets ?? []
-  )
-  const [manageableTeamsLoading, setManageableTeamsLoading] = useState(
-    () => !cached.manageableTeams
-  )
-  const [approvalTargetsLoading, setApprovalTargetsLoading] = useState(
-    () => !cached.approvalTargets
-  )
-  const [manageableTeamsError, setManageableTeamsError] = useState(false)
-  const [approvalTargetsError, setApprovalTargetsError] = useState(false)
+  const activeUserIdRef = useRef(userId)
+
+  const currentAccessState =
+    accessState.userId === userId ? accessState : { userId, ...profileAccessStateForUser(userId) }
 
   const refreshManageableTeams = useCallback(
     async (options: RefreshOptions = {}) => {
       if (!userId) return []
-      setManageableTeamsLoading(true)
-      setManageableTeamsError(false)
+      setAccessState(prev => ({
+        ...(prev.userId === userId ? prev : { userId, ...profileAccessStateForUser(userId) }),
+        manageableTeamsLoading: true,
+        manageableTeamsError: false,
+      }))
       try {
         const teams = await requestManageableTeams(userId, options)
-        setManageableTeams(teams)
+        if (activeUserIdRef.current === userId) {
+          setAccessState(prev => ({
+            ...(prev.userId === userId ? prev : { userId, ...profileAccessStateForUser(userId) }),
+            manageableTeams: teams,
+            manageableTeamsError: false,
+            manageableTeamsLoading: false,
+          }))
+        }
         return teams
       } catch (error) {
-        if (!isSilentApiError(error)) setManageableTeamsError(true)
+        if (activeUserIdRef.current === userId) {
+          setAccessState(prev => ({
+            userId,
+            ...profileAccessStateAfterManageableTeamsError(
+              prev.userId === userId ? prev : profileAccessStateForUser(userId)
+            ),
+            manageableTeamsError: !isSilentApiError(error),
+          }))
+        }
         throw error
-      } finally {
-        setManageableTeamsLoading(false)
       }
     },
     [userId]
@@ -69,49 +83,70 @@ export function ProfileAccessProvider({ children }: { children: ReactNode }) {
   const refreshApprovalTargets = useCallback(
     async (options: RefreshOptions = {}) => {
       if (!userId) return []
-      setApprovalTargetsLoading(true)
-      setApprovalTargetsError(false)
+      setAccessState(prev => ({
+        ...(prev.userId === userId ? prev : { userId, ...profileAccessStateForUser(userId) }),
+        approvalTargetsLoading: true,
+        approvalTargetsError: false,
+      }))
       try {
         const targets = await requestApprovalTargets(userId, options)
-        setApprovalTargets(targets)
+        if (activeUserIdRef.current === userId) {
+          setAccessState(prev => ({
+            ...(prev.userId === userId ? prev : { userId, ...profileAccessStateForUser(userId) }),
+            approvalTargets: targets,
+            approvalTargetsError: false,
+            approvalTargetsLoading: false,
+          }))
+        }
         return targets
       } catch (error) {
-        if (!isSilentApiError(error)) setApprovalTargetsError(true)
+        if (activeUserIdRef.current === userId) {
+          setAccessState(prev => ({
+            userId,
+            ...profileAccessStateAfterApprovalTargetsError(
+              prev.userId === userId ? prev : profileAccessStateForUser(userId)
+            ),
+            approvalTargetsError: !isSilentApiError(error),
+          }))
+        }
         throw error
-      } finally {
-        setApprovalTargetsLoading(false)
       }
     },
     [userId]
   )
 
   useEffect(() => {
+    activeUserIdRef.current = userId
+    const next = profileAccessStateForUser(userId)
+    setAccessState({ userId, ...next })
     if (!userId) return
-    void refreshManageableTeams().catch(() => undefined)
-    void refreshApprovalTargets().catch(() => undefined)
+    if (next.manageableTeamsLoading) void refreshManageableTeams().catch(() => undefined)
+    if (next.approvalTargetsLoading) void refreshApprovalTargets().catch(() => undefined)
   }, [refreshApprovalTargets, refreshManageableTeams, userId])
 
-  const activeRoleCanManage = authState.me?.role === 'admin' || authState.me?.role === 'inviter'
   const value = useMemo<ProfileAccessContextValue>(
     () => ({
-      approvalTargets,
-      approvalTargetsError,
-      approvalTargetsLoading,
-      canManageMembers: activeRoleCanManage || manageableTeams.length > 0,
-      manageableTeams,
-      manageableTeamsError,
-      manageableTeamsLoading,
+      approvalTargets: currentAccessState.approvalTargets,
+      approvalTargetsError: currentAccessState.approvalTargetsError,
+      approvalTargetsLoading: currentAccessState.approvalTargetsLoading,
+      canManageMembers: canManageMembersForAccess(
+        authState.me?.role,
+        currentAccessState.manageableTeams
+      ),
+      manageableTeams: currentAccessState.manageableTeams,
+      manageableTeamsError: currentAccessState.manageableTeamsError,
+      manageableTeamsLoading: currentAccessState.manageableTeamsLoading,
       refreshApprovalTargets,
       refreshManageableTeams,
     }),
     [
-      activeRoleCanManage,
-      approvalTargets,
-      approvalTargetsError,
-      approvalTargetsLoading,
-      manageableTeams,
-      manageableTeamsError,
-      manageableTeamsLoading,
+      authState.me?.role,
+      currentAccessState.approvalTargets,
+      currentAccessState.approvalTargetsError,
+      currentAccessState.approvalTargetsLoading,
+      currentAccessState.manageableTeams,
+      currentAccessState.manageableTeamsError,
+      currentAccessState.manageableTeamsLoading,
       refreshApprovalTargets,
       refreshManageableTeams,
     ]
