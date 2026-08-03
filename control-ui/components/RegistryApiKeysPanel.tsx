@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -155,8 +156,7 @@ export default function RegistryApiKeysPanel() {
         ) : null}
         {view.kind === 'no-org' ? (
           <p className="cu-banner cu-banner--warn">
-            This deployment is not bound to a registry org, so there are no org API keys to
-            manage.
+            This deployment is not bound to a registry org, so there are no org API keys to manage.
           </p>
         ) : null}
         {view.kind === 'auth-disabled' ? (
@@ -170,7 +170,7 @@ export default function RegistryApiKeysPanel() {
             ) : (
               <>
                 API keys become available once this deployment is connected to the registry.{' '}
-                <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+                <Link href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</Link>.
               </>
             )}
           </p>

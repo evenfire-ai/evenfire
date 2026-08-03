@@ -55,19 +55,13 @@ function HomeContent() {
 
 export default function Page() {
   return (
-    <Suspense
-      fallback={
-        <main className="cu-app cu-app--auth">
-          <div className="cu-card cu-card--auth">
-            <div className="cu-card__body">Loading...</div>
-          </div>
-        </main>
-      }
-    >
-      <InvitationRedirect />
+    <>
+      <Suspense fallback={null}>
+        <InvitationRedirect />
+      </Suspense>
       <AuthGate>
         <HomeContent />
       </AuthGate>
-    </Suspense>
+    </>
   )
 }

@@ -7,7 +7,6 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkeleton'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -22,6 +21,7 @@ import {
   installRecipeFromRegistry,
 } from '@lib/api'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
+import RegistryEntryDetailLoading from './loading'
 
 export const dynamic = 'force-dynamic'
 
@@ -112,7 +112,7 @@ function RegistryEntryActionsMenu({
 
 export default function RegistryEntryDetailPage() {
   return (
-    <Suspense fallback={<LoadingScreen />}>
+    <Suspense fallback={<RegistryEntryDetailLoading />}>
       <RegistryEntryDetailContent />
     </Suspense>
   )

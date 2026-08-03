@@ -1,6 +1,14 @@
 'use client'
 
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -12,6 +20,7 @@ import {
   setGlobalAuthErrorHandler,
 } from '../lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '../lib/authRedirect'
+import { resetPublishScopeCache } from '../lib/hooks/usePublishScope'
 import { useToast } from './Toast'
 
 type AuthState = {
@@ -47,6 +56,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // this singleton registration tied to them if either provider is remounted.
   useEffect(() => {
     const handleAuthError = () => {
+      resetPublishScopeCache()
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
       router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
       if (sessionExpiredToastShownRef.current) return
@@ -84,6 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(
     async (username: string, password: string): Promise<AdminLoginResponse> => {
       const result = await loginControlUI(username, password)
+      resetPublishScopeCache()
       sessionExpiredToastShownRef.current = false
       setAuthState({
         id: result.me.id,
@@ -101,17 +112,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await logoutControlUI()
     } finally {
+      resetPublishScopeCache(authState.id)
       sessionExpiredToastShownRef.current = false
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
       router.replace(CONTROL_ROUTES.login)
     }
-  }, [router])
+  }, [authState.id, router])
 
-  return (
-    <AuthContext.Provider value={{ authState, login, logout, checkAuth }}>
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({ authState, login, logout, checkAuth }),
+    [authState, checkAuth, login, logout]
   )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

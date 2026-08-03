@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../api'
-import { isPublisherEnabled, usePublishScope } from '../usePublishScope'
+import {
+  PublishScopeProvider,
+  isPublisherEnabled,
+  resetPublishScopeCache,
+  usePublishScope,
+} from '../usePublishScope'
 
 vi.mock('../../api', async orig => {
   const actual = await orig<typeof import('../../api')>()
@@ -17,8 +22,15 @@ function Probe() {
   )
 }
 
+function renderWithProvider(children: React.ReactNode = <Probe />) {
+  return render(<PublishScopeProvider cacheKey="admin-1">{children}</PublishScopeProvider>)
+}
+
 afterEach(cleanup)
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  resetPublishScopeCache()
+})
 
 describe('usePublishScope / isPublisherEnabled', () => {
   it('isPublisherEnabled: org-bound non-curator → true', () => {
@@ -66,7 +78,7 @@ describe('usePublishScope / isPublisherEnabled', () => {
       curator: false,
       orgName: 'Acme',
     })
-    render(<Probe />)
+    renderWithProvider()
     expect(await screen.findByText('enabled')).toBeInTheDocument()
   })
 
@@ -74,7 +86,34 @@ describe('usePublishScope / isPublisherEnabled', () => {
     vi.mocked(api.getPublishScope).mockRejectedValue(
       Object.assign(new Error('boom'), { status: 500 })
     )
-    render(<Probe />)
+    renderWithProvider()
     await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument())
+  })
+
+  it('shares one request across consumers and child route changes', async () => {
+    vi.mocked(api.getPublishScope).mockResolvedValue({
+      scope: 'acme',
+      curator: false,
+      orgName: 'Acme',
+    })
+
+    const view = renderWithProvider(
+      <>
+        <Probe />
+        <Probe />
+      </>
+    )
+    expect(await screen.findAllByText('enabled')).toHaveLength(2)
+
+    view.rerender(
+      <PublishScopeProvider cacheKey="admin-1">
+        <div data-testid="next-route">
+          <Probe />
+        </div>
+      </PublishScopeProvider>
+    )
+
+    expect(await screen.findByTestId('next-route')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(1)
   })
 })

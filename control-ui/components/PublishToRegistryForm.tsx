@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getPublishScope, publishToRegistry } from '../lib/api'
 import type { PublishScope } from '../lib/api'
@@ -587,7 +588,7 @@ export function PublishToRegistryForm({
                   </p>
                   <p className="cu-field__hint">
                     Need a key to publish from CI or a script?{' '}
-                    <a href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</a>
+                    <Link href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</Link>
                   </p>
                 </div>
               ))}

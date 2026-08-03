@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildInvitationHeading, formatRemaining, resolveInvitationToken } from '../lib/invitations'
 import './approvalChannels.test'
+import './profileAccess.test'
+import './profileAppFrame.test'
 import './profileSettings.test'
 import './routes.test'
 

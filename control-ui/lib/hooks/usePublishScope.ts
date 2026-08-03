@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import { createContext, createElement, useContext, useEffect, useMemo, useState } from 'react'
 import { type PublishScope, getPublishScope, isSilentApiError } from '../api'
 
 export type PublishScopeState = {
@@ -9,35 +10,96 @@ export type PublishScopeState = {
   error: boolean
 }
 
-/**
- * Resolve the caller's registry publish scope once on mount. Used to gate the
- * Publisher sidebar entry and view. Fails CLOSED: while loading, on a hard
- * error, or on a curator / org-unbound scope, the Publisher surface stays
- * hidden. A silent 401 (session expiry) is left to the global auth handler.
- */
-export function usePublishScope(): PublishScopeState {
-  const [state, setState] = useState<PublishScopeState>({
-    scope: null,
-    loading: true,
-    error: false,
-  })
+const EMPTY_STATE: PublishScopeState = {
+  scope: null,
+  loading: true,
+  error: false,
+}
+
+const PublishScopeContext = createContext<PublishScopeState | null>(null)
+const resolvedScopes = new Map<string, PublishScope>()
+const pendingScopes = new Map<string, Promise<PublishScope>>()
+
+function requestPublishScope(cacheKey: string): Promise<PublishScope> {
+  const resolved = resolvedScopes.get(cacheKey)
+  if (resolved) return Promise.resolve(resolved)
+
+  const pending = pendingScopes.get(cacheKey)
+  if (pending) return pending
+
+  const request = getPublishScope()
+    .then(scope => {
+      resolvedScopes.set(cacheKey, scope)
+      return scope
+    })
+    .finally(() => {
+      pendingScopes.delete(cacheKey)
+    })
+  pendingScopes.set(cacheKey, request)
+  return request
+}
+
+export function resetPublishScopeCache(cacheKey?: string): void {
+  if (cacheKey) {
+    resolvedScopes.delete(cacheKey)
+    pendingScopes.delete(cacheKey)
+    return
+  }
+  resolvedScopes.clear()
+  pendingScopes.clear()
+}
+
+export function PublishScopeProvider({
+  cacheKey,
+  children,
+}: {
+  cacheKey: string
+  children: ReactNode
+}) {
+  const cachedScope = cacheKey ? resolvedScopes.get(cacheKey) : undefined
+  const [state, setState] = useState<PublishScopeState>(() =>
+    cachedScope ? { scope: cachedScope, loading: false, error: false } : EMPTY_STATE
+  )
 
   useEffect(() => {
     let cancelled = false
-    getPublishScope()
+    if (!cacheKey) {
+      setState(EMPTY_STATE)
+      return
+    }
+
+    const nextCachedScope = resolvedScopes.get(cacheKey)
+    if (nextCachedScope) {
+      setState({ scope: nextCachedScope, loading: false, error: false })
+      return
+    }
+
+    setState(EMPTY_STATE)
+    void requestPublishScope(cacheKey)
       .then(scope => {
         if (!cancelled) setState({ scope, loading: false, error: false })
       })
-      .catch(err => {
-        if (cancelled || isSilentApiError(err)) return
+      .catch(error => {
+        if (cancelled || isSilentApiError(error)) return
         setState({ scope: null, loading: false, error: true })
       })
+
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [cacheKey])
 
-  return state
+  const value = useMemo(() => state, [state])
+  return createElement(PublishScopeContext.Provider, { value }, children)
+}
+
+/**
+ * Read the persistent caller scope shared by the sidebar and Publisher views.
+ * It fails closed while loading or when the provider reports an error.
+ */
+export function usePublishScope(): PublishScopeState {
+  const state = useContext(PublishScopeContext)
+  return state ?? EMPTY_STATE
 }
 
 /**

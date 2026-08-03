@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
@@ -38,8 +39,8 @@ export function GrantedToMe({
     return (
       <p className="cu-banner cu-banner--warn">
         Plugins shared with your org appear in your{' '}
-        <a href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</a> and can be installed from
-        there.
+        <Link href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</Link> and can be installed
+        from there.
       </p>
     )
   }

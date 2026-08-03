@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { Metadata } from 'next'
 import { AuthProvider } from '@components/AuthContext'
+import { ProfileAppFrame } from '@components/ProfileAppFrame'
 import { ToastProvider } from '@components/Toast'
 import './globals.css'
 
@@ -25,7 +26,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body className="cu-body">
         <ToastProvider>
-          <AuthProvider>{children}</AuthProvider>
+          <AuthProvider>
+            <ProfileAppFrame>{children}</ProfileAppFrame>
+          </AuthProvider>
         </ToastProvider>
       </body>
     </html>

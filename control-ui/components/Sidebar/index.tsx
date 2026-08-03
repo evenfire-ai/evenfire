@@ -14,7 +14,7 @@ import type { SidebarItem, SidebarProps, SidebarTab } from './types'
 
 export function Sidebar({ currentTab, isOpen = false, onNavigate, onLogout }: SidebarProps) {
   const pathname = usePathname()
-  const { scope } = usePublishScope()
+  const { scope, loading: publishScopeLoading } = usePublishScope()
   const publisherEnabled = isPublisherEnabled(scope)
   const [expandedGroups, setExpandedGroups] = useState<Set<SidebarTab>>(
     () => new Set(SIDEBAR_TABS[currentTab].children?.length ? [currentTab] : [])
@@ -22,7 +22,9 @@ export function Sidebar({ currentTab, isOpen = false, onNavigate, onLogout }: Si
   const entries = (Object.entries(SIDEBAR_TABS) as Array<[SidebarTab, SidebarItem]>)
     .filter(
       ([tabKey, item]) =>
-        !item.hidden && tabKey !== 'settings' && (tabKey !== 'publisher' || publisherEnabled)
+        !item.hidden &&
+        tabKey !== 'settings' &&
+        (tabKey !== 'publisher' || publisherEnabled || publishScopeLoading)
     )
     .sort(([, first], [, second]) => first.label.localeCompare(second.label))
   const settings = SIDEBAR_TABS.settings
@@ -60,6 +62,18 @@ export function Sidebar({ currentTab, isOpen = false, onNavigate, onLogout }: Si
       </div>
       <nav className="cu-sidebar__nav" aria-label="Main sections">
         {entries.map(([tabKey, item]) => {
+          if (tabKey === 'publisher' && publishScopeLoading) {
+            return (
+              <div
+                key={tabKey}
+                className="cu-sidebar__item cu-sidebar__item--loading"
+                aria-hidden="true"
+              >
+                <span className="cu-sidebar__icon cu-skeleton" />
+                <span className="cu-sidebar__label cu-skeleton" />
+              </div>
+            )
+          }
           const active = currentTab === tabKey
           const expanded = expandedGroups.has(tabKey)
           if (item.children?.length) {

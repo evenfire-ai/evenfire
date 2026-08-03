@@ -1,10 +1,20 @@
 'use client'
 
+import { createContext, useContext } from 'react'
 import { useAuth } from '@components/AuthContext'
 import { LoginPanel } from '@components/LoginPanel'
 import type { AuthGateProps } from './types'
 
+const AuthGateContext = createContext(false)
+
 export function AuthGate({ children }: AuthGateProps) {
+  const isInsideAuthGate = useContext(AuthGateContext)
+  if (isInsideAuthGate) return <>{children}</>
+
+  return <AuthGateBoundary>{children}</AuthGateBoundary>
+}
+
+function AuthGateBoundary({ children }: AuthGateProps) {
   const { authState } = useAuth()
 
   if (authState.isLoading) {
@@ -21,5 +31,5 @@ export function AuthGate({ children }: AuthGateProps) {
     return <LoginPanel />
   }
 
-  return <>{children}</>
+  return <AuthGateContext.Provider value>{children}</AuthGateContext.Provider>
 }
