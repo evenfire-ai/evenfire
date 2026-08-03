@@ -43,6 +43,7 @@ import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
+import { ensureRegistryPullSecret } from '../../services/registryPullSecretService.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
 
 /** Validate a Kubernetes resource name (RFC 1123 DNS subdomain). */
@@ -1111,16 +1112,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           transport: transportSpec,
         }
 
-        // Phase 2.4-delivery: local plugins whose image lives on the evenfire
-        // registry pull with the tenant's per-org pull secret (provisioned by
-        // MCC in the plugin namespace). Attach the reference; HCC propagates it.
-        if (
-          shouldAttachEvenfirePullSecret({
-            isLocal,
-            image: mcpServerSpec.image,
-            registryUrl: config.registryUrl,
-          })
-        ) {
+        // Local plugins whose image lives on the evenfire registry pull with the
+        // per-org `evenfire-registry-pull` secret. control-api self-provisions that
+        // secret in self-hosted mode (see ensureRegistryPullSecret below); it may
+        // also be pre-provisioned by an external operator. Attach the reference here;
+        // HCC propagates it to the pod.
+        const attachEvenfirePullSecret = shouldAttachEvenfirePullSecret({
+          isLocal,
+          image: mcpServerSpec.image,
+          registryUrl: config.registryUrl,
+        })
+        if (attachEvenfirePullSecret) {
           mcpServerSpec.imagePullSecrets = [{ name: EVENFIRE_REGISTRY_PULL_SECRET_NAME }]
         }
 
@@ -1211,6 +1213,25 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryName,
           body.registryEntryVersion
         )
+
+        // ── Ensure the shared registry pull secret (self-hosted) ───────────
+        // Must run when a private evenfire-hosted image is in play — independent of
+        // whether the plugin needs credentials (a credential-less plugin still needs
+        // to pull). Runs BEFORE the per-plugin credentials Secret so a failure leaves
+        // nothing to roll back, and BEFORE the McpServer CRD that references it.
+        // Namespace-shared, so it is NOT part of the per-plugin rollback below.
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, targetNs)
+          } catch (err) {
+            const k8sErr = extractK8sError(err)
+            res.status(k8sErr?.status && k8sErr.status < 500 ? 502 : 500).json({
+              error: 'registry_pull_secret_provision_failed',
+              detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
+            })
+            return
+          }
+        }
 
         // ── Step 3: Create K8s Secret if credentials provided ─────────────
         let secretCreated = false
@@ -1800,21 +1821,34 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Phase 2.4-delivery: recompute imagePullSecrets on every upgrade. The
-        // spread of ...existingSpec above carries a prior ref forward, so we
-        // must set it when the new image is evenfire-hosted and DELETE it
-        // otherwise (host change evenfire→GCP-AR, or local→remote) to avoid a
-        // stale, unresolvable pull-secret reference.
-        if (
-          shouldAttachEvenfirePullSecret({
-            isLocal,
-            image: updatedSpec.image,
-            registryUrl: config.registryUrl,
-          })
-        ) {
+        // Recompute imagePullSecrets on every upgrade. The spread of ...existingSpec
+        // above carries a prior ref forward, so we must set it when the new image is
+        // evenfire-hosted and DELETE it otherwise (host change evenfire→GCP-AR, or
+        // local→remote) to avoid a stale, unresolvable pull-secret reference.
+        const attachEvenfirePullSecret = shouldAttachEvenfirePullSecret({
+          isLocal,
+          image: updatedSpec.image,
+          registryUrl: config.registryUrl,
+        })
+        if (attachEvenfirePullSecret) {
           updatedSpec.imagePullSecrets = [{ name: EVENFIRE_REGISTRY_PULL_SECRET_NAME }]
         } else {
           delete updatedSpec.imagePullSecrets
+        }
+
+        // Ensure the shared pull secret exists before the CRD update references it
+        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud).
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, namespace)
+          } catch (err) {
+            const k8sErr = extractK8sError(err)
+            res.status(k8sErr?.status && k8sErr.status < 500 ? 502 : 500).json({
+              error: 'registry_pull_secret_provision_failed',
+              detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
+            })
+            return
+          }
         }
 
         const preflightErrors = await validateMcpServerSpecPreflight(updatedSpec, {

@@ -71,6 +71,13 @@ Once connected, browsing the public catalog, publishing, and image push/pull all
 work using the credential stored when you claimed the connection — no further
 setup is needed for those.
 
+> **In-cluster image pulls.** When you install a private plugin whose image lives on
+> the evenfire registry, control-api (in self-hosted mode) automatically provisions
+> the in-cluster `evenfire-registry-pull` Secret in the plugin namespace, so the
+> plugin pods can pull the image — you do not create that Secret by hand. It is
+> minted from your connection's own registry identity and left untouched if an
+> external operator already provided one.
+
 **Creating and managing API keys** (`efrk_` org keys, used for CI and other
 programmatic publishing) needs registry authentication active. In self-hosted,
 connecting is sufficient: authentication turns on automatically the moment

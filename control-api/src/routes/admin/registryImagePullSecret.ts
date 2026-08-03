@@ -1,16 +1,18 @@
 /**
- * Registry Phase 2.4-delivery — evenfire pull-secret attach classification.
+ * evenfire pull-secret attach classification.
  *
  * Pure, dependency-free helpers deciding whether an installed local-mode
- * McpServer image should carry the `evenfire-registry-pull` imagePullSecret.
- * The secret is provisioned onto the tenant cluster by MCC (out of this repo);
- * control-api only references it by name when the image lives on the configured
- * evenfire registry host.
+ * McpServer image should carry the `evenfire-registry-pull` imagePullSecret,
+ * i.e. when the image lives on the configured evenfire registry host. The Secret
+ * itself is self-provisioned by control-api in self-hosted mode
+ * (`registryPullSecretService`) and may also be pre-provisioned by an external
+ * operator; this file only decides when to reference it by name.
  */
 
 /**
- * Name of the dockerconfigjson Secret MCC provisions in the tenant plugin
- * namespace. Must stay in sync with the MCC install step. Never inline.
+ * Name of the dockerconfigjson Secret referenced by local-mode McpServers whose
+ * image lives on the evenfire registry. The single source of truth for the name —
+ * `registryPullSecretService` writes it, this file references it. Never inline.
  */
 export const EVENFIRE_REGISTRY_PULL_SECRET_NAME = 'evenfire-registry-pull'
 
