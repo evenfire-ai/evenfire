@@ -59,7 +59,7 @@ type Config = {
    */
   registryVoucherPrivateKey: string
   // The registry-assigned key_id (uuid) used as the voucher `kid` header in
-  // MANAGED mode (spec §14.2). Delivered by MCC in the registry-voucher Secret
+  // MANAGED mode (spec §14.2). Delivered by the managed operator in the registry-voucher Secret
   // as CONTROL_API_REGISTRY_VOUCHER_KID. Self-hosted reads kid from the DB row.
   registryVoucherKid: string
   // Registry consumer config — added in Path A.
@@ -747,7 +747,7 @@ export const config: Config = {
   //
   // v1 invariant: SharedFileSystem CRDs always live with the Hosts that mount
   // their PVCs read-only, i.e. in the Hosts namespace. So this MUST default to
-  // HOSTS_NAMESPACE (not a hardcoded `mcp-host`): on a per-tenant MCC cluster
+  // HOSTS_NAMESPACE (not a hardcoded `mcp-host`): on a per-tenant managed cluster
   // the Hosts namespace is `mcp-host-<slug>`, and the SharedFilesystems admin
   // route + the granted RBAC both target that tenant namespace. Defaulting to
   // a bare `mcp-host` made the route query the untenanted namespace and 403

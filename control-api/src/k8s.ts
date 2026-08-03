@@ -494,7 +494,7 @@ export class K8sGateway {
    * "reconcile applied" vs "kubelet is happy" gap).
    *
    * Listed per-namespace, NOT via listPodForAllNamespaces: a cluster-wide
-   * list needs cluster-scoped RBAC that MCC shared tenants do not (and must
+   * list needs cluster-scoped RBAC that managed shared tenants do not (and must
    * not) grant, and the recipe label carries no tenant scoping — an
    * all-namespaces list on a shared cluster would return other tenants'
    * pods for a same-named recipe.
