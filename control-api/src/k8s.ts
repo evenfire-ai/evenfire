@@ -665,6 +665,7 @@ export function extractHttpStatus(err: unknown): number | null {
   const maybe = err as {
     statusCode?: number
     code?: number | string
+    status?: number
     response?: { statusCode?: number; status?: number }
   }
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
@@ -673,8 +674,7 @@ export function extractHttpStatus(err: unknown): number | null {
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
-  if (typeof (err as { status?: unknown }).status === 'number')
-    return (err as { status: number }).status
+  if (typeof maybe.status === 'number') return maybe.status
   return null
 }
 

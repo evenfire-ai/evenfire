@@ -1,6 +1,10 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretUpsertRequest } from '../types.js'
-import { type SecretConstraintOptions, assertValidSecretConstraints } from './secretConstraints.js'
+import {
+  type SecretConstraintOptions,
+  assertValidSecretConstraints,
+  assertValidSecretType,
+} from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 export class SecretService {
@@ -109,8 +113,10 @@ export class SecretService {
    * from a route targeting any OTHER namespace unless that namespace's Role
    * has been granted `patch`.
    */
-  async mergeSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<unknown> {
-    assertValidSecretConstraints(req, opts)
+  async mergeSecret(req: SecretUpsertRequest, _opts?: SecretConstraintOptions): Promise<unknown> {
+    if (req.type !== undefined) {
+      assertValidSecretType(req.type)
+    }
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 

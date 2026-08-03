@@ -111,7 +111,7 @@ export function stripBlockedAnnotationKeys(
       result[key] = value
     }
   }
-  return Object.keys(result).length > 0 ? result : undefined
+  return result
 }
 
 export function assertValidSecretConstraints(

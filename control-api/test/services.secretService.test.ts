@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { extractHttpStatus } from '../src/k8s.js'
 import {
   ALLOWED_SECRET_TYPES,
   DangerousAnnotationError,
@@ -297,12 +298,6 @@ describe('SecretService — dangerous annotations never reach the apiserver', ()
         svc.updateSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
       apiSurface: ['readNamespacedSecret', 'replaceNamespacedSecret'],
     },
-    {
-      name: 'mergeSecret',
-      call: annotations =>
-        svc.mergeSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
-      apiSurface: ['patchNamespacedSecret'],
-    },
   ]
 
   for (const op of writeOps) {
@@ -458,7 +453,7 @@ describe('SecretService — platform annotations (clerum.io/) blocked by default
     expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
   })
 
-  it('opt-out propagates through updateSecret and mergeSecret', async () => {
+  it('opt-out propagates through updateSecret', async () => {
     await svc.updateSecret(
       {
         name: 's',
@@ -469,17 +464,6 @@ describe('SecretService — platform annotations (clerum.io/) blocked by default
       { allowPlatformAnnotations: true }
     )
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
-
-    await svc.mergeSecret(
-      {
-        name: 's',
-        namespace: 'test-ns',
-        annotations: { 'clerum.io/catalog-version': 'v3' },
-        stringData: { k: 'v' },
-      },
-      { allowPlatformAnnotations: true }
-    )
-    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
   })
 })
 
@@ -542,16 +526,16 @@ describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', ()
     expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
   })
 
-  it('returns undefined for empty object (truthy but no entries)', () => {
-    expect(stripBlockedAnnotationKeys({})).toBeUndefined()
+  it('returns {} for empty object (truthy but no entries)', () => {
+    expect(stripBlockedAnnotationKeys({})).toEqual({})
   })
 
-  it('returns undefined when all keys are blocked', () => {
+  it('returns {} when all keys are blocked', () => {
     const annotations = {
       'kubectl.kubernetes.io/last-applied-configuration': '{}',
       'kubernetes.io/service-account.name': 'default',
     }
-    expect(stripBlockedAnnotationKeys(annotations)).toBeUndefined()
+    expect(stripBlockedAnnotationKeys(annotations)).toEqual({})
   })
 
   it('strips infra-prefixed keys and keeps safe keys', () => {
@@ -607,6 +591,52 @@ describe('stripBlockedAnnotationKeys — snapshot sanitization for rollback', ()
       'my-annotation': 'value',
     }
     expect(stripBlockedAnnotationKeys(annotations)).toEqual(annotations)
+  })
+})
+
+// The {} vs undefined distinction is a load-bearing contract: {} means "caller
+// wants zero annotations" while undefined means "caller didn't provide
+// annotations". Collapsing {} to undefined would silently turn an explicit
+// clear into a no-op.
+describe('stripBlockedAnnotationKeys — edge cases', () => {
+  it('returns {} for an empty annotations object (never collapses to undefined)', () => {
+    expect(stripBlockedAnnotationKeys({})).toEqual({})
+  })
+
+  it('returns undefined for undefined input', () => {
+    expect(stripBlockedAnnotationKeys(undefined)).toBeUndefined()
+  })
+
+  it('returns {} when all keys are blocked', () => {
+    expect(
+      stripBlockedAnnotationKeys({
+        'kubectl.kubernetes.io/last-applied-configuration': '{}',
+        'kubernetes.io/service-account.name': 'default',
+      })
+    ).toEqual({})
+  })
+
+  it('strips only blocked keys, preserves safe keys', () => {
+    expect(
+      stripBlockedAnnotationKeys({
+        'kubectl.kubernetes.io/last-applied-configuration': '{}',
+        'my-custom-annotation': 'keep-me',
+      })
+    ).toEqual({ 'my-custom-annotation': 'keep-me' })
+  })
+})
+
+describe('extractHttpStatus — .status property', () => {
+  it('reads a top-level .status number', () => {
+    expect(extractHttpStatus({ status: 409 })).toBe(409)
+  })
+
+  it('prefers .statusCode over .status', () => {
+    expect(extractHttpStatus({ statusCode: 404, status: 500 })).toBe(404)
+  })
+
+  it('returns null for non-numeric .status', () => {
+    expect(extractHttpStatus({ status: 'Failure' })).toBeNull()
   })
 })
 

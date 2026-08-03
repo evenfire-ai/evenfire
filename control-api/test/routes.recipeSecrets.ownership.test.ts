@@ -90,6 +90,21 @@ describe('POST /admin/recipe-secrets — ownership', () => {
     expect(res.body.error).toMatch(/does not match any WorkflowRecipe/)
   })
 
+  it('propagates a 500 when the recipe-existence check fails (fail-closed, never assumes the recipe exists)', async () => {
+    const gateway = createGateway({ recipes: ['recipe-a'] })
+    gateway.listResource.mockRejectedValueOnce(new Error('apiserver unavailable'))
+    const res = await request(app(gateway))
+      .post('/admin/recipe-secrets')
+      .send({
+        name: 'k',
+        data: { a: 'b' },
+        ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
+      })
+      .expect(500)
+    expect(res.body.error).toContain('apiserver unavailable')
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
   it('stores shared=true label when kind=shared', async () => {
     const gateway = createGateway()
     const res = await request(app(gateway))
