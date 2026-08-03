@@ -23,17 +23,21 @@ trial" (`docs/concepts/open-core-and-hosted.md`).
 This spec makes **control-api self-provision** the Secret when it runs in
 self-hosted mode, using credentials and Kubernetes RBAC it *already holds*, and
 removes the in-repo assumption that MCC provisions it. It coexists safely where an
-external operator already created the Secret, and requires **no new RBAC and no
-registry-side change** to ship the first phase.
+external operator already created the Secret, needs **no new Kubernetes RBAC**, and
+ships as **one coordinated release** across two repos: a single `evenfire-registry`
+gate change plus the control-api self-provisioner, using a least-privilege pull-only
+credential from day one (§14).
 
 The key enabling facts, all verified in code:
 
 - control-api's self-hosted registry client is provisioned with `registry:manage-keys`
   *specifically* "so a headless deployment can mint its own org efrk_ key (the
   docker credential)" — `evenfire-registry/src/routes/deployments.ts:237-247`.
-- That scope authorizes the **machine branch** of `POST /org/:org/keys`, which mints
-  a `['registry:read','registry:publish']` key and returns a ready
-  `dockerconfigjson` — `evenfire-registry/src/routes/org.ts:245,276,293-295`.
+- A one-line registry gate change lets that `manage-keys` machine mint a **pull-only**
+  key for its own org via `POST /org/:org/registry-pull-credential` (today `*`-admin
+  only, `org.ts:376`; `mintPullKey`/`buildDockerconfigjson` unchanged). The same scope
+  *also* already reaches the publish-scoped machine branch of `POST /org/:org/keys`
+  (`org.ts:245,276,293-295`) — the proven fallback, §6.3.
 - control-api already creates dockerconfigjson-shaped Secrets in the plugin
   namespace (`config.mcpServersNamespace`) with existing RBAC — `SecretService`
   (`control-api/src/services/secretService.ts:33-53`), Role grants
@@ -95,7 +99,7 @@ auth-related secrets (WRC / HCC). §5 assesses that proposal; the conclusion is 
   the managed/self-hosted branch is expressed via `registryConnectionMode`, not MCC.
 - **G3.** Idempotent coexistence: where an external operator (including MCC) already
   provisioned the Secret, control-api never clobbers, rotates, or orphans it.
-- **G4.** No new Kubernetes RBAC and (Phase 1) no registry-side change.
+- **G4.** No new Kubernetes RBAC; a single small `evenfire-registry` gate change (§6.2), shipped in the same release.
 - **G5.** The self-provisioned Secret is byte-compatible with MCC's — same name,
   namespace source, type, and data key — so either satisfies the same `McpServer`
   reference.
@@ -225,85 +229,69 @@ into a controller that would need registry credentials plumbed into it.
 
 ---
 
-## 6. Credential source (the one real design decision)
+## 6. Credential source
 
-### 6.1 What works today, with zero registry change
+The feature ships as **one coordinated release across two repos** (`evenfire-registry`
++ `evenfire`), not a sequence — see the parallel workstreams in §14. Because the
+registry change lands with control-api, the design uses a **least-privilege pull-only
+credential from day one**; there is no interim push-capable step.
+
+### 6.1 The credential — an org-scoped pull-only key
 
 control-api's self-hosted client holds `registry:manage-keys`
 (`deployments.ts:242-247`; also the standing `TENANT_DEFAULT_SCOPES`,
-`evenfire-registry/src/routes/clients.ts:44-50`). Its **machine Bearer** fetch
+`evenfire-registry/src/routes/clients.ts:44-50`), and has a **machine Bearer** fetch
 (`registryClient.authedFetch` / `orgRegistryFetch`,
-`control-api/src/services/registryClient.ts:191-207,538-552`) can call
-`POST /org/:org/keys`; the **machine branch** authorizes an org-bound machine with
-`registry:manage-keys` (`org.ts:245`), forces scopes `['registry:read','registry:publish']`
-(`org.ts:276`), and returns a server-built `dockerconfigjson` (`org.ts:293-295`).
-Org name comes from `resolvePublishScope().orgName`
-(`registryClient.ts:650-662`, resolved from the registry `/whoami` mapping).
+`control-api/src/services/registryClient.ts:191-207,551-582`). It mints a pull-only
+key for its own org via the registry's `POST /org/:org/registry-pull-credential`
+(relaxed to accept an org-bound `manage-keys` machine — §6.2), which calls
+`mintPullKey` (`orgApiKeyService.ts:122-142`, `kind:'pull'`). Org name comes from
+`resolvePublishScope().orgName` (`registryClient.ts:650-662`, from the registry
+`/whoami` mapping). control-api **builds the `dockerconfigjson` locally**, keyed on
+`registryHostFromUrl(config.registryUrl)` (§7.9-2), from the returned key.
 
-Advantages of this path over MCC's endpoint:
+Properties of the pull-only key that simplify the design vs a publish key:
 
-- **Works in both modes** (no org-owner user required — the existing
-  `orgApiKeyClient.createKey` user path 403s in managed orgs that have no owner).
-- **Not rotate-on-call.** `/org/:org/keys` `mintKey` is a plain `INSERT` with no
-  advisory lock and no revoke-prior (`orgApiKeyService.ts:70-88`), unlike the
-  pull-only `mintPullKey` which revoke-then-inserts under a lock
-  (`:122-142`). So a re-mint never *orphans/revokes* a working on-cluster key — the
-  footgun MCC must sequence around. The flip side is **accumulation**: naive
-  re-minting leaks keys toward `MAX_ACTIVE_KEYS_PER_ORG = 100`
-  (`orgApiKeyService.ts:23`; `/org/:org/keys` 409s `too_many_keys` at the cap,
-  `org.ts:280-287`). control-api must therefore **revoke its own prior
-  control-api-minted key before minting a replacement** (`DELETE /org/:org/keys/:id`,
-  reachable by the same manage-keys machine, `org.ts:334-349`) — see §7.6.
-- `expiresInDays` is supported for TTL (`orgApiKeyService.ts:70-88`).
+- **Least privilege** — pull-only (`kind:'pull'`) grants pull on the org's
+  own/granted/public repos, never push. A leaked Secret cannot push.
+- **Rotate-on-call, ≤1 per org** — `mintPullKey` revoke-then-inserts under an advisory
+  lock, so there is at most one active pull key per org. **No accumulation** toward
+  `MAX_ACTIVE_KEYS_PER_ORG` and **no explicit revoke-prior bookkeeping** needed. The
+  cost is that a blind re-mint *orphans* the on-cluster key, so **read-before-mint is
+  mandatory** (§7.1) — mint only when the Secret is absent/broken.
+- **Invisible to operators** — pull keys are excluded from the owner self-service key
+  list (`orgApiKeyService.ts:99,110`), so the auto-minted key does not clutter
+  `/admin/registry/keys` and cannot be confused with a user/CI key.
 
-**Implementation reality (call this out):** control-api has **no** existing method
-that does a *machine*-Bearer `POST /org/:org/keys`. The only key-mint wrapper today
-is `orgApiKeyClient.createKey`, which uses a per-admin **user** token
-(`userAuthedFetch`, `orgApiKeyClient.ts:115-164`) and hits the registry's *user*
-branch — it 403s in ownerless (managed) orgs. The generic machine-Bearer helpers
-`authedFetch` / `orgRegistryFetch` exist but are **module-private** and only wrap
-`/grants`, `/entries`, `/granted-to-me` (`registryClient.ts:551-626`). So Phase 1
-requires a **new exported `registryClient` method** — e.g.
-`mintOrgMachineKey(orgName): Promise<{ dockerconfigjson, keyId }>` — built on
-`orgRegistryFetch('/org/${orgName}/keys', {method:'POST'})`, mirroring the existing
-`createOrgGrant` pattern (`registryClient.ts:584`). This is listed in §13.
+**Implementation reality:** control-api has **no** existing method that mints against
+this endpoint. The only key-mint wrapper today is `orgApiKeyClient.createKey`, which
+uses a per-admin **user** token (`userAuthedFetch`, `orgApiKeyClient.ts:115-164`) — a
+different path. The generic machine-Bearer helpers `authedFetch` / `orgRegistryFetch`
+exist but are **module-private** and only wrap `/grants`, `/entries`, `/granted-to-me`
+(`registryClient.ts:551-626`). So a **new exported `registryClient` method** is
+required — e.g. `mintOrgPullCredential(orgName): Promise<{ key, keyId }>` — built on
+`orgRegistryFetch`, mirroring the existing `createOrgGrant` pattern
+(`registryClient.ts:584`). Listed in §13.
 
-**Tradeoff (the decision to record):** the minted key is
-**publish-scoped (push-capable)**, broader than MCC's pull-only key. `imagePullSecrets`
-are consumed by the kubelet and are *not* mounted into containers, so exfiltration
-requires a workload in the namespace with `secrets:get` RBAC (or the Secret
-volume-mounted) — not the default. The real concern is the **standing
-push-capable credential** living namespace-wide (blast radius independent of pod
-reachability), vs MCC's least-privilege pull-only key. Phase 2 (§6.2) closes it.
+### 6.2 The registry change (ships in the same release)
 
-### 6.2 Phase 2 — a least-privilege pull-only mint (registry-side)
+Relax `POST /org/:org/registry-pull-credential` so an **org-bound machine holding
+`registry:manage-keys`** can mint a pull-only key for its **own** org. Today the gate
+requires an `*`-admin machine (`org.ts:376`); the change replaces that with
+`authorizeMachineForOrg(auth, orgName, 'registry:manage-keys')`, reusing `mintPullKey`
+and `buildDockerconfigjson` unchanged (only the auth gate moves). `*`-admin callers
+(the managed operator) keep working; a foreign org still `403`s. This is the single
+`evenfire-registry` change and it is **in scope** for this work.
 
-To restore least privilege, add a **non-`*`** pull-only mint the tenant can call
-for its own org. Two shapes (either is a small registry change):
+### 6.3 Alternative considered — the publish-scoped machine `/org/:org/keys` path
 
-- **(a)** Relax `POST /org/:org/registry-pull-credential` to also accept an
-  org-bound machine holding `registry:manage-keys` (today `org.ts:376` requires `*`).
-  Keeps the existing rotate-on-call, pull-only semantics; control-api must then
-  read-before-mint (it already will).
-- **(b)** Add a `kind:'pull'` option to `POST /org/:org/keys` that mints a
-  pull-scoped, non-rotating key for a manage-keys machine.
-
-Recommendation **(a)** — it reuses `mintPullKey` and the existing
-`buildDockerconfigjson`, so the only change is the auth gate. `evenfire-registry`
-is in scope for this work.
-
-### 6.3 Recommendation
-
-Ship **Phase 1** with §6.1 (publish-scoped key, zero registry change) to unblock
-self-hosted immediately, and land **Phase 2** (§6.2, pull-only) as a fast follow so
-the standing credential is least-privilege. control-api reads the same Secret in
-both phases; only the mint call changes.
-
-> **Open decision for reviewers:** accept the publish-scoped key in Phase 1, or
-> block Phase 1 on the Phase 2 pull-only mint? The recommendation is to ship
-> phased; the security team should sign off on the interim publish-scoped key.
-
----
+The machine branch of `POST /org/:org/keys` (`org.ts:245,276,293-295`) is reachable by
+the same `manage-keys` machine **with no registry change** and returns a
+`dockerconfigjson`, but the key is **publish-scoped (push-capable)** and additive (no
+rotate, accumulates toward the 100-cap, visible in the operator key list). It proves
+the feasibility and is a viable **fallback** if the §6.2 registry change ever has to be
+decoupled — but because we ship both repos together, the pull-only credential (§6.1) is
+the design and this path is not used.
 
 ## 7. Design
 
@@ -357,18 +345,17 @@ Algorithm:
      wrong-typed same-named Secret), regardless of label → **`'repaired'`**: mint and
      `updateSecret` (replace) — do **not** `createSecret` (it would 409). This closes
      the gap where a create-409 is silently "treated as success" over a broken Secret.
-3. **Mint (revoke-prior first).** If a prior control-api-minted pull key id is on
-   record (Secret annotation or a small state row), **revoke it**
-   (`DELETE /org/:org/keys/:id`, `org.ts:334-349`) before minting, to bound
-   accumulation (§6.1). Scope revoke-prior to keys carrying control-api's fixed
-   pull-key **description marker** so it never revokes a user/CI key (§7.9-3). Then
-   call the registry mint for `resolvePublishScope().orgName` with that description
-   (Phase 1: machine `POST /org/:org/keys`; Phase 2: pull-only). **Build the
-   `dockerconfigjson` locally**, keyed on `registryHostFromUrl(config.registryUrl)`
-   (the image host, per the attach invariant) — *not* the registry's
-   `registryTokenIssuer`-keyed response (§7.9-2) — via
-   `{auths:{[host]:{username:'_',password:key,auth:base64('_:'+key)}}}`
-   (`orgApiKeyService.ts:147-151`). Record the returned key id for future revoke.
+3. **Mint (only reached when the Secret is absent or broken).** Call the registry's
+   pull-only mint for `resolvePublishScope().orgName`
+   (`POST /org/:org/registry-pull-credential`, §6.1/§6.2). It is **rotate-on-call**
+   (revokes the org's prior pull key and inserts a fresh one under a lock,
+   `orgApiKeyService.ts:122-142`), so no explicit revoke-prior bookkeeping is needed —
+   but this is exactly why **step 2's read-before-mint is mandatory**: a blind re-mint
+   would orphan a working on-cluster key. **Build the `dockerconfigjson` locally**,
+   keyed on `registryHostFromUrl(config.registryUrl)` (the image host, per the attach
+   invariant) — *not* the registry's `registryTokenIssuer`-keyed response (§7.9-2) —
+   via `{auths:{[host]:{username:'_',password:key,auth:base64('_:'+key)}}}`
+   (`orgApiKeyService.ts:147-151`).
 4. **Write.** `createSecret` (absent) or `updateSecret` (repair) with
    `type:'kubernetes.io/dockerconfigjson'`,
    `data:{'.dockerconfigjson': <base64>}`,
@@ -412,10 +399,13 @@ mint call should carry a bounded timeout.
 > and carry the wrong semantics for a namespace-wide shared credential.
 >
 > **Concurrency.** With multiple control-api replicas or concurrent install/upgrade
-> ops, the read→mint→write sequence can race (the additive mint has no server-side
-> lock, unlike `mintPullKey`). The create-`409` re-read (step 4) collapses the
-> Secret-write race; to bound duplicate *key* mints, serialize provisioning per
-> process (an in-process mutex keyed on the Secret name) and rely on revoke-prior.
+> ops, the read→mint→write sequence can race. The create-`409` re-read (step 4)
+> collapses the Secret-write race, and an in-process mutex keyed on the Secret name
+> serializes provisioning within a replica. The mint itself is safe under races:
+> `mintPullKey` is rotate-on-call under a per-org advisory lock, so concurrent mints
+> converge on a single active pull key rather than accumulating — though a replica
+> that minted just before a peer's rotate must still re-read (a stale in-hand key is
+> discarded in favor of the on-cluster Secret).
 
 ### 7.3 Trigger point
 
@@ -464,9 +454,10 @@ Two independent guarantees, both required:
    (unlabeled, or lacking `managed-by=control-api`) is left **untouched**
    (`'exists-foreign'`). control-api only ever writes a Secret it owns.
 
-Because Phase 1 mints via additive `/org/:org/keys` (not rotate-on-call), even a
-mistaken double-provision cannot orphan a working credential — but read-before-mint
-still applies to avoid key churn and the 100-key cap.
+Because the pull-only mint is **rotate-on-call**, a blind re-mint would orphan the
+working on-cluster key — so read-before-mint (§7.1 step 2) is the load-bearing
+idempotency guarantee: control-api mints only when the Secret is absent or broken, and
+never for an `'exists-ours'`/`'exists-foreign'` hit.
 
 ### 7.5 What stays unchanged
 
@@ -480,24 +471,24 @@ still applies to avoid key churn and the 100-key cap.
 ### 7.6 Rotation & lifecycle
 
 - **Rotation & liveness.** `'exists-ours'` reuse (§7.1 step 2) serves the embedded
-  key indefinitely, so the key must not silently die. Phase 1 posture: **mint the key
-  with no `expiresInDays`** (non-expiring) so reuse is safe by construction, and treat
-  an observed `401`/`ImagePullBackOff` (or an admin "re-provision" action) as the
-  rotation trigger — which revokes the prior control-api key (§6.1) and re-mints,
-  **replacing** the `'exists-ours'` Secret in place (never a foreign one). A scheduled
-  proactive rotation may be deferred (MCC defers it too), but the *reactive* trigger
-  and the non-expiring-key choice are **required** for Phase 1, else a revoked-out-of-band
-  or expired key strands the cluster with no self-heal. Posture in one line:
-  *control-api owns rotation for Secrets it owns and never touches a foreign Secret.*
+  key indefinitely, so the key must not silently die. The pull key carries no
+  expiry (`mintPullKey` sets none), so reuse is safe by construction. Treat an
+  observed `401`/`ImagePullBackOff` (or an admin "re-provision" action) as the
+  reactive rotation trigger — which re-mints (the endpoint rotates the org's pull
+  key) and **replaces** the `'exists-ours'` Secret in place (never a foreign one). A
+  scheduled proactive rotation may be deferred, but the *reactive* trigger is
+  **required**, else a revoked-out-of-band key strands the cluster with no self-heal.
+  Posture in one line: *control-api owns rotation for Secrets it owns and never
+  touches a foreign Secret.*
 - **GC.** Plugin uninstall deletes the per-plugin `<name>-credentials` Secret by name
   and does **not** touch the shared pull Secret (§7.9) — correct, since other plugins
   may still need it. The Secret is therefore a standing namespace credential for the
   cluster's lifetime; no ownerReference/finalizer is added (consistent with the
-  absence of ownerReferences anywhere in control-api today). Neither uninstall nor any
-  other path revokes the underlying `efrk_` key, so the registry-side key is a
-  standing credential too and can accrue across re-mints unless revoke-prior (§7.1) is
-  honored. Revoking the key on the last-plugin uninstall (and on `registryUrl`/host
-  change) is out of scope for Phase 1 but noted as a lifecycle follow-up.
+  absence of ownerReferences anywhere in control-api today). Because the pull key is
+  rotate-on-call (≤1 per org), it does **not** accumulate — but nothing revokes the
+  final key on teardown, so it remains a standing registry credential. Revoking it on
+  the last-plugin uninstall (and on `registryUrl`/host change) is out of scope but
+  noted as a lifecycle follow-up.
 
 ### 7.7 Optional HCC enhancement — presence validation
 
@@ -597,15 +588,15 @@ Traced against the current install/upgrade/uninstall code. **Cleared (safe today
    `shouldAttachEvenfirePullSecret` invariant guarantees equals the image host — rather
    than trust the registry's `registryTokenIssuer`-keyed response. Same pure formula
    (`{auths:{[host]:{username:'_',password:key,auth:base64('_:'+key)}}}`), local host.
-3. **Shared key cap, list visibility, and revoke safety.** control-api already exposes
+3. **No collision with operator `efrk_` keys.** control-api also exposes
    `/admin/registry/keys` (`registry.ts:2221-2247`), where operators mint/list/revoke
-   `efrk_` keys via the user-token path — all sharing `MAX_ACTIVE_KEYS_PER_ORG=100`.
-   The auto-minted pull key therefore (a) counts against that cap alongside CI/user
-   keys, and (b) appears in the user-facing key list. Mint it with a **fixed,
-   recognizable description** (e.g. `evenfire-registry-pull (auto)`), and scope
-   revoke-prior (§6.1) to keys carrying that marker so it never revokes a user/CI key.
-   Consider filtering it from the `/admin/registry/keys` GET list to avoid operator
-   confusion.
+   `efrk_` keys. Using the **pull-only** credential keeps these cleanly separate: pull
+   keys (`kind:'pull'`) are excluded from that operator list (`orgApiKeyService.ts:99,110`),
+   are rotate-on-call (≤1 per org, so negligible against `MAX_ACTIVE_KEYS_PER_ORG=100`),
+   and are managed entirely by the mint endpoint — so no description-marker, no
+   revoke-prior bookkeeping, and no risk of the provisioner revoking a user/CI key.
+   (This is a concrete reason the pull-only credential, §6.1, is preferable to the
+   publish-scoped fallback, §6.3, which *would* re-introduce all three concerns.)
 
 ---
 
@@ -649,18 +640,18 @@ future scope.
 
 ## 9. Rollout & migration
 
-1. **Ship control-api self-provisioning** gated on `self-hosted`. Managed clusters
-   are inert (MCC keeps owning the Secret). No coordination needed — the mode gate
-   guarantees no double-writer.
-2. **Fast-follow: Phase 2 pull-only mint** on the registry (§6.2); control-api
-   switches the mint call. Existing self-provisioned Secrets are replaced on next
-   ensure/rotation.
-3. **Retire MCC's `install_registry_pull_secret`** (shared + dedicated) — a separate
-   change in the MCC repo, sequenced *after* managed clusters also self-provision (a
-   future extension of the mode gate) **or** left as-is if managed stays on MCC. Do
-   not remove MCC's step until managed provisioning is guaranteed by another actor;
-   until then managed and self-hosted are cleanly partitioned by mode.
-4. **Doc + comment scrub** (§7.8) lands with step 1.
+1. **Deploy the registry gate change (§6.2) first or together** — control-api's mint
+   `403`s until the relaxed endpoint is live, so the `evenfire-registry` deploy must
+   land before (or with) the control-api rollout. Both are part of this release.
+2. **Ship control-api self-provisioning** gated on `self-hosted`, with the comment/doc
+   scrub (§7.8). Managed clusters are inert (the managed operator keeps owning the
+   Secret) — the mode gate guarantees no double-writer, so no cross-repo coordination
+   with the managed operator is needed.
+3. **Retire the managed operator's `install_registry_pull_secret`** (shared + dedicated)
+   — a separate change in that repo, sequenced *after* managed clusters also
+   self-provision (a future extension of the mode gate) **or** left as-is if managed
+   stays on the operator. Do not remove it until managed provisioning is guaranteed by
+   another actor; until then managed and self-hosted are cleanly partitioned by mode.
 
 No migration is required for existing managed tenants: their MCC-written Secret
 (unlabeled, `fieldManager mcc-rung35` on shared) is untouched by the self-hosted
@@ -672,17 +663,15 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 
 | # | Risk | Mitigation |
 | --- | --- | --- |
-| R1 | Phase 1 stores a **push-capable** standing key namespace-wide (blast radius — a workload with `secrets:get` RBAC or a mounted Secret could exfiltrate and `docker push`; `imagePullSecrets` themselves are kubelet-only, not container-mounted). | Ship Phase 2 pull-only mint as fast-follow (§6.2); security sign-off on the interim; non-expiring key with reactive rotation (§7.6). |
+| R1 | Rotate-on-call mint orphans a working on-cluster key (blind re-mint). | Read-before-mint is mandatory — mint only when the Secret is absent/broken (§7.1); in-process serialization on the Secret name. |
 | R2 | Clobbering an operator/MCC Secret. | Mode gate + `managed-by` ownership read; foreign Secrets are never written (§7.4); unlabeled-⇒-foreign invariant noted (§7.2). |
-| R3 | Key accumulation toward `MAX_ACTIVE_KEYS_PER_ORG=100` (additive `mintKey`, no revoke). | Revoke-prior control-api key before re-mint (§6.1/§7.1); read-before-mint; in-process serialization; revoke a key minted into a lost create-`409` race. |
-| R4 | Pull Secret in the wrong namespace → ref silently unresolved (`imagePullSecrets` are namespace-local). | Provision into `targetNs` (co-located with the McpServer + credentials Secret), not a fixed namespace; a namespace outside control-api's secrets-RBAC set fails the read `403` and aborts (§7.1/§8). |
-| R5 | Self-hosted registry identity / org mapping not yet established (no claimed client, `orgName` null). | Gate on `isRegistryAuthActive()` **and** non-null `resolvePublishScope().orgName`; skip with a clear install-time error, never mint against `/org/null/keys` (§7.1). Presupposes a working self-hosted connect flow. |
-| R6 | Registry unreachable. | control-api→registry egress already covered in base; kubelet→registry pull is a node/GKE firewall concern, not a pod NetworkPolicy (§7.8). |
-| R7 | `targetNs` outside control-api's secrets RBAC (`{mcp-server, mcp-host, control-plane, sandbox-recipes, sandbox-ui}`) via a `body.namespace` override. | Default `targetNs` is `config.mcpServersNamespace` (`mcp-server`, covered + pre-created); a non-404 read error (e.g. `403`) aborts before minting, so no key-cap slot is wasted (§7.1); operators exposing the override constrain it to the covered set (§8). |
-| R8 | Shared pull Secret wrongly torn down by a per-plugin rollback. | `ensureRegistryPullSecret` sits outside the Step-4 `secretCreated`/`deleteSecret` rollback scope; a CRD-create failure never deletes the namespace-shared pull Secret (§7.3). |
-| R9 | `.dockerconfigjson` keyed on the wrong host → present Secret still yields `ImagePullBackOff`. | Build the blob locally keyed on `registryHostFromUrl(config.registryUrl)` (= image host), not the registry's `registryTokenIssuer` (§7.9-2). |
-| R10 | Auto-minted pull key collides with user/CI keys — shared 100-cap, appears in the operator key list, or revoke-prior nukes a user key. | Fixed description marker on the pull key; revoke-prior scoped to that marker only; optionally hide it from `/admin/registry/keys` GET (§7.9-3). |
-| R11 | Credential-less private-image plugin (`credRequired=false`) gets no pull Secret. | Hook is outside the `if (credRequired)` block, gated only on `shouldAttachEvenfirePullSecret` (§7.9-1). |
+| R3 | Pull Secret in the wrong namespace → ref silently unresolved (`imagePullSecrets` are namespace-local). | Provision into `targetNs` (co-located with the McpServer + credentials Secret), not a fixed namespace; a namespace outside control-api's secrets-RBAC set fails the read `403` and aborts (§7.1/§8). |
+| R4 | Self-hosted registry identity / org mapping not yet established (no claimed client, `orgName` null). | Gate on `isRegistryAuthActive()` **and** non-null `resolvePublishScope().orgName`; skip with a clear install-time error, never mint against `/org/null/…` (§7.1). Presupposes a working self-hosted connect flow. |
+| R5 | Registry unreachable, or the §6.2 endpoint change not yet deployed → mint 403/error. | control-api→registry egress already covered in base; the registry change ships in the same release and must be live before control-api mints (§14 ordering); fail-loud install surfaces it (§7.1). |
+| R6 | `targetNs` outside control-api's secrets RBAC (`{mcp-server, mcp-host, control-plane, sandbox-recipes, sandbox-ui}`) via a `body.namespace` override. | Default `targetNs` is `config.mcpServersNamespace` (`mcp-server`, covered + pre-created); a non-404 read error (e.g. `403`) aborts before minting (§7.1); operators exposing the override constrain it to the covered set (§8). |
+| R7 | Shared pull Secret wrongly torn down by a per-plugin rollback. | `ensureRegistryPullSecret` sits outside the Step-4 `secretCreated`/`deleteSecret` rollback scope; a CRD-create failure never deletes the namespace-shared pull Secret (§7.3). |
+| R8 | `.dockerconfigjson` keyed on the wrong host → present Secret still yields `ImagePullBackOff`. | Build the blob locally keyed on `registryHostFromUrl(config.registryUrl)` (= image host), not the registry's `registryTokenIssuer` (§7.9-2). |
+| R9 | Credential-less private-image plugin (`credRequired=false`) gets no pull Secret. | Hook is outside the `if (credRequired)` block, gated only on `shouldAttachEvenfirePullSecret` (§7.9-1). |
 
 ---
 
@@ -694,8 +683,11 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 - **Secret shape** — asserts type `kubernetes.io/dockerconfigjson`, single
   `.dockerconfigjson` key, base64 not double-encoded, `managed-by=control-api` label,
   namespace = `config.mcpServersNamespace`.
-- **Registry client** — machine `POST /org/:org/keys` mint returns `dockerconfigjson`;
-  org resolved from `resolvePublishScope`.
+- **Registry client** — machine `POST /org/:org/registry-pull-credential` mint returns
+  a pull-only `key`; org resolved from `resolvePublishScope`; dockerconfigjson built
+  locally, keyed on the `registryUrl` host.
+- **Registry (Workstream A)** — an org-bound `manage-keys` machine mints its own org's
+  pull key (`201`); a foreign org `403`s; `*`-admin still works.
 - **Integration / e2e (minikube, self-hosted)** — install a private evenfire-hosted
   local plugin; assert the Secret is created and the plugin pod pulls (no
   `ImagePullBackOff`); re-install is idempotent; a pre-seeded foreign Secret is
@@ -718,15 +710,12 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 
 ## 12. Open questions / decisions for review
 
-1. **Credential scope (§6.3)** — accept the publish-scoped key in Phase 1, or block
-   on the Phase 2 pull-only mint? *(Recommendation: ship phased.)*
-2. **MCC-word scrub breadth (§7.8)** — scrub only pull-secret comments, or all
+1. **MCC-word scrub breadth (§7.8)** — scrub only pull-secret comments, or all
    managed-mode "MCC" mentions? *(Recommendation: scrub wording, keep behavior.)*
-3. **Trigger (§7.3)** — lazy-at-attach only, or add the boot reconcile? *(Recommendation: lazy; boot optional.)*
-4. **Rotation policy (§7.6)** — define now, or defer as MCC does? *(Recommendation: define posture, defer scheduled rotation.)*
-5. **HCC presence-validation (§7.7)** — in this spec or a follow-up? *(Recommendation: follow-up.)*
-6. **MCC step retirement (§9.3)** — coordinate managed self-provisioning, or leave
-   managed on MCC indefinitely behind the mode gate?
+2. **Trigger (§7.3)** — lazy-at-attach only, or add the boot reconcile? *(Recommendation: lazy; boot optional.)*
+3. **Rotation policy (§7.6)** — reactive-only now, or add scheduled proactive rotation? *(Recommendation: reactive now, defer scheduled.)*
+4. **HCC presence-validation (§7.7)** — in this release or a follow-up? *(Recommendation: follow-up.)*
+5. **Managed-operator step retirement (§9.3)** — coordinate managed self-provisioning, or leave managed on the operator indefinitely behind the mode gate?
 
 ---
 
@@ -737,7 +726,7 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 - `control-api/test/registryImagePullSecret.test.ts:10` — test description to reword (G2 scrub).
 - `control-api/src/routes/admin/registry.ts` — attach sites `:~1117-1124`,`:~1808-1818`; comment `:1114-1116`; existing fail-loud plugin-ns Secret write via gateway `:1226-1240`; router gateway param `:732`.
 - `control-api/src/services/registryPullSecretService.ts` — **new** (`ensureRegistryPullSecret`; takes `K8sGateway` + mint fn).
-- `control-api/src/services/registryClient.ts` — **new** exported `mintOrgMachineKey(orgName)` built on the private `orgRegistryFetch` (`:551`, machine Bearer, prefixes `/api/v1`), mirroring `createOrgGrant` (`:584`); `authedFetch` `:191`; `resolvePublishScope` `:650-662` (orgName nullable).
+- `control-api/src/services/registryClient.ts` — **new** exported `mintOrgPullCredential(orgName)` built on the private `orgRegistryFetch` (`:551`, machine Bearer, prefixes `/api/v1`), mirroring `createOrgGrant` (`:584`); `authedFetch` `:191`; `resolvePublishScope` `:650-662` (orgName nullable).
 - `control-api/src/services/orgApiKeyClient.ts:115-164` — existing **user-token** key mint (the path that 403s in ownerless orgs; *not* reused).
 - `control-api/src/k8s.ts:389-394` — `K8sGateway.getSecret/createSecret/updateSecret` (the write surface actually used at the attach sites).
 - `control-api/src/services/secretService.ts:25-53` — `getSecret` **re-throws 404** (not 404-aware); `createSecret` passes `type` through.
@@ -746,10 +735,10 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 - `host-context-controller/src/reconciler.ts:994-1002` — reference propagation (unchanged); `:436-453` — envSecret validation (model for §7.7).
 - `docs/how-to/connect-to-registry.md:59,70` — doc fix.
 
-**evenfire-registry (in scope; Phase 2)**
+**evenfire-registry (in scope; Workstream A)**
 - `src/routes/deployments.ts:237-247` — self-hosted client gets `registry:manage-keys` (the enabler).
-- `src/routes/org.ts:245,276,293-295` — machine-branch key mint + `dockerconfigjson`; `:371-388` — `*`-gated pull-only endpoint (Phase 2 relaxation target).
-- `src/services/orgApiKeyService.ts:70-88,122-151` — `mintKey`/`mintPullKey`/`buildDockerconfigjson`; `:23` — `MAX_ACTIVE_KEYS_PER_ORG`.
+- `src/routes/org.ts:371-388` — `*`-gated pull-only endpoint (`:376` gate is the A1 relaxation target); `:245,276,293-295` — publish-scoped machine branch (the §6.3 fallback).
+- `src/services/orgApiKeyService.ts:122-151` — `mintPullKey` (rotate-on-call, `kind:'pull'`) / `buildDockerconfigjson`; `:99,110` — pull keys excluded from the owner key list; `:23` — `MAX_ACTIVE_KEYS_PER_ORG`.
 
 **evenfire-managed-cluster-control (out of repo; sequenced retirement)**
 - `packages/backend/src/operations/handlers/tenant-install-shared.ts:476-496`, `evenfire-install.ts:356-378`, `install/secrets.ts:110-121,181-212`, `install/registry.ts:48-95` — the `install_registry_pull_secret` behavior being superseded.
@@ -758,33 +747,41 @@ path and reads as `'exists-foreign'` if the mode ever flips.
 
 ## 14. Implementation plan
 
-Two phases. **Phase 1** unblocks self-hosted with **no registry change** (publish-scoped
-key). **Phase 2** swaps in a least-privilege pull-only credential and requires a small
-`evenfire-registry` change. control-api reads the *same* Secret in both; only the mint
-call and the key's scope/lifecycle change.
+**One release, two parallel workstreams** — Workstream A (`evenfire-registry`, one
+endpoint gate change) and Workstream B (`evenfire`/control-api, the self-provisioner).
+They can be built concurrently; the only ordering constraint is at **deploy** time (A
+must be live before B mints — §9-1). control-api uses the least-privilege pull-only
+credential from the first commit; there is no interim publish-scoped step.
 
-### Phase 1 — control-api self-provisioning (evenfire repo)
+### Workstream A — registry pull-credential gate (`evenfire-registry`)
 
-Ordered so each task is independently reviewable; **P1.1–P1.3** are the functional core,
-**P1.4–P1.7** are decoupling/quality.
+- **A1 — Relax the gate** (`src/routes/org.ts`). In `POST /:org/registry-pull-credential`,
+  replace the `*`-admin gate (`:376`) with
+  `authorizeMachineForOrg(auth, orgName, 'registry:manage-keys')` (§6.2) so an org-bound
+  machine mints a pull-only key for its **own** org. `mintPullKey` (rotate-on-call,
+  `kind:'pull'`) and `buildDockerconfigjson` unchanged — only the auth gate moves.
+  *Accept:* an org-bound `manage-keys` machine gets `201`; a foreign org still `403`s;
+  `*`-admin still works (managed operator unaffected); audit log preserved.
 
-- **P1.1 — `registryClient.mintOrgMachineKey(orgName)`** (`control-api/src/services/registryClient.ts`).
-  New exported fn built on the private `orgRegistryFetch` (machine Bearer, prefixes
-  `/api/v1`), mirroring `createOrgGrant`. `POST /org/${orgName}/keys` with a **fixed
-  description marker** (e.g. `evenfire-registry-pull (auto)`); returns
-  `{ keyId, key }`. Do **not** consume the response's `dockerconfigjson` (wrong host,
-  §7.9-2). Add `revokeOrgMachineKey(orgName, keyId)` (`DELETE /org/:org/keys/:id`) and a
-  `listOrgMachineKeys(orgName)` filtered to the marker (for revoke-prior + repair).
-  *Accept:* unit test hits a mocked registry, asserts machine-Bearer + marker.
-- **P1.2 — `registryPullSecretService.ensureRegistryPullSecret(targetNs)`**
+### Workstream B — control-api self-provisioner (`evenfire`)
+
+Ordered so each task is independently reviewable; **B1–B3** are the functional core,
+**B4–B7** are decoupling/quality.
+
+- **B1 — `registryClient.mintOrgPullCredential(orgName)`** (`control-api/src/services/registryClient.ts`).
+  New exported fn on the private `orgRegistryFetch` (machine Bearer, prefixes `/api/v1`),
+  mirroring `createOrgGrant`; `POST /org/${orgName}/registry-pull-credential`; returns
+  `{ key, keyId }`. Do **not** consume the response's `dockerconfigjson` (wrong host,
+  §7.9-2). *Accept:* unit test against a mocked registry asserts machine-Bearer + endpoint.
+- **B2 — `registryPullSecretService.ensureRegistryPullSecret(targetNs)`**
   (`control-api/src/services/registryPullSecretService.ts`, **new**). The §7.1 state
   machine: gate (mode/auth/url/non-null `orgName`) → read (404→absent, 403→abort,
-  classify ours/foreign/repair) → revoke-prior (marker-scoped) → mint (P1.1) → **build
+  classify ours/foreign/repair) → mint (B1, only when absent/broken) → **build
   dockerconfigjson locally** keyed on `registryHostFromUrl(config.registryUrl)` →
-  `createSecret`/`updateSecret` with `managed-by:control-api` + key-id annotation. In-process
-  mutex on the Secret name. Deps injected: `K8sGateway`, the P1.1 mint fns, `config`.
+  `createSecret`/`updateSecret` with `managed-by:control-api`. In-process mutex on the
+  Secret name. Deps injected: `K8sGateway`, the B1 mint fn, `config`.
   *Accept:* the §11 unit matrix (absent/ours/foreign/repair/409/gate-off) green.
-- **P1.3 — Wire into install + upgrade** (`control-api/src/routes/admin/registry.ts`).
+- **B3 — Wire into install + upgrade** (`control-api/src/routes/admin/registry.ts`).
   Call `ensureRegistryPullSecret(targetNs)` when `shouldAttachEvenfirePullSecret` is true,
   **outside the `if (credRequired)` block** (§7.9-1), in the Step-3 window **before** the
   Step-4 CRD create, and **outside** the per-plugin `secretCreated`/rollback bookkeeping
@@ -792,47 +789,28 @@ Ordered so each task is independently reviewable; **P1.1–P1.3** are the functi
   unresolvable ref. Same in the upgrade handler's credentials phase.
   *Accept:* e2e (minikube, self-hosted) — a private plugin pulls; a credential-less
   private plugin pulls; re-install idempotent; a pre-seeded foreign Secret is preserved.
-- **P1.4 — Revise existing tests** (`control-api/test/routes.registryInstall.test.ts`).
+- **B4 — Revise existing tests** (`control-api/test/routes.registryInstall.test.ts`).
   Update the `createSecret` call-count assertions (`:864`, `:1148`, `:1204`) and extend the
   `evenfire imagePullSecrets attach` block (`:1424`) to assert the pull-Secret create,
   shape, namespace (`targetNs`), and host-keying.
-- **P1.5 — Remove MCC knowledge** (§7.8). Rewrite comments at
+- **B5 — Remove MCC knowledge** (§7.8). Rewrite comments at
   `registryImagePullSecret.ts:6,12-13` and `registry.ts:1114-1116`; reword the test name at
   `registryImagePullSecret.test.ts:10`; scrub the adjacent managed-mode "MCC" wording
   (keep the `registryConnectionMode` behavior). *Gate:* `grep -rn '\bMCC\b' control-api/src
   control-api/test` returns only intentional, neutral phrasings.
-- **P1.6 — Docs** — fix `docs/how-to/connect-to-registry.md:59,70` to describe
+- **B6 — Docs** — fix `docs/how-to/connect-to-registry.md:59,70` to describe
   self-provisioning; add the node-level registry-egress note for remote-registry
   self-hosters (§7.8).
-- **P1.7 — (optional) HCC presence-validation** (§7.7) — separate PR; read-validate the
+- **B7 — (optional) HCC presence-validation** (§7.7) — separate PR; read-validate the
   pull Secret and emit a `SecretResolved`-style condition instead of silent
   `ImagePullBackOff`.
 
-### Phase 2 — least-privilege pull-only mint (evenfire-registry + control-api)
+### Release & sequencing (see §9)
 
-- **P2.1 — Registry: relax the pull-credential gate** (`evenfire-registry/src/routes/org.ts`).
-  In `POST /:org/registry-pull-credential`, replace the `*`-admin gate (`:376`) with
-  `authorizeMachineForOrg(auth, orgName, 'registry:manage-keys')` (option §6.2(a)) so an
-  org-bound machine can mint a pull-only key for its **own** org. Keep `mintPullKey`
-  (rotate-on-call, `kind:'pull'`) and the audit log; no change to `buildDockerconfigjson`.
-  *Accept:* an org-bound `manage-keys` machine gets `201`; a foreign org still `403`s;
-  `*`-admin still works (MCC unaffected).
-- **P2.2 — control-api: switch the mint call** (`registryClient.ts` + `registryPullSecretService.ts`).
-  Point the mint at the pull-only endpoint, extract `key`, build the dockerconfigjson
-  locally keyed on the `registryUrl` host (unchanged from P1). Since the pull endpoint is
-  **rotate-on-call** (revokes the org's prior pull key), the explicit revoke-prior (P1.1)
-  becomes redundant — but keep the **read-before-mint** discipline strict (a blind re-mint
-  now *orphans* the on-cluster key). This flips the key-lifecycle tradeoff: accumulation
-  (R3) disappears, the rotate-on-call footgun returns and is handled by read-before-mint.
-  *Accept:* the minted key carries only pull scope (`kind:'pull'`); re-provision with the
-  Secret present does not rotate.
-- **P2.3 — Security sign-off** on retiring the interim publish-scoped key (§6.3, §12-1);
-  once P2 ships, existing Phase-1 Secrets are replaced on next ensure/rotation.
-
-### Sequencing (see §9)
-
-`P1.1 → P1.2 → P1.3` land the fix; `P1.4–P1.6` land with them. `P2.*` is a fast follow.
-Retiring the managed operator's `install_registry_pull_secret` step (§9.3) is a separate,
-later change in that repo — **not** part of this plan, and only once managed-mode
-provisioning is guaranteed by another actor; until then the `registryConnectionMode` gate
-keeps managed and self-hosted cleanly partitioned.
+A and B are built in parallel and **released together**. The only hard ordering is at
+deploy: **A must be live before B mints** (else B `403`s — surfaced fail-loud, R5). An
+integration test exercises B against the A-updated registry before cutover. Retiring the
+managed operator's `install_registry_pull_secret` step (§9-3) is a separate, later change
+in that repo — **not** part of this release, and only once managed-mode provisioning is
+guaranteed by another actor; until then the `registryConnectionMode` gate keeps managed
+and self-hosted cleanly partitioned.
