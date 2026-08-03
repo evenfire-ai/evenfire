@@ -47,6 +47,21 @@ function isWindowVisible(win: BrowserWindow | null): boolean {
 }
 
 /**
+ * Chromium renderer focus is not the same thing as application focus: a
+ * WebContentsView can own the active document while the Evenfire window still
+ * owns the user's attention. Keep notification policy on the native Electron
+ * window state instead of asking the parent renderer who currently owns DOM
+ * focus.
+ */
+function isAppFocused(): boolean {
+  return BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.isFocused())
+}
+
+function windowState(win: BrowserWindow | null): { visible: boolean; focused: boolean } {
+  return { visible: isWindowVisible(win), focused: isAppFocused() }
+}
+
+/**
  * GAP-D1 (spec-v2 §4.5-4): after the OS sleeps/resumes (or the screen locks and
  * unlocks), open SSE sockets are typically dead but neither the tracker watchdog
  * nor the bridge reconnect has noticed yet. Broadcast a `system:resume` tick so
@@ -65,11 +80,11 @@ function wirePowerMonitor(): void {
   powerMonitor.on('unlock-screen', emit)
 }
 
-/** Push window visibility to the renderer on every show/hide/minimize/focus change. */
+/** Push native window state to the renderer on every visibility/focus change. */
 function wireWindowVisibility(win: BrowserWindow): void {
   const emit = () => {
     if (win.isDestroyed()) return
-    win.webContents.send('window:visibility', { visible: isWindowVisible(win) })
+    win.webContents.send('window:visibility', windowState(win))
   }
   win.on('show', emit)
   win.on('hide', emit)
@@ -77,13 +92,18 @@ function wireWindowVisibility(win: BrowserWindow): void {
   win.on('restore', emit)
   win.on('focus', emit)
   win.on('blur', emit)
+  // A future secondary BrowserWindow can take focus without emitting a focus
+  // event on the main window. App-level events keep the main renderer's
+  // application-focus view authoritative in that case as well.
+  app.on('browser-window-focus', emit)
+  app.on('browser-window-blur', emit)
 }
 
 ipcMain.handle('window:getVisibility', event => {
   // Same trusted-sender invariant as every handler in ipc.ts (defense in depth,
   // even for a read-only boolean getter).
   assertTrustedSender(event)
-  return { visible: isWindowVisible(mainWindow) }
+  return windowState(mainWindow)
 })
 const DESKTOP_SETUP_PROTOCOL = 'evenfire'
 const CLERUM_PROTOCOL = 'clerum'

@@ -569,13 +569,18 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
         .toContain('Title and body are required.')
       expect(sdkInvocationCount('clientNotifications')).toBe(before)
     })
-    await typeEmbedded(app, webContentsId, '#message', 'Plugin Workload SDK Desktop validation.')
+    await typeEmbedded(
+      app,
+      webContentsId,
+      '#message',
+      `Plugin Workload SDK Desktop validation ${marker}.`
+    )
     await expect
       .poll(() => embeddedValue(app!, webContentsId, '#title'))
       .toBe(`Evenfire E2E ${marker}`)
     await expect
       .poll(() => embeddedValue(app!, webContentsId, '#message'))
-      .toBe('Plugin Workload SDK Desktop validation.')
+      .toBe(`Plugin Workload SDK Desktop validation ${marker}.`)
     await activateEmbedded(app, webContentsId, '#notify')
     await expect
       .poll(() => embeddedText(app!, webContentsId, '#notify-out'), { timeout: 30_000 })
@@ -604,7 +609,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
       await expect(inbox).toBeVisible({ timeout: 20_000 })
       const deliveredItem = inbox
         .getByTestId('notification-menu-item')
-        .filter({ hasText: `Evenfire E2E ${marker}` })
+        .filter({ hasText: `Plugin Workload SDK Desktop validation ${marker}.` })
       await expect(deliveredItem).toBeVisible({ timeout: 30_000 })
       await expect(inbox).not.toContainText('No notifications or pending approvals right now.')
       await bell.click()

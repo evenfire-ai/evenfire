@@ -348,6 +348,16 @@ if [[ "${cluster_changed}" == "true" ]]; then
   ensure_evenfire_registry
   incremental_restart_targets
 
+  # nginx.conf is mounted through a subPath.  Kubernetes updates the
+  # ConfigMap object but does not refresh that file in an already-running pod,
+  # so a full deployment sync must roll the gateway before any SDK probe uses
+  # the new route set.
+  if [[ "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ||
+        "${FORCE_RESTART}" == "true" ]]; then
+    rollout_restart_with_retry control-plane nginx-workflow-approval-gateway
+    rollout_if_present control-plane nginx-workflow-approval-gateway
+  fi
+
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui

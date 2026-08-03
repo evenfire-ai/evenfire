@@ -39,6 +39,11 @@ export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
 source "${SCRIPT_DIR}/e2e-lib.sh"
 require_safe_kube_context
 
+die() {
+  printf '%s\n' "Plugin Workload SDK E2E error: $*" >&2
+  exit 1
+}
+
 RECIPE_NAME="e2e-plugin-workload-sdk"
 WORKLOAD_ID="sdk-caller"
 EVENT_TYPE="e2e.test.notification"
@@ -142,6 +147,31 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+
+# Fail closed before creating any fixture if a caller or inherited shell
+# environment asks this gate to wait for an unbounded or human-scale interval.
+# These ceilings keep a broken reconcile/provider path actionable instead of
+# leaving a T2 run apparently idle for tens of minutes.
+E2E_HARD_MAX_GATE_SECONDS=600
+E2E_HARD_MAX_PHASE_WAIT_SECONDS=180
+E2E_HARD_MAX_POLL_INTERVAL_SECONDS=5
+
+validate_bounded_seconds() {
+  local name="$1" value="$2" ceiling="$3"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ] || [ "$value" -gt "$ceiling" ]; then
+    die "${name}=${value} exceeds the fail-closed ceiling of ${ceiling}s"
+  fi
+}
+
+validate_bounded_seconds E2E_GATE_MAX_SECONDS "$E2E_GATE_MAX_SECONDS" "$E2E_HARD_MAX_GATE_SECONDS"
+validate_bounded_seconds TIMEOUT_POD "$TIMEOUT_POD" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds TIMEOUT_DELETE "$TIMEOUT_DELETE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds TIMEOUT_DISCOVERY "$TIMEOUT_DISCOVERY" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_STATUS_VALIDATED "$E2E_WAIT_STATUS_VALIDATED" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_CALLER_MARKER "$E2E_WAIT_CALLER_MARKER" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_CALLER_DONE "$E2E_WAIT_CALLER_DONE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_NOTIFICATION_ROW "$E2E_WAIT_NOTIFICATION_ROW" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds POLL_INTERVAL "$POLL_INTERVAL" "$E2E_HARD_MAX_POLL_INTERVAL_SECONDS"
 
 require_write_confirmation() {
   if [ "${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" != "1" ]; then
@@ -412,16 +442,6 @@ cleanup_on_exit() {
   exit "$status"
 }
 
-if [ "${1:-}" = "--cleanup-only" ]; then
-  require_write_confirmation || exit 2
-  cleanup_sdk_recipe
-  exit $?
-fi
-
-require_write_confirmation || exit 2
-
-trap cleanup_on_exit EXIT
-
 # ─── control-api admin helpers (exec curl inside the control-api pod) ─────
 
 control_api_pod() {
@@ -615,6 +635,15 @@ restore_notification_preferences() {
   fi
   psql_query "INSERT INTO user_notification_preferences (user_id,preferred_medium,channel_fallback_enabled,preferred_account_id) VALUES ('${USER_REF}'::uuid,${medium_sql},${NOTIFICATION_PREF_SNAPSHOT_FALLBACK},${account_sql}) ON CONFLICT (user_id) DO UPDATE SET preferred_medium=EXCLUDED.preferred_medium,channel_fallback_enabled=EXCLUDED.channel_fallback_enabled,preferred_account_id=EXCLUDED.preferred_account_id,updated_at=NOW();" >/dev/null 2>&1
 }
+
+if [ "${1:-}" = "--cleanup-only" ]; then
+  require_write_confirmation || exit 2
+  cleanup_sdk_recipe
+  exit $?
+fi
+
+require_write_confirmation || exit 2
+trap cleanup_on_exit EXIT
 
 is_psql_true() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -1079,7 +1108,7 @@ fetch(process.env.PLUGIN_WORKLOAD_SDK_ENDPOINT + "/v1/prompt-bridge", {
     idempotencyKey: "e2e-deny-target-" + process.env.E2E_PROBE_RUN_ID,
     messages: [{ role: "user", content: "x" }],
   }),
-}).then(async r => { const b = await r.json().catch(() => ({})); console.log(r.status + ":" + (b.error || "")); process.exit(0) })
+}).then(async r => { const b = await r.json().catch(() => ({})); console.log(r.status + ":" + (b.error || "") + ":" + (b.message || "")); process.exit(0) })
   .catch(() => { console.log("ERR"); process.exit(0) })
 ' 2>/dev/null || true)"
 if printf "%s" "$unauthorized_target" | grep -q 'target_not_allowed'; then
@@ -1146,27 +1175,34 @@ logs="$(wait_for_caller_logs_matching E2E_SDK_CLIENT_NOTIFICATION_OK "$E2E_WAIT_
 if printf "%s" "$logs" | grep -q E2E_SDK_PROMPT_BRIDGE_OK; then
   ok "sdk-caller promptBridge call was authorized (invocationId returned)"
 else
-  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (fixture marker missing; caller logs redacted)"
-  exit 1
-fi
-
-if printf "%s" "$logs" | grep -q E2E_SDK_EXPLICIT_TARGET_OK; then
-  ok "sdk-caller explicit approved targetRef was served and returned non-empty content"
-else
-  fail "sdk-caller explicit approved targetRef did not return a served target/content marker"
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (markers=${markers:-<none>})"
   exit 1
 fi
 
 if printf "%s" "$logs" | grep -q E2E_SDK_CLIENT_NOTIFICATION_OK; then
   ok "sdk-caller clientNotifications call was accepted (notificationId returned)"
 else
-  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (fixture marker missing; caller logs redacted)"
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (markers=${markers:-<none>})"
   exit 1
 fi
 
+# The fixture intentionally exercises the approved selector after the first
+# notification, then idempotency and quota. Waiting for its terminal marker
+# gives the process time to emit those later markers instead of evaluating a
+# partial log snapshot immediately after clientNotifications succeeds.
 logs="$(wait_for_caller_logs_matching E2E_SDK_DONE "$E2E_WAIT_CALLER_DONE" || true)"
 if ! printf "%s" "$logs" | grep -q E2E_SDK_DONE; then
   fail "sdk-caller fixture did not finish within ${E2E_WAIT_CALLER_DONE}s"
+  exit 1
+fi
+
+if printf "%s" "$logs" | grep -q E2E_SDK_EXPLICIT_TARGET_OK; then
+  ok "sdk-caller explicit approved targetRef was served and returned non-empty content"
+else
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller explicit approved targetRef did not return a served target/content marker (markers=${markers:-<none>})"
   exit 1
 fi
 

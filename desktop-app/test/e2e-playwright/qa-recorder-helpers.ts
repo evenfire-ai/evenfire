@@ -155,8 +155,21 @@ export async function launchDesktopApp(testInfo: TestInfo): Promise<{
     slowMo: Number.isFinite(slowMo) ? slowMo : 75,
   })
 
+  const actualUserDataDir = await app.evaluate(({ app: electronApp }) =>
+    electronApp.getPath('userData')
+  )
+  if (path.resolve(actualUserDataDir) !== path.resolve(userDataDir)) {
+    await app.close()
+    throw new Error(
+      `Electron did not honor the isolated user-data-dir: expected ${userDataDir}, got ${actualUserDataDir}`
+    )
+  }
+
   const page = await app.firstWindow()
-  await page.setViewportSize({ width: 1280, height: 720 })
+  // Do not emulate a CSS viewport for native WebContentsView journeys. On a
+  // Retina display that forces renderer DPR=1 while Electron remains at
+  // scaleFactor=2, producing misleading half-sized native bounds. The window
+  // is still recorded at 1280x720 when video capture is enabled above.
   await page.waitForLoadState('domcontentloaded')
   return { app, page }
 }

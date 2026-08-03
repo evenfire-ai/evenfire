@@ -464,8 +464,10 @@ declare global {
         openUrl: (url: string) => Promise<void>
       }
       window: {
-        getVisibility: () => Promise<{ visible: boolean }>
-        onVisibilityChange: (callback: (state: { visible: boolean }) => void) => () => void
+        getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        onVisibilityChange: (
+          callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
       }
       system: {
         /** GAP-D1 (§4.5-4): OS resume / screen unlock tick — reconcile in-flight chats. */

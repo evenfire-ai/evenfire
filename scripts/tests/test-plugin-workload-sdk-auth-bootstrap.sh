@@ -151,4 +151,14 @@ else
   pass 'admin session material is not passed as a kubectl/node process argument'
 fi
 
+if grep -Fq 'E2E_HARD_MAX_GATE_SECONDS=600' "$SCRIPT" &&
+   grep -Fq 'E2E_HARD_MAX_PHASE_WAIT_SECONDS=180' "$SCRIPT" &&
+   grep -Fq 'E2E_HARD_MAX_POLL_INTERVAL_SECONDS=5' "$SCRIPT" &&
+   grep -Fq 'validate_bounded_seconds E2E_GATE_MAX_SECONDS' "$SCRIPT" &&
+   grep -Fq 'validate_bounded_seconds TIMEOUT_POD' "$SCRIPT"; then
+  pass 'Plugin Workload SDK E2E rejects human-scale waits before creating resources'
+else
+  fail 'Plugin Workload SDK E2E lacks fail-closed wait ceilings'
+fi
+
 exit "$FAIL"

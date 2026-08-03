@@ -68,9 +68,20 @@ function defaultUserDataDirectoryPath(): string {
   }
 }
 
+function hasExplicitUserDataDirectory(): boolean {
+  return process.argv.some(
+    argument => argument === '--user-data-dir' || argument.startsWith('--user-data-dir=')
+  )
+}
+
 try {
   app?.setName?.(DEFAULT_APP_NAME)
-  app?.setPath?.('userData', defaultUserDataDirectoryPath())
+  // Respect Electron's explicit user-data-dir switch. QA/E2E launches use an
+  // isolated profile so local settings and sessions cannot leak from the
+  // developer's normal Evenfire profile into a functional journey.
+  if (!hasExplicitUserDataDirectory()) {
+    app?.setPath?.('userData', defaultUserDataDirectoryPath())
+  }
 } catch {
   // Electron can be mocked in unit tests before the real app object is ready.
 }

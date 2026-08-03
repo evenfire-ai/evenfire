@@ -498,6 +498,30 @@ data:
         # clientNotifications) to control-api through this gateway. Same RS256
         # runtime access JWT that the workflow-approvals endpoints accept;
         # control-api authorizes each call against the recipe grant.
+        location = /api/v1/mcp-host/plugin-workload-sdk/capabilities {
+          limit_except GET {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2 {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge {
           limit_except POST {
             deny all;
@@ -555,6 +579,22 @@ data:
         }
 
         location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/status$ {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # Provider-attempt status is part of the promptBridge audit contract.
+        # It must remain behind the same mcp-host JWT gateway as invocation
+        # status; otherwise the provider call can be authorized and issued a
+        # JIT ticket, but the runtime cannot close the attempt lease.
+        location ~ ^/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/[^/]+/status$ {
           limit_except POST {
             deny all;
           }

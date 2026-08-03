@@ -91,7 +91,9 @@ fi
 if incremental_contains 'control-api/*) incremental_add_target control-api control-plane control-api' &&
    incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
    incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
-   incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui'; then
+   incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui' &&
+   incremental_contains 'tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)' &&
+   incremental_contains 'incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e'; then
   pass "incremental sync maps known runtime paths to their own images and deployments"
 else
   fail "incremental sync does not map known runtime paths precisely"
@@ -113,6 +115,15 @@ if contains 'scripts/minikube/sync-auth-key.sh' &&
   pass "pre-gate sync uses the shared idempotent auth-key sync helper"
 else
   fail "pre-gate sync does not use the shared idempotent auth-key sync helper"
+fi
+
+if contains 'nginx.conf is mounted through a subPath' &&
+   contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
+   contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
+   contains 'rollout_if_present control-plane nginx-workflow-approval-gateway'; then
+  pass "pre-gate sync refreshes the subPath-mounted workflow gateway after deployment changes"
+else
+  fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
 fi
 
 if contains 'fingerprint_dir packages/workflow-runtime-core' &&

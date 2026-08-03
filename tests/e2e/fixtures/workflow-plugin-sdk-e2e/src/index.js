@@ -27,6 +27,10 @@ const USER_REF = process.env.E2E_SDK_USER_REF || 'e2e-test-user'
 const RUN_ID = process.env.E2E_SDK_RUN_ID || String(Date.now())
 const QUOTA_LIMIT = parseInt(process.env.E2E_SDK_QUOTA_LIMIT || '4', 10)
 const EXPLICIT_TARGET_REF = process.env.E2E_SDK_EXPLICIT_TARGET_REF || ''
+// Every SDK request must fail closed if the server stops responding.  The
+// outer shell gate also has bounded polling, but fetch itself otherwise has no
+// implicit deadline and could keep a fixture alive indefinitely.
+const SDK_REQUEST_TIMEOUT_MS = 15_000
 
 /** Tracks the invocationId from the first promptBridge call for idempotency check. */
 let firstPromptBridgeId = null
@@ -46,6 +50,7 @@ async function callSdk(path, body) {
       'x-clerum-caller-ref': CALLER_REF,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SDK_REQUEST_TIMEOUT_MS),
   })
   let parsed = null
   try {

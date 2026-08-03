@@ -333,6 +333,15 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
+  it('keeps the Minikube control-api Marketplace on the branch-local registry', () => {
+    const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
+
+    expect(controlApiConfig).toContain(
+      "CLERUM_REGISTRY_URL: 'http://registry-api.registry.svc.cluster.local:8085'"
+    )
+    expect(controlApiConfig).not.toContain("CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'")
+  })
+
   it('keeps the stateless heartbeat route POST-only through the mcp-host gateway', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
@@ -349,6 +358,45 @@ describe('network/gateway intent (manifest-level)', () => {
     const route = locationBlock(
       gatewayConf,
       'location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes the Plugin Workload SDK capabilities probe through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/capabilities'
+    )
+
+    expect(route).toContain('limit_except GET')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes the target-aware Plugin Workload SDK promptBridge v2 endpoint through the gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes promptBridge provider-attempt status through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/[^/]+/status'
     )
 
     expect(route).toContain('limit_except POST')
