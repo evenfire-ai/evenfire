@@ -470,7 +470,14 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
 
     await page.getByTestId('nav-sandbox-ui').click()
     await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
-    const appCard = page.getByRole('button', { name: `Open ${APP_TITLE}`, exact: true })
+    // The sidebar also exposes an "Open <app>" control for the same app. Scope
+    // the action to the Apps main content so this journey follows the visible
+    // catalog card a user would select, rather than relying on a strict-mode
+    // ambiguous global locator.
+    const appCard = page
+      .getByRole('main')
+      .getByRole('button', { name: `Open ${APP_TITLE}`, exact: true })
+    await expect(appCard).toHaveCount(1)
     await expect(appCard).toBeVisible({ timeout: 30_000 })
     await appCard.click()
     await expect(page.getByRole('button', { name: 'Back to apps' })).toBeVisible({
