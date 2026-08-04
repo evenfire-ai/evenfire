@@ -16,3 +16,17 @@ non-sensitive identifier in the pathname and fetch the corresponding data after 
 
 Browser handoff links require a root-mounted HTTP(S) Profile UI and use `/open/apps/...`. A Profile
 UI deployed below a path prefix is not compatible with this contract.
+
+## Cross-version compatibility
+
+Profile UI and installed desktop clients can run different versions. A browser may generate a link
+with a newer Profile UI while the operating system opens an older installed desktop parser.
+
+Wire-contract changes must be additive by default:
+
+- Consumers must tolerate unknown query parameters.
+- Existing hostnames and parameter names must not be renamed or removed without a migration plan.
+- New query parameters must remain optional while older supported desktop versions exist.
+- Producers must keep emitting the existing `app` hostname plus `path` and `team` parameter names
+  for the supported migration window.
+- Any breaking wire change requires a separate versioning design before it ships.
