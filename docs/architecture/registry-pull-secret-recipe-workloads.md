@@ -1,8 +1,12 @@
 # Platform image-pull credentials for recipe workloads
 
-**Status:** Implemented in PR #243, with two carve-outs recorded in place: WRC injection is
-deliberately **not** mode-gated, so the operator contract changes on managed clusters too
-(§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship with it.
+**Status:** Implemented in PR #243 — **not approved; five blocking review findings open**
+(§13), four of them P1. The most consequential (§13.1) reverses this document's
+install-time trigger decision: provisioning must become a standing invariant, because a
+`WorkflowRecipe` can be created without control-api while WRC injects the pull-secret
+reference regardless. Two earlier carve-outs also remain recorded in place: WRC injection
+is deliberately **not** mode-gated, so the operator contract changes on managed clusters
+too (§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship.
 **Date:** 2026-08-04
 **Area:** control-api · workflow-recipes (WRC) · workflow-runtime-core · image pull · self-hosted
 **Follows:** [`registry-pull-secret-self-provisioning.md`](registry-pull-secret-self-provisioning.md)
@@ -333,6 +337,12 @@ the three **platform** workload namespaces (`mcpServersNamespace`, `sandboxNames
 
 ### 6.4 Provisioning trigger — eager across all platform namespaces
 
+> **SUPERSEDED IN PART by §13.1.** The *namespace* decision below stands (eager across all
+> three). The *trigger* decision does not: install-time hooks alone leave the `kubectl
+> apply` and `deploy_recipe` creation paths unprovisioned, because WRC injects the
+> reference for CRDs control-api never sees. Provisioning becomes a standing invariant
+> (boot + periodic + the lazy hooks). Read §13.1 before implementing this section.
+
 **Decision: provision into all three platform workload namespaces** whenever provisioning
 runs, rather than computing per-recipe which namespaces a manifest touches. Triggered from
 both `install` and `install-recipe`, and only when the entry actually references a
@@ -578,3 +588,159 @@ working immediately.
    gate's ownership-worded denial?~~ **Resolved: hard-reject at validation shipped.**
 3. Should HCC gain the presence-validation from #243 §7.7 now that more namespaces
    reference the same Secret name?
+
+---
+
+## 13. Review findings — remediation plan
+
+Five blocking findings from PR review. All five were verified against source before being
+accepted; none is dismissed. **§13.1 is the important one** — it invalidates a decision
+recorded in §12 and changes the shape of the feature from an install-time side effect into
+a standing cluster invariant.
+
+### 13.1 [P1] Provisioning must be a standing invariant, not an install-time hook
+
+**The mismatch.** As shipped, the two halves of this feature are triggered by different
+things:
+
+| Half | Trigger | Covers |
+| --- | --- | --- |
+| WRC **injects** the reference | every reconcile, for **any** `WorkflowRecipe` CRD | all creation paths |
+| control-api **provisions** the Secret | its own install/upgrade routes | one creation path |
+
+A `WorkflowRecipe` does not only come from control-api. `docs/crds/workflowrecipe.md:339`
+documents three supported paths:
+
+1. control-api (`POST /admin/registry/install-recipe`) — the only one hooked;
+2. **`kubectl apply`** of a CRD;
+3. the **WRC MCP `deploy_recipe` tool** (`workflow-recipes/src/mcp/tools.ts:62`,
+   `server.ts:128`), callable by an agent and authorized only by a `contextRef` match.
+
+For paths 2 and 3, WRC injects a reference to a Secret nobody created →
+`ImagePullBackOff`.
+
+**Why this is worse than the pre-existing gap.** Before this feature those paths produced a
+pod with *no* pull secret and the same failure. After it, the pod asserts a credential the
+platform never provisioned. Same symptom, but the platform is now making a claim it has
+not backed — which is exactly the class of silent precondition §2 exists to eliminate.
+
+**Decision — reverses §12's "lazy only".** control-api ensures the platform pull Secret as
+a **standing invariant**:
+
+- **At boot**, non-fatal, alongside the existing boot reconcilers in `main.ts`.
+- **Periodically**, on a configurable interval (default ~10 min), so a CRD created by any
+  path finds the credential already present.
+- **Plus the existing lazy hooks**, retained deliberately — an install must not wait up to
+  a full interval, and the lazy path is the only one that can fail the request with an
+  actionable error.
+
+**Two different failure semantics — specify both.** This is the part most likely to be got
+wrong:
+
+| Context | On a precondition failure (no org, not connected) |
+| --- | --- |
+| **Install/upgrade (lazy)** | **THROW** → fail the request with `registry_pull_secret_provision_failed` and a reason. The user asked for something we cannot deliver. |
+| **Boot / periodic reconcile** | **LOG and retry next tick.** A cluster mid-connect-flow must not crash-loop or emit an error every interval. |
+
+Reusing the install path's fail-loud behavior in the reconcile would turn a normal
+pre-connect state into recurring noise; reusing the reconcile's log-and-continue in the
+install would restore the silent `ImagePullBackOff`.
+
+**Hard dependency: the periodic loop makes §13.3 mandatory, not optional.** Two replicas
+reconciling on a timer, without a cross-process lock, do not merely race occasionally —
+they fight *continuously*: each pod's mint revokes the other's key, the fingerprint check
+then sees divergence, and both re-mint on the next tick. A lazy-only design races only
+during concurrent installs; a periodic design races forever. **§13.3 must land with, or
+before, the periodic reconcile.**
+
+**Second-order effect on §13.2.** With a periodic loop, a mint can happen at an arbitrary
+time rather than only during an install — so the possibility of revoking an
+externally-managed copy's credential (§13.2) stops being install-scoped and becomes
+continuous. That raises §13.2's priority from "handle it" to "handle it before enabling
+the timer."
+
+**Not chosen: have WRC skip injection when the Secret is absent.** It would avoid asserting
+a credential that does not exist, but the pod still cannot pull, so it trades one silent
+failure for another. The presence-*surfacing* idea (§12-3 / #243 §7.7 — emit a condition
+instead of a bare `ImagePullBackOff`) is complementary and still worth doing.
+
+### 13.2 [P1] Minting can revoke a valid foreign copy
+
+The "never touch a foreign Secret" rule protects the **Secret object**; it does not protect
+the **credential inside it**. `mintPullKey` revokes `WHERE org_id = $1 AND kind = 'pull'`
+(`evenfire-registry/src/services/orgApiKeyService.ts:130-131`) — every prior pull key for
+the org, whoever minted it.
+
+So: an operator-managed Secret in one namespace holds a working key; a plugin installs into
+another namespace with no Secret; we mint; the operator's key is revoked; we correctly do
+not touch their Secret — which now contains a dead credential. Their workloads break, we
+report success.
+
+Conditional on the foreign copy having been built from a `kind='pull'` key for the same
+org. A user token or publish-scoped `efrk_` key is unaffected.
+
+**Remediation:** treat a foreign copy as a **refusal to mint**, not something to work
+around. If any target namespace holds an externally-managed Secret, fail with an
+actionable error (`foreign_secret_present`: remove it, or provision every namespace the
+same way) rather than silently invalidating it. Reading the credential out of a foreign
+Secret and reusing it is explicitly rejected — that is someone else's credential.
+
+### 13.3 [P1] Serialization is per-process only
+
+`replicas: 1` in `deploy/base/control-plane/control-api.yaml:15` with no explicit
+`strategy` takes the default `RollingUpdate`, so two pods coexist on every deploy. The
+`inflight` map is per-process and does not span them.
+
+Interleaving is the problem, not key accumulation (which rotate-on-call already bounds):
+pod A mints `k1`; pod B mints `k2` (revoking `k1`); writes interleave; some namespaces end
+up holding the revoked key. The fingerprint annotation makes this **detectable and
+self-healing on the next pass** — but "the next pass" is the next install, so pulls fail
+until then.
+
+**Remediation:** a cross-process lock around read→mint→write, keyed on the org.
+control-api already has Postgres, so `pg_advisory_lock` is the natural mechanism and adds
+no dependency — mirroring what the registry itself does inside `mintPullKey`. The
+in-process map stays as a cheap first-level dedupe.
+
+### 13.4 [P1] `upgrade-recipe` has no provisioning hook
+
+`POST /admin/registry/upgrade-recipe` (`control-api/src/routes/admin/registry.ts:2001`)
+never calls `ensureRegistryPullSecret(s)`. The three existing hooks are at `:1206`
+(McpServer install), `:1522` (install-recipe) and `:1850` (McpServer upgrade).
+
+Upgrading a recipe from a public image to a private one therefore persists the CRD and then
+fails at pull time, with a `200` on the API call.
+
+**Remediation:** add the same hook, gated on `recipeReferencesPlatformImage` of the
+**incoming** spec, positioned after validation and before the CRD write — matching the
+install-recipe placement. Fix it explicitly even once §13.1 lands: the reconcile is a
+safety net, not a substitute for failing the request that introduced the problem.
+
+### 13.5 [Acceptance] No end-to-end runtime evidence
+
+Coverage is unit- and route-level against `MockGateway`. Nothing exercises
+`Secret → WRC → McpServer/HCC → Pod Ready → private image pull`.
+
+Mutation testing sharpens this rather than substituting for it: it proves the tests fail
+when the code breaks. It cannot prove the kubelet accepts the blob, that the type and data
+key are what Kubernetes wants, that RBAC permits the write in `sandbox-ui`, or that the
+registry honors the minted key at pull time. Those are assumptions verified only against
+docs and source.
+
+The dependency that made this untestable is gone: `evenfire-registry` #64 is merged and
+deployed. **Remediation:** a minikube e2e against the live registry covering (a) an
+MCP-server plugin, (b) a recipe plugin with a non-transport workload, (c) a recipe created
+by `kubectl apply` (the §13.1 path), each asserting `Pod Ready` rather than just Secret
+contents.
+
+### 13.6 Sequencing
+
+```
+§13.3 lock ──┬──> §13.1 periodic reconcile ──> §13.5 e2e
+§13.2 foreign┘
+§13.4 upgrade-recipe hook  (independent, land immediately)
+```
+
+§13.4 is independent and should land first as the smallest correct fix. §13.3 and §13.2
+gate the periodic half of §13.1 — the boot-only half is safe without them, so §13.1 may be
+split (boot now, timer after the lock) if that shortens the path to a mergeable state.

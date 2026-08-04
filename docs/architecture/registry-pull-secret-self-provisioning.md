@@ -465,7 +465,11 @@ failure contract) — mirroring the existing fail-loud credentials write at
 `registry.ts:1226-1240`. When `gateway` is absent (dev/no-cluster), provisioning
 no-ops and the attach behaves as today.
 
-**Optional: boot-time reconcile.** A non-fatal pass in `main.ts` alongside
+**Boot + periodic reconcile — now REQUIRED, not optional (see the recipe spec §13.1).**
+For `McpServer` installs the lazy hook alone is sufficient, since that CRD is only ever
+created here. It is *not* sufficient once WRC injects the same reference into
+`WorkflowRecipe` workloads, because those CRDs can be created without control-api. A
+non-fatal pass in `main.ts` alongside
 `reconcileAllowedModelsConfigMapOnBoot` (`main.ts:~61`) can pre-create the Secret so
 it exists before any pod schedules. Deferred unless install-time latency is a
 concern; the lazy path suffices because HCC re-pulls once the Secret appears.
@@ -803,8 +807,14 @@ nothing. Mutation-verified: gating the hook on `credRequired` fails 3 of these 4
 
 - ~~MCC-word scrub breadth (§7.8)~~ — **done**: scrubbed repo-wide in comments, behavior
   unchanged. `grep -rn '\bMCC\b' control-api/src control-api/test` returns nothing.
-- ~~Trigger (§7.3)~~ — **lazy**, at the install/upgrade Secret-write phase; no boot
-  reconcile (it would provision on clusters that never install a private plugin).
+- ~~Trigger (§7.3)~~ — **REVERSED.** Originally resolved as lazy-only (no boot reconcile,
+  to avoid provisioning on clusters that never install a private plugin). That reasoning
+  holds for `McpServer` installs, which only ever originate here — but not for
+  `WorkflowRecipe`, which can be created by `kubectl apply` or the WRC `deploy_recipe`
+  tool without control-api being involved, while WRC injects the pull-secret reference
+  regardless. Provisioning therefore has to be a standing invariant. See
+  [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md)
+  §13.1.
 
 **Still open**
 
