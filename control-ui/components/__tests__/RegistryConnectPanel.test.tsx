@@ -31,6 +31,8 @@ vi.mock('../../lib/hooks/usePublishScope', async orig => {
   }
 })
 vi.mock('../ConfirmDialog', () => ({ useConfirmDialog: vi.fn() }))
+const { mockPush } = vi.hoisted(() => ({ mockPush: vi.fn() }))
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mockPush }) }))
 
 function render(ui: React.ReactNode) {
   return rtlRender(<ToastProvider>{ui}</ToastProvider>)
@@ -197,14 +199,32 @@ describe('RegistryConnectPanel', () => {
     expect(screen.queryByText(/Try again shortly/i)).toBeNull()
   })
 
-  it('shows connected + Disconnect when already connected', async () => {
+  it('connected view has no Disconnect control and states the connection is permanent', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connected',
       deploymentId: 'd',
       org: 'acme',
     })
     render(<RegistryConnectPanel />)
-    await waitFor(() => expect(screen.getByText('Disconnect')).toBeInTheDocument())
+    await waitFor(() =>
+      expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
+    )
+    // Disconnect was removed (design spec §5.6): a claim is permanent, so no
+    // self-service teardown control is offered — the copy states this instead.
+    expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
+    expect(screen.getByText(/connection is permanent/i)).toBeInTheDocument()
+  })
+
+  it('connected view offers a "Go to your organization" CTA → org entries', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      deploymentId: 'd',
+      org: 'acme',
+    })
+    render(<RegistryConnectPanel />)
+    const cta = await screen.findByRole('button', { name: /go to your organization/i })
+    fireEvent.click(cta)
+    expect(mockPush).toHaveBeenCalledWith('/marketplace/org/entries')
   })
 
   // Regression guard: the panel used to render an env-var banner
@@ -571,18 +591,20 @@ describe('RegistryConnectPanel', () => {
     expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
   })
 
-  it('refreshes publish scope after disconnecting an active connection', async () => {
+  it('does not offer active disconnect and routes connected users to their organization', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connected',
       deploymentId: 'd',
       org: 'acme',
     })
     render(<RegistryConnectPanel />)
-    await userEvent.click(await screen.findByRole('button', { name: /^disconnect$/i }))
-    await waitFor(() => expect(api.disconnectRegistryConnection).toHaveBeenCalledTimes(1))
-    expect(publishScopeMocks.refresh).toHaveBeenCalledTimes(1)
-    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
-    expect(screen.getByText('Request registration')).toBeInTheDocument()
+    await screen.findByText(/Connected to the Evenfire Registry/)
+
+    expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /go to your organization/i }))
+    expect(mockPush).toHaveBeenCalledWith('/marketplace/org/entries')
+    expect(api.disconnectRegistryConnection).not.toHaveBeenCalled()
+    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
   })
 
   it('refreshes publish scope after starting over from a rejected request', async () => {
@@ -596,19 +618,6 @@ describe('RegistryConnectPanel', () => {
     await waitFor(() => expect(api.disconnectRegistryConnection).toHaveBeenCalledTimes(1))
     expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
     expect(screen.getByText('Request registration')).toBeInTheDocument()
-  })
-
-  it('does not force-refresh publish scope when disconnect fails', async () => {
-    vi.mocked(api.getRegistryConnection).mockResolvedValue({
-      state: 'connected',
-      deploymentId: 'd',
-      org: 'acme',
-    })
-    vi.mocked(api.disconnectRegistryConnection).mockRejectedValue(new Error('nope'))
-    render(<RegistryConnectPanel />)
-    await userEvent.click(await screen.findByRole('button', { name: /^disconnect$/i }))
-    await waitFor(() => expect(api.disconnectRegistryConnection).toHaveBeenCalledTimes(1))
-    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
   })
 
   it('refreshes publish scope after already_connected re-sync returns connected', async () => {

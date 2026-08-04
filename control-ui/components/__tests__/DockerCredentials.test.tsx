@@ -9,6 +9,7 @@ vi.mock('../../lib/api', () => ({
   listRegistryApiKeys: vi.fn(),
   createRegistryApiKey: vi.fn(),
   revokeRegistryApiKey: vi.fn(),
+  getRegistryConnection: vi.fn(),
 }))
 vi.mock('../ConfirmDialog', () => ({ useConfirmDialog: vi.fn() }))
 
@@ -124,11 +125,27 @@ describe('DockerCredentialsPanel', () => {
     expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
   })
 
-  it('409 registry_auth_disabled → dev-mode notice', async () => {
+  it('409 registry_auth_disabled (self-hosted) → connect path forward, not a dead-end', async () => {
     vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
       Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
     )
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
     render(<DockerCredentialsPanel orgScope="acme" />)
-    expect(await screen.findByText(/registry authentication is disabled/i)).toBeInTheDocument()
+    const link = await screen.findByRole('link', { name: /connect to evenfire registry/i })
+    expect(link).toHaveAttribute('href', '/marketplace/connect')
+    // Structurally absent, not transient — no Retry (design spec §5.1).
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
+  })
+
+  it('409 registry_auth_disabled (managed) → operator env-var notice', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
+      Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
+    )
+    vi.mocked(api.getRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'not_self_hosted' })
+    )
+    render(<DockerCredentialsPanel orgScope="acme" />)
+    expect(await screen.findByText(/CLERUM_REGISTRY_AUTH_ENABLED/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
   })
 })

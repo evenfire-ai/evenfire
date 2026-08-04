@@ -28,7 +28,7 @@ afterEach(() => {
 beforeEach(() => vi.clearAllMocks())
 
 describe('Sidebar publisher gating', () => {
-  it('shows the Publisher entry for an org-bound non-curator deploy', async () => {
+  it('does not render a Publisher entry (folded into the Marketplace org tab)', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({
         scope: { scope: 'acme', curator: false, orgName: 'Acme' },
@@ -37,40 +37,9 @@ describe('Sidebar publisher gating', () => {
       })
     )
     render(<Sidebar currentTab="hosts" />)
-    const link = await screen.findByRole('link', { name: /publisher/i })
-    expect(link).toHaveAttribute('href', '/publisher')
-  })
-
-  it('hides the Publisher entry when publisherUiEnabled is false (self-hosted default), even for an org-bound non-curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue(
-      publishScopeState({
-        scope: { scope: 'acme', curator: false, orgName: 'Acme', publisherUiEnabled: false },
-        loading: false,
-        error: false,
-      })
-    )
-    render(<Sidebar currentTab="hosts" />)
+    // Publisher was folded into the org-named Marketplace tab (design spec §4).
     expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry on a curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue(
-      publishScopeState({
-        scope: { scope: null, curator: true, orgName: null },
-        loading: false,
-        error: false,
-      })
-    )
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry while publish-scope is loading', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue(
-      publishScopeState({ scope: null, loading: true, error: false })
-    )
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
+    expect(screen.getByRole('link', { name: /marketplace/i })).toBeInTheDocument()
   })
 
   it('still renders the other navigation entries', () => {

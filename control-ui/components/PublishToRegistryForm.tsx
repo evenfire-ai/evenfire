@@ -85,16 +85,13 @@ type EntryType = 'mcp-server' | 'recipe'
 type ServerMode = 'local' | 'remote'
 type CredKeyRow = { name: string; label: string; kind: string }
 
-export function PublishToRegistryForm({
-  initialEntryType = 'mcp-server',
-  onPublished,
-  onCancel,
-  pageHeader,
-}: Props) {
+export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Props) {
   const { showToast } = useToast()
   const [step, setStep] = useState(0)
-  // Common fields
-  const [entryType, setEntryType] = useState<EntryType>(initialEntryType)
+  // Common fields. Publishing is Connector-only for now under the distribution
+  // strategy narrowing (plugins are org-private, not user-published), so the
+  // type picker is hidden below and entryType is pinned to 'mcp-server'.
+  const [entryType] = useState<EntryType>('mcp-server')
   const [name, setName] = useState('')
   const [version, setVersion] = useState('1.0.0')
   const [description, setDescription] = useState('')
@@ -260,6 +257,9 @@ export function PublishToRegistryForm({
       >
         {step === 0 ? (
           <div className="cu-form-stack cu-agent-form-stack">
+            {/* Entry-type picker hidden for now: publishing is Connector-only
+                under the distribution strategy narrowing (plugins are org-private,
+                not user-published). Restore with both options to re-enable.
             <SegmentedControl<EntryType>
               ariaLabel="Marketplace entry type"
               value={entryType}
@@ -269,7 +269,7 @@ export function PublishToRegistryForm({
                 { value: 'mcp-server', label: 'Connector' },
                 { value: 'recipe', label: 'Plugin' },
               ]}
-            />
+            /> */}
             <div className="cu-field">
               <label htmlFor="pub-name">
                 Name <span className="cu-field__required">*</span>
@@ -577,9 +577,10 @@ export function PublishToRegistryForm({
                   </p>
                 </div>
               ))}
-            {/* Visibility is fixed for the curated @clerum catalog — the registry forces
-                public, so we surface a locked, read-only indicator rather than a toggle.
-                This is informational only and does not affect the submitted payload. */}
+            {/* Visibility indicator hidden for now under the distribution strategy
+                narrowing: it hardcoded "Public" even for org-scoped publishes, which
+                is misleading (users publish org-private, not public). Restore with a
+                correct per-target value when public publishing returns.
             <div className="cu-field">
               <label htmlFor="pub-visibility">Visibility</label>
               <div className="cu-field__readonly" id="pub-visibility" aria-readonly="true">
@@ -587,6 +588,7 @@ export function PublishToRegistryForm({
               </div>
               <p className="cu-field__hint">Curated catalog entries are always public.</p>
             </div>
+            */}
           </div>
         ) : null}
 

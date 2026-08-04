@@ -57,6 +57,12 @@ export interface CreateOrgApiKeyInput {
   scopes?: string[]
   expiresInDays?: number
 }
+export interface OrgImage {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
 
 async function exchangeVoucher(admin: AdminUserRecord): Promise<string> {
   const voucher = await mintIdentityVoucher(admin)
@@ -172,6 +178,31 @@ export async function listKeys(
   const res = await userAuthedFetch(admin, `/org/${encodeURIComponent(org)}/keys`)
   if (!res.ok) throw await toStatusError(res)
   return (await res.json()) as { keys: OrgApiKey[] }
+}
+
+// List the org's container image repositories. Read surface for the Control UI
+// images area; owner-gated user token, same path as listKeys. The registry
+// returns { repos: [{ id, name, visibility, createdAt }] } (tags not included);
+// tolerate an `images` key + a future `tags` field too.
+export async function listImages(
+  admin: AdminUserRecord,
+  org: string
+): Promise<{ images: OrgImage[] }> {
+  const res = await userAuthedFetch(admin, `/org/${encodeURIComponent(org)}/images`)
+  if (!res.ok) throw await toStatusError(res)
+  const raw = (await res.json()) as {
+    repos?: { name: string; visibility: string; createdAt: string; tags?: string[] }[]
+    images?: { name: string; visibility: string; createdAt: string; tags?: string[] }[]
+  }
+  const rows = raw?.images ?? raw?.repos ?? []
+  return {
+    images: rows.map(r => ({
+      name: r.name,
+      visibility: r.visibility,
+      createdAt: r.createdAt,
+      tags: r.tags ?? [],
+    })),
+  }
 }
 
 export async function createKey(

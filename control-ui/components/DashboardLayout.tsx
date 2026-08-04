@@ -99,9 +99,6 @@ function PersistentDashboardFrame({ children }: Pick<DashboardLayoutProps, 'chil
     if (isControlRouteSection(pathname, CONTROL_ROUTES.marketplace.root)) {
       return 'registry-catalog'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.publisher.root)) {
-      return 'publisher'
-    }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.llmModels.root)) {
       return 'llm-models'
     }

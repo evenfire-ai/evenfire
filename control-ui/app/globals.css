@@ -1989,6 +1989,22 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
+/* Previous-versions list inside an expanded owned-entry row: keep the label and
+   each version/Install line spaced so adjacent Install buttons don't touch. */
+.cu-marketplace-versions {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+  min-width: 0;
+  max-width: 28rem;
+}
+
+.cu-marketplace-versions .cu-table-actions {
+  align-items: center;
+  gap: var(--cu-space-4);
+}
+
 .cu-expandable-field__code,
 .cu-code-text {
   color: var(--cu-text-soft);
@@ -2554,6 +2570,22 @@ textarea.cu-input {
   padding: 1.25rem 1rem;
   color: var(--cu-text-soft);
   font-size: 0.875rem;
+}
+
+.cu-empty__explainer {
+  max-width: 52ch;
+  margin: 0 auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-4);
+  line-height: 1.6;
+}
+
+/* No global paragraph reset, so zero the default margins and let the flex gap
+   alone space the paragraphs — otherwise the 1em margins compound with gap. */
+.cu-empty__explainer p {
+  margin: 0;
 }
 
 .cu-empty--compact {
@@ -8173,6 +8205,29 @@ textarea.cu-input {
   display: grid;
   gap: 1rem;
   box-shadow: var(--cu-shadow);
+}
+
+/* Wider variant for modals with long content (e.g. Docker commands + config). */
+.cu-modal--wide {
+  width: min(46rem, 96vw);
+}
+
+/* Preformatted command / config snippet inside a modal or panel. Wraps long
+   lines (docker login … -p <secret>, push coordinates, dockerconfigjson) so
+   nothing is clipped, rather than overflowing a fixed-width dialog. */
+.cu-code-block {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--cu-surface-alt, var(--cu-surface));
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-sm, var(--cu-radius));
+  font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
 }
 
 /* Quick-pick chips row for multi-choice shortcuts */
