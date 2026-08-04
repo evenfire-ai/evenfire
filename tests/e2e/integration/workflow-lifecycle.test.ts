@@ -51,6 +51,13 @@ skipEachIfClusterDown(() => controlApiUp)
 /**
  * Execute kubectl and return stdout. Returns null on error.
  * Safe for read-only checks in tests (not destructive).
+ *
+ * WARNING: `args` is split on whitespace before being passed to execFileSync,
+ * so no single token may contain a space (e.g. a jsonpath with embedded
+ * spaces like `{range .items[*]}{.metadata.name}{" "}{end}`, or quoted
+ * values). All current call sites use K8s names/label selectors/jsonpaths
+ * without spaces. If you need a whitespace-containing token, call
+ * execFileSync directly with an explicit argv array instead.
  */
 function kubectl(args: string): string | null {
   try {

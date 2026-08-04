@@ -284,6 +284,31 @@ export async function requireControlApiUp(suiteName: string): Promise<boolean> {
 }
 
 /**
+ * Generic fail-loud reachability check for services other than control-api
+ * (mcp-host, rpc-proxy, external-rest-api, ...). Same contract as
+ * `requireControlApiUp`: throws when the service is unreachable UNLESS the
+ * explicit opt-out env var is set, in which case it returns `false` so the
+ * caller can pair it with `skipEachIfClusterDown()`.
+ */
+export async function requireServiceUp(
+  suiteName: string,
+  serviceName: string,
+  url: string
+): Promise<boolean> {
+  const up = await isServiceUp(url)
+  if (up) return true
+  const msg = `[${suiteName}] ${serviceName} not reachable at ${url}`
+  if (SKIP_IF_UNREACHABLE) {
+    console.log(`${msg} — tests will be skipped (E2E_SKIP_IF_CLUSTER_UNREACHABLE=1)`)
+    return false
+  }
+  throw new Error(
+    `${msg}. This E2E suite requires ${serviceName} to be reachable. Run ` +
+      '`make minikube-pf-all` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.'
+  )
+}
+
+/**
  * Register a beforeEach hook that marks each test as "skipped" via
  * ctx.skip() when the cluster is unreachable. This replaces the old
  * `if (!controlApiUp) return` pattern which silently passed tests

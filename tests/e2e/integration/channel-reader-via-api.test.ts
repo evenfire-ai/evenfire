@@ -75,6 +75,14 @@ const TG_CONNECT_TIMEOUT_MS = 90_000
 
 // ─── kubectl wrappers (subprocess, returns stdout or null on error) ─────────
 
+/**
+ * WARNING: `args` is split on whitespace before being passed to execFileSync,
+ * so no single token may contain a space (e.g. a jsonpath with embedded
+ * spaces like `{range .items[*]}{.metadata.name}{" "}{end}`, or quoted
+ * values). All current call sites use K8s names/label selectors/jsonpaths
+ * without spaces. If you need a whitespace-containing token, call
+ * execFileSync directly with an explicit argv array instead.
+ */
 function kubectl(args: string): string {
   const parts = args.split(/\s+/).filter(Boolean)
   return execFileSync('kubectl', [`--context=${KUBECTL_CONTEXT}`, ...parts], {
@@ -172,9 +180,6 @@ afterAll(() => {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('channel-reader via control-api', () => {
-  // Tracks state across sequential tests. vitest runs `it` blocks in source
-  // order within a describe; they share state on purpose for this E2E.
-  let initialDeployUid = ''
   let initialAnnotationHash = ''
 
   it('admin login produced a JWT', () => {
@@ -193,7 +198,6 @@ describe('channel-reader via control-api', () => {
         HCC_TIMEOUT_MS
       )
       expect(dep).toMatch(/^[0-9a-f-]{36}/) // UUID
-      initialDeployUid = dep
 
       const labels = kubectl(
         `get deployment ${DEPLOY_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.labels}`

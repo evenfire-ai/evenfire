@@ -15,30 +15,30 @@ import {
   MCP_HOST_URL,
   RPC_PROXY_URL,
   fetchJson,
-  isServiceUp,
 } from './helpers.integration.js'
+import { requireServiceUp, skipEachIfClusterDown } from './mcpCredentialRotation.helpers.js'
 
 const HOST_REF = process.env.TEST_HOST_REF ?? 'chatllm'
+const SUITE = 'channel-reader-mcp-host'
 
 let mchUp = false
 let runtimeAuthReady = false
 let runtimeToken = ''
 
-beforeAll(async () => {
-  mchUp = await isServiceUp(MCP_HOST_URL)
-  if (!mchUp) {
-    console.log('[channel-reader-mcp-host] mcp-host not available — tests will be skipped')
-    return
-  }
+// Marks every test as vitest "skipped" (yellow) when mcp-host is unreachable,
+// instead of the old `if (!mchUp) return` guards which silently PASSED tests
+// with zero assertions. Tests that additionally need runtime auth call
+// ctx.skip() in their body when runtimeAuthReady is false.
+skipEachIfClusterDown(() => mchUp)
 
-  const externalUp = await isServiceUp(EXTERNAL_REST_API_URL)
-  const rpcProxyUp = await isServiceUp(RPC_PROXY_URL)
-  if (!externalUp || !rpcProxyUp) {
-    console.log(
-      '[channel-reader-mcp-host] external-rest-api/rpc-proxy not available — auth-required tests will be skipped'
-    )
-    return
-  }
+beforeAll(async () => {
+  // Fail-loud by default; returns false only under E2E_SKIP_IF_CLUSTER_UNREACHABLE=1.
+  mchUp = await requireServiceUp(SUITE, 'mcp-host', MCP_HOST_URL)
+  if (!mchUp) return
+
+  const externalUp = await requireServiceUp(SUITE, 'external-rest-api', EXTERNAL_REST_API_URL)
+  const rpcProxyUp = await requireServiceUp(SUITE, 'rpc-proxy', RPC_PROXY_URL)
+  if (!externalUp || !rpcProxyUp) return
 
   runtimeToken = await issueRealRpcToken(['host:message:invoke', 'host:status:read'], [HOST_REF])
   runtimeAuthReady = true
@@ -90,8 +90,6 @@ async function postMessageQuick(
 
 describe('channel-reader → mcp-host: health', () => {
   it('/v1/runtime/health returns 200', async () => {
-    if (!mchUp) return
-
     const { status } = await fetchJson(`${MCP_HOST_URL}/v1/runtime/health`)
     expect(status).toBe(200)
   })
@@ -101,8 +99,6 @@ describe('channel-reader → mcp-host: health', () => {
 
 describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
   it('rejects a valid message without runtime auth', async () => {
-    if (!mchUp) return
-
     const res = await fetch(`${MCP_HOST_URL}/v1/runtime/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -112,8 +108,8 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
     expect(res.status).toBe(401)
   })
 
-  it('accepts a valid message (2xx — LLM may still be processing)', async () => {
-    if (!mchUp || !runtimeAuthReady) return
+  it('accepts a valid message (2xx — LLM may still be processing)', async ctx => {
+    if (!runtimeAuthReady) ctx.skip()
 
     const { status } = await postMessageQuick(makeMessage())
     // 200 = LLM completed within 8s; 202 = timed out (LLM still processing)
@@ -122,8 +118,6 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
   })
 
   it('returns 400 immediately for a message with invalid JSON body', async () => {
-    if (!mchUp) return
-
     const res = await fetch(`${MCP_HOST_URL}/v1/runtime/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -133,8 +127,8 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
     expect(res.status).toBe(400)
   })
 
-  it('does not return 5xx for a message missing optional fields', async () => {
-    if (!mchUp || !runtimeAuthReady) return
+  it('does not return 5xx for a message missing optional fields', async ctx => {
+    if (!runtimeAuthReady) ctx.skip()
 
     const { status } = await postMessageQuick({
       content: 'minimal message',
@@ -153,14 +147,12 @@ describe('channel-reader → mcp-host: POST /v1/runtime/messages', () => {
 
 describe('channel-reader → mcp-host: GET /v1/runtime/status', () => {
   it('rejects status without runtime auth', async () => {
-    if (!mchUp) return
-
     const { status } = await fetchJson<Record<string, unknown>>(`${MCP_HOST_URL}/v1/runtime/status`)
     expect(status).toBe(401)
   })
 
-  it('returns 200 with a non-empty status object via rpc-proxy', async () => {
-    if (!mchUp || !runtimeAuthReady) return
+  it('returns 200 with a non-empty status object via rpc-proxy', async ctx => {
+    if (!runtimeAuthReady) ctx.skip()
 
     const url = `${RPC_PROXY_URL}/api/v1/rpc/hosts/${encodeURIComponent(HOST_REF)}/status`
     const { status, data } = await fetchJson<Record<string, unknown>>(url, {
