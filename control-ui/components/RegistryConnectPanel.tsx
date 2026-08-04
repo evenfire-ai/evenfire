@@ -1,6 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RegistryRecoveryError,
   disconnectRegistryConnection,
@@ -33,6 +35,7 @@ type View =
 
 export default function RegistryConnectPanel() {
   const { showToast } = useToast()
+  const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
   // request-form fields
@@ -460,10 +463,18 @@ export default function RegistryConnectPanel() {
                 deployment can now publish entries and push/pull images.
               </p>
               <p className="cu-muted-note">
-                This connection is permanent: the organization name is bound to this deployment.
-                Severing a live connection is an operator action against the cluster plus a support
-                request, not a self-service step.
+                This connection is permanent: the organization name is tied to this deployment.
+                Removing it later takes a change to the cluster.
               </p>
+              <div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
+                >
+                  Go to your organization
+                </Button>
+              </div>
             </div>
           ) : null}
         </div>
