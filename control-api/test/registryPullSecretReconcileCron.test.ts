@@ -21,6 +21,17 @@ vi.mock('../src/services/registryPullSecretService.js', () => ({
   platformWorkloadNamespaces: () => ['mcp-server', 'sandbox-recipes', 'sandbox-ui'],
 }))
 
+// The log LEVEL is part of this loop's contract, not decoration: it runs unprompted on every
+// cluster, so a level chosen per-state is what keeps a normal pre-connect cluster from
+// looking broken while a genuinely stuck one stays findable.
+const log = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
+vi.mock('../src/observability/logger.js', () => ({ rootLogger: { child: () => log } }))
+
 const gateway = {} as K8sGateway
 
 beforeEach(() => {
@@ -78,6 +89,67 @@ describe('reconcileRegistryPullSecret', () => {
   it('reports success without provisioning when everything is already in place', async () => {
     ensureRegistryPullSecrets.mockResolvedValue(new Map([['mcp-server', 'exists-ours']]))
     await expect(reconcileRegistryPullSecret(gateway)).resolves.toBe(true)
+  })
+})
+
+/**
+ * Level selection. `registry_not_connected` and `org_unresolved` are states this loop's own
+ * comment calls expected — a cluster that has not finished the connect flow is not
+ * misconfigured, it is early — and at the default interval a warn per tick is 144 warnings a
+ * day that mean nothing. But "expected" stops being true if it never resolves, so the signal
+ * has to survive somewhere an operator will look.
+ */
+describe('reconcileRegistryPullSecret — log level', () => {
+  const notConnected = () =>
+    Object.assign(new Error('registry connection is not active'), {
+      reason: 'registry_not_connected',
+    })
+
+  it.each(['registry_not_connected', 'org_unresolved'])(
+    'logs %s below warn while it is still a plausible startup state',
+    async reason => {
+      ensureRegistryPullSecrets.mockRejectedValue(Object.assign(new Error('nope'), { reason }))
+      await expect(reconcileRegistryPullSecret(gateway)).resolves.toBe(false)
+      expect(log.warn).not.toHaveBeenCalled()
+      expect(log.debug).toHaveBeenCalled()
+    }
+  )
+
+  // Not "quiet forever": a precondition that has held for this many consecutive ticks is a
+  // cluster somebody has to look at, and the operator debugging it greps for warnings.
+  it('escalates to warn once a known precondition persists', async () => {
+    ensureRegistryPullSecrets.mockRejectedValue(notConnected())
+    for (let i = 0; i < 5; i += 1) {
+      await reconcileRegistryPullSecret(gateway)
+    }
+    expect(log.warn).not.toHaveBeenCalled()
+
+    await reconcileRegistryPullSecret(gateway)
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(log.warn.mock.calls[0][0]).toMatchObject({ reason: 'registry_not_connected' })
+  })
+
+  // An unexpected failure has no "this is normal at first" story, so it warns on tick one.
+  it('warns immediately on an unexpected failure', async () => {
+    ensureRegistryPullSecrets.mockRejectedValue(new Error('boom'))
+    await expect(reconcileRegistryPullSecret(gateway)).resolves.toBe(false)
+    expect(log.warn).toHaveBeenCalledTimes(1)
+  })
+
+  // A cluster that connects mid-run is back to normal, and the count that would escalate the
+  // NEXT transient precondition has to go with it — otherwise one bad hour makes every later
+  // blip look persistent.
+  it('resets the escalation count after a pass succeeds', async () => {
+    ensureRegistryPullSecrets.mockRejectedValue(notConnected())
+    for (let i = 0; i < 5; i += 1) {
+      await reconcileRegistryPullSecret(gateway)
+    }
+    ensureRegistryPullSecrets.mockResolvedValue(new Map())
+    await reconcileRegistryPullSecret(gateway)
+
+    ensureRegistryPullSecrets.mockRejectedValue(notConnected())
+    await reconcileRegistryPullSecret(gateway)
+    expect(log.warn).not.toHaveBeenCalled()
   })
 })
 

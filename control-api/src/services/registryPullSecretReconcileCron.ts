@@ -19,6 +19,11 @@
  * distinguishes the two — legitimate no-ops return `skipped`, everything else throws — so
  * this file's only job is to swallow the throw and try again later.
  *
+ * The LEVEL carries that distinction, because "swallow it" and "hide it" are not the same
+ * thing. A known precondition on an unconnected cluster logs below warn; anything
+ * unexpected, or a known precondition that has held for many consecutive ticks and is
+ * therefore no longer plausibly transient, warns. See EXPECTED_PRECONDITION_REASONS.
+ *
  * Serialization across replicas is handled inside the service by a per-org advisory lock.
  * That lock is what makes a PERIODIC loop safe at all: without it, two pods on a timer do
  * not race occasionally, they fight continuously — each pod's mint revokes the other's key
@@ -32,6 +37,31 @@ import {
 } from './registryPullSecretService.js'
 
 const log = rootLogger.child({ service: 'registry_pull_secret_reconcile' })
+
+/**
+ * Precondition failures that are a NORMAL state for a cluster, not a fault: the registry
+ * connect flow has not been completed, or the registry has not bound this deployment to an
+ * org yet. Both resolve themselves the moment an operator finishes the flow.
+ *
+ * They are the two reasons `ensureInner` raises before it touches anything, and this loop
+ * runs on every cluster whether or not anyone has asked it to — so warning on them means 144
+ * warnings a day (at the 10-minute default) on a cluster where nothing is wrong, which
+ * teaches operators to ignore this logger.
+ */
+const EXPECTED_PRECONDITION_REASONS: ReadonlySet<string> = new Set([
+  'registry_not_connected',
+  'org_unresolved',
+])
+
+/**
+ * How many consecutive ticks an expected precondition may hold before it stops being
+ * "expected" and warns. ~1h at the default interval — long enough to cover a connect flow in
+ * progress, short enough that a cluster genuinely stuck this way is findable by an operator
+ * grepping for warnings rather than silently unable to install private plugins.
+ */
+const PRECONDITION_WARN_AFTER_TICKS = 6
+
+let consecutiveExpectedFailures = 0
 
 /**
  * Run one reconcile pass. Never throws — a failure here is a logged warning, because the
@@ -60,18 +90,40 @@ export async function reconcileRegistryPullSecret(gateway: K8sGateway): Promise<
         'provisioned the registry pull secret outside an install'
       )
     }
+    // A completed pass means whatever was blocking is gone. The streak has to reset with it,
+    // or one bad hour makes every later blip look persistent.
+    consecutiveExpectedFailures = 0
     return true
   } catch (err) {
-    // Expected while a cluster is unconnected or has no org bound yet. Warn, do not throw:
-    // this loop must not turn a normal pre-connect state into recurring errors.
-    log.warn(
-      {
-        event: 'registry_pull_secret_reconcile_skipped',
-        reason: (err as { reason?: string })?.reason,
-        err: err instanceof Error ? err.message : String(err),
-      },
-      'registry pull secret reconcile did not complete; will retry on the next tick'
-    )
+    // Never thrown, always logged — but not always at the same level. The level is the whole
+    // difference between "this cluster has not been connected yet", which is normal and
+    // recurs on a timer, and "something is wrong", which an operator has to find.
+    const reason = (err as { reason?: string })?.reason
+    const expected = reason !== undefined && EXPECTED_PRECONDITION_REASONS.has(reason)
+    consecutiveExpectedFailures = expected ? consecutiveExpectedFailures + 1 : 0
+    const persistent = consecutiveExpectedFailures >= PRECONDITION_WARN_AFTER_TICKS
+    const payload = {
+      event: 'registry_pull_secret_reconcile_skipped',
+      reason,
+      err: err instanceof Error ? err.message : String(err),
+      ...(expected && { consecutiveTicks: consecutiveExpectedFailures }),
+    }
+    if (expected && !persistent) {
+      log.debug(
+        payload,
+        'registry pull secret reconcile skipped a known precondition; will retry on the next tick'
+      )
+    } else if (expected) {
+      log.warn(
+        payload,
+        'registry pull secret reconcile has been blocked on the same precondition for many ticks; private plugin installs cannot provision their pull credential until it clears'
+      )
+    } else {
+      log.warn(
+        payload,
+        'registry pull secret reconcile did not complete; will retry on the next tick'
+      )
+    }
     return false
   }
 }
@@ -95,6 +147,9 @@ export function startRegistryPullSecretReconcileCron(
 }
 
 export function stopRegistryPullSecretReconcileCron(): void {
+  // Before the early return: a stopped loop has no history, so a later start must not
+  // inherit a stale streak and warn on its first tick.
+  consecutiveExpectedFailures = 0
   if (!intervalHandle) return
   clearInterval(intervalHandle)
   intervalHandle = null

@@ -279,6 +279,24 @@ function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: num
   return value
 }
 
+/**
+ * A background-loop interval: a positive integer of milliseconds that must also clear a
+ * floor.
+ *
+ * The floor is the part `positiveIntegerFromEnv` cannot express. `1` parses perfectly and
+ * still reconciles a thousand times a second, so for a value handed straight to
+ * `setInterval` "positive" is not the same as "sane". Refused at boot rather than clamped,
+ * for the same reason every other invalid value here is refused: a silently corrected
+ * interval leaves the operator's setting and the running behaviour disagreeing forever.
+ */
+function intervalMsFromEnv(name: string, defaultValue: number, minValue: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value < minValue) {
+    throw new Error(`${name} must be an integer >= ${minValue} (milliseconds)`)
+  }
+  return value
+}
+
 // Also the target namespace for the allowlist ConfigMap (cross-service contract):
 // mcp-host + WRC read `clerum-llm-allowed-models` from here — see
 // services/llmAllowedModelsConfigMap.ts.
@@ -288,6 +306,7 @@ const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-
 const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sandbox-ui'
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
+const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -606,8 +625,15 @@ export const config: Config = {
   // already. Installs still provision synchronously, so this interval only bounds how long
   // a CRD created OUTSIDE control-api waits. Coarse (10 min) on purpose — each tick is a
   // few reads and no mint once the cluster is healthy.
-  registryPullSecretReconcileIntervalMs: Number(
-    process.env.REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS || 600_000
+  //
+  // Validated, not merely parsed: this value goes straight into `setInterval`, and each tick
+  // costs a Postgres advisory-lock transaction plus a Secret read per platform namespace. A
+  // 10s floor is still two orders of magnitude below the default and far above anything that
+  // could pass for a hot loop.
+  registryPullSecretReconcileIntervalMs: intervalMsFromEnv(
+    'REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS',
+    600_000,
+    REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
   ),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
