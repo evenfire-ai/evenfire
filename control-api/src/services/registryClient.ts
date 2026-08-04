@@ -680,6 +680,7 @@ export async function listOrgEntries(
 // client to its bound org / curator status). The module-level cache is scoped to
 // the current registry identity generation and is invalidated when the local
 // registry connection row or credentials change.
+const PUBLISH_SCOPE_CACHE_TTL_MS = CATALOG_CACHE_TTL_MS
 
 export interface PublishScope {
   curator: boolean
@@ -687,7 +688,7 @@ export interface PublishScope {
   scope: string | null
 }
 
-let _scopeCache: { generation: number; scope: PublishScope } | null = null
+let _scopeCache: { generation: number; scope: PublishScope; ts: number } | null = null
 let _scopePending: { generation: number; promise: Promise<PublishScope> } | null = null
 
 export async function whoami(): Promise<{
@@ -702,7 +703,12 @@ export async function whoami(): Promise<{
 export async function resolvePublishScope(opts?: { force?: boolean }): Promise<PublishScope> {
   return withCurrentRegistryIdentity(
     generation => {
-      if (_scopeCache && _scopeCache.generation === generation && !opts?.force)
+      if (
+        _scopeCache &&
+        _scopeCache.generation === generation &&
+        Date.now() - _scopeCache.ts < PUBLISH_SCOPE_CACHE_TTL_MS &&
+        !opts?.force
+      )
         return Promise.resolve(_scopeCache.scope)
       const pending =
         !opts?.force && _scopePending?.generation === generation ? _scopePending : null
@@ -718,7 +724,7 @@ export async function resolvePublishScope(opts?: { force?: boolean }): Promise<P
           scope: w.curator || !w.orgName ? null : `@${w.orgName}`,
         }
         if (isRegistryIdentityCacheGenerationCurrent(generation)) {
-          _scopeCache = { generation, scope }
+          _scopeCache = { generation, scope, ts: Date.now() }
         }
         return scope
       })

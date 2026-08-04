@@ -570,6 +570,48 @@ describe('registryClient — resolvePublishScope', () => {
     expect(fetchMock.mock.calls.length).toBe(callsAfterFirst)
   })
 
+  it('revalidates cached publish scope after the registry cache TTL expires', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    let whoamiCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) {
+        return Promise.resolve(fakeTokenResponse('tok-scope', 6000))
+      }
+      whoamiCalls += 1
+      const orgName = whoamiCalls === 1 ? 'alpha' : 'bravo'
+      return Promise.resolve(
+        new Response(JSON.stringify({ clientId: orgName, orgName, curator: false }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'alpha',
+      scope: '@alpha',
+    })
+
+    vi.setSystemTime(Date.now() + 14_999)
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'alpha',
+      scope: '@alpha',
+    })
+
+    vi.setSystemTime(Date.now() + 1)
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'bravo',
+      scope: '@bravo',
+    })
+    expect(whoamiCalls).toBe(2)
+  })
+
   it('invalidates cached token and publish scope when registry identity changes', async () => {
     let tokenCalls = 0
     let whoamiCalls = 0
