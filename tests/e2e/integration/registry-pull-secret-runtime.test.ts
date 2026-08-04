@@ -66,7 +66,7 @@
  * Everything this suite creates is prefixed `e2e-pullsecret-` and removed in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { KUBE_CONTEXT, kubectl, sleep } from '../helpers.js'
 import { CONTROL_API_URL, fetchJson, isServiceUp } from './helpers.integration.js'
 
@@ -124,6 +124,26 @@ let nodeWasCold = false
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Reject anything that is not a plain Kubernetes/OCI-shaped token before it reaches a
+ * command line.
+ *
+ * Every interpolated value here comes from either `process.env` or the registry catalog —
+ * both untrusted as far as CodeQL (and a careful reader) is concerned, since a crafted
+ * image ref or namespace would otherwise be able to inject shell. The charset is the union
+ * of what DNS-1123 names, namespaces and image references legitimately need; anything else
+ * is a bug or an attack, and throwing is correct for both.
+ */
+function safeToken(value: string, label: string): string {
+  if (!/^[A-Za-z0-9._@:/-]+$/.test(value)) {
+    throw new Error(
+      `[pull-secret-runtime] refusing to use ${label}=${JSON.stringify(value)} in a command: ` +
+        'only [A-Za-z0-9._@:/-] is allowed'
+    )
+  }
+  return value
+}
+
 /** kubectl that returns null instead of throwing (for existence probes). */
 function kubectlOrNull(args: string): string | null {
   try {
@@ -143,14 +163,21 @@ function kubectlJson<T = Record<string, unknown>>(args: string): T | null {
   }
 }
 
-/** Run a command inside the minikube node VM. Returns null on failure. */
+/**
+ * Run a command inside the minikube node VM. Returns null on failure.
+ *
+ * `execFileSync` with an argv array, NOT `execSync` with a template string: there is no
+ * local shell to inject into, so the profile name and the command cannot break out of
+ * their argument positions. The command itself is still interpreted by the node's shell
+ * over ssh, which is why every value interpolated into it passes `safeToken` first.
+ */
 function nodeExec(command: string): string | null {
   try {
-    return execSync(`minikube -p ${MINIKUBE_PROFILE} ssh -- ${command}`, {
-      encoding: 'utf-8',
-      timeout: 60_000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
+    return execFileSync(
+      'minikube',
+      ['-p', safeToken(MINIKUBE_PROFILE, 'MINIKUBE_PROFILE'), 'ssh', '--', command],
+      { encoding: 'utf-8', timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim()
   } catch {
     return null
   }
@@ -385,7 +412,11 @@ beforeAll(async () => {
     e => e.name === RECIPE_ENTRY && e.version === RECIPE_ENTRY_VERSION
   )
   const mcpEntry = catalog.find(e => e.name === MCP_ENTRY && e.version === MCP_ENTRY_VERSION)
-  mcpImage = mcpEntry?.mcp_server_meta?.imageRef ?? ''
+  // The image ref arrives from the registry catalog — remote data that later reaches a
+  // `docker` command on the node. Validate the shape here, at the point it enters the
+  // suite, rather than trusting it at each use site.
+  const rawImage = mcpEntry?.mcp_server_meta?.imageRef ?? ''
+  mcpImage = rawImage === '' ? '' : safeToken(rawImage, 'catalog imageRef')
   fixturesAvailable = Boolean(recipeEntry) && Boolean(mcpEntry) && mcpImage.startsWith(registryHost)
   if (!fixturesAvailable) {
     // Fatal under REQUIRE_CLUSTER: without private fixtures every runtime assertion in
@@ -507,12 +538,17 @@ async function restoreSandboxUiPullSecret(): Promise<void> {
   }
 
   try {
-    execSync(`kubectl --context=${KUBE_CONTEXT} apply -f -`, {
-      input: backup,
-      encoding: 'utf-8',
-      timeout: 30_000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    // argv array, no shell — the context name cannot break out of its argument position.
+    execFileSync(
+      'kubectl',
+      ['--context', safeToken(KUBE_CONTEXT, 'KUBE_CONTEXT'), 'apply', '-f', '-'],
+      {
+        input: backup,
+        encoding: 'utf-8',
+        timeout: 30_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }
+    )
   } catch {
     // Nothing more we can do here; the reconcile cron re-provisions it on its next tick.
   }
