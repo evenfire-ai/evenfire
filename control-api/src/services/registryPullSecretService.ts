@@ -191,7 +191,20 @@ async function mintCredential(orgName: string, host: string): Promise<MintedCred
 // `replicas: 1`). An in-process Map cannot see another replica's pass, so scaling out
 // would require an org-scoped distributed lock around the mint — control-api has Postgres
 // available for that. Not implemented: single-replica is the deployed shape today.
-const inflight = new Map<string, Promise<Map<string, EnsurePullSecretResult>>>()
+//
+// The cached value carries the unusable-foreign REASONS alongside the results rather than
+// throwing for them inside the pass. Whether an unusable foreign Secret is fatal depends on
+// which namespaces the CALLER needs, and the dedupe key deliberately does not encode that —
+// folding the required set into the key would stop an MCP install and a recipe install from
+// collapsing, which is the very race this map exists to prevent. So the pass records, and
+// each caller applies its own policy on the shared result.
+const inflight = new Map<string, Promise<EnsurePass>>()
+
+/** One pass's outcome: per-namespace results, plus why any foreign Secret is unusable. */
+type EnsurePass = {
+  results: Map<string, EnsurePullSecretResult>
+  unusable: Map<string, string>
+}
 
 /** The platform workload namespaces a pull credential may legitimately be written into. */
 export function platformWorkloadNamespaces(): string[] {
@@ -216,17 +229,36 @@ export function platformWorkloadNamespaces(): string[] {
  * THROWS `PullSecretProvisionError`, so a caller about to attach an imagePullSecrets
  * reference fails the install loudly instead of persisting an unresolvable one.
  */
-export function ensureRegistryPullSecrets(
+export async function ensureRegistryPullSecrets(
   gateway: K8sGateway,
-  namespaces: string[]
+  namespaces: string[],
+  opts: { required?: string[] } = {}
 ): Promise<Map<string, EnsurePullSecretResult>> {
   const targets = [...new Set(namespaces)].sort()
   const dedupeKey = targets.join(',')
-  const existing = inflight.get(dedupeKey)
-  if (existing) return existing
-  const run = ensureInner(gateway, targets).finally(() => inflight.delete(dedupeKey))
-  inflight.set(dedupeKey, run)
-  return run
+  let run = inflight.get(dedupeKey)
+  if (!run) {
+    run = ensureInner(gateway, targets).finally(() => inflight.delete(dedupeKey))
+    inflight.set(dedupeKey, run)
+  }
+  const { results, unusable } = await run
+
+  // An unusable foreign Secret is fatal only to a caller that needs THAT namespace. A pass
+  // covers the whole platform set (for the mint-once collapse), so an MCP install must not
+  // be failed by a squatter in a sandbox namespace it never references — while a recipe
+  // install, which does land there, still fails loudly. `required` defaults to every target,
+  // so a caller that asks for a set is asserting it needs all of it.
+  for (const ns of opts.required ?? targets) {
+    const why = unusable.get(ns)
+    if (why) {
+      throw new PullSecretProvisionError(
+        `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}" is externally owned and cannot serve an image pull: ${why}. Fix it in place, or delete it to let control-api manage that namespace. (A well-shaped foreign Secret is accepted even if its key has since been revoked — checking that would take a registry round-trip.)`,
+        'foreign_secret_unusable',
+        409
+      )
+    }
+  }
+  return results
 }
 
 /**
@@ -248,10 +280,14 @@ export async function ensureRegistryPullSecret(
   gateway: K8sGateway,
   targetNs: string
 ): Promise<EnsurePullSecretResult> {
-  const results = await ensureRegistryPullSecrets(gateway, [
-    targetNs,
-    ...platformWorkloadNamespaces(),
-  ])
+  const results = await ensureRegistryPullSecrets(
+    gateway,
+    [targetNs, ...platformWorkloadNamespaces()],
+    // Only this caller's own namespace is load-bearing: the siblings are swept along for
+    // the mint-once collapse, so a foreign squatter in one of them must not fail an install
+    // that never references it.
+    { required: [targetNs] }
+  )
   return results.get(targetNs) ?? 'skipped'
 }
 
@@ -303,18 +339,16 @@ function classify(current: SecretView | null, host: string): TargetState {
   return { kind: 'valid', fingerprint }
 }
 
-async function ensureInner(
-  gateway: K8sGateway,
-  targets: string[]
-): Promise<Map<string, EnsurePullSecretResult>> {
+async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<EnsurePass> {
   const out = new Map<string, EnsurePullSecretResult>()
+  const unusable = new Map<string, string>()
 
   // ── Legitimate no-ops ─────────────────────────────────────────────────────
   // Managed clusters: the operator owns this Secret; never contend with it.
   const host = registryHostFromUrl(config.registryUrl)
   if (config.registryConnectionMode !== 'self-hosted' || !host) {
     for (const ns of targets) out.set(ns, 'skipped')
-    return out
+    return { results: out, unusable }
   }
 
   // ── Hard preconditions: from here on we MUST provision or fail loudly ─────
@@ -358,27 +392,31 @@ async function ensureInner(
   // ── Foreign targets: hands off, but not a free pass ───────────────────────
   // Every caller of this service is about to attach an `imagePullSecrets` reference to
   // this name and persist a CRD, so a foreign Secret the kubelet cannot use is exactly as
-  // fatal as a missing one — and we may not repair it. Fail the install instead, naming
-  // the namespace, before anything is minted (so the org's live key is untouched).
-  // A well-shaped foreign Secret still proceeds: external pre-provisioning is supported.
+  // fatal as a missing one — and we may not repair it. We RECORD that here rather than
+  // throwing: the pass spans the whole platform set for the mint-once collapse, but only a
+  // caller that actually references the namespace should be failed by it (see
+  // `ensureRegistryPullSecrets`, which raises `foreign_secret_unusable` for its own
+  // required set). A well-shaped foreign Secret proceeds untouched either way: external
+  // pre-provisioning is a supported contract.
   const ours = targets.filter(ns => states.get(ns)!.kind !== 'foreign')
   for (const ns of targets) {
     const state = states.get(ns)!
     if (state.kind !== 'foreign') continue
     if (state.unusable) {
-      throw new PullSecretProvisionError(
-        `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}" is externally owned and cannot serve an image pull: ${state.unusable}. Fix it in place, or delete it to let control-api manage that namespace. (A well-shaped foreign Secret is accepted even if its key has since been revoked — checking that would take a registry round-trip.)`,
-        'foreign_secret_unusable',
-        409
+      unusable.set(ns, state.unusable)
+      logger.warn(
+        { namespace: ns, problem: state.unusable },
+        'externally-owned evenfire-registry-pull Secret cannot serve an image pull; leaving it untouched — installs that reference this namespace will fail until it is fixed or removed'
+      )
+    } else {
+      logger.warn(
+        { namespace: ns },
+        'externally-owned evenfire-registry-pull Secret present; leaving it untouched (remove it to let control-api manage this namespace)'
       )
     }
-    logger.warn(
-      { namespace: ns },
-      'externally-owned evenfire-registry-pull Secret present; leaving it untouched (remove it to let control-api manage this namespace)'
-    )
     out.set(ns, 'exists-foreign')
   }
-  if (ours.length === 0) return out
+  if (ours.length === 0) return { results: out, unusable }
 
   // A mint is needed when any namespace we own lacks a usable credential, OR when the
   // copies have diverged — divergence means an earlier pass wrote some namespaces and
@@ -392,7 +430,7 @@ async function ensureInner(
 
   if (!needsMint) {
     for (const ns of ours) out.set(ns, 'exists-ours')
-    return out
+    return { results: out, unusable }
   }
   if (diverged) {
     logger.warn(
@@ -429,7 +467,7 @@ async function ensureInner(
     fingerprint: cred.fingerprint,
   })
   logger.info({ namespaces: ours, orgName }, 'registry pull secret provisioned')
-  return out
+  return { results: out, unusable }
 }
 
 /** Write `cred` into one namespace, choosing create/update/recreate from its prior state. */

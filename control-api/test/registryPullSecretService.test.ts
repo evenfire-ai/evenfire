@@ -47,13 +47,16 @@ function encodeDockercfg(host: string, key: string): string {
   ).toString('base64')
 }
 
-async function readStored(mock: MockGateway): Promise<{
+async function readStored(
+  mock: MockGateway,
+  ns: string = NS
+): Promise<{
   type?: string
   labels: Record<string, string>
   annotations: Record<string, string>
   blob?: string
 }> {
-  const raw = (await mock.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS)) as {
+  const raw = (await mock.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)) as {
     metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
     type?: string
     data?: Record<string, string>
@@ -296,6 +299,38 @@ describe('ensureRegistryPullSecret — never touches a Secret we do not own', ()
       status: 409,
     })
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  // The pass covers the whole platform set so the mint can be collapsed across callers —
+  // but that must not turn a squatter in one namespace into an outage for installs that
+  // never land there. The failure is scoped to the caller's OWN required namespaces.
+  it('does not fail a single-namespace install over an unusable foreign Secret elsewhere', async () => {
+    const { gateway, mock } = gw()
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, UI, { type: 'Opaque', data: {} })
+
+    // The MCP install references mcp-server only; sandbox-ui is swept along for the mint
+    // collapse, so its broken squatter is not this caller's problem.
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('created')
+
+    // The namespaces we own were still provisioned from the one mint...
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    expect((await readStored(mock, NS)).blob).toBeTruthy()
+    // ...and the foreign Secret is still never written, usable or not.
+    const squatter = await readStored(mock, UI)
+    expect(squatter.type).toBe('Opaque')
+    expect(squatter.labels['clerum.io/managed-by']).toBeUndefined()
+  })
+
+  it('still fails the recipe path, which does reference that namespace', async () => {
+    const { gateway, mock } = gw()
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, UI, { type: 'Opaque', data: {} })
+
+    // Same broken squatter, but a full-set caller lands workloads in sandbox-ui, so for it
+    // the reference really is unresolvable.
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'foreign_secret_unusable',
+      status: 409,
+    })
   })
 })
 
