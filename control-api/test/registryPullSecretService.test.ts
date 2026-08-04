@@ -21,6 +21,9 @@ vi.mock('../src/services/registryClient.js', () => ({
 }))
 
 const NS = 'mcp-server'
+const SANDBOX = 'sandbox-recipes'
+const UI = 'sandbox-ui'
+const ALL = [NS, SANDBOX, UI]
 const HOST = 'registry.evenfire.ai'
 const DOCKERCONFIG_KEY = '.dockerconfigjson'
 const OURS = { 'clerum.io/managed-by': 'control-api' }
@@ -60,6 +63,24 @@ async function readStored(mock: MockGateway): Promise<{
     labels: raw.metadata?.labels ?? {},
     annotations: raw.metadata?.annotations ?? {},
     blob: raw.data?.[DOCKERCONFIG_KEY],
+  }
+}
+
+/**
+ * Seed an already-provisioned, agreeing credential in `namespaces`.
+ *
+ * Every entry point provisions the WHOLE platform set (the single-namespace wrapper
+ * delegates to it), so a test aimed at one namespace's state must settle the others too —
+ * an absent sibling alone forces a mint and swamps what the test is about.
+ */
+function seedValid(mock: MockGateway, namespaces: string[], key: string): void {
+  for (const ns of namespaces) {
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, {
+      type: 'kubernetes.io/dockerconfigjson',
+      labels: OURS,
+      annotations: { [FINGERPRINT_ANNOTATION]: fingerprintOf(key) },
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, key) },
+    })
   }
 }
 
@@ -180,12 +201,7 @@ describe('ensureRegistryPullSecret — provisioning', () => {
 
   it('reuses our existing, correctly-keyed Secret without minting', async () => {
     const { gateway, mock } = gw()
-    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
-      type: 'kubernetes.io/dockerconfigjson',
-      labels: OURS,
-      annotations: { [FINGERPRINT_ANNOTATION]: fingerprintOf('efrk_live') },
-      data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, 'efrk_live') },
-    })
+    seedValid(mock, ALL, 'efrk_live')
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('exists-ours')
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
   })
@@ -233,33 +249,64 @@ describe('ensureRegistryPullSecret — provisioning', () => {
 })
 
 describe('ensureRegistryPullSecret — never touches a Secret we do not own', () => {
-  it('leaves a foreign Secret WITH data untouched', async () => {
+  it('leaves a well-shaped foreign Secret untouched and proceeds', async () => {
     const { gateway, mock } = gw()
+    // The siblings are settled, so nothing but the foreign namespace is in play.
+    seedValid(mock, [SANDBOX, UI], 'efrk_live')
     mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
       type: 'kubernetes.io/dockerconfigjson',
-      data: { [DOCKERCONFIG_KEY]: 'operator-provisioned' },
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, 'operator-key') },
     })
+    // External pre-provisioning is a supported contract: usable + not ours ⇒ hands off.
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('exists-foreign')
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
-    expect((await readStored(mock)).blob).toBe('operator-provisioned')
+    expect((await readStored(mock)).blob).toBe(encodeDockercfg(HOST, 'operator-key'))
   })
 
-  it('leaves a foreign EMPTY Secret untouched (never seizes ownership)', async () => {
+  // Foreign is a reason not to WRITE, not a reason to wave the caller through: every
+  // caller attaches an imagePullSecrets reference to this exact name and then persists a
+  // CRD. A foreign Secret the kubelet cannot use makes that reference unresolvable, which
+  // is the silent ImagePullBackOff this service exists to prevent.
+  it('fails loudly when a foreign Secret is the wrong type (kubelet ignores it)', async () => {
     const { gateway, mock } = gw()
+    seedValid(mock, [SANDBOX, UI], 'efrk_live')
     mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, { type: 'Opaque', data: {} })
-    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('exists-foreign')
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).rejects.toMatchObject({
+      reason: 'foreign_secret_unusable',
+      status: 409,
+    })
+    // Still never written, and never minted for: invariant 1 is unchanged.
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
     const stored = await readStored(mock)
     expect(stored.type).toBe('Opaque')
     expect(stored.labels['clerum.io/managed-by']).toBeUndefined()
+  })
+
+  it('fails loudly when a foreign Secret is keyed on a different registry host', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [SANDBOX, UI], 'efrk_live')
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg('old-registry.example.com', 'operator-key') },
+    })
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).rejects.toMatchObject({
+      reason: 'foreign_secret_unusable',
+      status: 409,
+    })
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
   })
 })
 
 describe('ensureRegistryPullSecret — concurrent create race', () => {
   it('adopts the winner without minting a second key', async () => {
     const { gateway, mock } = gw()
-    // The winner's Secret appears between our 404 read and our create.
-    vi.spyOn(mock, 'createSecret').mockImplementation(async () => {
+    // The winner's Secret appears between our 404 read and our create — in ONE namespace;
+    // the pass's other namespaces are created normally.
+    const create = mock.createSecret.bind(mock)
+    vi.spyOn(mock, 'createSecret').mockImplementation(async req => {
+      if ((req as { namespace?: string }).namespace !== NS) return create(req)
       mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
         type: 'kubernetes.io/dockerconfigjson',
         labels: OURS,
@@ -268,8 +315,8 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
       throw Object.assign(new Error('already exists'), { statusCode: 409, code: 409 })
     })
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('created')
-    // Exactly ONE mint. Our mint already revoked whatever the winner stored, so we
-    // overwrite with ours rather than adopting a now-dead credential.
+    // Exactly ONE mint, and the pass converges its own namespaces on that one key rather
+    // than adopting a winner's credential it cannot verify.
     expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
     const stored = await readStored(mock)
     expect(decodeHosts(stored.blob)).toEqual([HOST])
@@ -278,10 +325,6 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
 })
 
 describe('ensureRegistryPullSecrets — fan-out across platform namespaces', () => {
-  const SANDBOX = 'sandbox-recipes'
-  const UI = 'sandbox-ui'
-  const ALL = [NS, SANDBOX, UI]
-
   async function blobIn(mock: MockGateway, ns: string) {
     const raw = (await mock.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)) as {
       metadata?: { annotations?: Record<string, string> }
@@ -370,9 +413,10 @@ describe('ensureRegistryPullSecrets — fan-out across platform namespaces', () 
 
   it('skips a foreign namespace but still provisions the others', async () => {
     const { gateway, mock } = gw()
+    const operatorBlob = encodeDockercfg(HOST, 'operator-key')
     mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, SANDBOX, {
       type: 'kubernetes.io/dockerconfigjson',
-      data: { [DOCKERCONFIG_KEY]: 'operator-provisioned' },
+      data: { [DOCKERCONFIG_KEY]: operatorBlob },
     })
     const res = await ensureRegistryPullSecrets(gateway, ALL)
 
@@ -380,7 +424,7 @@ describe('ensureRegistryPullSecrets — fan-out across platform namespaces', () 
     expect(res.get(NS)).toBe('created')
     expect(res.get(UI)).toBe('created')
     // Untouched, byte for byte.
-    expect((await blobIn(mock, SANDBOX)).blob).toBe('operator-provisioned')
+    expect((await blobIn(mock, SANDBOX)).blob).toBe(operatorBlob)
   })
 
   it('refuses a namespace outside the platform set, before minting', async () => {
@@ -390,5 +434,40 @@ describe('ensureRegistryPullSecrets — fan-out across platform namespaces', () 
       status: 400,
     })
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  // The inflight dedupe is keyed on the target SET, so concurrent passes only collapse if
+  // they agree on that set. An MCP install (one namespace) and a recipe install (all
+  // three) overlap on mcp-server, and two mints against a rotate-on-call registry leave
+  // the loser's namespaces holding a revoked key — with matching fingerprints, so the
+  // divergence detector cannot see it and no later pass ever re-mints. Hence: the
+  // single-namespace wrapper must run the SAME full-set pass.
+  it('collapses a single-namespace pass and a full-set pass into ONE mint', async () => {
+    const { gateway, mock } = gw()
+
+    const [single, fanOut] = await Promise.all([
+      ensureRegistryPullSecret(gateway, NS),
+      ensureRegistryPullSecrets(gateway, ALL),
+    ])
+
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    expect(single).toBe('created')
+    expect([...fanOut.values()]).toEqual(['created', 'created', 'created'])
+    // Every namespace holds the one live credential — including the two the
+    // single-namespace caller did not name.
+    const seen = await Promise.all(ALL.map(ns => blobIn(mock, ns)))
+    expect(new Set(seen.map(s => s.fingerprint))).toEqual(new Set([fingerprintOf('efrk_test_key')]))
+  })
+
+  it('provisions the whole platform set from a single-namespace caller', async () => {
+    const { gateway, mock } = gw()
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('created')
+
+    // A full-set pass every time is also what lets a diverged cluster self-heal on the
+    // next install, whichever route triggers it.
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    const seen = await Promise.all(ALL.map(ns => blobIn(mock, ns)))
+    expect(new Set(seen.map(s => s.fingerprint))).toEqual(new Set([fingerprintOf('efrk_test_key')]))
   })
 })

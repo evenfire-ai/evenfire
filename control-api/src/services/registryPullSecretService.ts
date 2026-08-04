@@ -6,17 +6,30 @@
  * provisions it itself. Design: docs/architecture/registry-pull-secret-self-provisioning.md.
  *
  * Contract (must match what the managed operator writes, so either satisfies the same
- * McpServer.spec.imagePullSecrets reference):
+ * imagePullSecrets reference):
  *   name  = 'evenfire-registry-pull'         (EVENFIRE_REGISTRY_PULL_SECRET_NAME)
- *   ns    = the McpServer's own namespace    (imagePullSecrets are namespace-local)
+ *   ns    = EVERY platform workload namespace (see below; imagePullSecrets are ns-local)
  *   type  = kubernetes.io/dockerconfigjson
  *   data['.dockerconfigjson'] = base64 payload, keyed on OUR image host (registryUrl),
  *                               NOT the registry's token-issuer
  *   label clerum.io/managed-by = control-api  (ownership marker; absent ⇒ externally owned)
  *
+ * Namespaces — the reference is NOT confined to an McpServer's own namespace. WRC injects
+ * `imagePullSecrets: [evenfire-registry-pull]` into every workload whose image host equals
+ * the configured registry host, wherever CLERUM_REGISTRY_URL is set, and recipe workloads
+ * split across all three platform workload namespaces by kind (transport → mcp-server,
+ * spec.ui.workloadRef → sandbox-ui, everything else → sandbox-recipes). So the Secret must
+ * exist in ALL of them — `platformWorkloadNamespaces()`, the one allowlist writes are
+ * confined to. On a MANAGED cluster control-api writes none of them (provisioning
+ * short-circuits to 'skipped'), which makes populating all three the external operator's
+ * job: a managed cluster that provisions only mcp-server leaves recipe pods in
+ * ImagePullBackOff with nothing in the API trail to explain it.
+ *
  * Two invariants make this safe to run repeatedly:
  *   1. NEVER write a Secret we do not own. An unlabeled Secret belongs to an external
- *      operator; we return `exists-foreign` and leave it alone even if it looks broken.
+ *      operator; we return `exists-foreign` and leave it alone. Not owning it does not
+ *      mean waving the caller through, though: if it cannot serve an image pull at all we
+ *      fail the install (`foreign_secret_unusable`) rather than let a CRD reference it.
  *   2. Mint ONLY when we are already committed to a write we know can succeed. The
  *      registry's pull-credential mint is rotate-on-call — it revokes the org's previous
  *      key — so a mint that is followed by a failed write strands every other namespace's
@@ -167,7 +180,17 @@ async function mintCredential(orgName: string, host: string): Promise<MintedCred
 }
 
 // Collapse concurrent ensure passes WITHIN this replica so two in-flight installs cannot
-// both mint. Keyed on the whole target set, since a pass is atomic over its namespaces.
+// both mint. Keyed on the whole target set, since a pass is atomic over its namespaces —
+// which means every caller must pass the SAME set or the dedupe silently does nothing.
+// That is why the single-namespace wrapper below delegates to the full platform set: two
+// mints against a rotate-on-call registry leave the loser's namespaces on a revoked key,
+// and (because the loser rewrites the winner's namespaces too) with FINGERPRINTS THAT
+// AGREE — so the divergence check in ensureInner cannot see it and no later pass re-mints.
+//
+// Correct only at ONE replica (deploy/base/control-plane/control-api.yaml pins
+// `replicas: 1`). An in-process Map cannot see another replica's pass, so scaling out
+// would require an org-scoped distributed lock around the mint — control-api has Postgres
+// available for that. Not implemented: single-replica is the deployed shape today.
 const inflight = new Map<string, Promise<Map<string, EnsurePullSecretResult>>>()
 
 /** The platform workload namespaces a pull credential may legitimately be written into. */
@@ -209,28 +232,66 @@ export function ensureRegistryPullSecrets(
 /**
  * Single-namespace convenience wrapper, for the McpServer install/upgrade paths that
  * provision exactly the namespace their workload lands in.
+ *
+ * It still runs the FULL platform-namespace pass and then picks its own namespace out of
+ * the result, because the inflight dedupe is keyed on the target set: a pass over just
+ * `[targetNs]` would never collapse with a concurrent recipe install over all three, and
+ * both would mint (see the note on `inflight`). `targetNs` stays in the list so an
+ * unsupported namespace is still rejected by ensureInner's allowlist — same reason code,
+ * same status, same point in the sequence.
+ *
+ * Costs two extra Secret reads per MCP install. Buys the mint-once guarantee across route
+ * paths, and makes every install a full-set pass, so a diverged cluster converges on
+ * whichever install runs next.
  */
 export async function ensureRegistryPullSecret(
   gateway: K8sGateway,
   targetNs: string
 ): Promise<EnsurePullSecretResult> {
-  const results = await ensureRegistryPullSecrets(gateway, [targetNs])
+  const results = await ensureRegistryPullSecrets(gateway, [
+    targetNs,
+    ...platformWorkloadNamespaces(),
+  ])
   return results.get(targetNs) ?? 'skipped'
 }
 
 /** Classification of one namespace's current Secret, decided before anything is minted. */
 type TargetState =
-  | { kind: 'foreign' }
+  | { kind: 'foreign'; unusable: string | null }
   | { kind: 'valid'; fingerprint: string }
   | { kind: 'absent' }
   | { kind: 'broken'; wrongType: boolean }
+
+/**
+ * Why a Secret we do NOT own cannot serve an image pull, or null when it can.
+ *
+ * Read-only by construction — the same two checks `classify` applies to our own copies,
+ * with no fingerprint requirement (that annotation is ours; an external operator has no
+ * reason to write it) and no write of any kind.
+ *
+ * Deliberately shape-only: a well-formed blob whose key the registry has since revoked
+ * still passes here. Proving liveness would take a registry round-trip on every install,
+ * which this check does not do.
+ */
+function foreignUsabilityProblem(current: SecretView, host: string): string | null {
+  if (current.type !== DOCKERCONFIG_TYPE) {
+    return `its type is "${current.type ?? 'unset'}", not ${DOCKERCONFIG_TYPE} — the kubelet ignores it for image pulls`
+  }
+  if (!dockerconfigMatchesHost(current.dockerconfig, host)) {
+    return `its ${DOCKERCONFIG_KEY} carries no entry for "${host}", so the kubelet will never select it`
+  }
+  return null
+}
 
 function classify(current: SecretView | null, host: string): TargetState {
   if (!current) return { kind: 'absent' }
   // INVARIANT 1: never write a Secret we do not own — even a broken one. Adopting it would
   // seize an external operator's credential; repairing it in place would rotate the org
-  // key out from under them.
-  if (current.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) return { kind: 'foreign' }
+  // key out from under them. We still inspect it: not-ours decides who WRITES, not whether
+  // the caller may attach a reference to it (see ensureInner).
+  if (current.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
+    return { kind: 'foreign', unusable: foreignUsabilityProblem(current, host) }
+  }
   const wrongType = current.type !== DOCKERCONFIG_TYPE
   // Presence alone is not enough: a blob keyed on a previous registry host can never be
   // selected by the kubelet, and a copy with no fingerprint cannot be compared across
@@ -294,15 +355,28 @@ async function ensureInner(
     states.set(ns, classify(await readCurrent(gateway, ns), host))
   }
 
+  // ── Foreign targets: hands off, but not a free pass ───────────────────────
+  // Every caller of this service is about to attach an `imagePullSecrets` reference to
+  // this name and persist a CRD, so a foreign Secret the kubelet cannot use is exactly as
+  // fatal as a missing one — and we may not repair it. Fail the install instead, naming
+  // the namespace, before anything is minted (so the org's live key is untouched).
+  // A well-shaped foreign Secret still proceeds: external pre-provisioning is supported.
   const ours = targets.filter(ns => states.get(ns)!.kind !== 'foreign')
   for (const ns of targets) {
-    if (states.get(ns)!.kind === 'foreign') {
-      logger.warn(
-        { namespace: ns },
-        'externally-owned evenfire-registry-pull Secret present; leaving it untouched (remove it to let control-api manage this namespace)'
+    const state = states.get(ns)!
+    if (state.kind !== 'foreign') continue
+    if (state.unusable) {
+      throw new PullSecretProvisionError(
+        `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}" is externally owned and cannot serve an image pull: ${state.unusable}. Fix it in place, or delete it to let control-api manage that namespace. (A well-shaped foreign Secret is accepted even if its key has since been revoked — checking that would take a registry round-trip.)`,
+        'foreign_secret_unusable',
+        409
       )
-      out.set(ns, 'exists-foreign')
     }
+    logger.warn(
+      { namespace: ns },
+      'externally-owned evenfire-registry-pull Secret present; leaving it untouched (remove it to let control-api manage this namespace)'
+    )
+    out.set(ns, 'exists-foreign')
   }
   if (ours.length === 0) return out
 
@@ -378,9 +452,13 @@ async function writeCredential(
       return 'created'
     } catch (err) {
       if (k8sStatus(err) !== 409) throw err
-      // Lost a create race. The winner's Secret is authoritative for its own content, but
-      // OUR mint has already revoked whatever key it holds — so overwrite it with ours
-      // rather than adopting a now-dead credential. Skip if the winner is foreign.
+      // Lost a create race — but NOT against ourselves: concurrent passes in this replica
+      // collapse on the `inflight` key. The winner is therefore another writer (a second
+      // replica, which this design does not support, or an out-of-band actor), and which
+      // key is live is not knowable here — ours revoked theirs only if we minted last.
+      // Write ours anyway, so this pass leaves every namespace it owns on ONE key;
+      // adopting the winner's would split this namespace from the rest for a credential we
+      // can verify no better. Skip if the winner is foreign — invariant 1 still holds.
       const winner = await readCurrent(gateway, ns)
       if (winner && winner.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) return 'exists-foreign'
       await gateway.updateSecret(buildSecretReq(ns, cred))
