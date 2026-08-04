@@ -2,6 +2,10 @@ import { Router } from 'express'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalControlJwt } from '../../middleware/internalControlJwt.js'
 import {
+  createPluginWorkloadSdkInternalRateLimit,
+  createPluginWorkloadSdkPreAuthRateLimit,
+} from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import {
   type PluginWorkloadSdkRevocationActor,
   finalizePluginWorkloadSdkRevocation,
   revokePluginWorkloadSdkForRecipe,
@@ -49,9 +53,19 @@ function wrcRevocationActor(claims: InternalControlClaims): PluginWorkloadSdkRev
  */
 export function createInternalPluginWorkloadSdkRouter(): Router {
   const router = Router()
+
+  // Revocation takes advisory locks and writes audit rows. Protect both the
+  // unauthenticated JWT boundary and the authenticated WRC principal once at
+  // the prefix so every current/future internal SDK route inherits the guard.
+  router.use(
+    '/internal/plugin-workload-sdk',
+    createPluginWorkloadSdkPreAuthRateLimit(),
+    requireInternalControlJwt,
+    createPluginWorkloadSdkInternalRateLimit()
+  )
+
   router.post(
     '/internal/plugin-workload-sdk/revoke',
-    requireInternalControlJwt,
     asyncHandler(async (req, res) => {
       const internalControl = req.internalControl
       if (internalControl?.iss !== 'wrc' || internalControl.sub !== 'wrc-provisioner') {
@@ -74,7 +88,6 @@ export function createInternalPluginWorkloadSdkRouter(): Router {
 
   router.post(
     '/internal/plugin-workload-sdk/finalize-revocation',
-    requireInternalControlJwt,
     asyncHandler(async (req, res) => {
       const internalControl = req.internalControl
       if (internalControl?.iss !== 'wrc' || internalControl.sub !== 'wrc-provisioner') {

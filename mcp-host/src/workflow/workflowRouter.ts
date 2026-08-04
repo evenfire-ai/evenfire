@@ -15,6 +15,7 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import * as fs from 'fs'
 import * as path from 'path'
+import { createMcpHostPreAuthRateLimit } from '../shared/httpRateLimit'
 import {
   ArtifactPathError,
   type OpenedArtifactFile,
@@ -93,6 +94,13 @@ function startExecuteStream(res: Response): ReturnType<typeof setInterval> {
 
 export function createWorkflowRouter(service: WorkflowService): Router {
   const router = Router()
+
+  // Protect the boundary before JWT verification. The outer server already
+  // bounds request bodies; the recipe/principal limiter remains a separate
+  // control-plane guard, while this high-ceiling IP bucket prevents
+  // unauthenticated floods from making token verification the expensive
+  // denial path.
+  router.use(createMcpHostPreAuthRateLimit())
 
   // POST /execute — execute a single step (requires scope: execute, sub: coordinator)
   router.post('/execute', requireWorkflowAuth('execute'), async (req: Request, res: Response) => {

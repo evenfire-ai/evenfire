@@ -332,6 +332,152 @@ export class ClerumMcpServer {
     return server
   }
 
+  /**
+   * Handle the ordinary workflow REST surface after the route name has been
+   * bound to a verified JWT. Keeping this branch separate from the SDK
+   * credential broker makes the broker's path guard an early abort rather
+   * than a user-controlled condition around Secret resolution.
+   */
+  private async handleStandardWorkflowRestRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    routeRecipeName: string,
+    subPath: string
+  ): Promise<void> {
+    const url = req.url ?? ''
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    let claims
+    try {
+      claims = await verifyIncomingToken(token)
+    } catch (authErr) {
+      console.error(
+        `[WRC-AUTH] Token verification failed for ${req.method} ${url}:`,
+        authErr instanceof Error ? authErr.message : authErr
+      )
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+
+    // The URL is only a routing hint. Every workflow operation below uses
+    // the recipe identity from the verified token after this binding check;
+    // no path-controlled value reaches a handler or Kubernetes resolver.
+    if (claims.recipeName !== routeRecipeName || claims.recipeNamespace !== this.sandboxNamespace) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Workflow recipe binding mismatch' }))
+      return
+    }
+    const recipeName = claims.recipeName
+
+    if (!this.workflowHandlers) {
+      this.workflowHandlers = createWorkflowEndpointHandlers(
+        this.customApi,
+        this.sandboxNamespace,
+        this.tokenFactory ?? undefined,
+        { traceReporter: this.provider.getTraceReporter() }
+      )
+    }
+    const handlers = this.workflowHandlers
+
+    const artifactMatch = subPath.match(/^\/artifacts\/([^/]+)$/)
+    if (req.method === 'GET' && artifactMatch) {
+      const filename = decodeURIComponent(artifactMatch[1])
+      const result = await handlers.getArtifact(recipeName, filename, claims)
+      if (result.status === 200 && Buffer.isBuffer(result.body)) {
+        res.writeHead(200, result.headers ?? { 'Content-Type': 'application/octet-stream' })
+        res.end(result.body)
+      } else {
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
+      }
+      return
+    }
+
+    if (req.method === 'DELETE' && artifactMatch) {
+      const filename = decodeURIComponent(artifactMatch[1])
+      const result = await handlers.deleteArtifactFile(recipeName, filename, claims)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(result.status === 204 ? '' : JSON.stringify(result.body))
+      return
+    }
+
+    if (req.method === 'DELETE' && subPath === '/artifacts') {
+      const result = await handlers.deleteArtifact(recipeName, claims)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(result.status === 204 ? '' : JSON.stringify(result.body))
+      return
+    }
+
+    if (req.method === 'GET' && subPath === '/status') {
+      const result = await handlers.getWorkflowStatus(recipeName, claims)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result.body))
+      return
+    }
+
+    if (req.method === 'GET' && subPath === '/health') {
+      const result = await handlers.getHealth(recipeName, claims)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result.body))
+      return
+    }
+
+    if (req.method === 'GET' && subPath === '/signals') {
+      const result = await handlers.getSignals(recipeName, claims)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result.body))
+      return
+    }
+
+    if (req.method === 'POST') {
+      const parseResult = await parseJsonBody(req)
+      if (!parseResult.ok) {
+        const status = parseResult.reason === 'too_large' ? 413 : 400
+        const error =
+          parseResult.reason === 'too_large' ? 'Request body too large' : 'Invalid JSON body'
+        res.writeHead(status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error }))
+        return
+      }
+      const body = parseResult.body
+
+      if (subPath === '/status') {
+        const result = await handlers.postStepStatus(recipeName, claims, body as never)
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
+        return
+      }
+
+      if (subPath === '/configure-model') {
+        const result = await handlers.configureModel(
+          recipeName,
+          claims,
+          body as never,
+          this.modelConfigHandler ?? undefined
+        )
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
+        return
+      }
+
+      if (subPath === '/injections/model') {
+        const result = await handlers.requestModelInjection(
+          recipeName,
+          claims,
+          body as never,
+          this.modelConfigHandler ?? undefined
+        )
+        res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result.body))
+        return
+      }
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found' }))
+  }
+
   private async handleHttpRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse
@@ -411,302 +557,172 @@ export class ClerumMcpServer {
 
     // ─── Workflow REST API (/api/v1/workflow/:name/...) ──────────────
     const workflowMatch = url.match(/^\/api\/v1\/workflow\/([^/]+)(\/.*)?$/)
-    if (workflowMatch) {
-      const recipeName = decodeURIComponent(workflowMatch[1])
-      const subPath = workflowMatch[2] ?? ''
+    if (!workflowMatch) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+      return
+    }
+    const routeRecipeName = decodeURIComponent(workflowMatch[1])
+    const subPath = workflowMatch[2] ?? ''
 
-      // SEC: validate recipeName matches K8s RFC 1123 DNS label format before any API call.
-      // Prevents Host header injection and path traversal via crafted recipe names.
-      if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(recipeName)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Invalid recipe name format' }))
-        return
-      }
-
-      // Plugin Workload SDK credential broker. This route deliberately uses a
-      // different audience from the workflow REST API: an mcp-host runtime JWT
-      // authenticates the caller and a second short-lived signed ticket binds
-      // the exact target that control-api already authorized.
-      // lgtm[js/user-controlled-bypass]
-      // The request path only selects the handler. Before any Secret read, the
-      // handler verifies the JWT issuer/audience/scope, binds the token claims
-      // to the server-owned namespace and recipe, and then validates the
-      // signed invocation/target ticket against the current control-api policy.
-      if (req.method === 'POST' && subPath === '/plugin-workload-sdk/credentials') {
-        const authHeader = req.headers.authorization
-        const runtimeToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
-        let callerClaims
-        try {
-          callerClaims = await verifyPluginSdkBrokerCallerToken(runtimeToken)
-        } catch {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Unauthorized' }))
-          return
-        }
-        if (
-          callerClaims.recipeName !== recipeName ||
-          callerClaims.recipeNamespace !== this.sandboxNamespace ||
-          !callerClaims.workflowControlScopes.includes('plugin-workload-sdk')
-        ) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Credential broker scope denied' }))
-          return
-        }
-
-        const parseResult = await parseJsonBody(req)
-        if (!parseResult.ok) {
-          res.writeHead(parseResult.reason === 'too_large' ? 413 : 400, {
-            'Content-Type': 'application/json',
-          })
-          res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
-          return
-        }
-        const body = parseResult.body
-        const target = body.target as PluginSdkCredentialTarget | undefined
-        if (
-          body.recipeNamespace !== this.sandboxNamespace ||
-          typeof body.invocationId !== 'string' ||
-          !Number.isInteger(body.attemptGeneration) ||
-          Number(body.attemptGeneration) < 1 ||
-          typeof body.providerAttemptId !== 'string' ||
-          !body.providerAttemptId ||
-          !Number.isInteger(body.providerAttemptIndex) ||
-          Number(body.providerAttemptIndex) < 1 ||
-          !target ||
-          typeof target.targetRef !== 'string' ||
-          typeof target.provider !== 'string' ||
-          typeof target.model !== 'string' ||
-          typeof target.credentialSlot !== 'string' ||
-          typeof body.credentialTicket !== 'string'
-        ) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
-          return
-        }
-
-        let ticket
-        try {
-          ticket = await verifyPluginSdkCredentialTicket(body.credentialTicket)
-        } catch {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
-          return
-        }
-        // Derive the resolver target directly from the verified JWT claims.
-        // `target` is an untrusted diagnostic echo and must not flow into any
-        // policy, revalidation, or Secret-resolution operation.
-        const signedTarget: PluginSdkCredentialTarget = {
-          targetRef: ticket.targetRef,
-          provider: ticket.provider,
-          model: ticket.model,
-          credentialSlot: ticket.credentialSlot,
-        }
-        if (
-          ticket.recipeName !== recipeName ||
-          ticket.recipeNamespace !== this.sandboxNamespace ||
-          ticket.invocationId !== body.invocationId ||
-          ticket.attemptGeneration !== Number(body.attemptGeneration) ||
-          ticket.providerAttemptId !== body.providerAttemptId ||
-          ticket.providerAttemptIndex !== Number(body.providerAttemptIndex) ||
-          !pluginSdkCredentialTargetEchoMatches(signedTarget, target)
-        ) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
-          return
-        }
-        // The request body is only an equality check. Once the signed ticket
-        // is verified, use its claims as the sole identity passed to the
-        // Secret resolver and to all subsequent policy revalidation calls.
-        const boundInvocationId = ticket.invocationId
-        // TOCTOU gate: ticket signature proves what was authorized, while this
-        // control-api read proves that the invocation and policy revision/hash
-        // are still current immediately before the Secret lookup.
-        const ticketStillActive = await revalidatePluginSdkCredentialTicket({
-          runtimeToken,
-          credentialTicket: body.credentialTicket,
-          invocationId: boundInvocationId,
-          targetRef: signedTarget.targetRef,
-          attemptGeneration: ticket.attemptGeneration,
-          providerAttemptId: ticket.providerAttemptId,
-          providerAttemptIndex: ticket.providerAttemptIndex,
-        })
-        if (!ticketStillActive) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Credential ticket denied' }))
-          return
-        }
-        if (!this.modelConfigHandler) {
-          res.writeHead(503, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Credential broker unavailable' }))
-          return
-        }
-        const result = await this.modelConfigHandler.resolvePluginSdkCredential(signedTarget)
-        // Re-check after the Secret read as well as before it.  Control API
-        // and the WRC Secret store are separate systems, so a single remote
-        // check cannot be atomic with the read; the post-read gate ensures a
-        // revocation observed during resolution never returns credentials.
-        if (result.status === 200) {
-          const ticketStillActiveAfterResolve = await revalidatePluginSdkCredentialTicket({
-            runtimeToken,
-            credentialTicket: body.credentialTicket,
-            invocationId: boundInvocationId,
-            targetRef: signedTarget.targetRef,
-            attemptGeneration: ticket.attemptGeneration,
-            providerAttemptId: ticket.providerAttemptId,
-            providerAttemptIndex: ticket.providerAttemptIndex,
-            redeem: true,
-          })
-          if (!ticketStillActiveAfterResolve) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Credential ticket denied' }))
-            return
-          }
-          if (!this.consumePluginSdkTicket(ticket.jti)) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Credential ticket denied' }))
-            return
-          }
-        }
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result.body))
-        return
-      }
-
-      // JWT authentication — dual-issuer aware (clerum-wrc OR control-api)
-      const authHeader = req.headers.authorization
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
-      let claims
-      try {
-        claims = await verifyIncomingToken(token)
-      } catch (authErr) {
-        console.error(
-          `[WRC-AUTH] Token verification failed for ${req.method} ${url}:`,
-          authErr instanceof Error ? authErr.message : authErr
-        )
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Unauthorized' }))
-        return
-      }
-
-      if (!this.workflowHandlers) {
-        this.workflowHandlers = createWorkflowEndpointHandlers(
-          this.customApi,
-          this.sandboxNamespace,
-          this.tokenFactory ?? undefined,
-          { traceReporter: this.provider.getTraceReporter() }
-        )
-      }
-      const handlers = this.workflowHandlers
-
-      // GET /api/v1/workflow/:name/artifacts/:filename — admin artifact download proxy
-      const artifactMatch = subPath.match(/^\/artifacts\/([^/]+)$/)
-      if (req.method === 'GET' && artifactMatch) {
-        const filename = decodeURIComponent(artifactMatch[1])
-        const result = await handlers.getArtifact(recipeName, filename, claims)
-        if (result.status === 200 && Buffer.isBuffer(result.body)) {
-          res.writeHead(200, result.headers ?? { 'Content-Type': 'application/octet-stream' })
-          res.end(result.body)
-        } else {
-          res.writeHead(result.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result.body))
-        }
-        return
-      }
-
-      // DELETE /api/v1/workflow/:name/artifacts/:filename — admin single file delete
-      if (req.method === 'DELETE' && artifactMatch) {
-        const filename = decodeURIComponent(artifactMatch[1])
-        const result = await handlers.deleteArtifactFile(recipeName, filename, claims)
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(result.status === 204 ? '' : JSON.stringify(result.body))
-        return
-      }
-
-      // DELETE /api/v1/workflow/:name/artifacts — admin bulk delete
-      if (req.method === 'DELETE' && subPath === '/artifacts') {
-        const result = await handlers.deleteArtifact(recipeName, claims)
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(result.status === 204 ? '' : JSON.stringify(result.body))
-        return
-      }
-
-      // GET /api/v1/workflow/:name/status
-      if (req.method === 'GET' && subPath === '/status') {
-        const result = await handlers.getWorkflowStatus(recipeName, claims)
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result.body))
-        return
-      }
-
-      // GET /api/v1/workflow/:name/health
-      if (req.method === 'GET' && subPath === '/health') {
-        const result = await handlers.getHealth(recipeName, claims)
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result.body))
-        return
-      }
-
-      // GET /api/v1/workflow/:name/signals
-      if (req.method === 'GET' && subPath === '/signals') {
-        const result = await handlers.getSignals(recipeName, claims)
-        res.writeHead(result.status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result.body))
-        return
-      }
-
-      // POST endpoints — parse body
-      if (req.method === 'POST') {
-        const parseResult = await parseJsonBody(req)
-        if (!parseResult.ok) {
-          const status = parseResult.reason === 'too_large' ? 413 : 400
-          const error =
-            parseResult.reason === 'too_large' ? 'Request body too large' : 'Invalid JSON body'
-          res.writeHead(status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error }))
-          return
-        }
-        const body = parseResult.body
-
-        // POST /api/v1/workflow/:name/status
-        if (subPath === '/status') {
-          const result = await handlers.postStepStatus(recipeName, claims, body as never)
-          res.writeHead(result.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result.body))
-          return
-        }
-
-        // POST /api/v1/workflow/:name/configure-model
-        if (subPath === '/configure-model') {
-          // Token factory injected at construction signs a fresh WRC→mcp-host
-          // configure token per call inside handlers.configureModel — no store.
-          const result = await handlers.configureModel(
-            recipeName,
-            claims,
-            body as never,
-            this.modelConfigHandler ?? undefined
-          )
-          res.writeHead(result.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result.body))
-          return
-        }
-
-        // POST /api/v1/workflow/:name/injections/model
-        if (subPath === '/injections/model') {
-          const result = await handlers.requestModelInjection(
-            recipeName,
-            claims,
-            body as never,
-            this.modelConfigHandler ?? undefined
-          )
-          res.writeHead(result.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result.body))
-          return
-        }
-      }
+    // SEC: validate the route label before any API call.
+    // Prevents Host header injection and path traversal via crafted recipe names.
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(routeRecipeName)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Invalid recipe name format' }))
+      return
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Not found' }))
+    // The standard workflow branch is an early abort. The broker below is
+    // reached only after this path/method guard, so a user-controlled URL does
+    // not syntactically wrap the sensitive Secret-resolution operation.
+    if (req.method !== 'POST' || subPath !== '/plugin-workload-sdk/credentials') {
+      await this.handleStandardWorkflowRestRequest(req, res, routeRecipeName, subPath)
+      return
+    }
+
+    // Plugin Workload SDK credential broker. This route deliberately uses a
+    // different audience from the workflow REST API: an mcp-host runtime JWT
+    // authenticates the caller and a second short-lived signed ticket binds
+    // the exact target that control-api already authorized.
+    const authHeader = req.headers.authorization
+    const runtimeToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    let callerClaims
+    try {
+      callerClaims = await verifyPluginSdkBrokerCallerToken(runtimeToken)
+    } catch {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    const boundRecipeName = callerClaims.recipeName
+    if (
+      boundRecipeName !== routeRecipeName ||
+      callerClaims.recipeNamespace !== this.sandboxNamespace ||
+      !callerClaims.workflowControlScopes.includes('plugin-workload-sdk')
+    ) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Credential broker scope denied' }))
+      return
+    }
+
+    const parseResult = await parseJsonBody(req)
+    if (!parseResult.ok) {
+      res.writeHead(parseResult.reason === 'too_large' ? 413 : 400, {
+        'Content-Type': 'application/json',
+      })
+      res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
+      return
+    }
+    const body = parseResult.body
+    const target = body.target as PluginSdkCredentialTarget | undefined
+    if (
+      body.recipeNamespace !== this.sandboxNamespace ||
+      typeof body.invocationId !== 'string' ||
+      !Number.isInteger(body.attemptGeneration) ||
+      Number(body.attemptGeneration) < 1 ||
+      typeof body.providerAttemptId !== 'string' ||
+      !body.providerAttemptId ||
+      !Number.isInteger(body.providerAttemptIndex) ||
+      Number(body.providerAttemptIndex) < 1 ||
+      !target ||
+      typeof target.targetRef !== 'string' ||
+      typeof target.provider !== 'string' ||
+      typeof target.model !== 'string' ||
+      typeof target.credentialSlot !== 'string' ||
+      typeof body.credentialTicket !== 'string'
+    ) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Invalid credential broker request' }))
+      return
+    }
+
+    let ticket
+    try {
+      ticket = await verifyPluginSdkCredentialTicket(body.credentialTicket)
+    } catch {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+      return
+    }
+    // Derive the resolver target directly from the verified JWT claims.
+    // `target` is an untrusted diagnostic echo and must not flow into any
+    // policy, revalidation, or Secret-resolution operation.
+    const signedTarget: PluginSdkCredentialTarget = {
+      targetRef: ticket.targetRef,
+      provider: ticket.provider,
+      model: ticket.model,
+      credentialSlot: ticket.credentialSlot,
+    }
+    if (
+      ticket.recipeName !== boundRecipeName ||
+      ticket.recipeNamespace !== this.sandboxNamespace ||
+      ticket.invocationId !== body.invocationId ||
+      ticket.attemptGeneration !== Number(body.attemptGeneration) ||
+      ticket.providerAttemptId !== body.providerAttemptId ||
+      ticket.providerAttemptIndex !== Number(body.providerAttemptIndex) ||
+      !pluginSdkCredentialTargetEchoMatches(signedTarget, target)
+    ) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+      return
+    }
+    // The request body is only an equality check. Once the signed ticket
+    // is verified, use its claims as the sole identity passed to the
+    // Secret resolver and to all subsequent policy revalidation calls.
+    const boundInvocationId = ticket.invocationId
+    // TOCTOU gate: ticket signature proves what was authorized, while this
+    // control-api read proves that the invocation and policy revision/hash
+    // are still current immediately before the Secret lookup.
+    const ticketStillActive = await revalidatePluginSdkCredentialTicket({
+      runtimeToken,
+      credentialTicket: body.credentialTicket,
+      invocationId: boundInvocationId,
+      targetRef: signedTarget.targetRef,
+      attemptGeneration: ticket.attemptGeneration,
+      providerAttemptId: ticket.providerAttemptId,
+      providerAttemptIndex: ticket.providerAttemptIndex,
+    })
+    if (!ticketStillActive) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+      return
+    }
+    if (!this.modelConfigHandler) {
+      res.writeHead(503, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Credential broker unavailable' }))
+      return
+    }
+    const result = await this.modelConfigHandler.resolvePluginSdkCredential(signedTarget)
+    // Re-check after the Secret read as well as before it.  Control API
+    // and the WRC Secret store are separate systems, so a single remote
+    // check cannot be atomic with the read; the post-read gate ensures a
+    // revocation observed during resolution never returns credentials.
+    if (result.status === 200) {
+      const ticketStillActiveAfterResolve = await revalidatePluginSdkCredentialTicket({
+        runtimeToken,
+        credentialTicket: body.credentialTicket,
+        invocationId: boundInvocationId,
+        targetRef: signedTarget.targetRef,
+        attemptGeneration: ticket.attemptGeneration,
+        providerAttemptId: ticket.providerAttemptId,
+        providerAttemptIndex: ticket.providerAttemptIndex,
+        redeem: true,
+      })
+      if (!ticketStillActiveAfterResolve) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+        return
+      }
+      if (!this.consumePluginSdkTicket(ticket.jti)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Credential ticket denied' }))
+        return
+      }
+    }
+    res.writeHead(result.status, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result.body))
+    return
   }
 
   async start(): Promise<void> {

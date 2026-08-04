@@ -262,7 +262,7 @@ describe('invocation retry lifecycle timestamps', () => {
 
   it('sweeps by the latest retry timestamp rather than the original reservation', async () => {
     await expect(failStaleInvocations(150)).resolves.toBe(1)
-    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
     expect(sql).toContain('lease_expires_at < now()')
     expect(sql).not.toContain('created_at < now()')
   })

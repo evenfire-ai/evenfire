@@ -939,7 +939,13 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
   })
 
   it('rate-limits credential-ticket introspection before expensive ticket work', async () => {
-    vi.mocked(pool.query).mockResolvedValueOnce({ rows: [{ count: 121 }], rowCount: 1 } as never)
+    // The SDK prefix now applies the high-ceiling authenticated gateway bucket
+    // before the tighter credential-ticket bucket. Keep the first query under
+    // that outer limit and exhaust the credential-specific bucket on the
+    // second query so this test remains focused on ticket work protection.
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [{ count: 121 }], rowCount: 1 } as never)
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
       .set('Authorization', `Bearer ${issueSdkToken()}`)

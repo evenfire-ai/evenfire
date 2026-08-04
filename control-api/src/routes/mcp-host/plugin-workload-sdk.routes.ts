@@ -2,6 +2,10 @@ import { type Request, type Response, Router } from 'express'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
+import {
+  createPluginWorkloadSdkPreAuthRateLimit,
+  createPluginWorkloadSdkRequestRateLimit,
+} from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
@@ -510,6 +514,17 @@ async function handlePromptBridgeAuthorization(
 export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   const router = Router()
 
+  // This router contains no unauthenticated endpoint. Apply the boundary
+  // protections once, scoped to the SDK prefix, so newly added SDK routes
+  // cannot accidentally omit either the pre-auth flood guard or the
+  // recipe-scoped PG limiter (the outer app bounds JSON bodies).
+  router.use(
+    '/mcp-host/plugin-workload-sdk',
+    createPluginWorkloadSdkPreAuthRateLimit(),
+    requireMcpHostJwt,
+    createPluginWorkloadSdkRequestRateLimit()
+  )
+
   router.post(
     // JIT fallback-ticket contract for mcp-host:
     // - call only after the prior provider attempt has failed;
@@ -518,7 +533,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     // The server derives caller and allowed suffix from the persisted
     // invocation, verifies current policy, and emits a new one-shot jti.
     '/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket',
-    requireMcpHostJwt,
     pluginWorkloadSdkCredentialRateLimit,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
@@ -559,7 +573,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // is absent instead of falling back to bootstrap credentials.
   router.post(
     '/mcp-host/plugin-workload-sdk/prompt-bridge/v2',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) =>
       handlePromptBridgeAuthorization(req, res, {
         requireContractVersion: true,
@@ -573,7 +586,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // the current persisted policy but does not require the new bootstrap fields.
   router.post(
     '/mcp-host/plugin-workload-sdk/prompt-bridge',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) =>
       handlePromptBridgeAuthorization(req, res, {
         requireContractVersion: false,
@@ -585,7 +597,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
 
   router.get(
     '/mcp-host/plugin-workload-sdk/capabilities',
-    requireMcpHostJwt,
     asyncHandler(async (_req, res) => {
       const claims = _req.mcpHostJwt!
       const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
@@ -617,7 +628,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
 
   router.post(
     '/mcp-host/plugin-workload-sdk/client-notification',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}
@@ -695,7 +705,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // path); it consumes no quota and writes no audit row.
   router.post(
     '/mcp-host/plugin-workload-sdk/client-notification/recipients',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}
@@ -720,7 +729,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // secret; it only attests that the ticket still matches the current policy.
   router.post(
     '/mcp-host/plugin-workload-sdk/credential-ticket/introspect',
-    requireMcpHostJwt,
     pluginWorkloadSdkCredentialRateLimit,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
@@ -746,12 +754,10 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         attemptGeneration < 1 ||
         providerAttemptIndex < 1
       ) {
-        res
-          .status(400)
-          .json({
-            error:
-              'credentialTicket, invocationId, targetRef, providerAttemptId and attemptGeneration are required',
-          })
+        res.status(400).json({
+          error:
+            'credentialTicket, invocationId, targetRef, providerAttemptId and attemptGeneration are required',
+        })
         return
       }
       const ticketClaims = verifyPluginWorkloadSdkCredentialTicket(ticket)
@@ -843,7 +849,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // in_progress → complete | failed | provider_unavailable.
   router.post(
     '/mcp-host/plugin-workload-sdk/invocations/:id/status',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}
@@ -906,7 +911,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
 
   router.post(
     '/mcp-host/plugin-workload-sdk/provider-attempts/:id/status',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       const body = isPlainObject(req.body) ? req.body : {}
@@ -925,11 +929,9 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         providerAttemptIndex < 1 ||
         !['complete', 'failed', 'provider_unavailable'].includes(String(status))
       ) {
-        res
-          .status(400)
-          .json({
-            error: 'invocationId, attemptGeneration, providerAttemptIndex and status are required',
-          })
+        res.status(400).json({
+          error: 'invocationId, attemptGeneration, providerAttemptIndex and status are required',
+        })
         return
       }
       const attempt = await getPluginWorkloadSdkProviderAttempt(req.params.id)
@@ -962,7 +964,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
 
   router.get(
     '/mcp-host/plugin-workload-sdk/invocations/:recipeRef',
-    requireMcpHostJwt,
     asyncHandler(async (req, res) => {
       const claims = req.mcpHostJwt!
       // Cross-recipe isolation: the path recipeRef must match the JWT's
