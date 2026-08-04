@@ -12,6 +12,7 @@ import {
   setGlobalAuthErrorHandler,
 } from '../lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '../lib/authRedirect'
+import { invalidateRegistryCapabilityCache } from '../lib/hooks/useRegistryCapability'
 import { useToast } from './Toast'
 
 type AuthState = {
@@ -102,6 +103,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await logoutControlUI()
     } finally {
       sessionExpiredToastShownRef.current = false
+      // Drop the module-level registry-capability cache so a same-tab
+      // logout→login doesn't serve the previous user's org identity.
+      invalidateRegistryCapabilityCache()
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
       router.replace(CONTROL_ROUTES.login)
     }

@@ -10,7 +10,6 @@ export type SidebarTab =
   | 'llm-models'
   | 'profile-admin'
   | 'workflow-recipes'
-  | 'publisher'
   | 'cost'
   | 'registry-catalog'
   | 'settings'
