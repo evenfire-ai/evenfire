@@ -82,22 +82,37 @@ const DOCKERCONFIG_KEY = '.dockerconfigjson'
 
 // ─── Cluster shape ──────────────────────────────────────────────────────────
 
-const MCP_SERVERS_NS = process.env.E2E_MCP_SERVERS_NAMESPACE ?? 'mcp-server'
-const SANDBOX_NS = process.env.E2E_SANDBOX_NAMESPACE ?? 'sandbox-recipes'
-const SANDBOX_UI_NS = process.env.E2E_SANDBOX_UI_NAMESPACE ?? 'sandbox-ui'
-const CONTROL_PLANE_NS = process.env.E2E_CONTROL_PLANE_NAMESPACE ?? 'control-plane'
+const MCP_SERVERS_NS = safeToken(process.env.E2E_MCP_SERVERS_NAMESPACE ?? 'mcp-server', 'ns')
+const SANDBOX_NS = safeToken(process.env.E2E_SANDBOX_NAMESPACE ?? 'sandbox-recipes', 'ns')
+const SANDBOX_UI_NS = safeToken(process.env.E2E_SANDBOX_UI_NAMESPACE ?? 'sandbox-ui', 'ns')
+const CONTROL_PLANE_NS = safeToken(process.env.E2E_CONTROL_PLANE_NAMESPACE ?? 'control-plane', 'ns')
 /** `platformWorkloadNamespaces()` in control-api/src/services/registryPullSecretService.ts. */
 const PLATFORM_NAMESPACES = [...new Set([MCP_SERVERS_NS, SANDBOX_NS, SANDBOX_UI_NS])]
 
-const MINIKUBE_PROFILE = process.env.MINIKUBE_PROFILE ?? KUBE_CONTEXT
+const MINIKUBE_PROFILE = safeToken(process.env.MINIKUBE_PROFILE ?? KUBE_CONTEXT, 'MINIKUBE_PROFILE')
 
 // ─── Fixtures (private, platform-registry-hosted) ───────────────────────────
 
-const RECIPE_ENTRY = process.env.E2E_PRIVATE_RECIPE_ENTRY ?? '@josete-pr243/pr243-registry-recipe'
-const RECIPE_ENTRY_VERSION = process.env.E2E_PRIVATE_RECIPE_VERSION ?? '1.0.0'
-const MCP_ENTRY = process.env.E2E_PRIVATE_MCP_ENTRY ?? '@josete-pr243/test-docgen'
-const MCP_ENTRY_VERSION = process.env.E2E_PRIVATE_MCP_VERSION ?? '1.0.5'
-const CONTEXT_REF = process.env.E2E_CONTEXT_ID ?? 'context1'
+// Sanitized even though these currently reach only HTTP bodies: the charset already covers
+// scoped entry names and semver, so it costs nothing and stops a future use site from
+// quietly reopening the taint path into a command line.
+const RECIPE_ENTRY = safeToken(
+  process.env.E2E_PRIVATE_RECIPE_ENTRY ?? '@josete-pr243/pr243-registry-recipe',
+  'E2E_PRIVATE_RECIPE_ENTRY'
+)
+const RECIPE_ENTRY_VERSION = safeToken(
+  process.env.E2E_PRIVATE_RECIPE_VERSION ?? '1.0.0',
+  'E2E_PRIVATE_RECIPE_VERSION'
+)
+const MCP_ENTRY = safeToken(
+  process.env.E2E_PRIVATE_MCP_ENTRY ?? '@josete-pr243/test-docgen',
+  'E2E_PRIVATE_MCP_ENTRY'
+)
+const MCP_ENTRY_VERSION = safeToken(
+  process.env.E2E_PRIVATE_MCP_VERSION ?? '1.0.5',
+  'E2E_PRIVATE_MCP_VERSION'
+)
+const CONTEXT_REF = safeToken(process.env.E2E_CONTEXT_ID ?? 'context1', 'E2E_CONTEXT_ID')
 
 const RUN_ID = Date.now().toString(36)
 const RECIPE_NAME = `e2e-pullsecret-recipe-${RUN_ID}`
