@@ -1055,6 +1055,7 @@ export type PluginWorkloadSdkProviderAttemptStatus =
   | 'complete'
   | 'failed'
   | 'provider_unavailable'
+  | 'skipped'
 
 export interface PluginWorkloadSdkProviderAttempt {
   id: string
@@ -1162,14 +1163,37 @@ export async function reservePluginWorkloadSdkProviderAttempt(input: {
     ) {
       return null
     }
-    const count = await db.query(
-      `SELECT COUNT(*)::integer AS count
+    const attemptsResult = await db.query(
+      `SELECT attempt_index, target_ref, status
          FROM plugin_workload_sdk_provider_attempts
-        WHERE invocation_id = $1 AND attempt_generation = $2`,
+        WHERE invocation_id = $1 AND attempt_generation = $2
+        ORDER BY attempt_index ASC
+        FOR UPDATE`,
       [input.invocationId, input.attemptGeneration]
     )
-    const attemptIndex = Number((count.rows[0] as { count?: unknown } | undefined)?.count ?? 0) + 1
-    if (attemptIndex > MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS) return null
+    const attempts = attemptsResult.rows as Array<{
+      attempt_index?: unknown
+      target_ref?: unknown
+      status?: unknown
+    }>
+    const attemptIndex = attempts.length + 1
+    const expectedTargetRef = authorization.authorizedTargetRefs[attemptIndex - 1]
+    if (
+      attemptIndex > MAX_PROMPT_BRIDGE_PROVIDER_ATTEMPTS ||
+      !expectedTargetRef ||
+      expectedTargetRef !== input.target.targetRef
+    ) {
+      return null
+    }
+    if (attemptIndex > 1) {
+      const previousAttempt = attempts[attempts.length - 1]
+      if (
+        !previousAttempt ||
+        !['failed', 'provider_unavailable', 'skipped'].includes(String(previousAttempt.status))
+      ) {
+        return null
+      }
+    }
     const result = await db.query(
       `INSERT INTO plugin_workload_sdk_provider_attempts
          (invocation_id, recipe_namespace, recipe_name, attempt_generation, attempt_index,

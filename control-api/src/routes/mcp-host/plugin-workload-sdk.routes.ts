@@ -1,4 +1,4 @@
-import { type Request, type Response, Router } from 'express'
+import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -47,7 +47,6 @@ import { isPlainObject } from '../../utils/isPlainObject.js'
 // (conformance: spec §19 "mcp-host control-api access uses the gateway").
 //
 //   POST /mcp-host/plugin-workload-sdk/prompt-bridge/v2
-//   POST /mcp-host/plugin-workload-sdk/prompt-bridge (v1 compatibility)
 //   GET  /mcp-host/plugin-workload-sdk/capabilities
 //   POST /mcp-host/plugin-workload-sdk/client-notification
 //   POST /mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket
@@ -74,6 +73,15 @@ const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
     return `plugin_workload_sdk_credential:${claims.recipeNamespace}/${claims.recipeName}`
   },
 })
+
+function requirePluginWorkloadSdkScope(req: Request, res: Response, next: NextFunction): void {
+  const claims = req.mcpHostJwt
+  if (!claims?.workflowControlScopes.includes('plugin-workload-sdk')) {
+    res.status(403).json({ error: 'scope_denied', retryable: false })
+    return
+  }
+  next()
+}
 
 const AUTHZ_HTTP_STATUS: Record<PluginWorkloadSdkErrorCode, number> = {
   capability_not_declared: 403,
@@ -166,7 +174,6 @@ function parsePromptBridgeBody(
   options: {
     requireContractVersion?: boolean
     requireBootstrapBinding?: boolean
-    legacyProtocol?: boolean
   } = {}
 ): ParsedPromptBridgeBody | null {
   const callerRef = validateCallerRef(body.callerRef, res)
@@ -183,9 +190,7 @@ function parsePromptBridgeBody(
       contractVersion !== PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION) ||
     (!options.requireContractVersion &&
       contractVersion !== undefined &&
-      (options.legacyProtocol
-        ? contractVersion !== 1
-        : contractVersion !== PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION))
+      contractVersion !== PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION)
   ) {
     res.status(409).json({
       error: 'protocol_mismatch',
@@ -237,7 +242,7 @@ function parsePromptBridgeBody(
     return null
   }
 
-  // v1: attachments are not supported (maxAttachments default 0).
+  // Attachments are not part of the promptBridge JSON contract.
   if (Array.isArray(body.attachments) && body.attachments.length > 0) {
     res.status(400).json({ error: 'attachments_not_supported' })
     return null
@@ -453,7 +458,6 @@ async function handlePromptBridgeAuthorization(
   options: {
     requireContractVersion: boolean
     requireBootstrapBinding: boolean
-    legacyProtocol?: boolean
   }
 ): Promise<void> {
   const claims = req.mcpHostJwt!
@@ -483,7 +487,6 @@ async function handlePromptBridgeAuthorization(
       ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
     },
     correlationId: parsed.correlationId,
-    legacyProtocol: options.legacyProtocol,
   })
   if (!result.ok) {
     sendAuthzError(res, result)
@@ -526,6 +529,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       message: { error: 'Too Many Requests', retryable: true },
     }),
     requireMcpHostJwt,
+    requirePluginWorkloadSdkScope,
     createPluginWorkloadSdkRequestRateLimit()
   )
 
@@ -572,29 +576,15 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     })
   )
 
-  // v2 is the target-aware/JIT contract. It is additive: old mcp-hosts keep
-  // using the v1 path below, while new clients fail clearly if this endpoint
-  // is absent instead of falling back to bootstrap credentials.
+  // v2 is the only supported target-aware/JIT contract. There is no runtime
+  // compatibility lane: old hosts must fail clearly and be upgraded rather
+  // than bypassing target policy and per-attempt credential fencing.
   router.post(
     '/mcp-host/plugin-workload-sdk/prompt-bridge/v2',
     asyncHandler(async (req, res) =>
       handlePromptBridgeAuthorization(req, res, {
         requireContractVersion: true,
         requireBootstrapBinding: true,
-      })
-    )
-  )
-
-  // Compatibility lane for an older mcp-host during a server-first rollout.
-  // It intentionally has no cross-provider target response contract; it uses
-  // the current persisted policy but does not require the new bootstrap fields.
-  router.post(
-    '/mcp-host/plugin-workload-sdk/prompt-bridge',
-    asyncHandler(async (req, res) =>
-      handlePromptBridgeAuthorization(req, res, {
-        requireContractVersion: false,
-        requireBootstrapBinding: false,
-        legacyProtocol: true,
       })
     )
   )
@@ -615,7 +605,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       const primaryTarget = grant?.promptTargets[0] ?? null
       res.status(200).json({
         contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
-        supportedContractVersions: [1, 2],
+        supportedContractVersions: [2],
         targetAwarePromptBridge: true,
         attemptLedger: true,
         credentialTickets: true,
@@ -651,7 +641,13 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
           eventType: parsed.eventType,
           target: parsed.targetRef ?? null,
           userRef: parsed.userRef ?? null,
-          notification: { title: parsed.notification.title, body: parsed.notification.body },
+          notification: {
+            title: parsed.notification.title,
+            body: parsed.notification.body,
+            data: parsed.notification.data ?? null,
+            actionRef: parsed.notification.actionRef ?? null,
+            deliveryPolicyRef: parsed.notification.deliveryPolicyRef ?? null,
+          },
         },
         correlationId: parsed.notification.correlationId,
       })
@@ -883,10 +879,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       }
 
       const attemptGeneration = providedAttemptGeneration ?? invocation.attemptGeneration
-      if (
-        providedAttemptGeneration === null &&
-        (invocation.contractVersion !== 1 || invocation.attemptGeneration !== 1)
-      ) {
+      if (providedAttemptGeneration === null) {
         res.status(400).json({ error: 'attemptGeneration is required for contract v2' })
         return
       }
@@ -931,7 +924,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         !invocationId ||
         attemptGeneration < 1 ||
         providerAttemptIndex < 1 ||
-        !['complete', 'failed', 'provider_unavailable'].includes(String(status))
+        !['complete', 'failed', 'provider_unavailable', 'skipped'].includes(String(status))
       ) {
         res.status(400).json({
           error: 'invocationId, attemptGeneration, providerAttemptIndex and status are required',
@@ -956,7 +949,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         recipeNamespace: claims.recipeNamespace,
         recipeName: claims.recipeName,
         attemptGeneration,
-        status: status as 'complete' | 'failed' | 'provider_unavailable',
+        status: status as 'complete' | 'failed' | 'provider_unavailable' | 'skipped',
       })
       if (!updated) {
         res.status(409).json({ error: 'stale_attempt', retryable: false })

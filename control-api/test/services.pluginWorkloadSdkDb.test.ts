@@ -6,8 +6,10 @@ import {
   failStaleInvocations,
   finalizePluginWorkloadSdkRevocation,
   getPluginWorkloadSdkLegacyGrantInventory,
+  hashPromptTargetPolicy,
   redeemPluginWorkloadSdkCredentialTicketJti,
   registerPluginWorkloadSdkCredentialTicketJti,
+  reservePluginWorkloadSdkProviderAttempt,
   resolveRecipientProfiles,
   revokePluginWorkloadSdkForRecipe,
   updateInvocationStatus,
@@ -164,6 +166,106 @@ describe('JIT credential ticket jti registry', () => {
       1,
       '33333333-3333-4333-8333-333333333333',
     ])
+  })
+})
+
+describe('ordered provider-attempt reservation', () => {
+  beforeEach(() => {
+    vi.mocked(pool.query).mockReset()
+  })
+
+  it('reserves only the next authorized target after an eligible prior failure', async () => {
+    const primary = {
+      targetRef: 'primary-openai',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      credentialSlot: 'openai-api-key',
+    }
+    const fallback = {
+      targetRef: 'fallback-claude',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      credentialSlot: 'claude-api-key',
+    }
+    const policyHash = hashPromptTargetPolicy({
+      policyRevision: 7,
+      defaultTargetRef: primary.targetRef,
+      promptTargets: [primary, fallback],
+    })
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // recipe lock
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '22222222-2222-4222-8222-222222222222',
+            method: 'promptBridge',
+            status: 'in_progress',
+            attempt_generation: 1,
+            lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+            prompt_authorization: {
+              policyRevision: 7,
+              policyHash,
+              authorizedTargetRefs: [primary.targetRef, fallback.targetRef],
+            },
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            policy_state: 'active',
+            policy_revision: 7,
+            prompt_targets: [primary, fallback],
+            default_target_ref: primary.targetRef,
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [{ attempt_index: 1, target_ref: primary.targetRef, status: 'failed' }],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            invocation_id: '22222222-2222-4222-8222-222222222222',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 2,
+            target_ref: fallback.targetRef,
+            provider: fallback.provider,
+            model: fallback.model,
+            credential_slot: fallback.credentialSlot,
+            status: 'reserved',
+            credential_jti: null,
+            started_at: new Date().toISOString(),
+            lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+            completed_at: null,
+            usage_request_id: null,
+          },
+        ],
+        rowCount: 1,
+      } as never)
+
+    const result = await reservePluginWorkloadSdkProviderAttempt({
+      invocationId: '22222222-2222-4222-8222-222222222222',
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'sdk-recipe',
+      attemptGeneration: 1,
+      target: fallback,
+    })
+
+    expect(result).toMatchObject({ attemptIndex: 2, targetRef: fallback.targetRef })
+    const sqls = vi.mocked(pool.query).mock.calls.map(([sql]) => String(sql))
+    expect(sqls[0]).toContain('pg_advisory_xact_lock')
+    expect(sqls[1]).toContain('FOR UPDATE')
+    expect(sqls[2]).toContain("capability_family = 'promptBridge'")
+    expect(sqls[3]).toContain('ORDER BY attempt_index ASC')
+    expect(sqls[3]).toContain('FOR UPDATE')
+    expect(sqls[4]).toContain('attempt_index')
   })
 })
 
@@ -639,5 +741,29 @@ describe('Plugin Workload SDK internal revocation audit actor', () => {
         changes: [expect.objectContaining({ status: 'disabled' })],
       })
     )
+  })
+
+  it('treats an already-disabled grant as an idempotent revoke', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            capability_family: 'promptBridge',
+            policy_state: 'disabled',
+            revocation_id: REVOCATION_ID,
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+    await expect(
+      revokePluginWorkloadSdkForRecipe('sandbox-recipes', 'sdk-recipe', actor)
+    ).resolves.toMatchObject({ state: 'disabled', revocationId: REVOCATION_ID })
+    expect(permissionEvents.append).not.toHaveBeenCalled()
   })
 })

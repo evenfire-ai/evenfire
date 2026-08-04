@@ -20,7 +20,7 @@ import {
   pluginWorkloadSdkTokenSecretKey,
   resolvePluginWorkloadSdkAllowedCallers,
 } from './pluginWorkloadSdkTokens'
-import { buildMcpHostPod } from './podFactory'
+import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
 import {
   PLUGIN_WORKLOAD_SDK_LEGACY_TOKEN_DATA_KEY,
   buildMcpHostUrl,
@@ -193,6 +193,26 @@ export class PluginWorkloadSdkProvisioner {
 
     await this.deps.ensureMcpHostHeadlessService(recipeName)
 
+    // Build the desired Pod once per reconcile so drift checks compare the
+    // complete immutable runtime contract, not only the image string. This
+    // catches same-image upgrades of the sdk-only env/dispatch contract.
+    const desiredMcpHostPod = buildMcpHostPod(
+      recipeName,
+      mcpHostAgent,
+      this.deps.config,
+      runtimeScopeRecipeName,
+      namespace,
+      undefined,
+      undefined,
+      effectiveWorkflowContextRefForSpec(recipeName, spec),
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      }
+    )
+    const desiredRuntimeContractHash = pluginWorkloadSdkRuntimeContractHash(desiredMcpHostPod)
+
     let mcpHostPhase = opts.mcpHostPhase
     if (mcpHostPhase === 'Running' || mcpHostPhase === 'Pending') {
       const waitingReason = await getContainerWaitingReason(
@@ -229,10 +249,14 @@ export class PluginWorkloadSdkProvisioner {
       if (runningPod?.deleting) {
         return 'deploying'
       }
-      if (runningPod?.image && runningPod.image !== this.deps.config.mcpHostImage) {
-        log.info('Plugin Workload SDK eager mcp-host image drift; rolling to platform image', {
+      const imageDrift = runningPod?.image !== this.deps.config.mcpHostImage
+      const runtimeContractDrift = runningPod?.runtimeContractHash !== desiredRuntimeContractHash
+      if (runningPod && (imageDrift || runtimeContractDrift)) {
+        log.info('Plugin Workload SDK eager mcp-host runtime contract drift; rolling Pod', {
           runningImage: runningPod.image,
           desiredImage: this.deps.config.mcpHostImage,
+          observedRuntimeContractHash: runningPod.runtimeContractHash,
+          desiredRuntimeContractHash,
         })
         await this.rollEagerSdkMcpHostPod(recipeName)
         // Requeue: the pod is recreated from the platform image on a later
@@ -244,26 +268,11 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     if (!mcpHostPhase || mcpHostPhase === 'Failed' || mcpHostPhase === 'Unknown') {
-      const mcpHostPod = buildMcpHostPod(
-        recipeName,
-        mcpHostAgent,
-        this.deps.config,
-        runtimeScopeRecipeName,
-        namespace,
-        undefined,
-        undefined,
-        effectiveWorkflowContextRefForSpec(recipeName, spec),
-        {
-          mountWorkflowOutput: false,
-          pluginWorkloadSdkEnabled: true,
-          pluginWorkloadSdkRuntimeMode: 'sdk-only',
-        }
-      )
       await this.deps.createIfNotExists(
         () =>
           this.deps.coreApi.createNamespacedPod({
             namespace: this.deps.config.sandboxNamespace,
-            body: mcpHostPod,
+            body: desiredMcpHostPod,
           }),
         `Pod "${recipeName}-mcp-host"`
       )

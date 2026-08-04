@@ -58,7 +58,6 @@ export type UsageIngestTransactionResult = {
 type PromptBridgeAttemptBinding = {
   invocation_id: string
   recipe_name: string
-  contract_version: number
   attempt_generation: number
   method: string
   target_refs: unknown
@@ -232,14 +231,6 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
     task_id === null &&
     llm_secret_name !== null &&
     prompt_bridge_metadata?.invocation_id !== undefined
-  const isLegacySdkOnly =
-    source_kind_raw === 'unknown' &&
-    r.channel_type === 'plugin_workload_sdk' &&
-    recipe_name !== null &&
-    run_id === null &&
-    task_id === null &&
-    llm_secret_name !== null &&
-    prompt_bridge_metadata?.invocation_id !== undefined
   const isWorkflowSdk = source_kind_raw === 'workflow' && r.channel_type === 'plugin_workload_sdk'
   if (source_kind_raw === 'workflow') {
     const taskRunId = workflowRunIdFromTaskId(task_id)
@@ -250,12 +241,7 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   // but retain their canonical workflow run/task/secret binding above. Reject
   // only an unrecognised shape; otherwise the usage emitted by a step-bearing
   // host would be dropped before it can be metered.
-  if (
-    r.channel_type === 'plugin_workload_sdk' &&
-    !isSdkOnly &&
-    !isLegacySdkOnly &&
-    !isWorkflowSdk
-  ) {
+  if (r.channel_type === 'plugin_workload_sdk' && !isSdkOnly && !isWorkflowSdk) {
     return null
   }
   if (
@@ -265,9 +251,8 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
     return null
   }
   // Contract v2 physical-attempt fields are checked against the persisted
-  // receipt during ingestion. A v1 host may omit generation/attempt fields;
-  // retaining the event here lets the binding layer classify it explicitly as
-  // the narrow legacy lane instead of confusing it with malformed JSON.
+  // receipt during ingestion. Events without those fields are rejected by the
+  // binding layer; there is no runtime v1 compatibility lane.
 
   return {
     request_id,
@@ -388,10 +373,8 @@ async function filterEventsByAttemptReceipt(
   }
   const result = await db.query(
     `SELECT attempts.invocation_id::text, attempts.attempt_generation, attempts.method,
-            attempts.target_refs, attempts.recipe_name, invocations.contract_version
+            attempts.target_refs, attempts.recipe_name
        FROM plugin_workload_sdk_invocation_attempts attempts
-       JOIN plugin_workload_sdk_invocations invocations
-         ON invocations.id = attempts.invocation_id
       WHERE attempts.invocation_id = ANY($1::uuid[])`,
     [invocationIds]
   )
@@ -433,37 +416,8 @@ async function filterEventsByAttemptReceipt(
         : undefined
     const targetRefs = receipt && Array.isArray(receipt.target_refs) ? receipt.target_refs : []
     const targetRef = metadata?.target_ref
-    const legacyInvocation =
-      typeof invocationId === 'string'
-        ? await db.query(
-            `SELECT contract_version, method, status, authorization_decision, detail,
-                    recipe_namespace, recipe_name
-               FROM plugin_workload_sdk_invocations
-              WHERE id = $1`,
-            [invocationId]
-          )
-        : { rows: [] }
-    const legacy = legacyInvocation.rows[0] as
-      | {
-          contract_version?: unknown
-          method?: unknown
-          status?: unknown
-          authorization_decision?: unknown
-          detail?: unknown
-          recipe_namespace?: unknown
-          recipe_name?: unknown
-        }
-      | undefined
     const hasPhysicalAttempt =
       typeof providerAttemptId === 'string' && Number.isInteger(providerAttemptIndex)
-    const legacyCompatible =
-      !hasPhysicalAttempt &&
-      legacy?.contract_version === 1 &&
-      legacy.method === 'promptBridge' &&
-      ['in_progress', 'complete'].includes(String(legacy.status)) &&
-      legacy.authorization_decision === 'authorized' &&
-      legacy.recipe_name === event.recipe_name &&
-      legacy.detail === event.model
     const physicalCompatible =
       hasPhysicalAttempt &&
       receipt?.method === 'promptBridge' &&
@@ -478,7 +432,7 @@ async function filterEventsByAttemptReceipt(
       providerAttemptById.get(providerAttemptId!)?.model === event.model &&
       providerAttemptById.get(providerAttemptId!)?.credential_slot === metadata?.credential_slot &&
       providerAttemptById.get(providerAttemptId!)?.status === 'complete'
-    if (physicalCompatible || legacyCompatible) {
+    if (physicalCompatible) {
       accepted.push(event)
     } else {
       rejected += 1

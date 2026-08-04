@@ -5163,17 +5163,96 @@ describe('WorkflowReconciler — reconcile loop', () => {
     expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
   })
 
+  it('reissues stale access and refresh scopes once, then converges on the next reconcile', async () => {
+    const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+    const expectedWorkflowControlScopes = [
+      'workflow:trigger',
+      'workflow:approval:resolve',
+      'workflow:approval:decide',
+    ]
+    const canonicalAccessToken = makeJwtWithExp(3600, {
+      workflowControlScopes: expectedWorkflowControlScopes,
+    })
+    const canonicalRefreshToken = makeJwtWithExp(3600, {
+      workflowControlScopes: expectedWorkflowControlScopes,
+    })
+    const canonicalControlToken = makeJwtWithExp(3600, {
+      scopes: expectedWorkflowControlScopes,
+    })
+    vi.mocked(issueMcpHostRuntimeTokens).mockResolvedValue({
+      accessToken: canonicalAccessToken,
+      refreshToken: canonicalRefreshToken,
+      mcpHostControlToken: canonicalControlToken,
+    })
+
+    let secretData: Record<string, string> = {
+      'mcp-host-runtime-access-token': Buffer.from(
+        makeJwtWithExp(3600, { workflowControlScopes: ['workflow:list'] })
+      ).toString('base64'),
+      'mcp-host-runtime-refresh-token': Buffer.from(
+        makeJwtWithExp(3600, { workflowControlScopes: ['workflow:list'] })
+      ).toString('base64'),
+      'mcp-host-workflow-control-token': Buffer.from(
+        makeJwtWithExp(3600, { scopes: expectedWorkflowControlScopes })
+      ).toString('base64'),
+      'mcp-host-gfs-token': makeEncodedGfsAccess(),
+    }
+    coreApi.readNamespacedSecret = vi.fn().mockImplementation(async ({ name }) => {
+      if (name === 'wf-test-wf-mcp-host-runtime-tokens') return { data: secretData }
+      throw { code: 404 }
+    })
+    coreApi.patchNamespacedSecret = vi.fn().mockImplementation(async ({ body }) => {
+      secretData = { ...secretData, ...(body?.data ?? {}) }
+      return {}
+    })
+
+    const reconciler = new WorkflowReconciler(makeDeps({ coreApi: coreApi as never }))
+    const spec = makeSpec({
+      steps: [
+        {
+          id: 'broker-trigger',
+          instruction: 'Trigger a workflow',
+          allowedTools: { include: ['workflow_trigger'] },
+        },
+      ],
+    })
+
+    await reconciler.ensureMcpHostRuntimeCredentials('recipe-runtime-ns', 'test-wf', spec)
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
+      'recipe-runtime-ns',
+      'test-wf',
+      expectedWorkflowControlScopes
+    )
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledTimes(1)
+
+    await reconciler.ensureMcpHostRuntimeCredentials('recipe-runtime-ns', 'test-wf', spec)
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledTimes(1)
+  })
+
   it('reissues only the workflow-control token when declared broker scopes change', async () => {
     const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+    const expectedWorkflowControlScopes = [
+      'workflow:trigger',
+      'workflow:approval:resolve',
+      'workflow:approval:decide',
+    ]
     coreApi.readNamespacedSecret = vi.fn().mockImplementation(async ({ name }) => {
       if (name === 'wf-test-wf-mcp-host-runtime-tokens') {
         return {
           data: {
             'mcp-host-runtime-access-token': Buffer.from(
-              makeJwtWithExp(3600, { recipeName: 'test-wf' })
+              makeJwtWithExp(3600, {
+                recipeName: 'test-wf',
+                workflowControlScopes: expectedWorkflowControlScopes,
+              })
             ).toString('base64'),
             'mcp-host-runtime-refresh-token': Buffer.from(
-              makeJwtWithExp(3600, { recipeName: 'test-wf' })
+              makeJwtWithExp(3600, {
+                recipeName: 'test-wf',
+                workflowControlScopes: expectedWorkflowControlScopes,
+              })
             ).toString('base64'),
             'mcp-host-workflow-control-token': Buffer.from(
               makeJwtWithExp(3600, { recipeName: 'test-wf', scopes: ['workflow:list'] })
@@ -5203,9 +5282,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
     expect(vi.mocked(issueMcpHostRuntimeTokens).mock.calls.length).toBe(runtimeCallsBefore)
     expect(issueMcpHostWorkflowControlToken).toHaveBeenCalledWith('recipe-runtime-ns', 'test-wf', [
-      'workflow:trigger',
-      'workflow:approval:resolve',
-      'workflow:approval:decide',
+      ...expectedWorkflowControlScopes,
     ])
     expect(coreApi.patchNamespacedSecret).toHaveBeenCalledWith(
       expect.objectContaining({

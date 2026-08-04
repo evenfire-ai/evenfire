@@ -134,7 +134,7 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     r.contractVersion === 2 &&
     typeof r.invocationId === 'string' &&
     typeof r.replay === 'boolean' &&
-    (r.providerCallRequired === undefined || typeof r.providerCallRequired === 'boolean') &&
+    typeof r.providerCallRequired === 'boolean' &&
     typeof r.status === 'string' &&
     typeof r.model === 'string' &&
     (r.modelPolicy === null ||
@@ -484,7 +484,7 @@ export class PluginWorkloadSdkControlApiClient {
 
   /**
    * Negotiates the target-aware/JIT wire contract before a prompt. There is no
-   * v1 fallback: an SDK host must not send multiprovider traffic to an API that
+   * legacy fallback: an SDK host must not send multiprovider traffic to an API that
    * cannot fence attempts or tickets.
    */
   async ensurePromptBridgeCapabilities(): Promise<void> {
@@ -602,17 +602,7 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    // The v2 response is strict. Only the provider-call disposition remains
-    // additive for a short server-first rollout window; absence is derived from
-    // the already persisted idempotency contract and never enables credentials.
-    return {
-      ...result,
-      providerCallRequired:
-        typeof (result as unknown as { providerCallRequired?: unknown }).providerCallRequired ===
-        'boolean'
-          ? result.providerCallRequired
-          : !result.replay,
-    }
+    return result
   }
 
   /**
@@ -671,7 +661,7 @@ export class PluginWorkloadSdkControlApiClient {
     attemptGeneration: number
     providerAttemptId: string
     providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
+    status: 'complete' | 'failed' | 'provider_unavailable' | 'skipped'
   }): Promise<void> {
     await this.post(
       `/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/${encodeURIComponent(

@@ -391,7 +391,7 @@ export async function addPluginWorkloadSdkProviderAttemptLedger(db: DbClient): P
       model TEXT NOT NULL,
       credential_slot TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'reserved'
-        CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable')),
+        CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped')),
       credential_jti UUID NULL,
       started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       lease_expires_at TIMESTAMPTZ NULL,
@@ -405,6 +405,14 @@ export async function addPluginWorkloadSdkProviderAttemptLedger(db: DbClient): P
       ON plugin_workload_sdk_provider_attempts (invocation_id, attempt_generation, attempt_index);
     CREATE INDEX IF NOT EXISTS plugin_workload_sdk_provider_attempts_status_idx
       ON plugin_workload_sdk_provider_attempts (status, lease_expires_at);
+    -- Existing clusters created the ledger before circuit-breaker skips became
+    -- auditable. Replace the inline constraint idempotently so those clusters
+    -- accept the same terminal status as fresh installs.
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_provider_attempts_status_check;
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
+      CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped'));
   `)
 }
 

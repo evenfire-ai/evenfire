@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { WorkflowRecipeSpec } from '../types'
 import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
 import type { PluginWorkloadSdkProvisionerDeps } from './pluginWorkloadSdkProvisioner'
+import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
 import type { WorkflowRuntimePlan } from './runtimePlan'
+import type { WorkflowConfig } from './types'
 
 const SANDBOX_NS = 'sandbox-recipes'
 const DESIRED_IMAGE = 'registry.example/clerum/mcp-host-slim:sha-new'
@@ -14,12 +16,19 @@ const RECIPE = 'demo'
 function podWithPhase(
   image: string,
   phase: 'Running' | 'Pending',
-  opts: { deleting?: boolean } = {}
+  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
 ) {
   return {
     metadata: {
       uid: 'pod-uid-1',
       ...(opts.deleting ? { deletionTimestamp: '2026-06-19T18:00:00Z' } : {}),
+      ...(opts.runtimeContractHash
+        ? {
+            annotations: {
+              'clerum.io/plugin-workload-sdk-runtime-contract-hash': opts.runtimeContractHash,
+            },
+          }
+        : {}),
     },
     spec: { containers: [{ name: 'mcp-host', image }] },
     status: { phase, conditions: [], containerStatuses: [] },
@@ -29,7 +38,7 @@ function podWithPhase(
 function makeProvisioner(
   podImage: string,
   phase: 'Running' | 'Pending' = 'Running',
-  opts: { deleting?: boolean } = {}
+  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
 ) {
   const readNamespacedPod = vi.fn().mockResolvedValue(podWithPhase(podImage, phase, opts))
   const deleteNamespacedPod = vi.fn().mockResolvedValue({})
@@ -42,11 +51,7 @@ function makeProvisioner(
 
   const deps = {
     coreApi,
-    config: {
-      mcpHostImage: DESIRED_IMAGE,
-      sandboxNamespace: SANDBOX_NS,
-      pluginWorkloadSdkEnabled: true,
-    },
+    config: TEST_CONFIG,
     tokenFactory: {},
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
@@ -64,6 +69,48 @@ function makeProvisioner(
 // bail out before reaching the image-drift branch.
 const SPEC = { agent: { provider: 'openai', model: 'gpt-4' } } as unknown as WorkflowRecipeSpec
 const RUNTIME = {} as unknown as WorkflowRuntimePlan
+const TEST_CONFIG = {
+  coordinatorImage: 'registry.example/coordinator:current',
+  mcpHostImage: DESIRED_IMAGE,
+  wrcEndpoint: 'http://workflow-recipes.example',
+  sandboxNamespace: SANDBOX_NS,
+  mcpServerNamespace: 'mcp-server',
+  imagePullPolicy: 'IfNotPresent',
+  maxWorkflowSteps: 10,
+  workflowDefaultRunDurationSeconds: 60,
+  workflowMaxRunDurationSeconds: 600,
+  runtimeTokenTtlSeconds: 600,
+  runtimeTokenRefreshBeforeSeconds: 60,
+  workflowMaxWorkloadsPerRecipe: 10,
+  workflowUiEgressInternalMaxItems: 10,
+  workflowMaxSteps: 10,
+  workflowStepDependsOnMaxItems: 10,
+  workflowStepAllowedToolsMaxItems: 10,
+  workflowStepMcpServersMaxItems: 10,
+  workflowStatefulSetMaxReplicas: 3,
+  workflowStatefulSetMaxVolumeClaimTemplates: 3,
+  workflowStatefulSetMaxPvcPreflightChecks: 3,
+  pluginWorkloadSdkEnabled: true,
+} as unknown as WorkflowConfig
+
+function desiredRuntimeContractHash(): string {
+  const desiredPod = buildMcpHostPod(
+    RECIPE,
+    SPEC.agent,
+    TEST_CONFIG,
+    RECIPE,
+    SANDBOX_NS,
+    undefined,
+    undefined,
+    undefined,
+    {
+      mountWorkflowOutput: false,
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkRuntimeMode: 'sdk-only',
+    }
+  )
+  return pluginWorkloadSdkRuntimeContractHash(desiredPod)
+}
 
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('rolls a healthy eager mcp-host pod when its image drifts from the platform image', async () => {
@@ -92,7 +139,11 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
   })
 
   it('does not roll the pod when its image already matches the platform image', async () => {
-    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(DESIRED_IMAGE)
+    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(
+      DESIRED_IMAGE,
+      'Running',
+      { runtimeContractHash: desiredRuntimeContractHash() }
+    )
 
     await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
@@ -106,6 +157,26 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
 
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
     expect(createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('rolls a same-image pod when the runtime contract hash is missing', async () => {
+    const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE)
+
+    const status = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running' }
+    )
+
+    expect(status).toBe('deploying')
+    expect(deleteNamespacedPod).toHaveBeenCalledWith({
+      name: `${RECIPE}-mcp-host`,
+      namespace: SANDBOX_NS,
+    })
   })
 
   it('rolls a pending eager mcp-host pod on image drift before waiting for readiness', async () => {
@@ -166,11 +237,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     const coreApi = { readNamespacedPod, deleteNamespacedPod, createNamespacedPod }
     const deps = {
       coreApi,
-      config: {
-        mcpHostImage: DESIRED_IMAGE,
-        sandboxNamespace: SANDBOX_NS,
-        pluginWorkloadSdkEnabled: true,
-      },
+      config: TEST_CONFIG,
       tokenFactory: {},
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
@@ -338,12 +405,34 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       agent: { provider: 'openai', model: 'gpt-4' },
       pluginWorkloadSdk: { promptBridge: {} },
     } as unknown as WorkflowRecipeSpec
+    const expectedRuntimeContractHash = pluginWorkloadSdkRuntimeContractHash(
+      buildMcpHostPod(
+        RECIPE,
+        promptBridgeSpec.agent,
+        TEST_CONFIG,
+        RECIPE,
+        SANDBOX_NS,
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          pluginWorkloadSdkEnabled: true,
+          pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        }
+      )
+    )
     let podImage = DESIRED_IMAGE
     // Keep the UID stable across the test double's replacement so this assertion
     // specifically proves the explicit roll reset, not only identity-key rollover.
     let podUid = 'pod-uid-1'
     const readNamespacedPod = vi.fn().mockImplementation(async () => ({
-      metadata: { uid: podUid },
+      metadata: {
+        uid: podUid,
+        annotations: {
+          'clerum.io/plugin-workload-sdk-runtime-contract-hash': expectedRuntimeContractHash,
+        },
+      },
       spec: { containers: [{ name: 'mcp-host', image: podImage }] },
       status: {
         phase: 'Running',
@@ -359,11 +448,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     const coreApi = { readNamespacedPod, deleteNamespacedPod, createNamespacedPod }
     const deps = {
       coreApi,
-      config: {
-        mcpHostImage: DESIRED_IMAGE,
-        sandboxNamespace: SANDBOX_NS,
-        pluginWorkloadSdkEnabled: true,
-      },
+      config: TEST_CONFIG,
       tokenFactory: { signWrcConfigureToken },
       modelConfigHandler: { handle },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

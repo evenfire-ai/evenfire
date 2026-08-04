@@ -333,7 +333,20 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       }
     )
 
-    const result = await bridge.complete(request)
+    const providerAttemptReporter = { report: vi.fn() }
+    const credentialTicketIssuer = {
+      issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+        credentialTicket: `fresh-${target.targetRef}`,
+        providerAttemptId: `attempt-${target.targetRef}`,
+        providerAttemptIndex: target.targetRef === primary.targetRef ? 1 : 2,
+      })),
+    }
+
+    const result = await bridge.complete({
+      ...request,
+      credentialTicketIssuer,
+      providerAttemptReporter,
+    })
 
     expect(result.servedTarget).toEqual(fallback)
     expect(credentialCalls).toEqual([fallback.targetRef])
@@ -341,6 +354,16 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(second.completeSingleTurn).toHaveBeenCalledOnce()
     expect(breakers.get(primary.targetRef)?.isOpen()).toBe(true)
     expect(breakers.get(fallback.targetRef)?.isOpen()).toBe(false)
+    expect(providerAttemptReporter.report).toHaveBeenNthCalledWith(1, {
+      providerAttemptId: `attempt-${primary.targetRef}`,
+      providerAttemptIndex: 1,
+      status: 'skipped',
+    })
+    expect(providerAttemptReporter.report).toHaveBeenNthCalledWith(2, {
+      providerAttemptId: `attempt-${fallback.targetRef}`,
+      providerAttemptIndex: 2,
+      status: 'complete',
+    })
   })
 
   it('publishes circuit state under the effective target label', async () => {

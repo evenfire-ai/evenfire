@@ -86,6 +86,7 @@ function issueSdkToken(scopes: mcpHostJwt.McpHostControlScope[] = ['plugin-workl
 const validPromptBody = {
   recipeNamespace: NS,
   recipeName: RECIPE,
+  contractVersion: 2,
   callerRef: 'api',
   bootstrapProvider: 'zai',
   bootstrapModel: 'glm-4.7',
@@ -184,6 +185,16 @@ beforeEach(() => {
 })
 
 describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
+  it('fails closed for a valid recipe token without the SDK scope', async () => {
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken([])}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'scope_denied', retryable: false })
+    expect(sdkDb.findGrant).not.toHaveBeenCalled()
+  })
+
   it('advertises the v2 identity contract while a prompt policy is missing', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(null)
 
@@ -194,7 +205,7 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
       contractVersion: 2,
-      supportedContractVersions: [1, 2],
+      supportedContractVersions: [2],
       targetAwarePromptBridge: true,
       attemptLedger: true,
       credentialTickets: true,
@@ -254,17 +265,17 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
   })
 })
 
-describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
+describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/v2', () => {
   it('returns 401 without a token', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .send(validPromptBody)
     expect(res.status).toBe(401)
   })
 
   it('returns 400 recipe_binding_mismatch when body differs from claims', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, recipeName: 'other-recipe' })
     expect(res.status).toBe(400)
@@ -274,7 +285,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('returns 400 invalid_purpose for a purpose outside the enum', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, purpose: 'jailbreak' })
     expect(res.status).toBe(400)
@@ -283,7 +294,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('returns 400 invalid_idempotency_key for a malformed key', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, idempotencyKey: 'bad key with spaces!' })
     expect(res.status).toBe(400)
@@ -292,7 +303,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('returns 413 payload_too_large when messages exceed the content byte cap', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({
         ...validPromptBody,
@@ -302,9 +313,9 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
     expect(res.body.error).toBe('payload_too_large')
   })
 
-  it('returns 400 attachments_not_supported in v1', async () => {
+  it('returns 400 attachments_not_supported for the v2 JSON contract', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, attachments: [{ name: 'file.pdf' }] })
     expect(res.status).toBe(400)
@@ -319,7 +330,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
       retryable: false,
     })
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken([])}`)
       .send(validPromptBody)
     expect(res.status).toBe(403)
@@ -334,7 +345,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
       retryable: false,
     })
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send(validPromptBody)
     expect(res.status).toBe(429)
@@ -343,7 +354,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('returns 201 with the invocation envelope on success', async () => {
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send(validPromptBody)
     expect(res.status).toBe(201)
@@ -356,7 +367,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('forwards an exact provider/model selector without accepting a raw credential', async () => {
     await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, provider: 'openai', model: 'gpt-5.4' })
       .expect(201)
@@ -370,7 +381,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
 
   it('includes caller metadata in the canonical payload used for idempotency', async () => {
     await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send({ ...validPromptBody, metadata: { traceId: 'trace-1', source: 'sandbox-ui' } })
 
@@ -412,7 +423,7 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge', () => {
       },
     })
     const res = await request(buildApp())
-      .post('/mcp-host/plugin-workload-sdk/prompt-bridge')
+      .post('/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
       .set('Authorization', `Bearer ${issueSdkToken()}`)
       .send(validPromptBody)
     expect(res.status).toBe(200)
@@ -574,6 +585,29 @@ describe('POST /mcp-host/plugin-workload-sdk/client-notification', () => {
         eventType: 'lead.followup.due',
         targetRef: 'team.sales',
         title: 'Follow up',
+      })
+    )
+  })
+
+  it('includes data, action, and delivery policy in the idempotency payload', async () => {
+    const notification = {
+      title: 'Follow up',
+      body: 'Lead is due',
+      data: { leadId: 'lead-7' },
+      actionRef: { type: 'crm.lead', id: 'lead-7', urlRef: 'lead-detail' },
+      deliveryPolicyRef: 'business-hours',
+    }
+    await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/client-notification')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({ ...validNotificationBody, notification })
+      .expect(201)
+
+    expect(authorizer.authorizeClientNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          notification,
+        }),
       })
     )
   })

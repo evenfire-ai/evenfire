@@ -164,8 +164,9 @@ NOTIFICATION_PREF_SNAPSHOT_EXISTS=0
 NOTIFICATION_PREF_SNAPSHOT_MEDIUM=""
 NOTIFICATION_PREF_SNAPSHOT_FALLBACK=""
 NOTIFICATION_PREF_SNAPSHOT_ACCOUNT=""
-# Hard ceiling for the entire gate (default 15m). Override with E2E_GATE_MAX_SECONDS.
-E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-900}"
+# Hard ceiling for the entire gate (default 10m). Override with
+# E2E_GATE_MAX_SECONDS only to a value no greater than the fail-closed ceiling.
+E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-600}"
 E2E_GATE_STARTED_AT=$SECONDS
 # Per-phase wait ceilings (seconds).
 E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"

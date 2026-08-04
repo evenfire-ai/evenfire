@@ -13,8 +13,15 @@ function readOptionalFile(filePath: string): string | null {
   }
 }
 
-/** Parse dotenv data without overwriting an explicit process value. */
-function loadEnvContents(contents: string): void {
+const ADMIN_ENV_KEYS = [
+  'ADMIN_PASSWORD',
+  'TEST_ADMIN_PASSWORD',
+  'E2E_ADMIN_PASSWORD',
+  'ADMIN_PASS',
+] as const
+
+function parseEnvContents(contents: string): Map<string, string> {
+  const values = new Map<string, string>()
   const lines = contents.split('\n')
   for (const line of lines) {
     const trimmed = line.trim()
@@ -29,10 +36,28 @@ function loadEnvContents(contents: string): void {
     ) {
       value = value.slice(1, -1)
     }
-    // Presence, not truthiness: an explicit empty process value is still an
-    // operator decision and must not be replaced by a lane default.
-    if (!(key in process.env)) process.env[key] = value
+    values.set(key, value)
   }
+  return values
+}
+
+/** Parse dotenv data without overwriting an explicit process value. */
+function loadEnvContents(contents: string, overrideKeys = new Set<string>()): void {
+  for (const [key, value] of parseEnvContents(contents)) {
+    // Presence, not truthiness: an explicit empty process value is still an
+    // operator decision and must not be replaced by a lane default, except
+    // for the canonical admin credential aliases handled below.
+    if (overrideKeys.has(key) || !(key in process.env)) process.env[key] = value
+  }
+}
+
+function canonicalAdminPassword(contents: string): string | undefined {
+  const values = parseEnvContents(contents)
+  for (const key of ADMIN_ENV_KEYS) {
+    const value = values.get(key)
+    if (value) return value
+  }
+  return undefined
 }
 
 /** Load a dotenv-style file without a check-then-read race. */
@@ -45,9 +70,23 @@ function loadEnvFile(envPath: string): void {
  * Resolve the canonical repository .env for a secondary worktree. Direct
  * Playwright invocations do not inherit the shell wrapper's environment, so
  * the Desktop lane must use the same root-env contract as Control UI:
- * explicit process values, then the canonical root .env, then test defaults.
+ * Explicit endpoint/process values remain caller-owned; admin credential
+ * aliases are canonical-root-first so a stale inherited password cannot win.
  */
 function loadCanonicalRootEnv(): void {
+  const loadCanonicalFile = (envPath: string): void => {
+    const contents = readOptionalFile(envPath)
+    if (contents === null) return
+    loadEnvContents(contents, new Set(ADMIN_ENV_KEYS))
+    const password = canonicalAdminPassword(contents)
+    if (password) {
+      // Keep all aliases coherent. Otherwise an inherited E2E_ADMIN_PASSWORD
+      // could still win in the fixture even after ADMIN_PASSWORD was loaded
+      // from the canonical root .env.
+      for (const key of ADMIN_ENV_KEYS) process.env[key] = password
+    }
+  }
+
   // __dirname is desktop-app/test/e2e-playwright; walk to the worktree root.
   // This matters when Playwright is launched directly from a secondary
   // worktree: the canonical .env lives in the primary Evenfire checkout.
@@ -58,28 +97,28 @@ function loadCanonicalRootEnv(): void {
     gitFileContents = fs.readFileSync(gitFile, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      loadEnvFile(path.join(repoRoot, '.env'))
+      loadCanonicalFile(path.join(repoRoot, '.env'))
       return
     }
     // A normal checkout has a file-form worktree pointer here. If `.git` is a
     // directory (for example in a non-worktree checkout), there is no safe
     // common-dir traversal to perform from this config file.
     if ((error as NodeJS.ErrnoException).code === 'EISDIR') {
-      loadEnvFile(path.join(repoRoot, '.env'))
+      loadCanonicalFile(path.join(repoRoot, '.env'))
       return
     }
     throw error
   }
   const gitdirMatch = gitFileContents.trim().match(/^gitdir:\s*(.+)$/)
   if (!gitdirMatch) {
-    loadEnvFile(path.join(repoRoot, '.env'))
+    loadCanonicalFile(path.join(repoRoot, '.env'))
     return
   }
   const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1])
   const commonDirFile = path.join(worktreeGitDir, 'commondir')
   const commonDirValue = readOptionalFile(commonDirFile)
   if (commonDirValue === null) {
-    loadEnvFile(path.join(repoRoot, '.env'))
+    loadCanonicalFile(path.join(repoRoot, '.env'))
     return
   }
   const commonDir = path.resolve(worktreeGitDir, commonDirValue.trim())
@@ -87,7 +126,7 @@ function loadCanonicalRootEnv(): void {
   // directory (the primary checkout), not the secondary worktree containing
   // this config. This keeps seeded credentials and endpoint policy aligned
   // with the operator lane.
-  loadEnvFile(path.join(commonDir, '..', '.env'))
+  loadCanonicalFile(path.join(commonDir, '..', '.env'))
 }
 
 loadCanonicalRootEnv()

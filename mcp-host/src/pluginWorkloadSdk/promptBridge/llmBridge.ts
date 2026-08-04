@@ -52,7 +52,7 @@ export interface PromptBridgeProviderAttemptReporter {
   report(input: {
     providerAttemptId: string
     providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
+    status: 'complete' | 'failed' | 'provider_unavailable' | 'skipped'
   }): Promise<void>
 }
 
@@ -209,6 +209,33 @@ export class LlmBridge {
 
       const breaker = this.breakerFor(authorized.target)
       if (!breaker.allow()) {
+        // A circuit-open target still consumes an ordered, auditable physical
+        // attempt. Reserve and close it as `skipped` before advancing; without
+        // this ledger row Control API would correctly reject the next target
+        // as an out-of-order fallback.
+        const skippedTicket = await withinDeadline(
+          () =>
+            request.credentialTicketIssuer.issue({
+              invocationId: request.invocationId,
+              attemptGeneration: request.attemptGeneration,
+              target: authorized.target,
+              policyRevision: request.policyRevision,
+              policyHash: request.policyHash,
+            }),
+          remainingTimeoutMs(deadlineAt),
+          'timeout'
+        )
+        if (
+          request.providerAttemptReporter &&
+          skippedTicket.providerAttemptId &&
+          skippedTicket.providerAttemptIndex !== undefined
+        ) {
+          await request.providerAttemptReporter.report({
+            providerAttemptId: skippedTicket.providerAttemptId,
+            providerAttemptIndex: skippedTicket.providerAttemptIndex,
+            status: 'skipped',
+          })
+        }
         const error = new ClassifiedProviderError(
           { code: LlmErrorCode.ApiCallFailed, retryable: true },
           new PluginWorkloadError(

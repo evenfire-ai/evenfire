@@ -772,11 +772,11 @@ export class WorkflowRecipeReconciler {
    * disabled keeps a stale host/token reachable only behind an explicit
    * requeue, until the cleanup dependency is available and converges.
    */
-  private async cleanupPluginWorkloadSdkOnlyOrThrow(recipeName: string): Promise<void> {
+  private async cleanupPluginWorkloadSdkOrThrow(recipeName: string): Promise<void> {
     if (!this.workflowReconciler) {
       throw new Error('workflow subsystem is not initialized; SDK cleanup cannot be confirmed')
     }
-    await this.workflowReconciler.cleanupPluginWorkloadSdkOnly(recipeName)
+    await this.workflowReconciler.cleanupPluginWorkloadSdk(recipeName)
   }
 
   private async waitForTransportNetworkReadiness(
@@ -1263,7 +1263,7 @@ export class WorkflowRecipeReconciler {
     // intentionally restricted to the stepless adapter.
     if (!isWorkflow && recipe.spec.pluginWorkloadSdk && !this.config.pluginWorkloadSdkEnabled) {
       try {
-        await this.cleanupPluginWorkloadSdkOnlyOrThrow(name)
+        await this.cleanupPluginWorkloadSdkOrThrow(name)
       } catch (error) {
         return {
           phase: 'failed' as RecipePhase,
@@ -1284,6 +1284,25 @@ export class WorkflowRecipeReconciler {
       // Revocation must precede spec/policy validation: an invalid edit that also
       // removes publishTargets must still close the previously opened lane.
       await this.revokeCoordinatorGfsNetworkPolicyIfDisabled(recipe)
+    }
+
+    // Capability removal is independent from workflow phase. Do this before
+    // terminal-phase short-circuiting so a failed/deprecated/rollback-failed
+    // recipe cannot retain SDK authority after the operator removes the block.
+    // The durable status marker is cleared by the following status projection
+    // only after this fail-closed cleanup succeeds.
+    if (!recipe.spec.pluginWorkloadSdk && recipe.status?.pluginWorkloadSdk) {
+      try {
+        await this.cleanupPluginWorkloadSdkOrThrow(name)
+      } catch (error) {
+        return {
+          phase: 'failed' as RecipePhase,
+          message: `Plugin Workload SDK teardown failed after capability removal: ${String(error)}`,
+          workloadStatuses: [],
+          skipStatusPatch: true,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        }
+      }
     }
 
     const limitError = validateWorkflowRecipeLimits(recipe.spec, this.config)
@@ -1897,14 +1916,6 @@ export class WorkflowRecipeReconciler {
       // Step 2: Validate spec
       this.validateSpec(recipe)
 
-      // A removed SDK declaration must release the resources that were owned
-      // by the SDK-only runtime before this recipe settles as a plain workload.
-      // The status marker is durable across the spec edit; no workflow path is
-      // involved in this cleanup.
-      if (!isWorkflow && !recipe.spec.pluginWorkloadSdk && recipe.status?.pluginWorkloadSdk) {
-        await this.cleanupPluginWorkloadSdkOnlyOrThrow(name)
-      }
-
       // Step 2.5: Policy enforcement already ran at the top of reconcile()
       // so both workflow and non-workflow recipes are gated uniformly. No
       // duplicate check here.
@@ -2445,7 +2456,8 @@ export class WorkflowRecipeReconciler {
           sdkOnlyBootstrapPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
-        requeueFixedInterval: sdkOnlyPolicyPending,
+        requeueFixedInterval:
+          sdkOnlyPolicyPending || sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending,
       }
     } catch (error) {
       // Transient failures must not brick a healthy recipe at the terminal,
@@ -3180,6 +3192,12 @@ export class WorkflowRecipeReconciler {
     // ─── Workflow Delete (Stage 1) ────────────────────────────────────
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
     if (isWorkflow && this.workflowReconciler) {
+      // Fence the SDK capability before the workflow deletion pipeline removes
+      // the shared mcp-host/token resources. Hybrid recipes must not bypass
+      // broker revocation merely because they also have coordinator state.
+      if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
+        await this.cleanupPluginWorkloadSdkOrThrow(name)
+      }
       await this.workflowReconciler.reconcileDelete(name, recipe.metadata.namespace, recipe.spec)
       await this.cleanupDelegationIfNeeded(recipe)
       await this.cleanupDeclaredRuntimeResources(recipe)
@@ -3190,7 +3208,7 @@ export class WorkflowRecipeReconciler {
     // a capability may have been removed in an update before Kubernetes emits
     // the final delete event, and cleanup must still revoke its host tokens.
     if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
-      await this.cleanupPluginWorkloadSdkOnlyOrThrow(name)
+      await this.cleanupPluginWorkloadSdkOrThrow(name)
     }
 
     await this.cleanupDelegationIfNeeded(recipe)

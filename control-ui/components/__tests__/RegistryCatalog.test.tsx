@@ -138,7 +138,7 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
     // Panel title is "Connectors" (the "Marketplace" tab labels the section); no count.
-    expect(screen.getByText('Connectors')).toBeInTheDocument()
+    expect(screen.getByText('Connectors', { selector: '.cu-panel-title' })).toBeInTheDocument()
     expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 

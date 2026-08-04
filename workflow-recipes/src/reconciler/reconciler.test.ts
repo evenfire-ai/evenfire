@@ -343,6 +343,7 @@ describe('WorkflowRecipeReconciler', () => {
       phase: 'deploying',
       message: 'Plugin Workload SDK bootstrap identity proof pending',
       requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      requeueFixedInterval: true,
     })
   })
 
@@ -381,20 +382,21 @@ describe('WorkflowRecipeReconciler', () => {
       phase: 'deploying',
       message: 'Plugin Workload SDK mcp-host starting',
       requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      requeueFixedInterval: true,
     })
   })
 
   it('cleans SDK-only runtime resources after the capability is removed without invoking workflow reconciliation', async () => {
-    const cleanupPluginWorkloadSdkOnly = vi.fn().mockResolvedValue(undefined)
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
     const workflowReconcile = vi.fn()
     ;(
       reconciler as unknown as {
         workflowReconciler: {
           reconcile: typeof workflowReconcile
-          cleanupPluginWorkloadSdkOnly: typeof cleanupPluginWorkloadSdkOnly
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
         }
       }
-    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdkOnly }
+    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdk }
 
     const result = await reconciler.reconcile(
       makeRecipe({
@@ -406,19 +408,47 @@ describe('WorkflowRecipeReconciler', () => {
     )
 
     expect(result.phase).toBe('active')
-    expect(cleanupPluginWorkloadSdkOnly).toHaveBeenCalledWith('test-recipe')
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
+  it.each(['failed', 'deprecated', 'rollback-failed'] as const)(
+    'cleans a removed SDK capability even when the recipe is already %s',
+    async phase => {
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler = { cleanupPluginWorkloadSdk }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          status: {
+            phase,
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+            },
+          },
+        })
+      )
+
+      expect(result.phase).toBe(phase)
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
+    }
+  )
+
   it('tears down an existing SDK-only host when the global feature flag is disabled', async () => {
-    const cleanupPluginWorkloadSdkOnly = vi.fn().mockResolvedValue(undefined)
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
     const workflowReconcile = vi.fn()
     ;(
       reconciler as unknown as {
         config: { pluginWorkloadSdkEnabled: boolean }
         workflowReconciler: {
           reconcile: typeof workflowReconcile
-          cleanupPluginWorkloadSdkOnly: typeof cleanupPluginWorkloadSdkOnly
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
         }
       }
     ).config.pluginWorkloadSdkEnabled = false
@@ -426,10 +456,10 @@ describe('WorkflowRecipeReconciler', () => {
       reconciler as unknown as {
         workflowReconciler: {
           reconcile: typeof workflowReconcile
-          cleanupPluginWorkloadSdkOnly: typeof cleanupPluginWorkloadSdkOnly
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
         }
       }
-    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdkOnly }
+    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdk }
 
     const result = await reconciler.reconcile(
       makeRecipe({
@@ -449,7 +479,7 @@ describe('WorkflowRecipeReconciler', () => {
       pluginWorkloadSdkTeardownConfirmed: true,
       message: 'Plugin Workload SDK disabled after confirmed teardown',
     })
-    expect(cleanupPluginWorkloadSdkOnly).toHaveBeenCalledWith('test-recipe')
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
@@ -4050,6 +4080,40 @@ describe('WorkflowRecipeReconciler', () => {
       name: 'test-recipe-web-search-12345678',
       namespace: 'mcp-server',
     })
+  })
+
+  it('fences SDK authority before deleting a hybrid workflow recipe', async () => {
+    const order: string[] = []
+    const cleanupPluginWorkloadSdk = vi.fn(async () => {
+      order.push('sdk-revoke-and-cleanup')
+    })
+    const workflowInfraCleanup = vi.fn(async () => {
+      order.push('workflow-cleanup')
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+          reconcileDelete: typeof workflowInfraCleanup
+        }
+      }
+    ).workflowReconciler = { cleanupPluginWorkloadSdk, reconcileDelete: workflowInfraCleanup }
+
+    const recipe = makeRecipe({
+      spec: {
+        steps: [{ id: 'research', instruction: 'run' }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['api'] },
+      },
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+      },
+    })
+
+    await reconciler.reconcileDelete(recipe)
+
+    expect(order).toEqual(['sdk-revoke-and-cleanup', 'workflow-cleanup'])
+    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
   })
 
   it('forwards custom coordinator workflow fields to the workflow reconciler', async () => {

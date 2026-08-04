@@ -83,7 +83,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         contractVersion: 2,
-        supportedContractVersions: [1, 2],
+        supportedContractVersions: [2],
         targetAwarePromptBridge: true,
         attemptLedger: true,
         credentialTickets: true,
@@ -117,7 +117,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         contractVersion: 2,
-        supportedContractVersions: [1, 2],
+        supportedContractVersions: [2],
         targetAwarePromptBridge: true,
         attemptLedger: true,
         credentialTickets: true,
@@ -147,13 +147,13 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     })
   })
 
-  it('derives the provider-call disposition for an older control-api response', async () => {
-    const { providerCallRequired: _omitted, ...legacyBody } = authorizedBody('legacy-invocation')
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, legacyBody))
+  it('rejects a response missing the v2 provider-call disposition', async () => {
+    const { providerCallRequired: _omitted, ...incompleteBody } =
+      authorizedBody('legacy-invocation')
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, incompleteBody))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
-    await expect(client.authorizePromptBridge(promptBody)).resolves.toMatchObject({
-      replay: false,
-      providerCallRequired: true,
+    await expect(client.authorizePromptBridge(promptBody)).rejects.toMatchObject({
+      code: 'provider_unavailable',
     })
   })
 

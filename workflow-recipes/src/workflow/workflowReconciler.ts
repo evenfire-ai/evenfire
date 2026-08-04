@@ -947,11 +947,12 @@ export class WorkflowReconciler {
   }
 
   /**
-   * Remove resources owned exclusively by the SDK-only eager host. This is
-   * intentionally narrower than workflow deletion so dropping the capability
-   * cannot create or tear down workflow execution state.
+   * Revoke and physically fence the Plugin Workload SDK capability. This is
+   * capability-level cleanup, deliberately independent from workflow
+   * coordinator teardown so both SDK-only and hybrid recipes share the same
+   * authorization-fencing invariant.
    */
-  async cleanupPluginWorkloadSdkOnly(recipeName: string): Promise<void> {
+  async cleanupPluginWorkloadSdk(recipeName: string): Promise<void> {
     const ns = this.deps.config.sandboxNamespace
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
     const networkPolicyNames = [
@@ -963,30 +964,28 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
     ]
-    let revocationError: unknown = null
     let revocationReceipt: PluginWorkloadSdkRevocationReceipt | null = null
     const revocationClient = this.deps.pluginWorkloadSdkRevocationClient
     if (!revocationClient) {
-      revocationError = new Error(
-        'Plugin Workload SDK revocation client is not configured; refusing to report teardown complete'
+      throw new Error(
+        'Plugin Workload SDK revocation client is not configured; refusing to tear down an unfenced capability'
       )
-    } else {
-      try {
-        revocationReceipt = await revocationClient.revoke(ns, recipeName)
-        if (revocationReceipt.state === 'conflict') {
-          throw new Error(`Plugin Workload SDK revocation conflict for recipe "${recipeName}"`)
-        }
-      } catch (error) {
-        // Continue with the physical boundary even if control-api is briefly
-        // unavailable. The service/network teardown prevents new ingress;
-        // the original error is rethrown after absence is proven so WRC does
-        // not publish `disabled` and the next reconcile retries the fence.
-        revocationError = error
-        this.log.error('Plugin Workload SDK control-plane revocation failed', {
-          recipeName,
-          error: error instanceof Error ? error.message : String(error),
-        })
+    }
+    try {
+      // Authorization fencing is the first state transition. If Control API
+      // cannot revoke (or reports a CAS conflict), retain the finalizer and
+      // every owned runtime object for a retry; deleting locally first would
+      // hide an unfenced broker grant and make recovery non-deterministic.
+      revocationReceipt = await revocationClient.revoke(ns, recipeName)
+      if (revocationReceipt.state === 'conflict') {
+        throw new Error(`Plugin Workload SDK revocation conflict for recipe "${recipeName}"`)
       }
+    } catch (error) {
+      this.log.error('Plugin Workload SDK control-plane revocation failed', {
+        recipeName,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
     }
     // Close the service and network-policy edges before removing the pod or
     // token Secrets. This ordering is the revocation boundary: a live pod
@@ -1048,8 +1047,7 @@ export class WorkflowReconciler {
       ),
     ])
     await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames)
-    if (revocationError) throw revocationError
-    if (revocationClient && revocationReceipt?.state === 'revoking') {
+    if (revocationReceipt.state === 'revoking') {
       if (!revocationReceipt.revocationId) {
         throw new Error(`Plugin Workload SDK revocation receipt for ${recipeName} has no epoch`)
       }
@@ -1058,9 +1056,13 @@ export class WorkflowReconciler {
         recipeName,
         revocationReceipt.revocationId
       )
-      if (finalized.state !== 'disabled') {
+      // `missing` is also terminal: an operator may have removed the grant
+      // after the revocation epoch was fenced. There is no remaining broker
+      // authority to finalize in that case, so retaining the recipe finalizer
+      // would turn a safe, idempotent cleanup into a permanent wedge.
+      if (finalized.state !== 'disabled' && finalized.state !== 'missing') {
         throw new Error(
-          `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled`
+          `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled or absent`
         )
       }
     }
@@ -4417,6 +4419,14 @@ export class WorkflowReconciler {
     const refreshExp = WorkflowReconciler.jwtExp(refreshJwt)
     const accessBinding = WorkflowReconciler.jwtRuntimeBinding(accessJwt)
     const refreshBinding = WorkflowReconciler.jwtRuntimeBinding(refreshJwt)
+    const accessScopes = WorkflowReconciler.jwtWorkflowControlScopes(
+      accessJwt,
+      'workflowControlScopes'
+    )
+    const refreshScopes = WorkflowReconciler.jwtWorkflowControlScopes(
+      refreshJwt,
+      'workflowControlScopes'
+    )
     const rawMcpHostControl = existing.data?.['mcp-host-workflow-control-token']
     const mcpHostControlJwt = rawMcpHostControl
       ? Buffer.from(rawMcpHostControl, 'base64').toString('utf-8')
@@ -4455,6 +4465,9 @@ export class WorkflowReconciler {
         expectedControlHostRef
       )
     const controlScopesMismatch = !workflowControlScopesEqual(controlScopes, workflowControlScopes)
+    const runtimeScopesMismatch =
+      !workflowControlScopesEqual(accessScopes, workflowControlScopes) ||
+      !workflowControlScopesEqual(refreshScopes, workflowControlScopes)
     const gfsSubjectMismatch = !!rawGfsAccess && gfsAccessSub !== expectedGfsSubject
     const gfsScopesMismatch = !gfsScopesEqual(gfsAccessScopes, expectedGfsScopes)
     const refreshBeforeSeconds = this.runtimeTokenFileRefreshBeforeSeconds
@@ -4462,6 +4475,7 @@ export class WorkflowReconciler {
       accessExp === 0 ||
       refreshExp === 0 ||
       runtimeBindingMismatch ||
+      runtimeScopesMismatch ||
       accessExp - nowSecs < refreshBeforeSeconds ||
       refreshExp - nowSecs < refreshBeforeSeconds
 
@@ -4482,6 +4496,7 @@ export class WorkflowReconciler {
 
     if (
       runtimeBindingMismatch ||
+      runtimeScopesMismatch ||
       controlBindingMismatch ||
       controlScopesMismatch ||
       gfsSubjectMismatch ||
@@ -4492,6 +4507,8 @@ export class WorkflowReconciler {
         runtimeScopeRecipeName,
         accessBinding,
         refreshBinding,
+        accessScopes,
+        refreshScopes,
         controlBinding,
         controlScopes,
         expectedControlScopes: workflowControlScopes,
@@ -4609,10 +4626,13 @@ export class WorkflowReconciler {
     }
   }
 
-  private static jwtWorkflowControlScopes(jwt: string): WorkflowControlScope[] {
+  private static jwtWorkflowControlScopes(
+    jwt: string,
+    claim: 'scopes' | 'workflowControlScopes' = 'scopes'
+  ): WorkflowControlScope[] {
     try {
       const payload = decodeJwt(jwt)
-      const scopes = Array.isArray(payload.scopes) ? payload.scopes : []
+      const scopes = Array.isArray(payload[claim]) ? payload[claim] : []
       const normalized: WorkflowControlScope[] = []
       const seen = new Set<string>()
       for (const scope of scopes) {

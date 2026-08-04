@@ -18,6 +18,8 @@ REPO="$(cd "$HERE/../.." && pwd)"
 
 # shellcheck source=scripts/e2e/load-dotenv.sh
 source "$HERE/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "$HERE/admin-credentials.sh"
 
 CALLER_KUBECONTEXT="${KUBECONTEXT:-}"
 CALLER_E2E_K8S_CONTEXT="${E2E_K8S_CONTEXT:-}"
@@ -40,6 +42,41 @@ CALLER_MCP_HOST_BASE_URL="${MCP_HOST_BASE_URL:-}"
 # Load the canonical root .env as data so AIRTABLE_API_KEY + AIRTABLE_BASE_ID
 # reach preflight without executing arbitrary dotenv content.
 dotenv_load_canonical_root "$REPO"
+
+# Resolve credentials by origin rather than by inherited variable name. The
+# canonical root .env is the seed source for the branch-owned cluster, so a
+# stale E2E_ADMIN_PASSWORD in the parent shell must not silently win. The
+# local fallback is used only when no canonical/process credential exists.
+RESOLVED_ADMIN_PASSWORD="$(e2e_resolve_admin_password "$REPO" "$(printf '%s%s' 'changeme123' '!')" || true)"
+if [[ -z "$RESOLVED_ADMIN_PASSWORD" ]]; then
+  echo '[playwright-dev] ERROR: no admin password is configured in the canonical root .env or process environment' >&2
+  exit 1
+fi
+export E2E_ADMIN_PASSWORD="$RESOLVED_ADMIN_PASSWORD"
+export ADMIN_PASSWORD="$RESOLVED_ADMIN_PASSWORD"
+export TEST_ADMIN_PASSWORD="$RESOLVED_ADMIN_PASSWORD"
+
+# The SDK T3 lane is intentionally deterministic and provider-bounded. Never
+# inherit the host-wide Z.AI selection into this journey: an unavailable or
+# rate-limited provider would make an infrastructure check look like a product
+# failure. Callers may choose either approved provider explicitly.
+SDK_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-${CLERUM_MODEL_PROVIDER:-openai}}"
+case "$SDK_PROVIDER" in
+  openai|claude) ;;
+  *)
+    echo "[playwright-dev] ERROR: Plugin Workload SDK Playwright requires OpenAI or Claude; got ${SDK_PROVIDER}" >&2
+    exit 1
+    ;;
+esac
+SDK_MODEL="${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-}}"
+if [[ -z "$SDK_MODEL" ]]; then
+  case "$SDK_PROVIDER" in
+    openai) SDK_MODEL='gpt-5.4-mini' ;;
+    claude) SDK_MODEL='claude-sonnet-4-6' ;;
+  esac
+fi
+export E2E_WORKFLOW_MODEL_PROVIDER="$SDK_PROVIDER"
+export E2E_WORKFLOW_MODEL_NAME="$SDK_MODEL"
 
 [[ -n "$CALLER_KUBECONTEXT" ]] && export KUBECONTEXT="$CALLER_KUBECONTEXT"
 [[ -n "$CALLER_E2E_K8S_CONTEXT" ]] && export E2E_K8S_CONTEXT="$CALLER_E2E_K8S_CONTEXT"

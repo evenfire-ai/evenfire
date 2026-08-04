@@ -28,6 +28,40 @@ import { AgentSpec, WorkflowConfig } from './types'
 export const PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR = '/var/run/clerum/plugin-workload-sdk/tokens'
 
 /**
+ * Annotation carrying the immutable contract used by an eager SDK mcp-host.
+ * Bare Pods have no Deployment template hash, so reconciliation must carry
+ * its own content address for safe same-image migrations.
+ */
+export const PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION =
+  'clerum.io/plugin-workload-sdk-runtime-contract-hash'
+
+function canonicalizeRuntimeContract(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRuntimeContract)
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return Object.fromEntries(
+      Object.keys(record)
+        .filter(key => record[key] !== undefined)
+        .sort()
+        .map(key => [key, canonicalizeRuntimeContract(record[key])])
+    )
+  }
+  return value
+}
+
+/**
+ * Hash only the PodSpec: metadata names, UIDs, timestamps, and the hash
+ * annotation itself are intentionally excluded. The spec contains the
+ * image, runtime mode/env, ports, volumes, service-account settings, probes,
+ * security context, and propagated runtime inputs that define the eager host
+ * contract.
+ */
+export function pluginWorkloadSdkRuntimeContractHash(pod: k8s.V1Pod): string {
+  const canonical = JSON.stringify(canonicalizeRuntimeContract({ spec: pod.spec }))
+  return createHash('sha256').update(canonical).digest('hex')
+}
+
+/**
  * Allowlist of env vars forwarded from the WRC controller's process.env into
  * each spawned mcp-host pod. Explicit list prevents leaking arbitrary secrets.
  */
@@ -585,7 +619,7 @@ export function buildMcpHostPod(
     mountWorkflowOutput && workflowOutputClaimName
       ? buildWorkflowOutputAffinity(workflowOutputClaimName)
       : undefined
-  return {
+  const pod: k8s.V1Pod = {
     apiVersion: 'v1',
     kind: 'Pod',
     metadata: {
@@ -806,6 +840,17 @@ export function buildMcpHostPod(
       ],
     },
   }
+  if (options.pluginWorkloadSdkEnabled === true) {
+    pod.metadata = {
+      ...pod.metadata,
+      annotations: {
+        ...(pod.metadata?.annotations ?? {}),
+        [PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION]:
+          pluginWorkloadSdkRuntimeContractHash(pod),
+      },
+    }
+  }
+  return pod
 }
 
 export function buildMcpHostHeadlessService(

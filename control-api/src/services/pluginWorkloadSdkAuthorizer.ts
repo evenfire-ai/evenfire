@@ -106,8 +106,6 @@ export interface AuthorizePromptBridgeParams {
   /** Canonical request payload — hashed for idempotency conflict detection. */
   payload: unknown
   correlationId?: string
-  /** True only for the temporary pre-v2 mcp-host compatibility route. */
-  legacyProtocol?: boolean
 }
 
 export interface AuthorizedPromptBridge {
@@ -274,10 +272,6 @@ async function authorizePromptBridgeInner(
   const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
   if (!grant) {
     return deny('capability_not_declared', 'recipe has no promptBridge grant')
-  }
-
-  if (params.legacyProtocol) {
-    return authorizeLegacyPromptBridge(params, grant)
   }
 
   if (grant.policyState !== 'active' || grant.policyRevision < 1) {
@@ -489,180 +483,6 @@ async function authorizePromptBridgeInner(
       attemptGeneration: recorded.invocation.attemptGeneration,
       policyRevision: grant.policyRevision,
       policyHash: resolvedPolicyHash,
-      maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
-    },
-  }
-}
-
-/**
- * Narrow compatibility lane for an older mcp-host during a rolling upgrade.
- * It deliberately reads only the legacy provider + flat allowedModels fields,
- * never target policy/JIT data, and records contract_version=1.  This keeps an
- * old host on its already configured single provider while v2 owns the new
- * multiprovider target contract.
- */
-async function authorizeLegacyPromptBridge(
-  params: AuthorizePromptBridgeParams,
-  grant: PluginWorkloadSdkGrant
-): Promise<PluginWorkloadSdkAuthzResult<AuthorizedPromptBridge>> {
-  const { claims, callerRef } = params
-  if (grant.policyState !== 'legacy_unreviewed' && grant.policyState !== 'active') {
-    return deny('provider_policy_denied', 'promptBridge policy is being revoked or is disabled')
-  }
-  const callerError = checkCaller(grant, callerRef)
-  if (callerError) return callerError
-  if (params.targetRef !== undefined || params.modelPolicyRef !== undefined) {
-    return deny(
-      'protocol_mismatch',
-      'legacy promptBridge accepts only the configured provider and model; upgrade mcp-host for target selectors',
-      true
-    )
-  }
-  const provider = grant.provider?.trim() || params.bootstrapProvider?.trim() || ''
-  const model = params.model?.trim() || params.bootstrapModel?.trim() || grant.allowedModels[0]
-  if (!provider || !model || grant.allowedModels.length === 0) {
-    return deny(
-      'provider_policy_denied',
-      'legacy promptBridge grant has no explicit provider/model binding; review it before use'
-    )
-  }
-  if (params.provider !== undefined && params.provider !== provider) {
-    return deny(
-      'provider_policy_denied',
-      'legacy promptBridge provider is fixed by the host binding'
-    )
-  }
-  if (params.bootstrapProvider !== undefined && params.bootstrapProvider.trim() !== provider) {
-    return deny(
-      'provider_policy_denied',
-      'legacy promptBridge bootstrap provider is not authorized'
-    )
-  }
-  if (params.bootstrapModel !== undefined && params.bootstrapModel.trim() !== model) {
-    return deny('provider_policy_denied', 'legacy promptBridge bootstrap model is not authorized')
-  }
-  if (!grant.allowedModels.includes(model)) {
-    return deny('target_not_allowed', 'requested model is not in the legacy grant allowlist')
-  }
-
-  const selectedTarget: PluginWorkloadSdkPromptTarget = {
-    targetRef: `legacy:${provider}:${model}`,
-    provider,
-    model,
-    credentialSlot: 'legacy-host-binding',
-  }
-  const recorded = await recordInvocation({
-    recipeNamespace: claims.recipeNamespace,
-    recipeName: claims.recipeName,
-    callerRef,
-    correlationId: params.correlationId,
-    method: 'promptBridge',
-    detail: model,
-    purpose: params.purpose,
-    idempotencyKey: params.idempotencyKey,
-    payload: params.payload,
-    status: 'in_progress',
-    authorizationDecision: 'authorized',
-    contractVersion: 1,
-    requiredGrantStates: ['active', 'legacy_unreviewed'],
-  })
-  if (recorded.kind === 'policy_revoked') {
-    return deny(
-      'provider_policy_denied',
-      'legacy promptBridge policy was revoked before invocation reservation'
-    )
-  }
-  if (recorded.kind === 'conflict') {
-    return deny('idempotency_conflict', 'idempotency key was already used with a different payload')
-  }
-  if (recorded.kind === 'race_unresolved') {
-    return deny('idempotency_conflict', 'idempotency reservation could not be resolved', true)
-  }
-  if (recorded.kind === 'replay') {
-    if (recorded.invocation.contractVersion !== 1 || recorded.invocation.status === 'failed') {
-      return deny(
-        'idempotency_conflict',
-        'legacy invocation cannot be replayed after a failed or upgraded attempt; retry with a new key'
-      )
-    }
-    return {
-      ok: true,
-      value: {
-        invocationId: recorded.invocation.id,
-        replay: true,
-        providerCallRequired: false,
-        status: recorded.invocation.status,
-        model: selectedTarget.model,
-        modelPolicy: null,
-        selectedTarget,
-        authorizedTargets: [selectedTarget],
-        attemptGeneration: recorded.invocation.attemptGeneration,
-        policyRevision: 0,
-        policyHash: '0'.repeat(64),
-        maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
-      },
-    }
-  }
-
-  try {
-    const rate = await checkRateLimit(
-      claims.recipeNamespace,
-      claims.recipeName,
-      'promptBridge',
-      grant
-    )
-    if (!rate.ok) {
-      await markInvocationStatus(recorded.invocation.id, 'failed', {
-        recipeNamespace: claims.recipeNamespace,
-        recipeName: claims.recipeName,
-        expectedCurrentStatus: 'in_progress',
-        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
-      })
-      return deny(rate.error, rate.message)
-    }
-    const quota = await consumeQuota(
-      claims.recipeNamespace,
-      claims.recipeName,
-      'promptBridge',
-      grant
-    )
-    if (!quota.ok) {
-      await markInvocationStatus(recorded.invocation.id, 'failed', {
-        recipeNamespace: claims.recipeNamespace,
-        recipeName: claims.recipeName,
-        expectedCurrentStatus: 'in_progress',
-        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
-      })
-      return deny(quota.error, quota.message)
-    }
-  } catch (error) {
-    try {
-      await markInvocationStatus(recorded.invocation.id, 'failed', {
-        recipeNamespace: claims.recipeNamespace,
-        recipeName: claims.recipeName,
-        expectedCurrentStatus: 'in_progress',
-        expectedAttemptGeneration: recorded.invocation.attemptGeneration,
-      })
-    } catch {
-      // Preserve the original database/rate error; maintenance will fence it.
-    }
-    throw error
-  }
-
-  return {
-    ok: true,
-    value: {
-      invocationId: recorded.invocation.id,
-      replay: false,
-      providerCallRequired: true,
-      status: 'in_progress',
-      model: selectedTarget.model,
-      modelPolicy: null,
-      selectedTarget,
-      authorizedTargets: [selectedTarget],
-      attemptGeneration: recorded.invocation.attemptGeneration,
-      policyRevision: 0,
-      policyHash: '0'.repeat(64),
       maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
     },
   }

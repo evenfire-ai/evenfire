@@ -282,6 +282,7 @@ else
 fi
 
 if grep -Fq 'E2E_HARD_MAX_GATE_SECONDS=600' "$SCRIPT" &&
+   grep -Fq 'E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-600}"' "$SCRIPT" &&
    grep -Fq 'E2E_HARD_MAX_PHASE_WAIT_SECONDS=180' "$SCRIPT" &&
    grep -Fq 'E2E_HARD_MAX_POLL_INTERVAL_SECONDS=5' "$SCRIPT" &&
    grep -Fq 'validate_bounded_seconds E2E_GATE_MAX_SECONDS' "$SCRIPT" &&
@@ -289,6 +290,19 @@ if grep -Fq 'E2E_HARD_MAX_GATE_SECONDS=600' "$SCRIPT" &&
   pass 'Plugin Workload SDK E2E rejects human-scale waits before creating resources'
 else
   fail 'Plugin Workload SDK E2E lacks fail-closed wait ceilings'
+fi
+
+make_line="$(make -n MINIKUBE_PROFILE=clerum-codex-context-test test-e2e-plugin-workload-sdk 2>&1 || true)"
+if [[ "$make_line" == *'KUBECONTEXT="${KUBECONTEXT:-clerum-codex-context-test}"'* ]]; then
+  pass 'Plugin Workload SDK Make target propagates the explicit branch context'
+else
+  fail 'Plugin Workload SDK Make target lost the explicit branch context'
+fi
+
+if [[ "$make_line" != *'KUBECONTEXT="${KUBECONTEXT:-${E2E_KUBECONTEXT:-}}"'* ]]; then
+  pass 'Plugin Workload SDK Make target does not fall back to global kubectl context'
+else
+  fail 'Plugin Workload SDK Make target still permits global kubectl context fallback'
 fi
 
 exit "$FAIL"

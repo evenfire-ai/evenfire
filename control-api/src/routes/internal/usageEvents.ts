@@ -2,11 +2,6 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import type { DbClient } from '../../db.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import {
-  getInvocationById,
-  getPluginWorkloadSdkAttemptReceipt,
-  getPluginWorkloadSdkProviderAttempt,
-} from '../../services/pluginWorkloadSdkDb.js'
 import { withTraceIngestTransaction } from '../../services/tracing/pools.js'
 import { projectAcceptedUsageEvents } from '../../services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../../services/usageEvents.js'
@@ -174,110 +169,97 @@ async function checkSdkOnlyUsageBinding(
   claims: McpHostAccessClaims,
   db: DbClient
 ): Promise<BindingViolation | null> {
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index]
-    if (!event || typeof event !== 'object') continue
+  const sdkEvents = events.flatMap((event, index) => {
+    if (!event || typeof event !== 'object') return []
     const record = event as Record<string, unknown>
-    const isSdkOnlySource =
-      record.source_kind === 'unknown' || record.source_kind === 'plugin_workload_sdk'
-    const isWorkflowSdkSource =
+    const sdkSource =
+      (record.source_kind === 'unknown' || record.source_kind === 'plugin_workload_sdk') &&
+      record.channel_type === 'plugin_workload_sdk'
+    const workflowSdkSource =
       record.source_kind === 'workflow' && record.channel_type === 'plugin_workload_sdk'
-    if (!isSdkOnlySource && !isWorkflowSdkSource) continue
+    return sdkSource || workflowSdkSource ? [{ index, record }] : []
+  })
+  if (sdkEvents.length === 0) return null
+
+  const invocationIds = new Set<string>()
+  const providerAttemptIds = new Set<string>()
+  for (const { index, record } of sdkEvents) {
     const metadata = record.prompt_bridge_metadata
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) continue
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
+    }
     const invocationId = (metadata as { invocation_id?: unknown }).invocation_id
-    if (typeof invocationId !== 'string') continue
-    const attemptGeneration = (metadata as { attempt_generation?: unknown }).attempt_generation
+    const generation = (metadata as { attempt_generation?: unknown }).attempt_generation
     const providerAttemptId = (metadata as { provider_attempt_id?: unknown }).provider_attempt_id
     const providerAttemptIndex = (metadata as { provider_attempt_index?: unknown })
       .provider_attempt_index
-    if (isSdkOnlySource || isWorkflowSdkSource) {
-      // A pre-v2 host cannot emit a physical-attempt receipt. Keep its
-      // compatibility lane explicit and narrow: the persisted invocation must
-      // be contract v1 and the event must match that legacy provider/model.
-      if (!Number.isInteger(attemptGeneration) || Number(attemptGeneration) < 1) {
-        const invocation = await getInvocationById(invocationId, db)
-        if (
-          !invocation ||
-          invocation.contractVersion !== 1 ||
-          invocation.recipeNamespace !== claims.recipeNamespace ||
-          invocation.recipeName !== claims.recipeName ||
-          invocation.method !== 'promptBridge' ||
-          !['in_progress', 'complete'].includes(invocation.status) ||
-          invocation.authorizationDecision !== 'authorized' ||
-          invocation.detail !== String(record.model ?? '')
-        ) {
-          return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-        }
-        continue
-      }
-      const receipt = await getPluginWorkloadSdkAttemptReceipt(
-        invocationId,
-        Number(attemptGeneration),
-        db
-      )
-      const targetRef = String((metadata as { target_ref?: unknown }).target_ref ?? '')
-      if (
-        !receipt ||
-        receipt.method !== 'promptBridge' ||
-        receipt.recipeNamespace !== claims.recipeNamespace ||
-        receipt.recipeName !== claims.recipeName
-      ) {
-        return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-      }
-      const hasPhysicalAttempt =
-        typeof providerAttemptId === 'string' && Number.isInteger(providerAttemptIndex)
-      if (!hasPhysicalAttempt) {
-        const invocation = await getInvocationById(invocationId, db)
-        if (
-          !invocation ||
-          invocation.contractVersion !== 1 ||
-          invocation.recipeNamespace !== claims.recipeNamespace ||
-          invocation.recipeName !== claims.recipeName ||
-          invocation.method !== 'promptBridge' ||
-          !['in_progress', 'complete'].includes(invocation.status) ||
-          invocation.authorizationDecision !== 'authorized' ||
-          invocation.detail !== String(record.model ?? '')
-        ) {
-          return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-        }
-        continue
-      }
-      const providerAttempt = await getPluginWorkloadSdkProviderAttempt(
-        providerAttemptId as string,
-        db
-      )
-      if (
-        !receipt.targetRefs.includes(targetRef) ||
-        !providerAttempt ||
-        providerAttempt.invocationId !== invocationId ||
-        providerAttempt.attemptGeneration !== Number(attemptGeneration) ||
-        providerAttempt.attemptIndex !== Number(providerAttemptIndex) ||
-        providerAttempt.targetRef !== targetRef ||
-        providerAttempt.provider !== String(record.provider ?? '') ||
-        providerAttempt.model !== String(record.model ?? '') ||
-        providerAttempt.credentialSlot !==
-          String((metadata as { credential_slot?: unknown }).credential_slot ?? '') ||
-        providerAttempt.status !== 'complete'
-      ) {
-        return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-      }
-      continue
-    }
-    const invocation = await getInvocationById(invocationId, db)
     if (
-      !invocation ||
-      invocation.recipeNamespace !== claims.recipeNamespace ||
-      invocation.recipeName !== claims.recipeName ||
-      invocation.method !== 'promptBridge' ||
-      // UsageReporter enqueues before the handler's terminal status POST; an
-      // in-flight invocation is therefore a valid server-bound usage source.
-      !['in_progress', 'complete'].includes(invocation.status) ||
-      invocation.authorizationDecision !== 'authorized' ||
-      !invocation.promptAuthorization ||
-      !invocation.promptAuthorization.authorizedTargetRefs.includes(
-        String((metadata as { target_ref?: unknown }).target_ref ?? '')
-      )
+      typeof invocationId !== 'string' ||
+      !Number.isInteger(generation) ||
+      Number(generation) < 1 ||
+      typeof providerAttemptId !== 'string' ||
+      !Number.isInteger(providerAttemptIndex) ||
+      Number(providerAttemptIndex) < 1
+    ) {
+      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
+    }
+    invocationIds.add(invocationId)
+    providerAttemptIds.add(providerAttemptId)
+  }
+
+  const [receiptResult, providerAttemptResult] = await Promise.all([
+    db.query(
+      `SELECT invocation_id::text, attempt_generation, method, target_refs, recipe_namespace, recipe_name
+         FROM plugin_workload_sdk_invocation_attempts
+        WHERE invocation_id = ANY($1::uuid[])`,
+      [[...invocationIds]]
+    ),
+    db.query(
+      `SELECT id::text, invocation_id::text, attempt_generation, attempt_index,
+              target_ref, provider, model, credential_slot, status,
+              recipe_namespace, recipe_name
+         FROM plugin_workload_sdk_provider_attempts
+        WHERE id = ANY($1::uuid[])`,
+      [[...providerAttemptIds]]
+    ),
+  ])
+  const receipts = new Map(
+    (receiptResult.rows as Array<Record<string, unknown>>).map(row => [
+      `${String(row.invocation_id)}:${Number(row.attempt_generation)}`,
+      row,
+    ])
+  )
+  const providerAttempts = new Map(
+    (providerAttemptResult.rows as Array<Record<string, unknown>>).map(row => [String(row.id), row])
+  )
+
+  for (const { index, record } of sdkEvents) {
+    const metadata = record.prompt_bridge_metadata as Record<string, unknown>
+    const invocationId = String(metadata.invocation_id)
+    const generation = Number(metadata.attempt_generation)
+    const providerAttemptId = String(metadata.provider_attempt_id)
+    const providerAttemptIndex = Number(metadata.provider_attempt_index)
+    const targetRef = String(metadata.target_ref ?? '')
+    const receipt = receipts.get(`${invocationId}:${generation}`)
+    const providerAttempt = providerAttempts.get(providerAttemptId)
+    const targetRefs = Array.isArray(receipt?.target_refs) ? receipt.target_refs.map(String) : []
+    if (
+      !receipt ||
+      receipt.method !== 'promptBridge' ||
+      receipt.recipe_namespace !== claims.recipeNamespace ||
+      receipt.recipe_name !== claims.recipeName ||
+      !targetRefs.includes(targetRef) ||
+      !providerAttempt ||
+      providerAttempt.invocation_id !== invocationId ||
+      Number(providerAttempt.attempt_generation) !== generation ||
+      Number(providerAttempt.attempt_index) !== providerAttemptIndex ||
+      providerAttempt.recipe_namespace !== claims.recipeNamespace ||
+      providerAttempt.recipe_name !== claims.recipeName ||
+      providerAttempt.target_ref !== targetRef ||
+      providerAttempt.provider !== String(record.provider ?? '') ||
+      providerAttempt.model !== String(record.model ?? '') ||
+      providerAttempt.credential_slot !== String(metadata.credential_slot ?? '') ||
+      providerAttempt.status !== 'complete'
     ) {
       return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
     }
