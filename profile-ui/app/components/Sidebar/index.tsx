@@ -43,7 +43,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
         {navigationItems.map(([routeKey, item]) => {
           const accessLoading =
             (routeKey === 'members' && manageableTeamsLoading && !canManageMembers) ||
-            (routeKey === 'approvalChannels' && approvalTargetsLoading)
+            (routeKey === 'approvalChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
           const accessDenied =
             (routeKey === 'members' && !canManageMembers) ||
             (routeKey === 'approvalChannels' && !hasExternalChannelAccess)
