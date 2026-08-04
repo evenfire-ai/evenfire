@@ -1,6 +1,25 @@
 ---
-# Minikube: workflow-recipes points at the local evenfire-registry deploy.
-# Auth is disabled in minikube — no registry-client-credentials Secret needed.
+# Minikube: workflow-recipes reads the SAME registry URL as control-api, sourced from the
+# one key that defines it (`control-api-config.CLERUM_REGISTRY_URL`) rather than a second
+# hardcoded copy here.
+#
+# This pairing is load-bearing, not tidiness. WRC decides whether to attach the platform
+# pull credential with `isPlatformRegistryImage(workload.image, registryUrl)`, which
+# compares the IMAGE host against this URL's host. control-api provisions that credential
+# using its own copy. When the two disagree, control-api mints and writes the Secret but
+# WRC never references it, so recipe pods get `ImagePullBackOff`
+# (`unauthorized: authentication required`) with an empty pod-level `imagePullSecrets`
+# while McpServers — whose reference control-api writes itself — keep working. That is
+# risk R3 in docs/architecture/registry-pull-secret-recipe-workloads.md, and it is exactly
+# what this file used to cause: it pinned WRC to the in-cluster registry while
+# control-api pointed at https://registry.evenfire.ai.
+#
+# Sourcing both from one key makes the divergence unrepresentable. Point
+# control-api-config at a different registry (e.g. your own in-cluster deploy) and WRC
+# follows automatically.
+#
+# Auth stays disabled here: WRC's catalog client has no machine credentials wired, and
+# with auth off it reads anonymously instead of throwing.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +32,9 @@ spec:
         - name: workflow-recipes
           env:
             - name: CLERUM_REGISTRY_URL
-              value: "http://registry-api.registry.svc.cluster.local:8085"
+              valueFrom:
+                configMapKeyRef:
+                  name: control-api-config
+                  key: CLERUM_REGISTRY_URL
             - name: CLERUM_REGISTRY_AUTH_ENABLED
               value: "false"

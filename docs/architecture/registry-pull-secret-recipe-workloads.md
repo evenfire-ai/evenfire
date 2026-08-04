@@ -259,12 +259,29 @@ control-api's `shouldAttachEvenfirePullSecret` becomes
 `isLocal && isPlatformRegistryImage(...)`, preserving its current semantics exactly. WRC
 calls `isPlatformRegistryImage` directly (recipe workloads have no `isLocal` notion).
 
-**New WRC config: reuse `CLERUM_REGISTRY_URL` verbatim** (WRC has no registry config
-today). Deliberately the *same* variable name control-api reads, not a WRC-prefixed alias:
-the two values must agree, and a shared name makes a mismatch a deployment error rather
-than a silent divergence. If they ever drift, recipe pods get no credential while MCP
-servers do — the hardest failure in this design to diagnose (R3), so the config is kept
-impossible to set inconsistently by accident.
+**New WRC config: reuse `CLERUM_REGISTRY_URL` verbatim.** Deliberately the *same* variable
+name control-api reads, not a WRC-prefixed alias: the two values must agree. If they drift,
+recipe pods get no credential while MCP servers do — the hardest failure in this design to
+diagnose (R3).
+
+A shared variable *name* is not by itself sufficient, and the original form of this section
+claimed more than it delivered on two counts. First, WRC did already have registry config:
+`registry/clerumRegistryClient.ts` reads `CLERUM_REGISTRY_URL` for catalog search (live via
+`mcp/handlers.ts`), so the variable is dual-purpose — API base URL for that client, image
+host for this predicate. Second, the values were not merely *possible* to set
+inconsistently, they were inconsistent **by default**: the shipped minikube overlay pinned
+WRC to `http://registry-api.registry.svc.cluster.local:8085` while control-api used
+`https://registry.evenfire.ai`, so R3 was the out-of-the-box behaviour and recipe installs
+reliably produced `ImagePullBackOff`. A shared predicate cannot prevent drift when each
+service feeds it a different value.
+
+What actually makes it safe is a single *definition*, not a single name:
+`control-api-config.CLERUM_REGISTRY_URL` is the only place the URL is written, and WRC
+projects that key via `configMapKeyRef` (`deploy/overlays/minikube/patches/registry-env.yaml`).
+Divergence is then unrepresentable in the overlay rather than merely discouraged. Any other
+overlay (notably the GCP/prod overlay, which lives in `evenfire-infra`) must establish the
+same pairing; WRC's base Deployment sets no `CLERUM_REGISTRY_URL`, so an overlay that
+neither patches it nor projects the key leaves it empty, which disables injection silently.
 
 ### 6.3 One mint, fanned out — the core correctness rule
 
@@ -502,7 +519,7 @@ working immediately.
 | --- | --- | --- |
 | R1 | Per-namespace minting revokes other namespaces' keys → partial cluster-wide `ImagePullBackOff`. | Single mint + fan-out write (§6.3); post-condition asserted in tests. |
 | R2 | Partial write (mint OK, one namespace fails) leaves a stale, undetectable key. | Fingerprint annotation makes divergence detectable and repairable (§6.3). |
-| R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | Shared predicate (§6.2) + documented config pairing; consider surfacing both values on a status/health endpoint. |
+| R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | **Was live, not hypothetical** — the shipped minikube overlay pinned WRC to the in-cluster registry while control-api used the shared one, so every recipe install hit it (found in live testing 2026-08-04). Closed for this overlay by making `control-api-config.CLERUM_REGISTRY_URL` the single definition and projecting it into WRC via `configMapKeyRef` (§6.2). Shared predicate alone was insufficient. **Still open elsewhere:** WRC's base Deployment sets no default, so any other overlay (GCP/prod in `evenfire-infra`) must repeat the pairing or injection silently disables; surfacing both values on a status/health endpoint is still worth doing. |
 | R4 | Someone "fixes" #637 denial by labelling the Secret `shared`. | §5.1 recorded as an explicit, permanent non-goal; add a test asserting the Secret is NOT `shared`/`owner-recipe` labeled. |
 | R5 | A recipe declares the reserved name and expects it honored. | **Closed.** Validation rejection (§6.1) shipped: `isPlatformManagedWorkflowSecretName` now reserves `EVENFIRE_REGISTRY_PULL_SECRET_NAME`, so `/validate`, POST, PUT and `POST /admin/recipes/secrets` reject the declaration at admission with a reserved-name rule. The #637 gate stays behind it as defense-in-depth for anything already persisted. |
 | R6 | Two extra copies of the credential. | Pull-only, org-scoped, no push; §8.2. |
