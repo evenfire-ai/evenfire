@@ -1,5 +1,5 @@
 import * as k8s from '@kubernetes/client-node'
-import { SecretUpsertRequest } from '../types.js'
+import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
 export class SecretService {
@@ -62,11 +62,27 @@ export class SecretService {
    * truth for the whole Secret body — admin /secrets, registry credentials,
    * inter-service token rotation. For multi-owner Secrets where individual
    * keys must survive a partial update, use `mergeSecret` instead.
+   *
+   * Pass `precondition` to make the replace ownership-bound rather than
+   * last-writer-wins (see `SecretPreconditions`). When it carries a
+   * `resourceVersion` the pre-read is SKIPPED and that version is sent as-is,
+   * so the API server rejects the write with 409 if anything touched the
+   * object since the caller read it. Re-reading here would defeat the entire
+   * point, by refreshing away the staleness we are trying to detect.
+   *
+   * Because that read is skipped, a precondition caller must supply everything
+   * it wants persisted: the `labels`/`annotations`/`type` fallbacks to the
+   * existing object are not available on this path.
    */
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async updateSecret(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
-    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    const existing = precondition?.resourceVersion
+      ? undefined
+      : await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -74,11 +90,14 @@ export class SecretService {
       metadata: {
         name: req.name,
         namespace: ns,
-        resourceVersion: existing.metadata?.resourceVersion,
-        labels: req.labels || existing.metadata?.labels,
-        annotations: req.annotations || existing.metadata?.annotations,
+        resourceVersion: precondition?.resourceVersion ?? existing?.metadata?.resourceVersion,
+        // Enforced by the API server when set: a replace naming a different uid than the
+        // stored object is refused. Free when the caller does not set it.
+        ...(precondition?.uid ? { uid: precondition.uid } : {}),
+        labels: req.labels || existing?.metadata?.labels,
+        annotations: req.annotations || existing?.metadata?.annotations,
       },
-      type: req.type || existing.type || 'Opaque',
+      type: req.type || existing?.type || 'Opaque',
       data: req.data,
       stringData: req.stringData,
     }
@@ -148,10 +167,36 @@ export class SecretService {
     )
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
+  /**
+   * Delete a Secret by name.
+   *
+   * Pass `precondition` to bind the delete to a specific object rather than to
+   * whatever currently answers to that name (see `SecretPreconditions`). A
+   * name-addressed delete is the more dangerous of the two mutations: an
+   * ownership check followed by a bare delete will remove a REPLACEMENT object
+   * — including one an external owner created in the gap — on the strength of
+   * a decision made about something that no longer exists. With `uid` set the
+   * API server refuses that with 409 instead.
+   */
+  async deleteSecret(
+    name: string,
+    namespace?: string,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    const hasPrecondition = Boolean(precondition?.uid || precondition?.resourceVersion)
     return this.coreApi.deleteNamespacedSecret({
       namespace: namespace || this.defaultNamespace,
       name,
+      ...(hasPrecondition && {
+        body: {
+          preconditions: {
+            ...(precondition?.uid && { uid: precondition.uid }),
+            ...(precondition?.resourceVersion && {
+              resourceVersion: precondition.resourceVersion,
+            }),
+          },
+        },
+      }),
     })
   }
 }

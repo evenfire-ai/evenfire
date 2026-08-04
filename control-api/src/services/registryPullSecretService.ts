@@ -72,11 +72,11 @@
  * against each other, not against an operator, another controller or a `kubectl` replacing
  * the same NAME — and the reconcile cron reopens that window on every tick rather than once
  * per install. So every mutation re-proves ownership immediately before it acts, comparing
- * `metadata.uid` and the ownership marker against what was classified (`recheckOwnership`).
+ * `metadata.uid` and the ownership marker against what was classified (`recheckOwnership`),
+ * and then CARRIES that identity into the write itself as a precondition, so the apiserver
+ * refuses a replace or delete against an object that moved in the gap (`mutateOwned`).
  * A namespace that changed hands is recorded (`ownership_changed`) and left alone; one that
- * merely vanished is created, since the mint has already revoked whatever key it held. This
- * is a narrow compare-and-swap, not an atomic one — the proof read is a separate request —
- * and the residual is spelled out on `recheckOwnership`.
+ * merely vanished is created, since the mint has already revoked whatever key it held.
  */
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
@@ -87,7 +87,7 @@ import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   registryHostFromUrl,
 } from '../routes/admin/registryImagePullSecret.js'
-import type { SecretUpsertRequest } from '../types.js'
+import type { SecretPreconditions, SecretUpsertRequest } from '../types.js'
 import { mintOrgPullCredential, resolvePublishScope } from './registryClient.js'
 import { isRegistryAuthActive } from './registryConnectionDb.js'
 
@@ -493,9 +493,16 @@ function classify(current: SecretView | null, host: string): TargetState {
   return { kind: 'valid', fingerprint, observed }
 }
 
-/** What a pre-mutation re-read concluded about the object still sitting under that name. */
+/**
+ * What a pre-mutation re-read concluded about the object still sitting under that name.
+ *
+ * `same` carries the identity THAT READ saw, not the one `classify` saw: it is what the
+ * following mutation binds itself to, so the API server can reject the write if anything
+ * moves in between (see `mutateOwned`). Passing the older identity would pin the write to a
+ * version the object may legitimately have left behind.
+ */
 type OwnershipRecheck =
-  | { verdict: 'same' }
+  | { verdict: 'same'; current: SecretIdentity }
   | { verdict: 'gone' }
   | { verdict: 'taken'; why: string }
 
@@ -513,25 +520,29 @@ type OwnershipRecheck =
  * only holds for as long as nobody else moves — and the reconcile cron reopens the window
  * every tick rather than once per install.
  *
- * WHAT IT IS. A narrow compare-and-swap, NOT an atomic one: the proof read is a separate
- * API request from the mutation, so a takeover landing between the two still slips through.
- * What it buys is the size of the window — one round trip instead of the whole pass (read
- * all → mint → write all, with a registry call in the middle). Closing it completely means
- * an `If-Match`-style precondition on the write itself: `metadata.resourceVersion` on the
- * replace, and `preconditions.uid` on the delete. Both live in `SecretService`, which is
- * shared with the admin /secrets routes and inter-service token rotation, so changing their
- * semantics is out of scope here.
+ * WHAT IT IS — AND IS NOT. On its own this is only half a compare-and-swap: the proof read
+ * is a separate API request from the mutation, so a takeover landing between the two would
+ * still slip through. It is never called on its own for that reason. `mutateOwned` pairs it
+ * with an `If-Match`-style precondition on the write itself — the identity returned here is
+ * carried into `metadata.resourceVersion` on the replace and `preconditions.uid` on the
+ * delete — so the API server, not this function, is what finally refuses a write to an
+ * object that moved. This read still earns its place: it produces the fresh identity the
+ * write binds to, and it distinguishes `gone` (create instead) from `taken` (surrender),
+ * neither of which a bare 409 can tell apart.
  *
  * WHAT IT COMPARES. `uid` and the ownership label, per the two ways a name changes hands:
  *   - `uid` differs ⇒ deleted and recreated. Data, labels and annotations can all be
  *     reproduced by the new owner; the uid cannot.
  *   - the marker is gone ⇒ adopted in place by an external owner, and `classify` would now
  *     call it `foreign`.
- * `resourceVersion` is deliberately NOT a gate. It changes on any edit, including benign
- * ones by something that left our marker in place — and refusing there would be worse than
- * writing: the mint has already revoked the key that copy holds, so declining to overwrite
- * leaves the namespace on a dead credential. It is carried for the log line, which is where
- * "still ours, but someone edited it" is worth seeing.
+ * `resourceVersion` is deliberately NOT a gate HERE, though it is a precondition on the
+ * write. It changes on any edit, including benign ones by something that left our marker in
+ * place, and refusing on that basis would be worse than writing: the mint has already
+ * revoked the key that copy holds, so declining to overwrite leaves the namespace on a dead
+ * credential. That is why `mutateOwned` treats the resulting 409 as "re-read and try again",
+ * not as "surrender" — only this function's ownership verdict may end the attempt. Here the
+ * version difference is logged, which is where "still ours, but someone edited it" is worth
+ * seeing.
  *
  * `uid` is compared only when both reads surfaced one. The API server always sets it; a
  * caller that cannot see it (an older gateway, a fake) falls back to the ownership label,
@@ -567,7 +578,79 @@ async function recheckOwnership(
       'evenfire-registry-pull Secret was modified between classification and write; still ours, proceeding'
     )
   }
-  return { verdict: 'same' }
+  return { verdict: 'same', current: { uid: now.uid, resourceVersion: now.resourceVersion } }
+}
+
+/**
+ * How many times an ownership-bound mutation may lose a benign race before we stop.
+ *
+ * Each attempt is one read plus one write, and the only thing that makes an attempt fail
+ * without ending the loop is a 409 from something else writing the same Secret in that gap.
+ * Three is chosen to absorb a genuine race, not to wait out a controller that is fighting us
+ * for the name: with a persistent writer no number of retries converges, and the honest
+ * answer is to stop and report, which is what exhausting these does.
+ */
+const OWNERSHIP_CAS_ATTEMPTS = 3
+
+/** The outcome of an ownership-bound mutation. `done` means it landed. */
+type MutateOutcome = { verdict: 'done' } | { verdict: 'gone' } | { verdict: 'taken'; why: string }
+
+/**
+ * Mutate the Secret in `ns` ONLY IF it is still the object this pass classified and still
+ * ours — a real compare-and-swap, decided by the API server rather than by a read we hope
+ * nothing raced.
+ *
+ * `recheckOwnership` alone cannot do this: it proves ownership in one request and the
+ * mutation happens in the next, so a takeover in that gap is invisible to it. Here the
+ * identity it observed is carried INTO the mutation as a precondition (`resourceVersion` on
+ * a replace, `preconditions.uid` on a delete), so a write to an object that moved is
+ * refused with 409 by the apiserver — the check and the use become one operation.
+ *
+ * WHY 409 IS NOT AN ANSWER BY ITSELF. It says "this object is not what you thought", which
+ * conflates two very different situations: someone took the name over, and someone edited a
+ * Secret that is still ours. Surrendering on both would be wrong — the mint upstream has
+ * already revoked the key the existing copy holds, so refusing to write over a benign edit
+ * strands that namespace on a dead credential, an ImagePullBackOff we caused ourselves. So a
+ * 409 sends us back through `recheckOwnership`, which CAN tell the two apart, and only its
+ * `taken` verdict ends the loop. That is also why the retry drops the stale
+ * `resourceVersion` but keeps the `uid`: the version is expected to have moved, the identity
+ * is not.
+ *
+ * `gone` is returned rather than retried — the object is absent, and what to do about that
+ * differs per call site (create the credential, or accept that the delete is already done).
+ */
+async function mutateOwned(
+  gateway: K8sGateway,
+  ns: string,
+  observed: SecretIdentity,
+  mutate: (precondition: SecretPreconditions) => Promise<unknown>
+): Promise<MutateOutcome> {
+  let expected = observed
+  for (let attempt = 1; attempt <= OWNERSHIP_CAS_ATTEMPTS; attempt++) {
+    const recheck = await recheckOwnership(gateway, ns, expected)
+    if (recheck.verdict !== 'same') return recheck
+    try {
+      await mutate({
+        uid: recheck.current.uid,
+        resourceVersion: recheck.current.resourceVersion,
+      })
+      return { verdict: 'done' }
+    } catch (err) {
+      if (k8sStatus(err) !== 409) throw err
+      logger.info(
+        { namespace: ns, attempt },
+        'evenfire-registry-pull Secret changed under an ownership-bound write; re-proving ownership before retrying'
+      )
+      // Keep the identity, drop the version: the next `recheckOwnership` must still catch a
+      // delete-and-recreate, but the version it compares against is known to be stale and
+      // would only log noise.
+      expected = { uid: recheck.current.uid, resourceVersion: undefined }
+    }
+  }
+  return {
+    verdict: 'taken',
+    why: `something else rewrote it during each of ${OWNERSHIP_CAS_ATTEMPTS} ownership-bound write attempts, so this pass never managed to write it without risking somebody else's object`,
+  }
 }
 
 /**
@@ -847,18 +930,17 @@ async function ensureLocked(
   for (const ns of ours) {
     const state = states.get(ns)!
     if (state.kind !== 'broken' || !state.wrongType) continue
-    const recheck = await recheckOwnership(gateway, ns, state.observed)
-    if (recheck.verdict === 'taken') {
-      recordTakeover(pass, ns, recheck.why)
+    const outcome = await mutateOwned(gateway, ns, state.observed, precondition =>
+      gateway.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, precondition)
+    )
+    if (outcome.verdict === 'taken') {
+      recordTakeover(pass, ns, outcome.why)
       surrendered.add(ns)
       continue
     }
     // 'gone': already deleted by someone else, so there is nothing to delete — but the
     // namespace still needs the credential, and `recreate` is exactly "create, do not
     // update" downstream. Falling through to the update path would 404.
-    if (recheck.verdict === 'same') {
-      await gateway.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)
-    }
     recreate.add(ns)
   }
   // Namespaces that changed hands are no longer ours to write. Every caller that references
@@ -971,10 +1053,24 @@ async function writeCredential(
         }
         return 'exists-foreign'
       }
-      // Read-then-write with no gap: `winner` was read immediately above, and the ownership
-      // check on it is this path's compare-and-swap. Nothing more can be proved here — the
-      // object had no prior classification to compare against, it did not exist yet.
-      await gateway.updateSecret(buildSecretReq(ns, cred))
+      // The winner is ours, so adopt it — but bind the write to the object we just read.
+      // "Read `winner`, then update by name" is the same TOCTOU as everywhere else on this
+      // path: the ownership check and the replace are two requests, and `updateSecret`
+      // without a precondition re-reads and wins regardless of what landed in between. A
+      // create race is precisely when a third writer is known to be active on this name, so
+      // this is the LAST place to assume the gap is safe.
+      const adopted = await mutateOwned(gateway, ns, winner, precondition =>
+        gateway.updateSecret(buildSecretReq(ns, cred), precondition)
+      )
+      if (adopted.verdict === 'taken') {
+        recordTakeover(ctx.pass, ns, adopted.why)
+        return 'exists-foreign'
+      }
+      if (adopted.verdict === 'gone') {
+        // Deleted again in the gap. Nobody holds the name and the namespace still needs a
+        // credential, so create rather than leaving it empty.
+        await gateway.createSecret(buildSecretReq(ns, cred))
+      }
       return 'created'
     }
   }
@@ -984,16 +1080,18 @@ async function writeCredential(
     // turn invariant 1 into a runtime accident.
     return 'exists-foreign'
   }
-  // The update path. `SecretService.updateSecret` re-reads to pick up the latest
-  // `resourceVersion` and therefore ALWAYS wins the write — it proves the object is current,
-  // never that it is still ours — so ownership has to be re-proved here, against the object
-  // `classify` decided about. See `recheckOwnership` for what this does and does not buy.
-  const recheck = await recheckOwnership(gateway, ns, state.observed)
-  if (recheck.verdict === 'taken') {
-    recordTakeover(ctx.pass, ns, recheck.why)
+  // The update path. Left to itself `SecretService.updateSecret` re-reads to pick up the
+  // latest `resourceVersion` and therefore ALWAYS wins the write — it proves the object is
+  // current, never that it is still ours. `mutateOwned` binds the replace to the identity we
+  // classified instead, so the apiserver refuses it if the object moved.
+  const outcome = await mutateOwned(gateway, ns, state.observed, precondition =>
+    gateway.updateSecret(buildSecretReq(ns, cred), precondition)
+  )
+  if (outcome.verdict === 'taken') {
+    recordTakeover(ctx.pass, ns, outcome.why)
     return 'exists-foreign'
   }
-  if (recheck.verdict === 'gone') {
+  if (outcome.verdict === 'gone') {
     // Deleted under us. NOT a takeover — nobody else holds the name — and the mint above has
     // already revoked whatever key that copy carried, so leaving the namespace empty is the
     // one outcome guaranteed to ImagePullBackOff. Create, because an update against an
@@ -1001,7 +1099,6 @@ async function writeCredential(
     await gateway.createSecret(buildSecretReq(ns, cred))
     return 'created'
   }
-  await gateway.updateSecret(buildSecretReq(ns, cred))
   return state.kind === 'valid' ? 'exists-ours' : 'repaired'
 }
 

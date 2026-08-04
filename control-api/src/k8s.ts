@@ -8,7 +8,12 @@ import {
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
-import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
+import {
+  ClerumResourceType,
+  HostOverview,
+  SecretPreconditions,
+  SecretUpsertRequest,
+} from './types.js'
 
 /**
  * Namespaces where exec operations are permitted.
@@ -394,8 +399,12 @@ export class K8sGateway {
     return this.secrets.createSecret(req)
   }
 
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.updateSecret(req)
+  /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
+  async updateSecret(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.updateSecret(req, precondition)
   }
 
   async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
@@ -406,8 +415,13 @@ export class K8sGateway {
     return this.secrets.removeSecretKey(req)
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
-    return this.secrets.deleteSecret(name, namespace)
+  /** `precondition` binds the delete to a specific object; see `SecretPreconditions`. */
+  async deleteSecret(
+    name: string,
+    namespace?: string,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.deleteSecret(name, namespace, precondition)
   }
 
   async getHostOverview(hostName: string, namespace?: string): Promise<HostOverview> {
