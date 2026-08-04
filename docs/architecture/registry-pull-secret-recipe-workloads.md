@@ -1,13 +1,15 @@
 # Platform image-pull credentials for recipe workloads
 
 **Status:** Implemented in PR #243. Five blocking review findings were raised against it
-(§13); **the four P1s are fixed** — including §13.1, which reversed this document's
-install-time trigger decision (provisioning is now a standing invariant, because a
-`WorkflowRecipe` can be created without control-api while WRC injects the pull-secret
-reference regardless). **§13.5 — end-to-end runtime evidence — remains open and is the
-last acceptance gate.** Two earlier carve-outs also remain recorded in place: WRC injection
-is deliberately **not** mode-gated, so the operator contract changes on managed clusters
-too (§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship.
+(§13); **all five are now closed** — the four P1s in code, including §13.1, which reversed
+this document's install-time trigger decision (provisioning is now a standing invariant,
+because a `WorkflowRecipe` can be created without control-api while WRC injects the
+pull-secret reference regardless); and **§13.5, the runtime acceptance gate, by a live
+cluster E2E: `tests/e2e/integration/registry-pull-secret-runtime.test.ts`** (§11, §13.5).
+Two earlier carve-outs remain recorded in place and are still true: WRC injection is
+deliberately **not** mode-gated, so the operator contract changes on managed clusters too
+(§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship — the
+third-party BYO-registry path is still the silent failure described there.
 **Date:** 2026-08-04
 **Area:** control-api · workflow-recipes (WRC) · workflow-runtime-core · image pull · self-hosted
 **Follows:** [`registry-pull-secret-self-provisioning.md`](registry-pull-secret-self-provisioning.md)
@@ -165,7 +167,7 @@ platform removes the reference to it.
   the managed operator keeps owning provisioning on its clusters. Note this is a non-goal
   for the *write* side only — WRC's **injection** is not mode-gated and therefore does
   change what the managed operator must provision (§9).
-- Reactive rotation of an out-of-band-revoked key (still open from #243 §12-2), though
+- Reactive rotation of an out-of-band-revoked key (still open — `registry-pull-secret-self-provisioning.md` §12-1), though
   §6.3's fingerprint makes cross-namespace divergence detectable.
 
 ---
@@ -229,19 +231,28 @@ Both enforcement points get the injection, since both produce runnable specs:
 | Pod template | `resourceBuilder.ts` (after the `allowedPullSecrets` filter) | recipe workloads in any namespace |
 | McpServer delegation | `mcpDelegation.ts` (after `projectableImagePullSecrets`) | transport workloads → `McpServer` → HCC |
 
-**Reserved-name handling — NOT shipped in #243** (still §12-2). The intent: if a recipe
-explicitly declares the platform name, injection makes it redundant, so recipe validation
-should **reject** the reserved name with a message saying it is platform-managed — fail
-loudly rather than appear to honor a declaration we ignore.
+**Reserved-name handling — SHIPPED in #243** (§12-2, resolved; R5). If a recipe explicitly
+declares the platform name, injection makes it redundant, so recipe validation **rejects**
+the reserved name with a message saying it is platform-managed — failing loudly rather than
+appearing to honor a declaration we ignore. As built:
+`isPlatformManagedWorkflowSecretName` (`control-api/src/routes/admin/recipes.ts`) reserves
+`EVENFIRE_REGISTRY_PULL_SECRET_NAME` alongside the `wf-` prefix, and `/validate`, POST, PUT
+and `POST /admin/recipes/secrets` all reject the declaration at admission with a
+`RefReserved` rule.
 
-What actually happens today, absent that validation, is *louder* than the "silent no-op"
-this paragraph feared: the #637 gate classifies the declared name `denied`, which makes the
-whole **workload** denied (`workflowRecipeReconciler.ts`, `collectSecretOwnership` counts
-`imagePullSecrets` refs alongside `envSecret`), so the workload is **not rendered at all** —
-it is torn down and reported `EnvSecretOwnershipDenied`. A recipe must therefore *not* name
-the reserved Secret. The injection sites still normalize the name defensively (§11), because
-the builders are re-entered with a denied access map on the StatefulSet revocation
-re-render path.
+> An earlier revision of this section recorded the validation as *not shipped* while §12-2
+> and R5 recorded it as shipped. That contradiction was flagged in review (P2) and is
+> resolved here in favour of the source: the reservation is live.
+
+The #637 gate stays behind that validation as defense-in-depth for anything already
+persisted, and its behavior is *louder* than the "silent no-op" the validation was meant to
+prevent: the gate classifies the declared name `denied`, which makes the whole **workload**
+denied (`workflowRecipeReconciler.ts`, `collectSecretOwnership` counts `imagePullSecrets`
+refs alongside `envSecret`), so the workload is **not rendered at all** — it is torn down and
+reported `EnvSecretOwnershipDenied`. A recipe must therefore not name the reserved Secret by
+either route. The injection sites still normalize the name defensively (§11), because the
+builders are re-entered with a denied access map on the StatefulSet revocation re-render
+path.
 
 ### 6.2 One source of truth, in `@clerum/workflow-runtime-core`
 
@@ -541,10 +552,10 @@ working immediately.
 
 | # | Risk | Mitigation |
 | --- | --- | --- |
-| R1 | Per-namespace minting revokes other namespaces' keys → partial cluster-wide `ImagePullBackOff`. | Single mint + fan-out write (§6.3); post-condition asserted in tests. |
-| R2 | Partial write (mint OK, one namespace fails) leaves a stale, undetectable key. | Fingerprint annotation makes divergence detectable and repairable (§6.3). |
+| R1 | Per-namespace minting revokes other namespaces' keys → partial cluster-wide `ImagePullBackOff`. | Single mint + fan-out write (§6.3); post-condition asserted in unit tests, and on a live cluster by the E2E's one-fingerprint-across-all-copies assertion (§11) — divergent fingerprints are the only symptom this failure has. |
+| R2 | Partial write (mint OK, one namespace fails) leaves a stale, undetectable key. | Fingerprint annotation makes divergence detectable and repairable (§6.3). **Observed working live** — an induced divergence was detected and converged on the next ensure pass; timestamps and fingerprints in §11. |
 | R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | **Was live, not hypothetical** — the shipped minikube overlay pinned WRC to the in-cluster registry while control-api used the shared one, so every recipe install hit it (found in live testing 2026-08-04). Closed in-repo: the **base** WRC Deployment now projects `control-api-config.CLERUM_REGISTRY_URL` via an `optional: true` `configMapKeyRef`, so every deployment built from `deploy/base` — including OSS self-hosted, the only mode where control-api provisioning actually runs — reads the same definition control-api does, and the minikube overlay no longer redeclares it (§6.2). Pinned by `workflow-recipes/tests/unit/workflow/deployManifest.test.ts`. Shared predicate alone was insufficient. **Residual:** the GCP dev/prod overlays and MCC tenant rendering live outside this repo and still set the value for both services independently (they agree today); and an overlay may still leave the key unset, which disables injection — WRC now emits a startup WARN naming that consequence instead of failing silently. Surfacing both values on a status/health endpoint is still worth doing. |
-| R4 | Someone "fixes" #637 denial by labelling the Secret `shared`. | §5.1 recorded as an explicit, permanent non-goal; add a test asserting the Secret is NOT `shared`/`owner-recipe` labeled. |
+| R4 | Someone "fixes" #637 denial by labelling the Secret `shared`. | §5.1 recorded as an explicit, permanent non-goal; the live-cluster E2E asserts the Secret carries neither `clerum.io/shared` nor `clerum.io/owner-recipe` in any platform namespace (§11), so a "fix" of this shape fails the acceptance gate. |
 | R5 | A recipe declares the reserved name and expects it honored. | **Closed.** Validation rejection (§6.1) shipped: `isPlatformManagedWorkflowSecretName` now reserves `EVENFIRE_REGISTRY_PULL_SECRET_NAME`, so `/validate`, POST, PUT and `POST /admin/recipes/secrets` reject the declaration at admission with a reserved-name rule. The #637 gate stays behind it as defense-in-depth for anything already persisted. |
 | R6 | Two extra copies of the credential. | Pull-only, org-scoped, no push; §8.2. |
 
@@ -564,8 +575,45 @@ working immediately.
 - **Anti-exfiltration** — a recipe declaring the platform Secret as `envSecret` is `denied`
   (regression guard for §5.1); a test asserts the Secret carries neither `shared` nor
   `owner-recipe`.
-- **e2e (minikube, self-hosted)** — install a recipe plugin with a private image; assert the
-  pod pulls; assert a mixed recipe (transport + non-transport) works in both namespaces.
+- **e2e (minikube, self-hosted)** — **SHIPPED:**
+  `tests/e2e/integration/registry-pull-secret-runtime.test.ts`, the §13.5 acceptance gate.
+  Four blocks against a live cluster and the live registry:
+
+  | Block | Asserts | Why a MockGateway cannot |
+  | --- | --- | --- |
+  | Secret placement | present in all three platform namespaces; `kubernetes.io/dockerconfigjson`; `managed-by=control-api`; `auths` keyed on the configured registry host; **one fingerprint across all copies**; neither `shared` nor `owner-recipe` | namespace + RBAC are real; the fingerprint check is the only cluster-visible symptom of R1 (three mints against a rotate-on-call registry) |
+  | Materialization | WRC renders the recipe workload's PodTemplate with `imagePullSecrets: [evenfire-registry-pull]` while the CRD does **not** declare it (proving injection, not declaration); control-api writes the reference onto the `McpServer` CRD and HCC materializes it verbatim onto the Deployment it owns | the WRC and HCC reconcile hops, and the rollout, are outside any route test |
+  | Pod readiness + real pull | image evicted from the node's docker cache first (`imagePullPolicy: IfNotPresent` would otherwise serve it from cache and exercise no credential); Pod Ready; the `Pulled` event says `Successfully pulled image … Image size: N bytes` and **not** `already present on machine` | proves the kubelet accepts the blob and the registry honors the minted key — both previously assumed from docs |
+  | Pre-persistence failure | a foreign, unusable Secret planted in one namespace makes `install-recipe` return `409 foreign_secret_unusable` **and** leaves no `WorkflowRecipe` behind | the ordering of provision-then-persist only matters against a real API server |
+
+  Guarded to **skip** (not fail) when the cluster, the port-forward, the admin credential,
+  self-hosted mode, or the private fixtures are unavailable; everything it creates is
+  prefixed `e2e-pullsecret-` and removed in `afterAll`, including an unconditional restore
+  of the temporary foreign Secret.
+
+  Two gaps it deliberately does not close. **The periodic reconcile (§13.1)** is not in the
+  suite: `REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS` defaults to 600 000 ms and shortening
+  it needs a redeploy, so a committed E2E cannot wait for a tick. It was verified
+  out-of-band on `clerum-test` instead — the `sandbox-ui` copy was deleted at 11:30:18Z and
+  restored by the cron at 11:32:33Z with a fresh fingerprint and a
+  `registry_pull_secret_reconciled` log line naming all three namespaces. **The
+  `kubectl apply` creation path** is covered only indirectly: the suite proves the standing
+  invariant is what makes it work (the Secret is present in every namespace before any
+  particular install), not the apply itself.
+
+  **R2's divergence repair was observed live during this work**, which is worth recording
+  because it is otherwise only argued. A regression rehearsal left `sandbox-ui` holding a
+  fingerprint (`dab2bc929d3d`) that disagreed with `mcp-server` / `sandbox-recipes`
+  (`f64af065ebe4`). The next install's ensure pass detected it —
+  `registry pull secret copies diverged across namespaces; re-minting to converge`
+  (2026-08-04T12:37:38Z) — re-minted once and rewrote all three onto `f3170a6e0585`. The
+  following run then took the no-mint path (`exists-ours`, fingerprint unchanged),
+  confirming both halves of §6.3: converge when diverged, do nothing when already current.
+
+  The suite is not in `DEFAULT_VITEST_SUITES` in `scripts/e2e/run-vitest-e2e.sh`, so it does
+  not run in the default gate; invoke it by path. Adding it there is safe — it skips
+  cleanly without the fixtures — and is worth doing when the fixtures become part of the
+  seeded environment.
 
 ---
 
@@ -703,6 +751,16 @@ control-api already has Postgres, so `pg_advisory_lock` is the natural mechanism
 no dependency — mirroring what the registry itself does inside `mintPullKey`. The
 in-process map stays as a cheap first-level dedupe.
 
+**The overlap is observed, not argued.** During #243's live testing on `clerum-test`
+(2026-08-04) a control-api rollout put two pods in `Running` simultaneously —
+ReplicaSets `786f7dcb9` and `7b7746fdf9`, both serving, before the older was killed.
+The finding was originally derived from the manifest (`replicas: 1` + default
+`RollingUpdate` ⇒ transient two-pod overlap); this is the same shape happening in an
+ordinary deploy on the deployed configuration. It is worth recording because the
+counter-argument to §13.3 was that a single-replica Deployment makes the in-process
+`inflight` map sufficient — which is true only between rollouts, and a rollout is
+exactly when a boot-time provisioning pass runs.
+
 ### 13.4 [P1] ✅ SHIPPED — `upgrade-recipe` has no provisioning hook
 
 `POST /admin/registry/upgrade-recipe` (`control-api/src/routes/admin/registry.ts:2001`)
@@ -717,22 +775,43 @@ fails at pull time, with a `200` on the API call.
 install-recipe placement. Fix it explicitly even once §13.1 lands: the reconcile is a
 safety net, not a substitute for failing the request that introduced the problem.
 
-### 13.5 [Acceptance] ⏳ OPEN — No end-to-end runtime evidence
+### 13.5 [Acceptance] ✅ SHIPPED — End-to-end runtime evidence
 
-Coverage is unit- and route-level against `MockGateway`. Nothing exercises
-`Secret → WRC → McpServer/HCC → Pod Ready → private image pull`.
-
-Mutation testing sharpens this rather than substituting for it: it proves the tests fail
-when the code breaks. It cannot prove the kubelet accepts the blob, that the type and data
-key are what Kubernetes wants, that RBAC permits the write in `sandbox-ui`, or that the
-registry honors the minted key at pull time. Those are assumptions verified only against
+**The finding.** Coverage was unit- and route-level against `MockGateway`. Nothing
+exercised `Secret → WRC → McpServer/HCC → Pod Ready → private image pull`. Mutation
+testing sharpened that rather than substituting for it: it proves the tests fail when the
+code breaks, but it cannot prove the kubelet accepts the blob, that the type and data key
+are what Kubernetes wants, that RBAC permits the write in `sandbox-ui`, or that the
+registry honors the minted key at pull time. Those were assumptions verified only against
 docs and source.
 
-The dependency that made this untestable is gone: `evenfire-registry` #64 is merged and
-deployed. **Remediation:** a minikube e2e against the live registry covering (a) an
-MCP-server plugin, (b) a recipe plugin with a non-transport workload, (c) a recipe created
-by `kubectl apply` (the §13.1 path), each asserting `Pod Ready` rather than just Secret
-contents.
+**Closed by** `tests/e2e/integration/registry-pull-secret-runtime.test.ts` — a live-cluster
+suite against `clerum-test` and the live `registry.evenfire.ai`, run in
+`REGISTRY_CONNECTION_MODE=self-hosted` against a connected org. Contents and per-block
+rationale are in §11; the short version is the four things a mock could not reach:
+
+| Assumption previously unverified | How the suite verifies it |
+| --- | --- |
+| the kubelet accepts the blob we write | a Pod pulls a private image with only this Secret referenced, after the image is evicted from the node |
+| the type and data key are what Kubernetes wants | the Secret is read back as `kubernetes.io/dockerconfigjson` with `.dockerconfigjson`, and a pull actually succeeds through it |
+| RBAC permits the write in `sandbox-ui` | the Secret is asserted present in all three platform namespaces, `sandbox-ui` included |
+| the registry honors the minted key at pull time | the `Pulled` event must read `Successfully pulled image … Image size: N bytes`, never `already present on machine` |
+
+Two additional properties the suite pins that no unit test can: **one mint fanned out**
+(all copies must carry the same `clerum.io/pull-key-fingerprint` — the only cluster-visible
+symptom of R1), and **injection rather than declaration** (the rendered PodTemplate carries
+the reference while the `WorkflowRecipe` CRD does not).
+
+**Coverage against the remediation as originally written.** (a) MCP-server plugin — covered.
+(b) recipe plugin with a non-transport workload — covered. (c) recipe created by
+`kubectl apply` — covered only *indirectly*: §13.1 turned provisioning into a standing
+invariant, so what makes that path work is the Secret already being present in every
+namespace, which the suite asserts directly. The apply itself is not exercised.
+
+**Deliberately still out of the suite:** the periodic reconcile tick (interval is 10 min by
+default and shortening it needs a redeploy — verified out-of-band instead; timestamps in
+§11) and managed-cluster behaviour (control-api writes nothing there by design, so there is
+no runtime outcome to observe — §9.1).
 
 ### 13.7 As-built
 
@@ -742,7 +821,7 @@ contents.
 | 13.2 | ✅ | `registryPullSecretService.ts` — `foreign_secret_would_be_revoked`, all-or-nothing refusal |
 | 13.3 | ✅ | `withPullSecretLock` — `pg_advisory_xact_lock(hashtext('registry-pull-secret:<org>'))` around read→mint→write |
 | 13.4 | ✅ | `registry.ts` — hook on `upgrade-recipe`, keyed on the INCOMING spec |
-| 13.5 | ⏳ | still open — the only remaining acceptance gate |
+| 13.5 | ✅ | `tests/e2e/integration/registry-pull-secret-runtime.test.ts` — live-cluster acceptance (§11, §13.5) |
 
 Notes worth carrying forward:
 

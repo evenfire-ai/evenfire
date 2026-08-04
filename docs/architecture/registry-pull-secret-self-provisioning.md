@@ -790,14 +790,24 @@ is outside `credRequired`); a mint failure fails the install and persists **no**
 McpServer; an unresolved org returns `409 org_unresolved`; a non-evenfire image provisions
 nothing. Mutation-verified: gating the hook on `credRequired` fails 3 of these 4.
 
-**Not shipped (deliberate)**
+**Shipped since — `tests/e2e/integration/registry-pull-secret-runtime.test.ts`**
 
 - **Integration / e2e (minikube, self-hosted)** — install a private plugin end-to-end and
-  assert the pod actually pulls. Requires the Workstream-A registry change deployed to a
-  reachable registry; worth adding once that lands.
+  assert the pod actually pulls. This was blocked on the Workstream-A registry change
+  reaching a live registry; `evenfire-registry` #64 is merged and deployed, so it now
+  exists. It covers this spec's `McpServer` path — control-api → `McpServer` CRD → HCC →
+  Deployment → Pod Ready → a real authenticated pull, with the image evicted from the
+  node's docker cache first so `imagePullPolicy: IfNotPresent` cannot serve it from cache
+  and leave the credential unexercised — alongside the recipe-workload extension. See
+  [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md)
+  §11 and §13.5.
+
+**Not shipped (deliberate)**
+
 - **A `mintOrgPullCredential` transport test** (endpoint path, POST, timeout, key
-  validation). It is mocked in both suites above; its behavior is asserted only
-  indirectly.
+  validation). It is mocked in both suites above; its behavior is still asserted only
+  indirectly at the unit level — though the e2e above now exercises the real transport end
+  to end, since a pull that succeeds proves the minted key reached the registry intact.
 
 ---
 
