@@ -153,7 +153,8 @@ function providerForModel(model: string): string {
 
 // A recipe whose plugin SDK enables promptBridge must resolve an agent
 // (spec.agent or a step agent with provider + model) or it fails after install.
-function recipeAgentRequirement(parsed: Record<string, unknown> | null): {
+// Exported for direct unit coverage of the agent-resolution rule.
+export function recipeAgentRequirement(parsed: Record<string, unknown> | null): {
   needsAgent: boolean
   allowedModels: string[]
 } {
@@ -167,8 +168,11 @@ function recipeAgentRequirement(parsed: Record<string, unknown> | null): {
   const agent = isPlainObject(spec.agent) ? spec.agent : null
   const hasSpecAgent =
     !!agent && typeof agent.provider === 'string' && typeof agent.model === 'string'
-  const steps =
-    isPlainObject(spec.workflow) && Array.isArray(spec.workflow.steps) ? spec.workflow.steps : []
+  // Steps live at spec.steps in the CRD (charts/clerum-crds/crds/workflowrecipe.yaml),
+  // NOT spec.workflow.steps (no such property). Mirror the canonical resolver in
+  // workflow-recipes/src/workflow/agentResolution.ts (resolveMcpHostAgent) so this
+  // wizard check can't drift from the reconciler and silently override a step agent.
+  const steps = Array.isArray(spec.steps) ? spec.steps : []
   const hasStepAgent = steps.some(
     s =>
       isPlainObject(s) &&

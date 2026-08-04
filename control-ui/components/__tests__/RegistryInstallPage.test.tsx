@@ -2,7 +2,7 @@ import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
-import RegistryInstallPage from '../../app/registry/install/page'
+import RegistryInstallPage, { recipeAgentRequirement } from '../../app/registry/install/page'
 import { getRegistryEntryVersion, installRecipeFromRegistry } from '../../lib/api'
 import type { RegistryEntry } from '../../lib/api'
 import { ToastProvider } from '../Toast'
@@ -221,5 +221,54 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
 
     expect(installRecipeFromRegistry).not.toHaveBeenCalled()
+  })
+})
+
+describe('recipeAgentRequirement — step agent resolution reads spec.steps', () => {
+  const promptBridgeSpec = (extra: Record<string, unknown>) => ({
+    spec: {
+      pluginWorkloadSdk: {
+        promptBridge: { allowedModels: ['gpt-4o-mini'], maxOutputTokens: 4096 },
+      },
+      ...extra,
+    },
+  })
+
+  it('does not need an agent when a step agent is declared at spec.steps', () => {
+    // Regression guard: the wizard previously read spec.workflow.steps (no such
+    // CRD property), so a declared step agent was never seen — the wizard would
+    // inject spec.agent and override the author's step agent.
+    const parsed = promptBridgeSpec({
+      steps: [{ id: 'research', agent: { provider: 'claude', model: 'claude-sonnet-4-6' } }],
+    })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(false)
+  })
+
+  it('needs an agent when promptBridge is set but neither spec.agent nor a step agent exists', () => {
+    const parsed = promptBridgeSpec({ steps: [{ id: 'research', run: { type: 'snippet' } }] })
+    const result = recipeAgentRequirement(parsed)
+    expect(result.needsAgent).toBe(true)
+    expect(result.allowedModels).toEqual(['gpt-4o-mini'])
+  })
+
+  it('does not need an agent when spec.agent is present', () => {
+    const parsed = promptBridgeSpec({ agent: { provider: 'openai', model: 'gpt-4o-mini' } })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(false)
+  })
+
+  it('ignores a step agent at the non-CRD spec.workflow.steps path', () => {
+    // Guards against reverting to the wrong path: the reconciler resolves agents
+    // from spec.steps, so an agent under spec.workflow.steps must NOT satisfy it.
+    const parsed = promptBridgeSpec({
+      workflow: {
+        steps: [{ id: 'x', agent: { provider: 'claude', model: 'claude-sonnet-4-6' } }],
+      },
+      steps: [{ id: 'x', run: { type: 'snippet' } }],
+    })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(true)
+  })
+
+  it('does not require an agent without promptBridge', () => {
+    expect(recipeAgentRequirement({ spec: { steps: [] } }).needsAgent).toBe(false)
   })
 })
