@@ -6,10 +6,15 @@ export function isPublicProfileUiPath(pathname: string): boolean {
   )
 }
 
+export function getRootInviteToken(pathname: string, searchParams: URLSearchParams): string | null {
+  if (pathname !== '/') return null
+  const inviteToken = searchParams.get('inviteToken')
+  return inviteToken && inviteToken.length > 0 ? inviteToken : null
+}
+
 export function isPublicProfileUiRequest(pathname: string, searchParams: URLSearchParams): boolean {
   if (isPublicProfileUiPath(pathname)) return true
-  const inviteToken = searchParams.get('inviteToken')
-  return pathname === '/' && inviteToken !== null && inviteToken.length > 0
+  return getRootInviteToken(pathname, searchParams) !== null
 }
 
 export type ProfileRouteKey =

@@ -1,17 +1,28 @@
 'use client'
 
 import type { ReactNode } from 'react'
-import { usePathname, useSearchParams } from 'next/navigation'
+import { useEffect } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { ProfileAccessProvider } from '@components/ProfileAccessContext'
 import { ProfileShell } from '@components/ProfileShell'
-import { isPublicProfileUiRequest } from '@lib/profileAppFrame'
+import { PROFILE_ROUTES } from '@constants/routes'
+import { getRootInviteToken, isPublicProfileUiPath } from '@lib/profileAppFrame'
 
 export function ProfileAppFrame({ children }: { children: ReactNode }) {
+  const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
+  const rootInviteToken = getRootInviteToken(pathname, searchParams)
 
-  if (isPublicProfileUiRequest(pathname, searchParams)) {
+  useEffect(() => {
+    if (!rootInviteToken) return
+    router.replace(PROFILE_ROUTES.invitation(rootInviteToken))
+  }, [rootInviteToken, router])
+
+  if (rootInviteToken) return null
+
+  if (isPublicProfileUiPath(pathname)) {
     return <>{children}</>
   }
 
