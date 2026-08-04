@@ -361,8 +361,23 @@ Algorithm:
    - `404` → **absent** → go to step 4.
    - any other status (esp. **403**) → **abort before minting**.
    - present and **not** labeled `managed-by=control-api` → **`'exists-foreign'`**,
-     returned unconditionally (I1). If it is also unusable we log a warning naming the
-     remedy (delete it), but we never write.
+     returned unconditionally (I1). We never write it, usable or not.
+
+     A foreign copy is not merely "skip this namespace", because the pull key is per-**org**
+     and the mint is rotate-on-call: minting for the namespaces we *do* own revokes the key
+     inside the foreign Secret as well, and I1 forbids us from repairing it afterwards. So a
+     **usable** foreign copy (right `type`, blob keyed on the current host) blocks the mint
+     for the whole pass — the org's credential is externally managed and this service must
+     not rotate it. Owned namespaces that needed that mint are recorded as blocked and
+     surfaced to callers that require them as `foreign_secret_would_be_revoked` (409); a
+     caller whose own namespaces are already current is unaffected.
+
+     An **unusable** foreign copy (wrong `type`, or a blob keyed on another host) does *not*
+     block the mint: the kubelet never selects it, so it cannot be serving pulls and
+     rotating breaks nothing. It still fails any caller that requires *its* namespace, with
+     `foreign_secret_unusable` (409). Both conditions are recorded during the pass rather
+     than thrown from it, because one pass is shared across callers with different required
+     sets — see the `blocked`/`unusable` maps in `registryPullSecretService.ts`.
    - present, ours, `type` correct, and the decoded blob's `auths` contains the current
      host → **`'exists-ours'`**. Presence alone is not enough: a blob keyed on a previous
      `CLERUM_REGISTRY_URL` can never be selected by the kubelet.
@@ -470,6 +485,13 @@ Because the pull-only mint is **rotate-on-call**, a blind re-mint would orphan t
 working on-cluster key — so read-before-mint (§7.1 step 2) is the load-bearing
 idempotency guarantee: control-api mints only when the Secret is absent or broken, and
 never for an `'exists-ours'`/`'exists-foreign'` hit.
+
+Leaving a foreign Secret unwritten is **not** on its own sufficient, because the key is
+per-org: a mint for any *other* namespace revokes the foreign copy's credential too, with
+no way to detect it (foreign copies are excluded from the fingerprint comparison) and no
+way to repair it (I1). A **usable** foreign copy therefore blocks the mint entirely for
+that pass — see §7.1 step 3. This is the same one-writer-per-org rule the registry
+enforces between operator and tenant, applied within a single cluster.
 
 ### 7.5 What stays unchanged
 

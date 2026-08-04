@@ -71,12 +71,30 @@ Once connected, browsing the public catalog, publishing, and image push/pull all
 work using the credential stored when you claimed the connection — no further
 setup is needed for those.
 
-> **In-cluster image pulls.** When you install a private plugin whose image lives on
-> the evenfire registry, control-api (in self-hosted mode) automatically provisions
-> the in-cluster `evenfire-registry-pull` Secret in the plugin namespace, so the
-> plugin pods can pull the image — you do not create that Secret by hand. It is
-> minted from your connection's own registry identity and left untouched if an
-> external operator already provided one.
+> **In-cluster image pulls.** When you install a private plugin or recipe whose image
+> lives on the evenfire registry, control-api (in self-hosted mode) automatically
+> provisions the in-cluster `evenfire-registry-pull` Secret in every platform workload
+> namespace — `mcp-server`, `sandbox-recipes` and `sandbox-ui` — so the pods can pull
+> the image. You do not create that Secret by hand. It is minted from your
+> connection's own registry identity.
+>
+> **If you pre-provision it yourself, do all three namespaces.** control-api never
+> writes a Secret it does not own (one without the `clerum.io/managed-by: control-api`
+> label), and the registry's pull credential is **per-organization and rotate-on-call**:
+> minting a key for one namespace revokes the key in every other copy, including yours.
+> So the moment control-api finds a **working** externally-provided copy in any of the
+> three namespaces, it stops minting entirely rather than silently invalidating your
+> credential. Installs that need a namespace you left empty then fail with
+> `foreign_secret_would_be_revoked`, naming both namespaces. Provide the Secret in all
+> three namespaces, or delete your copies and let control-api manage all three — a
+> half-external setup is not supported.
+>
+> A **malformed** external copy is treated differently: one with the wrong `type`, or a
+> `.dockerconfigjson` carrying no entry for your registry host, can never serve a pull,
+> so it does not hold control-api back from minting for the other namespaces. It does
+> fail any install that lands a workload in _its own_ namespace, with
+> `foreign_secret_unusable` — fix that Secret in place, or delete it and let control-api
+> manage that namespace.
 
 **Creating and managing API keys** (`efrk_` org keys, used for CI and other
 programmatic publishing) needs registry authentication active. In self-hosted,

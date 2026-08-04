@@ -34,6 +34,22 @@
  *      registry's pull-credential mint is rotate-on-call — it revokes the org's previous
  *      key — so a mint that is followed by a failed write strands every other namespace's
  *      Secret on a revoked credential.
+ *
+ * Those two combine into an ALL-OR-NOTHING rule on external pre-provisioning, because the
+ * credential is per-ORG while the Secret is per-NAMESPACE. Minting for a namespace we own
+ * also revokes the key sealed inside a foreign Secret we deliberately refused to touch —
+ * silently: the foreign bytes never change, foreign copies are excluded from the
+ * fingerprint set so the divergence check can never see it, and invariant 1 forbids
+ * repairing it. So if ANY target in a pass holds a USABLE foreign Secret, the org's pull
+ * credential is externally managed and this service mints NOTHING, in any namespace. An
+ * operator therefore provisions ALL of `platformWorkloadNamespaces()` or none of them; a
+ * half-external cluster fails the installs that need a namespace we cannot fill
+ * (`foreign_secret_would_be_revoked`) instead of quietly breaking the ones that work.
+ *
+ * "Usable" is the gate, not "foreign": an unusable foreign Secret (wrong type, or keyed on
+ * another host) is not serving any pull for this registry, so rotating the org key cannot
+ * break a working path through it and it does not block the mint. It is still fatal to a
+ * caller that references its namespace — via `foreign_secret_unusable`, per invariant 1.
  */
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
@@ -192,18 +208,32 @@ async function mintCredential(orgName: string, host: string): Promise<MintedCred
 // would require an org-scoped distributed lock around the mint — control-api has Postgres
 // available for that. Not implemented: single-replica is the deployed shape today.
 //
-// The cached value carries the unusable-foreign REASONS alongside the results rather than
-// throwing for them inside the pass. Whether an unusable foreign Secret is fatal depends on
-// which namespaces the CALLER needs, and the dedupe key deliberately does not encode that —
+// The cached value carries the per-namespace FAILURE REASONS alongside the results rather
+// than throwing for them inside the pass. Whether an unusable foreign Secret — or a
+// namespace we could not fill without revoking a foreign key — is fatal depends on which
+// namespaces the CALLER needs, and the dedupe key deliberately does not encode that:
 // folding the required set into the key would stop an MCP install and a recipe install from
 // collapsing, which is the very race this map exists to prevent. So the pass records, and
 // each caller applies its own policy on the shared result.
 const inflight = new Map<string, Promise<EnsurePass>>()
 
-/** One pass's outcome: per-namespace results, plus why any foreign Secret is unusable. */
+/**
+ * One pass's outcome: per-namespace results, plus the two per-namespace reasons a caller
+ * may have to fail on.
+ *
+ * `unusable` — a FOREIGN Secret the kubelet cannot use (`foreign_secret_unusable`).
+ * `blocked`  — a namespace we OWN that needed a mint we refused to perform, because some
+ *              other target in the pass holds a USABLE foreign Secret and the mint would
+ *              revoke its key (`foreign_secret_would_be_revoked`). Full caller-facing
+ *              sentences, not fragments: the remedy names the foreign namespace, which only
+ *              the pass knows. A blocked namespace has NO entry in `results` — nothing
+ *              happened to it, and every caller that could observe the gap fails on it
+ *              first.
+ */
 type EnsurePass = {
   results: Map<string, EnsurePullSecretResult>
   unusable: Map<string, string>
+  blocked: Map<string, string>
 }
 
 /** The platform workload namespaces a pull credential may legitimately be written into. */
@@ -222,7 +252,10 @@ export function platformWorkloadNamespaces(): string[] {
  * therefore have each mint invalidate the namespaces already written. So: read all, mint
  * once if any target needs it, then write that single credential to every target we own.
  *
- * Post-condition: every non-foreign target holds the same, current credential.
+ * Post-condition: every non-foreign target holds the same, current credential — UNLESS some
+ * target holds a USABLE foreign Secret, in which case the pass mints and writes nothing at
+ * all (see the all-or-nothing rule in the file header) and every owned target that needed a
+ * mint is recorded as blocked instead.
  *
  * Returns `'skipped'` for all targets ONLY when provisioning is legitimately not our job
  * (managed mode, or no registry configured). Every other "cannot provision" condition
@@ -241,14 +274,21 @@ export async function ensureRegistryPullSecrets(
     run = ensureInner(gateway, targets).finally(() => inflight.delete(dedupeKey))
     inflight.set(dedupeKey, run)
   }
-  const { results, unusable } = await run
+  const { results, unusable, blocked } = await run
 
-  // An unusable foreign Secret is fatal only to a caller that needs THAT namespace. A pass
-  // covers the whole platform set (for the mint-once collapse), so an MCP install must not
-  // be failed by a squatter in a sandbox namespace it never references — while a recipe
+  // A recorded failure is fatal only to a caller that needs THAT namespace. A pass covers
+  // the whole platform set (for the mint-once collapse), so an MCP install must not be
+  // failed by a squatter in a sandbox namespace it never references — while a recipe
   // install, which does land there, still fails loudly. `required` defaults to every target,
   // so a caller that asks for a set is asserting it needs all of it.
-  for (const ns of opts.required ?? targets) {
+  const required = opts.required ?? targets
+
+  // `unusable` first, across the WHOLE required set, before any `blocked`. Both can apply
+  // at once (a malformed foreign copy in one namespace, a well-shaped one blocking the mint
+  // in another), and `unusable` names a concrete defect in a specific Secret that has to be
+  // fixed or removed either way — deleting the copy that blocked the mint would just
+  // surface it on the next install. Leading with the defect is the shorter path out.
+  for (const ns of required) {
     const why = unusable.get(ns)
     if (why) {
       throw new PullSecretProvisionError(
@@ -257,6 +297,10 @@ export async function ensureRegistryPullSecrets(
         409
       )
     }
+  }
+  for (const ns of required) {
+    const why = blocked.get(ns)
+    if (why) throw new PullSecretProvisionError(why, 'foreign_secret_would_be_revoked', 409)
   }
   return results
 }
@@ -284,8 +328,10 @@ export async function ensureRegistryPullSecret(
     gateway,
     [targetNs, ...platformWorkloadNamespaces()],
     // Only this caller's own namespace is load-bearing: the siblings are swept along for
-    // the mint-once collapse, so a foreign squatter in one of them must not fail an install
-    // that never references it.
+    // the mint-once collapse, so an unusable foreign squatter in one of them must not fail
+    // an install that never references it. A USABLE foreign copy in a sibling is different
+    // — it forbids the mint outright (see the all-or-nothing rule in the file header), so
+    // if `targetNs` needed one it comes back `foreign_secret_would_be_revoked`.
     { required: [targetNs] }
   )
   return results.get(targetNs) ?? 'skipped'
@@ -342,13 +388,14 @@ function classify(current: SecretView | null, host: string): TargetState {
 async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<EnsurePass> {
   const out = new Map<string, EnsurePullSecretResult>()
   const unusable = new Map<string, string>()
+  const blocked = new Map<string, string>()
 
   // ── Legitimate no-ops ─────────────────────────────────────────────────────
   // Managed clusters: the operator owns this Secret; never contend with it.
   const host = registryHostFromUrl(config.registryUrl)
   if (config.registryConnectionMode !== 'self-hosted' || !host) {
     for (const ns of targets) out.set(ns, 'skipped')
-    return { results: out, unusable }
+    return { results: out, unusable, blocked }
   }
 
   // ── Hard preconditions: from here on we MUST provision or fail loudly ─────
@@ -396,12 +443,11 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
   // throwing: the pass spans the whole platform set for the mint-once collapse, but only a
   // caller that actually references the namespace should be failed by it (see
   // `ensureRegistryPullSecrets`, which raises `foreign_secret_unusable` for its own
-  // required set). A well-shaped foreign Secret proceeds untouched either way: external
-  // pre-provisioning is a supported contract.
+  // required set). A well-shaped foreign Secret proceeds untouched either way.
+  const foreign = targets.filter(ns => states.get(ns)!.kind === 'foreign')
   const ours = targets.filter(ns => states.get(ns)!.kind !== 'foreign')
-  for (const ns of targets) {
-    const state = states.get(ns)!
-    if (state.kind !== 'foreign') continue
+  for (const ns of foreign) {
+    const state = states.get(ns) as { kind: 'foreign'; unusable: string | null }
     if (state.unusable) {
       unusable.set(ns, state.unusable)
       logger.warn(
@@ -416,7 +462,7 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
     }
     out.set(ns, 'exists-foreign')
   }
-  if (ours.length === 0) return { results: out, unusable }
+  if (ours.length === 0) return { results: out, unusable, blocked }
 
   // A mint is needed when any namespace we own lacks a usable credential, OR when the
   // copies have diverged — divergence means an earlier pass wrote some namespaces and
@@ -430,8 +476,54 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
 
   if (!needsMint) {
     for (const ns of ours) out.set(ns, 'exists-ours')
-    return { results: out, unusable }
+    return { results: out, unusable, blocked }
   }
+
+  // ── All-or-nothing: a USABLE foreign copy anywhere forbids the mint ───────
+  // The credential is per-ORG and the mint is rotate-on-call, so minting for a namespace we
+  // own would revoke the key inside the foreign Secret we just agreed not to touch. That
+  // damage is invisible — the foreign bytes are unchanged, the foreign fingerprint is not
+  // in the divergence set above, and invariant 1 forbids repairing it — so the only safe
+  // move is to mint nothing and report the namespaces we could not fill. Owned copies that
+  // are already current are untouched by this: they needed no mint, so `needsMint` above
+  // has already returned them as `exists-ours`.
+  //
+  // The gate is USABILITY, not foreignness. An UNUSABLE foreign Secret cannot be serving a
+  // pull for this registry by construction — the kubelet ignores a wrong `type` outright,
+  // and never selects a blob carrying no entry for our host — so rotating the org key
+  // cannot break a working path through it. Blocking on it would only fail installs that
+  // never reference its namespace, which is the scoping this service already decided
+  // against. It stays recorded in `unusable`, so the callers that DO reference it still
+  // fail on it (`foreign_secret_unusable`).
+  const blocking = foreign.filter(
+    ns => (states.get(ns) as { unusable: string | null }).unusable === null
+  )
+  if (blocking.length > 0) {
+    // Under divergence every owned copy needs the rewrite, not just the invalid ones.
+    const unfillable = diverged ? ours : ours.filter(ns => states.get(ns)!.kind !== 'valid')
+    const externals = blocking.map(n => `"${n}"`).join(', ')
+    const all = platformWorkloadNamespaces()
+      .map(n => `"${n}"`)
+      .join(', ')
+    for (const ns of unfillable) {
+      blocked.set(
+        ns,
+        `cannot provision the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}": an externally-owned copy of it exists in ${externals}, and this organization's pull credential is rotate-on-call — minting one for "${ns}" would revoke the key inside that external Secret and break every pod already pulling with it. Either provision ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} externally in ALL of ${all}, or delete the external copy in ${externals} so control-api can manage every namespace itself.`
+      )
+    }
+    // The owned copies we did NOT block are genuinely current — nothing rotated their key —
+    // so report them honestly. Leaving them out would fall through the wrapper's
+    // `?? 'skipped'` and claim provisioning was never our job.
+    for (const ns of ours) {
+      if (!blocked.has(ns)) out.set(ns, 'exists-ours')
+    }
+    logger.warn(
+      { external: blocking, unfillable },
+      'usable externally-owned evenfire-registry-pull Secret present; refusing to mint (the mint is org-wide and rotate-on-call, so it would revoke the external key) — installs that need the unfillable namespaces will fail'
+    )
+    return { results: out, unusable, blocked }
+  }
+
   if (diverged) {
     logger.warn(
       { namespaces: ours },
@@ -457,7 +549,10 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
   const cred = await mintCredential(orgName, host)
   for (const ns of ours) {
     const state = states.get(ns)!
-    const outcome = await writeCredential(gateway, ns, state, cred, recreate.has(ns))
+    const outcome = await writeCredential(gateway, ns, state, cred, recreate.has(ns), {
+      host,
+      unusable,
+    })
     out.set(ns, outcome)
   }
 
@@ -467,7 +562,7 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
     fingerprint: cred.fingerprint,
   })
   logger.info({ namespaces: ours, orgName }, 'registry pull secret provisioned')
-  return { results: out, unusable }
+  return { results: out, unusable, blocked }
 }
 
 /** Write `cred` into one namespace, choosing create/update/recreate from its prior state. */
@@ -476,7 +571,10 @@ async function writeCredential(
   ns: string,
   state: TargetState,
   cred: MintedCredential,
-  alreadyDeleted: boolean
+  alreadyDeleted: boolean,
+  // The pass's `unusable` map, so a foreign Secret discovered on the race path below is
+  // recorded exactly as one discovered by `classify` would be — see the comment there.
+  pass: { host: string; unusable: Map<string, string> }
 ): Promise<EnsurePullSecretResult> {
   // Wrong-typed Secrets were deleted before the mint (see ensureInner), so they are now
   // absent and must be created, not updated.
@@ -498,7 +596,28 @@ async function writeCredential(
       // adopting the winner's would split this namespace from the rest for a credential we
       // can verify no better. Skip if the winner is foreign — invariant 1 still holds.
       const winner = await readCurrent(gateway, ns)
-      if (winner && winner.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) return 'exists-foreign'
+      if (!winner) {
+        // Created and deleted again before this read. The Secret is absent, and an update
+        // against an absent Secret 404s — so create, do not fall through.
+        await gateway.createSecret(buildSecretReq(ns, cred))
+        return 'created'
+      }
+      if (winner.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
+        // The all-or-nothing scan in ensureInner ran before this Secret existed, so the
+        // mint has already happened and cannot be taken back. What we CAN still do is give
+        // this namespace the same verdict the classify path would: a foreign Secret the
+        // kubelet will ignore must fail the callers that reference it, not sail past them
+        // and leave a CRD pointing at a credential no pod can use.
+        const problem = foreignUsabilityProblem(winner, pass.host)
+        if (problem) {
+          pass.unusable.set(ns, problem)
+          logger.warn(
+            { namespace: ns, problem },
+            'lost the create race to an externally-owned evenfire-registry-pull Secret that cannot serve an image pull; leaving it untouched — installs that reference this namespace will fail until it is fixed or removed'
+          )
+        }
+        return 'exists-foreign'
+      }
       await gateway.updateSecret(buildSecretReq(ns, cred))
       return 'created'
     }
