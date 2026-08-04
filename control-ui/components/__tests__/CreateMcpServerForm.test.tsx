@@ -50,6 +50,14 @@ function continueToSecrets() {
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 }
 
+function chooseNoCredentials() {
+  fireEvent.click(screen.getByRole('radio', { name: /No credentials required/ }))
+}
+
+function chooseNewSecret() {
+  fireEvent.click(screen.getByRole('radio', { name: /Create Kubernetes Secret/ }))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Rendering
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,10 +162,23 @@ describe('CreateMcpServerForm — transport', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// envSecret checkbox
+// Credentials
 // ─────────────────────────────────────────────────────────────────────────────
 describe('CreateMcpServerForm — secret reference', () => {
-  it('reveals the Kubernetes Secret Name input when the checkbox is toggled on', async () => {
+  it('requires an explicit credential decision before creation is enabled', async () => {
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity()
+    continueToSecrets()
+
+    const submit = screen.getByRole('button', { name: 'Create connector' })
+    expect(submit).toBeDisabled()
+
+    chooseNoCredentials()
+
+    expect(submit).not.toBeDisabled()
+  })
+
+  it('reveals the Kubernetes Secret Name input when Create Kubernetes Secret is selected', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
     continueToSecrets()
@@ -165,10 +186,7 @@ describe('CreateMcpServerForm — secret reference', () => {
     // Not visible by default
     expect(screen.queryByPlaceholderText('brave-search-credentials')).not.toBeInTheDocument()
 
-    const checkbox = screen.getByRole('checkbox', {
-      name: /Use Kubernetes Secret for credentials/,
-    })
-    fireEvent.click(checkbox)
+    chooseNewSecret()
 
     expect(screen.getByPlaceholderText('brave-search-credentials')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add Key Mapping' })).toBeInTheDocument()
@@ -195,6 +213,7 @@ describe('CreateMcpServerForm — submit', () => {
   async function fillRequired(name = 'brave-search') {
     await fillIdentity(name)
     continueToSecrets()
+    chooseNoCredentials()
   }
 
   it('calls createMcpServer and adds the server to the Context allowlist on submit', async () => {
@@ -258,6 +277,8 @@ describe('CreateMcpServerForm — submit', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
+    chooseNoCredentials()
+
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
     fireEvent.click(submit)
@@ -280,6 +301,8 @@ describe('CreateMcpServerForm — submit', () => {
       target: { value: 'public-web' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    chooseNoCredentials()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -307,6 +330,8 @@ describe('CreateMcpServerForm — submit', () => {
       target: { value: '443' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    chooseNoCredentials()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -350,32 +375,25 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
   }
 
   function enableEnvSecret(secretName = 'brave-credentials') {
-    fireEvent.click(screen.getByRole('checkbox', { name: /Use Kubernetes Secret for credentials/ }))
+    chooseNewSecret()
     fireEvent.change(screen.getByPlaceholderText('brave-search-credentials'), {
       target: { value: secretName },
     })
   }
 
-  it('blocks submit when envSecret is enabled but no key rows were added', async () => {
+  it('keeps Create disabled when a Secret has no key mappings', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
     // No "Add Key Mapping" click — zero rows total.
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(
-        screen.getByText('Add at least one key-value pair or disable envSecret')
-      ).toBeInTheDocument()
-    })
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })
 
-  it('blocks submit when key rows are present but all values are empty', async () => {
+  it('keeps Create disabled when a Secret mapping is incomplete', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
@@ -388,18 +406,12 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     fireEvent.change(envVarInput, { target: { value: 'BRAVE_API_KEY' } })
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(screen.getByText('All envSecret values must be non-empty')).toBeInTheDocument()
-    })
-    // No network calls must have been made.
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })
 
-  it('blocks submit when all key rows have empty secretKey names', async () => {
+  it('keeps Create disabled when every Secret mapping row is blank', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
@@ -409,14 +421,7 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     // This triggers the "Add at least one key-value pair or disable envSecret"
     // path (meaningfulRows.length === 0).
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(
-        screen.getByText('Add at least one key-value pair or disable envSecret')
-      ).toBeInTheDocument()
-    })
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })

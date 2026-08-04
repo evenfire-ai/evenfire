@@ -6,7 +6,7 @@ import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconX } from '@/components/icons'
-import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
+import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
 import {
   createMcpSecret,
   createMcpServer,
@@ -82,7 +82,7 @@ export function CreateMcpServerForm({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [envVars, setEnvVars] = useState<EnvVar[]>([])
-  const [useEnvSecret, setUseEnvSecret] = useState(false)
+  const [credentialMode, setCredentialMode] = useState<'secret' | 'none' | null>(null)
   const [envSecretName, setEnvSecretName] = useState('')
   const [envSecretKeys, setEnvSecretKeys] = useState<EnvSecretKeyMapping[]>([])
   const [secretValues, setSecretValues] = useState<string[]>([])
@@ -93,7 +93,26 @@ export function CreateMcpServerForm({
 
   const nameValid = MCP_SERVER_NAME_PATTERN.test(name) && name.length <= 63
   const egressValid = !egressStatus || egressStatus.errors.length === 0
-  const canSubmit = Boolean(name && image && contextRef) && nameValid && egressValid && !submitting
+  const useEnvSecret = credentialMode === 'secret'
+  const hasCompleteSecretMapping = envSecretKeys.some((row, index) => {
+    return Boolean(row.secretKey.trim() && row.envVar.trim() && (secretValues[index] ?? '').trim())
+  })
+  const hasIncompleteSecretMapping = envSecretKeys.some((row, index) => {
+    const values = [row.secretKey.trim(), row.envVar.trim(), (secretValues[index] ?? '').trim()]
+    return values.some(Boolean) && !values.every(Boolean)
+  })
+  const credentialsConfigured =
+    credentialMode === 'none' ||
+    (credentialMode === 'secret' &&
+      Boolean(envSecretName.trim()) &&
+      hasCompleteSecretMapping &&
+      !hasIncompleteSecretMapping)
+  const canSubmit =
+    Boolean(name && image && contextRef) &&
+    nameValid &&
+    egressValid &&
+    credentialsConfigured &&
+    !submitting
   const canContinue =
     step === 0 ? Boolean(name && image && contextRef && nameValid) && egressValid : egressValid
   const contextOptions = useMemo(
@@ -186,15 +205,20 @@ export function CreateMcpServerForm({
       if (canContinue) setStep(current => Math.min(STEPS.length - 1, current + 1))
       return
     }
+
+    if (credentialMode === null) {
+      setError('Choose whether this connector needs credentials before creating it.')
+      return
+    }
     if (!canSubmit) return
 
     // ── Client-side envSecret validation (PR-A / A2) ─────────────────────────
-    // If the operator enabled envSecret with a Secret name, they must provide
+    // If the operator chose a Secret, they must provide
     // at least one key-value pair so we actually create the Secret in-band.
     // Referencing a pre-existing Secret from this form is not supported here:
     // it's the exact "Secret missing → HCC silent hang" class we're closing.
-    // Operators who need to reference an existing Secret should disable the
-    // envSecret checkbox and manage it via kubectl / the API directly.
+    // Operators who need to reference an existing Secret should manage it via
+    // kubectl or the API directly.
     if (useEnvSecret && envSecretName.trim()) {
       const builtSecretData: Record<string, string> = {}
       envSecretKeys.forEach((row, index) => {
@@ -205,13 +229,8 @@ export function CreateMcpServerForm({
         }
       })
 
-      // Any row with a key set but an empty value is a hard error — the user
-      // clearly meant to provide credentials and forgot one.
-      const hasRowWithEmptyValue = envSecretKeys.some(
-        (row, index) => row.secretKey.trim() !== '' && (secretValues[index] ?? '') === ''
-      )
-      if (hasRowWithEmptyValue) {
-        setError('All envSecret values must be non-empty')
+      if (hasIncompleteSecretMapping) {
+        setError('Complete every Secret key, environment variable, and value before creating it.')
         return
       }
       if (Object.keys(builtSecretData).length === 0) {
@@ -493,7 +512,9 @@ export function CreateMcpServerForm({
                         Yes — Evenfire creates and manages the Deployment, Service, and
                         NetworkPolicies
                       </option>
-                      <option value="false">No — I will deploy the pod myself (discovery only)</option>
+                      <option value="false">
+                        No — I will deploy the pod myself (discovery only)
+                      </option>
                     </SelectInput>
                   </Field>
 
@@ -580,21 +601,58 @@ export function CreateMcpServerForm({
                 </Button>
               </FormSection>
 
-              <FormSection title="Secret Reference">
-                <CheckboxField
-                  checked={useEnvSecret}
-                  label="Use Kubernetes Secret for credentials"
-                  disabled={submitting}
-                  onChange={event => setUseEnvSecret(event.target.checked)}
-                />
+              <FormSection
+                description="Choose this explicitly so keyless connectors are not confused with connectors missing credentials."
+                title="Credentials"
+              >
+                <div className="cu-agent-radio-group" role="radiogroup" aria-label="Credentials">
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
+                      checked={credentialMode === 'secret'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('secret')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">Create Kubernetes Secret</span>
+                      <span className="cu-agent-radio__description">
+                        Enter API keys or tokens now. Evenfire creates the Secret before the
+                        connector.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
+                      checked={credentialMode === 'none'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('none')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">No credentials required</span>
+                      <span className="cu-agent-radio__description">
+                        Use this only for keyless connectors, such as Playwright or public
+                        documentation MCPs.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                {credentialMode === null ? (
+                  <p className="cu-form-section__description">
+                    Choose an option to enable Create connector.
+                  </p>
+                ) : null}
 
                 {useEnvSecret ? (
                   <>
                     <Field
                       description={
                         <>
-                          Name of an existing Secret in the <code>mcp-server</code> namespace that
-                          contains your credentials.
+                          Name for the new Secret in the <code>mcp-server</code> namespace that will
+                          contain these credentials.
                         </>
                       }
                       label="Kubernetes Secret Name"
