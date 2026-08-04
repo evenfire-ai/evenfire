@@ -34,6 +34,27 @@ export class OpenAIProvider implements SingleTurnProvider {
     return 'openai'
   }
 
+  /**
+   * OpenAI's reasoning/latest model families reject the legacy `max_tokens`
+   * request field and require `max_completion_tokens`. Keep the internal
+   * provider contract stable (`max_tokens`) while translating only those
+   * native models at the wire boundary. OpenAI-compatible providers override
+   * this hook because their portability contract still uses `max_tokens`.
+   */
+  protected usesMaxCompletionTokens(): boolean {
+    return /^(?:gpt-5(?:[.-]|$)|o[1-9](?:[.-]|$))/i.test(this.defaultModel)
+  }
+
+  private tokenLimitOptions(maxTokens: number | undefined): {
+    max_tokens?: number
+    max_completion_tokens?: number
+  } {
+    if (maxTokens === undefined) return {}
+    return this.usesMaxCompletionTokens()
+      ? { max_completion_tokens: maxTokens }
+      : { max_tokens: maxTokens }
+  }
+
   classifyError(err: unknown): ClassifiedError {
     return classifyByHttpStatus(err) ?? classifyUnknown(err)
   }
@@ -53,7 +74,7 @@ export class OpenAIProvider implements SingleTurnProvider {
       {
         model: this.defaultModel,
         messages: openaiMessages,
-        max_tokens: options?.max_tokens,
+        ...this.tokenLimitOptions(options?.max_tokens),
         temperature: options?.temperature,
       },
       { signal: options?.signal }
@@ -104,7 +125,7 @@ export class OpenAIProvider implements SingleTurnProvider {
         tool_choice: openaiTools
           ? ((options?.tool_choice ?? 'auto') as OpenAI.ChatCompletionToolChoiceOption)
           : undefined,
-        max_tokens: options?.max_tokens,
+        ...this.tokenLimitOptions(options?.max_tokens),
         temperature: options?.temperature,
       },
       { signal: options?.signal }
