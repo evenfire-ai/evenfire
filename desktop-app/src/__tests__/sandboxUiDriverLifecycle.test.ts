@@ -301,6 +301,23 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     )
   })
 
+  it('encodes the canonical default route before loading the mounted app', async () => {
+    const parentWindow = new FakeParentWindow()
+
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        defaultPath: '/café menu/literal%percent',
+      })
+    )
+    const view = electronMocks.views[0]
+
+    expect(view!.webContents.loadURL).toHaveBeenCalledWith(
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/' +
+        'caf%C3%A9%20menu/literal%25percent'
+    )
+  })
+
   it('rejects a refresh cookie scoped to a different recipe', async () => {
     const parentWindow = new FakeParentWindow()
     await mountSandboxUiView(mountArgs({ parentWindow }))

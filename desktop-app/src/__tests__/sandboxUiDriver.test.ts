@@ -134,6 +134,37 @@ describe('sandbox UI route normalization', () => {
     ).toBeUndefined()
   })
 
+  it('uses the shared canonical route contract for default path acceptance', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    expect(resolveSandboxUiDefaultPath('/café menu/literal%percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/safe/%252e%252e/admin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/safe/%252Fadmin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/tasks\u2028admin')).toBe('/')
+    expect(warn).toHaveBeenCalledTimes(3)
+
+    warn.mockRestore()
+  })
+
+  it('omits equivalent canonical default routes when sharing', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl:
+          'https://rpc.example/api/v1/sandbox-ui/ns/app/view/' +
+          'caf%C3%A9%20menu/literal%25percent',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent'),
+      })
+    ).toBeUndefined()
+  })
+
   it('treats the bare view endpoint and nested routes as the same boundary', () => {
     const prefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
     expect(isSandboxUiNavigationWithinPrefix(prefix, prefix)).toBe(true)

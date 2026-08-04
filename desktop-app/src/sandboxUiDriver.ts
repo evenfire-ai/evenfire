@@ -319,6 +319,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
   const viewPath = resolveSandboxUiDefaultPath(defaultPath)
   const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
+  const sharedViewPath = sharedPathForDefaultPath(viewPath)
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view`
@@ -418,8 +419,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   const url =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`
-  if (clientRoutePath && clientRoutePath !== viewPath) {
+    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${encodeSandboxUiDefaultPath(
+      viewPath
+    )}`
+  if (clientRoutePath && clientRoutePath !== sharedViewPath) {
     const encodedClientRoutePath = encodeSandboxUiRoutePath(clientRoutePath)
     const clientRouteUrl =
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
@@ -535,12 +538,6 @@ export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
   return '/'
 }
 
-const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
-
-function pathHasDotSegment(pathname: string): boolean {
-  return pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))
-}
-
 function encodeSandboxUiRoutePath(routePath: string): string {
   return routePath
     .split('/')
@@ -548,13 +545,55 @@ function encodeSandboxUiRoutePath(routePath: string): string {
     .join('/')
 }
 
-function sharedPathForDefaultPath(defaultPath: string): string {
+function firstDefaultPathMetaIndex(defaultPath: string): number | undefined {
   const firstQueryIndex = defaultPath.indexOf('?')
   const firstHashIndex = defaultPath.indexOf('#')
-  const firstMetaIndex = [firstQueryIndex, firstHashIndex]
-    .filter(index => index !== -1)
-    .sort((a, b) => a - b)[0]
-  return firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex) || '/'
+  return [firstQueryIndex, firstHashIndex].filter(index => index !== -1).sort((a, b) => a - b)[0]
+}
+
+function sharedPathForDefaultPath(defaultPath: string): string {
+  const firstMetaIndex = firstDefaultPathMetaIndex(defaultPath)
+  const pathname = firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex)
+  return normalizeSandboxUiRoute(pathname || '/') || '/'
+}
+
+function normalizeSandboxUiDefaultMetadata(metadata: string): string | null {
+  const hashIndex = metadata.indexOf('#')
+  if (hashIndex === -1) return metadata
+  const hashRouteStart = hashIndex + 1
+  const hashRemainder = metadata.slice(hashRouteStart)
+  const hashQueryIndex = hashRemainder.indexOf('?')
+  const hashRoute = hashQueryIndex === -1 ? hashRemainder : hashRemainder.slice(0, hashQueryIndex)
+  if (!hashRoute.startsWith('/')) return metadata
+  const normalizedHashRoute = normalizeSandboxUiRoute(hashRoute)
+  if (!normalizedHashRoute) return null
+  return (
+    metadata.slice(0, hashRouteStart) +
+    normalizedHashRoute +
+    (hashQueryIndex === -1 ? '' : hashRemainder.slice(hashQueryIndex))
+  )
+}
+
+function encodeSandboxUiDefaultMetadata(metadata: string): string {
+  const hashIndex = metadata.indexOf('#')
+  if (hashIndex === -1) return metadata
+  const hashRouteStart = hashIndex + 1
+  const hashRemainder = metadata.slice(hashRouteStart)
+  const hashQueryIndex = hashRemainder.indexOf('?')
+  const hashRoute = hashQueryIndex === -1 ? hashRemainder : hashRemainder.slice(0, hashQueryIndex)
+  if (!hashRoute.startsWith('/')) return metadata
+  return (
+    metadata.slice(0, hashRouteStart) +
+    encodeSandboxUiRoutePath(hashRoute) +
+    (hashQueryIndex === -1 ? '' : hashRemainder.slice(hashQueryIndex))
+  )
+}
+
+function encodeSandboxUiDefaultPath(defaultPath: string): string {
+  const firstMetaIndex = firstDefaultPathMetaIndex(defaultPath)
+  const pathname = firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex)
+  const metadata = firstMetaIndex === undefined ? '' : defaultPath.slice(firstMetaIndex)
+  return `${encodeSandboxUiRoutePath(pathname || '/')}${encodeSandboxUiDefaultMetadata(metadata)}`
 }
 
 function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
@@ -562,21 +601,19 @@ function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
   if (!routePath) return '/'
   if (
     routePath.length > 4096 ||
-    !routePath.startsWith('/') ||
-    routePath.startsWith('//') ||
     routePath.includes('\\') ||
-    /[\u0000-\u001f\u007f\s]/.test(routePath)
+    /[\u0000-\u001f\u007f\u2028\u2029]/.test(routePath)
   ) {
     return null
   }
-  const firstHashIndex = routePath.indexOf('#')
-  const serverPath = sharedPathForDefaultPath(routePath)
-  if (pathHasDotSegment(serverPath)) return null
-  if (firstHashIndex !== -1) {
-    const hashRoute = routePath.slice(firstHashIndex + 1).split('?')[0] || ''
-    if (hashRoute.startsWith('/') && pathHasDotSegment(hashRoute)) return null
-  }
-  return routePath
+  const firstMetaIndex = firstDefaultPathMetaIndex(routePath)
+  const pathname = firstMetaIndex === undefined ? routePath : routePath.slice(0, firstMetaIndex)
+  const metadata = firstMetaIndex === undefined ? '' : routePath.slice(firstMetaIndex)
+  const normalizedPathname = normalizeSandboxUiRoute(pathname || '/')
+  if (!normalizedPathname) return null
+  const normalizedMetadata = normalizeSandboxUiDefaultMetadata(metadata)
+  if (normalizedMetadata === null) return null
+  return `${normalizedPathname}${normalizedMetadata}`
 }
 
 export function canApplySandboxUiClientRoute(input: {
