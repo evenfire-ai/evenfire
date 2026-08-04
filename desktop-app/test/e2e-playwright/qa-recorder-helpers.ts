@@ -48,7 +48,7 @@ export function requireRecorderConfirm(flag: string, description: string): void 
 }
 
 /** Refuse non-loopback targets unless the operator explicitly allowed a remote QA env. */
-export function assertAllowedTarget(label: string, rawUrl: string): void {
+export async function assertAllowedTarget(label: string, rawUrl: string): Promise<void> {
   let url: URL
   try {
     url = new URL(rawUrl)
@@ -63,7 +63,7 @@ export function assertAllowedTarget(label: string, rawUrl: string): void {
   if (LOOPBACK_HOSTS.has(url.hostname) && process.env.QA_RECORDER_ALLOW_REMOTE !== '1') {
     // Target is local — assert the endpoints are healthy right now so a recorder
     // run fails fast with a clear message instead of a slow Electron timeout.
-    void assertHealthy(rawUrl, label)
+    await assertHealthy(rawUrl, label)
   }
 }
 

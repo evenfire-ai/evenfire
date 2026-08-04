@@ -71,6 +71,9 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
 
   const hasWorkflowSteps = (spec.steps?.length ?? 0) > 0
   if (!hasWorkflowSteps) {
+    if (!Array.isArray(spec.workloads) || spec.workloads.length === 0) {
+      errors.push('pluginWorkloadSdk SDK-only recipes require at least one spec.workloads entry')
+    }
     const configuredWorkflowFields = SDK_ONLY_WORKFLOW_FIELDS.filter(field => {
       switch (field) {
         case 'triggers':
@@ -197,6 +200,23 @@ export interface PluginWorkloadSdkBootstrapProofInput {
 }
 
 /**
+ * JSON merge-patch preserves omitted object members. Keep the status
+ * projection's derived metadata explicit so a validated record cannot leave
+ * stale bootstrap/policy identity behind after a degraded transition.
+ */
+const CLEARED_PLUGIN_WORKLOAD_SDK_METADATA = {
+  validatedAt: null,
+  bootstrapContractVersion: null,
+  bootstrapPodUid: null,
+  bootstrapProvider: null,
+  bootstrapModel: null,
+  policyRevision: null,
+  policyHash: null,
+  defaultTargetRef: null,
+  verifiedAt: null,
+} as const
+
+/**
  * Project `spec.pluginWorkloadSdk` + feature flag + reconcile outcome into
  * the status condition and capability record.
  *
@@ -270,6 +290,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         promptBridge,
         clientNotifications,
         message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
       },
     }
   }
@@ -298,6 +319,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         promptBridge,
         clientNotifications,
         message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
       },
     }
   }
@@ -329,6 +351,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         promptBridge,
         clientNotifications,
         message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
         ...(bootstrapProof
           ? {
               bootstrapContractVersion: bootstrapProof.contractVersion,
@@ -359,6 +382,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         promptBridge,
         clientNotifications,
         message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
       },
     }
   }
@@ -385,6 +409,7 @@ export function buildPluginWorkloadSdkStatus(args: {
       promptBridge,
       clientNotifications,
       message: `Capability validated (${families})`,
+      ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
       validatedAt: now,
       ...(bootstrapProof
         ? {

@@ -125,7 +125,7 @@ type ParseResult =
   | { ok: true; body: Record<string, unknown> }
   | { ok: false; reason: 'too_large' | 'invalid_json' | 'stream_error' }
 
-function parseJsonBody(req: http.IncomingMessage): Promise<ParseResult> {
+export function parseJsonBody(req: http.IncomingMessage): Promise<ParseResult> {
   return new Promise(resolve => {
     let data = ''
     let size = 0
@@ -145,7 +145,12 @@ function parseJsonBody(req: http.IncomingMessage): Promise<ParseResult> {
       if (settled) return
       settled = true
       try {
-        resolve({ ok: true, body: JSON.parse(data) })
+        const parsed: unknown = JSON.parse(data)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          resolve({ ok: false, reason: 'invalid_json' })
+          return
+        }
+        resolve({ ok: true, body: parsed as Record<string, unknown> })
       } catch {
         resolve({ ok: false, reason: 'invalid_json' })
       }

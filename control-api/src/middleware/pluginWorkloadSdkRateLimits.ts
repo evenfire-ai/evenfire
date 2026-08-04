@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express'
+import type { UiAuthedRequest } from './controlUIAuth.js'
 import { rateLimitMiddleware } from './rateLimitMiddleware.js'
 
 /**
@@ -30,6 +31,23 @@ export function createPluginWorkloadSdkInternalRateLimit(): RequestHandler {
       const claims = req.internalControl
       if (!claims) return 'plugin_workload_sdk_internal:unauthenticated'
       return `plugin_workload_sdk_internal:${claims.iss}:${claims.sub}`
+    },
+  })
+}
+
+/**
+ * Operator grant/quota/audit routes are authenticated, but they still need a
+ * principal-scoped distributed abuse budget. Use a sentinel for an unexpected
+ * missing claim so a middleware ordering regression cannot silently bypass the
+ * limiter.
+ */
+export function createPluginWorkloadSdkAdminRateLimit(): RequestHandler {
+  return rateLimitMiddleware({
+    bucketType: 'plugin_workload_sdk_admin',
+    maxPerMinute: 120,
+    getBucketKey: req => {
+      const sub = (req as UiAuthedRequest).adminAuth?.sub
+      return `plugin_workload_sdk_admin:${sub || 'unauthenticated'}`
     },
   })
 }

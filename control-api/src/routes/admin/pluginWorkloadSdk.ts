@@ -6,6 +6,7 @@ import {
 } from '@clerum/llm-providers'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
@@ -251,6 +252,7 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
 
 export function createAdminPluginWorkloadSdkRouter(): Router {
   const router = Router()
+  router.use('/admin/plugin-workload-sdk', createPluginWorkloadSdkAdminRateLimit())
 
   router.get(
     '/admin/plugin-workload-sdk/grants',

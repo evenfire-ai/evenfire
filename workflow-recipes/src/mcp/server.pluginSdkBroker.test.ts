@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import { PassThrough } from 'node:stream'
 import {
   ClerumMcpServer,
   bindPluginSdkCredentialTarget,
+  parseJsonBody,
   pluginSdkCredentialTargetEchoMatches,
   revalidatePluginSdkCredentialTicket,
 } from './server'
@@ -12,6 +14,29 @@ function response(status: number, body: unknown): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
+
+async function parseBody(body: string) {
+  const request = new PassThrough()
+  const parsed = parseJsonBody(request as never)
+  request.end(body)
+  return parsed
+}
+
+describe('WRC JSON body boundary', () => {
+  it.each(['null', '[]', '"scalar"', '42', 'true'])(
+    'rejects JSON %s because the endpoint contract requires an object',
+    async body => {
+      await expect(parseBody(body)).resolves.toEqual({ ok: false, reason: 'invalid_json' })
+    }
+  )
+
+  it('accepts a JSON object', async () => {
+    await expect(parseBody('{"messages":[]}')).resolves.toEqual({
+      ok: true,
+      body: { messages: [] },
+    })
+  })
+})
 
 describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
   it('denies a body target mismatch before the resolver and returns only signed claims', () => {

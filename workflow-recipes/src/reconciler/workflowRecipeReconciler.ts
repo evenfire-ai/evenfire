@@ -772,11 +772,14 @@ export class WorkflowRecipeReconciler {
    * disabled keeps a stale host/token reachable only behind an explicit
    * requeue, until the cleanup dependency is available and converges.
    */
-  private async cleanupPluginWorkloadSdkOrThrow(recipeName: string): Promise<void> {
+  private async cleanupPluginWorkloadSdkOrThrow(
+    recipeName: string,
+    options: { preserveWorkflowRuntime?: boolean } = {}
+  ): Promise<void> {
     if (!this.workflowReconciler) {
       throw new Error('workflow subsystem is not initialized; SDK cleanup cannot be confirmed')
     }
-    await this.workflowReconciler.cleanupPluginWorkloadSdk(recipeName)
+    await this.workflowReconciler.cleanupPluginWorkloadSdk(recipeName, options)
   }
 
   private async waitForTransportNetworkReadiness(
@@ -1263,7 +1266,9 @@ export class WorkflowRecipeReconciler {
     // intentionally restricted to the stepless adapter.
     if (!isWorkflow && recipe.spec.pluginWorkloadSdk && !this.config.pluginWorkloadSdkEnabled) {
       try {
-        await this.cleanupPluginWorkloadSdkOrThrow(name)
+        await this.cleanupPluginWorkloadSdkOrThrow(name, {
+          preserveWorkflowRuntime: isWorkflow,
+        })
       } catch (error) {
         return {
           phase: 'failed' as RecipePhase,
@@ -1293,7 +1298,9 @@ export class WorkflowRecipeReconciler {
     // only after this fail-closed cleanup succeeds.
     if (!recipe.spec.pluginWorkloadSdk && recipe.status?.pluginWorkloadSdk) {
       try {
-        await this.cleanupPluginWorkloadSdkOrThrow(name)
+        await this.cleanupPluginWorkloadSdkOrThrow(name, {
+          preserveWorkflowRuntime: isWorkflow,
+        })
       } catch (error) {
         return {
           phase: 'failed' as RecipePhase,
@@ -3196,7 +3203,7 @@ export class WorkflowRecipeReconciler {
       // the shared mcp-host/token resources. Hybrid recipes must not bypass
       // broker revocation merely because they also have coordinator state.
       if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
-        await this.cleanupPluginWorkloadSdkOrThrow(name)
+        await this.cleanupPluginWorkloadSdkOrThrow(name, { preserveWorkflowRuntime: true })
       }
       await this.workflowReconciler.reconcileDelete(name, recipe.metadata.namespace, recipe.spec)
       await this.cleanupDelegationIfNeeded(recipe)

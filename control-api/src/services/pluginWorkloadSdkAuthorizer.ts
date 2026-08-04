@@ -156,6 +156,25 @@ function resolvePromptTarget(
     }
   }
 
+  // The HTTP parser rejects provider-only selectors, but the authorizer is
+  // also called by internal mcp-host paths and tests. Keep the invariant at
+  // the authority boundary so a provider cannot implicitly choose its first
+  // model/credential slot.
+  if (
+    params.provider !== undefined &&
+    params.model === undefined &&
+    params.targetRef === undefined &&
+    params.modelPolicyRef === undefined
+  ) {
+    return {
+      ok: false,
+      error: deny(
+        'provider_policy_denied',
+        'provider requires model, targetRef, or modelPolicyRef'
+      ),
+    }
+  }
+
   let candidates: Array<{ target: PluginWorkloadSdkPromptTarget; index: number }> =
     grant.promptTargets.map((target, index) => ({ target, index }))
   let modelPolicy: PluginWorkloadSdkModelPolicy | null = null
@@ -625,8 +644,7 @@ export async function reissuePromptBridgeCredentialTicket(
     })
     return deny(
       'provider_unavailable',
-      'credential ticket issuance is temporarily unavailable',
-      true
+      'credential ticket issuance failed after reserving a provider attempt; retry is not safe for this attempt'
     )
   }
   return {

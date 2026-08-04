@@ -370,6 +370,18 @@ describe('authorizePromptBridge', () => {
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
   })
 
+  it('rejects a provider-only selector at the authorizer boundary', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      provider: 'zai',
+      model: undefined,
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
   it('does not treat a legacy wildcard allowedModels entry as routing authority', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: ['*'] }))
     const result = await authorizePromptBridge({
@@ -731,6 +743,32 @@ describe('reissuePromptBridgeCredentialTicket', () => {
       expect.objectContaining({ invocationId: 'inv-1', targetRef: 'openai-fallback' })
     )
     expect(JSON.stringify(result.value)).not.toContain('secret-value')
+  })
+
+  it('marks a reserved attempt terminal when ticket-jti registration fails', async () => {
+    const policy = twoTargetGrant()
+    authorizedSuffix.policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(policy)
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({ promptAuthorization: { ...authorizedSuffix } })
+    )
+    vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(false)
+
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'openai-fallback',
+      attemptGeneration: 1,
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'provider_unavailable',
+      retryable: false,
+    })
+    expect(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'failed', invocationId: 'inv-1' })
+    )
   })
 
   it('fails closed for a body target outside the original authorization suffix', async () => {

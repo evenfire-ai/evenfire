@@ -1628,6 +1628,38 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
   })
 
+  it('removes only SDK-owned authority from a hybrid workflow runtime', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(
+      reconciler.cleanupPluginWorkloadSdk('hybrid', { preserveWorkflowRuntime: true })
+    ).resolves.toBeUndefined()
+
+    expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+      name: 'wf-hybrid-plugin-workload-sdk-token',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'hybrid-workload-to-mcp-host-sdk-ingress',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'hybrid-workload-to-mcp-host-sdk-egress',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'hybrid-mcp-host-to-wrc-sdk-broker',
+      namespace: sandboxNamespace,
+    })
+    expect(mockCoreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(mockCoreApi.deleteNamespacedPod).not.toHaveBeenCalled()
+    expect(mockCoreApi.deleteNamespacedSecret).not.toHaveBeenCalledWith({
+      name: 'wf-hybrid-mcp-host-runtime-tokens',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
   it('fails closed before physical cleanup when the Control API revocation client is absent', async () => {
     const deps = makeDeps() as unknown as { pluginWorkloadSdkRevocationClient?: unknown }
     delete deps.pluginWorkloadSdkRevocationClient

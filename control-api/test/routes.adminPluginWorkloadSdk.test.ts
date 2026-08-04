@@ -4,6 +4,11 @@ import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createAdminPluginWorkloadSdkRouter } from '../src/routes/admin/pluginWorkloadSdk.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn(),
+}))
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -28,13 +33,13 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   }
 })
 
-function buildApp() {
+const DEFAULT_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
+
+function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    ;(req as unknown as { adminAuth: { sub: string } }).adminAuth = {
-      sub: '11111111-1111-4111-8111-111111111111',
-    }
+    ;(req as unknown as { adminAuth: { sub?: string } }).adminAuth = sub === null ? {} : { sub }
     next()
   })
   app.use(createAdminPluginWorkloadSdkRouter())
@@ -66,6 +71,14 @@ beforeEach(() => {
   vi.mocked(sdkDb.getQuotaCounters).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
+  vi.mocked(checkAndIncrement).mockReset()
+  vi.mocked(checkAndIncrement).mockResolvedValue({
+    allowed: true,
+    remaining: 119,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  })
   // R3 allowlist cross-check (listEnabledModelNamesForProvider) queries pool.
   // Default to the seed model so the valid-grant success paths pass; individual
   // tests override to simulate a disallowed model.
@@ -74,6 +87,34 @@ beforeEach(() => {
 })
 
 describe('routes/admin/pluginWorkloadSdk — grants', () => {
+  it('applies a principal-scoped admin rate limit before grant reads', async () => {
+    vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+
+    const res = await request(buildApp()).get('/admin/plugin-workload-sdk/grants')
+
+    expect(res.status).toBe(200)
+    expect(checkAndIncrement).toHaveBeenCalledWith(
+      'plugin_workload_sdk_admin:11111111-1111-4111-8111-111111111111',
+      120
+    )
+  })
+
+  it('keeps separate admin principals in separate rate-limit buckets', async () => {
+    vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+
+    await request(buildApp('admin-a')).get('/admin/plugin-workload-sdk/grants')
+    await request(buildApp('admin-b')).get('/admin/plugin-workload-sdk/grants')
+    await request(buildApp(null)).get('/admin/plugin-workload-sdk/grants')
+
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(1, 'plugin_workload_sdk_admin:admin-a', 120)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(2, 'plugin_workload_sdk_admin:admin-b', 120)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(
+      3,
+      'plugin_workload_sdk_admin:unauthenticated',
+      120
+    )
+  })
+
   it('lists grants with optional recipe filters', async () => {
     vi.mocked(sdkDb.listGrants).mockResolvedValue([])
     const res = await request(buildApp()).get(

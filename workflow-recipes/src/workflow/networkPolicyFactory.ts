@@ -164,10 +164,9 @@ function buildPublicHttpEgressRule(cidrs?: string[]): k8s.V1NetworkPolicyEgressR
   if (exactCidrs.length > 0) {
     return {
       to: exactCidrs.map(cidr => ({ ipBlock: { cidr } })),
-      ports: [
-        { port: 443, protocol: 'TCP' },
-        { port: 80, protocol: 'TCP' },
-      ],
+      // Public runtime egress is HTTPS-only. Plain HTTP would allow a
+      // compromised workload to exfiltrate credentials or prompt content.
+      ports: [{ port: 443, protocol: 'TCP' }],
     }
   }
 
@@ -180,10 +179,7 @@ function buildPublicHttpEgressRule(cidrs?: string[]): k8s.V1NetworkPolicyEgressR
         },
       },
     ],
-    ports: [
-      { port: 443, protocol: 'TCP' },
-      { port: 80, protocol: 'TCP' },
-    ],
+    ports: [{ port: 443, protocol: 'TCP' }],
   }
 }
 

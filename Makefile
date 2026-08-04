@@ -784,6 +784,22 @@ test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only
 	fi
 	KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-plugin-workload-sdk.sh
 
+.PHONY: test-e2e-plugin-workload-sdk-desktop
+test-e2e-plugin-workload-sdk-desktop: ## Run the explicit opt-in Electron/WebContentsView Plugin Workload SDK gate
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK E2E: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK E2E: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; URLs supplied by the branch profile"; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
+
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
 	@echo "Running cron tab validation E2E gate..."

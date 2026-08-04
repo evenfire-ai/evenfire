@@ -453,8 +453,8 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     'E2E_PLUGIN_SDK_WRITE_CONFIRM',
     'This journey performs one paid promptBridge call and sends one test notification.'
   )
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
   // Read-only setup assertion. Every functional action that follows is through
   // the real Desktop UI and its native WebContentsView.
   assertSteplessSdkRecipePrecondition()

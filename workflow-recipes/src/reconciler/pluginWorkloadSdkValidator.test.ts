@@ -92,8 +92,20 @@ describe('validatePluginWorkloadSdkSpec', () => {
     const errors = validatePluginWorkloadSdkSpec(
       baseSpec({ promptBridge: {}, allowedCallers: ['api'] }, { workloads: undefined })
     )
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('"api" does not reference any spec.workloads[].id')
+    expect(errors).toHaveLength(2)
+    expect(errors).toContain(
+      'pluginWorkloadSdk SDK-only recipes require at least one spec.workloads entry'
+    )
+    expect(
+      errors.some(error => error.includes('"api" does not reference any spec.workloads[].id'))
+    ).toBe(true)
+  })
+
+  it('rejects SDK-only recipes with an explicitly empty workloads list', () => {
+    const errors = validatePluginWorkloadSdkSpec(baseSpec({ promptBridge: {} }, { workloads: [] }))
+    expect(errors).toEqual([
+      'pluginWorkloadSdk SDK-only recipes require at least one spec.workloads entry',
+    ])
   })
 
   it('rejects wildcard entries in allowedEventTypes', () => {
@@ -275,6 +287,15 @@ describe('buildPluginWorkloadSdkStatus', () => {
       promptBridge: true,
       clientNotifications: false,
       message: 'Disabled (feature flag off)',
+      validatedAt: null,
+      bootstrapContractVersion: null,
+      bootstrapPodUid: null,
+      bootstrapProvider: null,
+      bootstrapModel: null,
+      policyRevision: null,
+      policyHash: null,
+      defaultTargetRef: null,
+      verifiedAt: null,
     })
   })
 
@@ -358,6 +379,15 @@ describe('buildPluginWorkloadSdkStatus', () => {
       promptBridge: true,
       clientNotifications: false,
       message: 'Capability validated, but the configured provider is unavailable',
+      validatedAt: null,
+      bootstrapContractVersion: null,
+      bootstrapPodUid: null,
+      bootstrapProvider: null,
+      bootstrapModel: null,
+      policyRevision: null,
+      policyHash: null,
+      defaultTargetRef: null,
+      verifiedAt: null,
     })
   })
 
@@ -401,6 +431,58 @@ describe('buildPluginWorkloadSdkStatus', () => {
       state: 'awaiting_policy',
       promptBridge: true,
       clientNotifications: false,
+      validatedAt: null,
+      policyRevision: null,
+      policyHash: null,
+      defaultTargetRef: null,
+    })
+  })
+
+  it('clears validated metadata when the capability degrades after a prior validation', () => {
+    const validated = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'old-pod',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        policyRevision: 7,
+        policyHash: 'b'.repeat(64),
+        defaultTargetRef: 'primary-openai',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(validated.capability).toMatchObject({
+      state: 'validated',
+      policyRevision: 7,
+      policyHash: 'b'.repeat(64),
+      defaultTargetRef: 'primary-openai',
+    })
+
+    const degraded = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'degraded',
+      featureFlagEnabled: true,
+      providerUnavailable: true,
+      now: NOW,
+    })
+    expect(degraded.capability).toMatchObject({
+      state: 'degraded',
+      validatedAt: null,
+      bootstrapContractVersion: null,
+      bootstrapPodUid: null,
+      bootstrapProvider: null,
+      bootstrapModel: null,
+      policyRevision: null,
+      policyHash: null,
+      defaultTargetRef: null,
+      verifiedAt: null,
     })
   })
 

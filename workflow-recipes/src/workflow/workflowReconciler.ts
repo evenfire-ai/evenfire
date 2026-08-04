@@ -170,6 +170,16 @@ type ExternalWorkflowOutputPvcState =
   | 'wrc-managed-conflict'
   | 'unauthorized'
 
+export interface PluginWorkloadSdkCleanupOptions {
+  /**
+   * Hybrid workflow recipes share their mcp-host, runtime token Secret and
+   * workflow network policies with the SDK lane. Remove only SDK-owned
+   * authority when the capability is edited out; the workflow reconciler
+   * remains the owner of shared runtime resources.
+   */
+  preserveWorkflowRuntime?: boolean
+}
+
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
   'WorkflowOutputWrcManagedLifecycle',
@@ -952,18 +962,27 @@ export class WorkflowReconciler {
    * coordinator teardown so both SDK-only and hybrid recipes share the same
    * authorization-fencing invariant.
    */
-  async cleanupPluginWorkloadSdk(recipeName: string): Promise<void> {
+  async cleanupPluginWorkloadSdk(
+    recipeName: string,
+    options: PluginWorkloadSdkCleanupOptions = {}
+  ): Promise<void> {
     const ns = this.deps.config.sandboxNamespace
+    const preserveWorkflowRuntime = options.preserveWorkflowRuntime === true
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
-    const networkPolicyNames = [
+    const sdkNetworkPolicyNames = [
       `${recipeName}-workload-to-mcp-host-sdk-ingress`,
       `${recipeName}-workload-to-mcp-host-sdk-egress`,
       `${recipeName}-mcp-host-to-wrc-sdk-broker`,
+    ]
+    const sharedNetworkPolicyNames = [
       `${recipeName}-mcp-host-to-servers`,
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
     ]
+    const networkPolicyNames = preserveWorkflowRuntime
+      ? sdkNetworkPolicyNames
+      : [...sdkNetworkPolicyNames, ...sharedNetworkPolicyNames]
     let revocationReceipt: PluginWorkloadSdkRevocationReceipt | null = null
     const revocationClient = this.deps.pluginWorkloadSdkRevocationClient
     if (!revocationClient) {
@@ -991,43 +1010,58 @@ export class WorkflowReconciler {
     // token Secrets. This ordering is the revocation boundary: a live pod
     // cannot keep receiving broker traffic while its credentials are being
     // deleted, and a failed delete is requeued instead of reported as disabled.
-    await this.teardownDelete(() =>
-      this.deps.coreApi.deleteNamespacedService({
-        name: buildMcpHostServiceName(recipeName),
-        namespace: ns,
-      })
-    )
+    if (!preserveWorkflowRuntime) {
+      await this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedService({
+          name: buildMcpHostServiceName(recipeName),
+          namespace: ns,
+        })
+      )
+    }
     await Promise.all([
-      ...networkPolicyNames.map(name =>
+      ...sdkNetworkPolicyNames.map(name =>
         this.teardownDelete(() =>
           this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
         )
       ),
+      ...(preserveWorkflowRuntime
+        ? []
+        : sharedNetworkPolicyNames.map(name =>
+            this.teardownDelete(() =>
+              this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+            )
+          )),
       // Older SDK-only reconciles used the shared workflow policy factory and
       // left coordinator-shaped policies behind. Sweep the complete recipe
       // label set so upgrades and dynamic policy names cannot retain a stale
       // isolation lane. The selector is recipe-scoped and only matches WRC-
       // managed policies, never the namespace-wide baseline policies.
-      this.teardownDelete(() =>
-        this.deleteNetworkPoliciesByLabelSelector(
-          ns,
-          `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
-        )
-      ),
-      this.teardownDelete(() =>
-        this.deleteNetworkPoliciesByLabelSelector(
-          this.deps.config.mcpServerNamespace,
-          `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
-        )
-      ),
+      ...(preserveWorkflowRuntime
+        ? []
+        : [
+            this.teardownDelete(() =>
+              this.deleteNetworkPoliciesByLabelSelector(
+                ns,
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+              )
+            ),
+            this.teardownDelete(() =>
+              this.deleteNetworkPoliciesByLabelSelector(
+                this.deps.config.mcpServerNamespace,
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+              )
+            ),
+          ]),
     ])
-    await this.teardownDelete(() =>
-      this.deps.coreApi.deleteNamespacedPod({
-        name: `${recipeName}-mcp-host`,
-        namespace: ns,
-        propagationPolicy: 'Background',
-      })
-    )
+    if (!preserveWorkflowRuntime) {
+      await this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedPod({
+          name: `${recipeName}-mcp-host`,
+          namespace: ns,
+          propagationPolicy: 'Background',
+        })
+      )
+    }
     await Promise.all([
       this.teardownDelete(() =>
         this.deps.coreApi.deleteNamespacedSecret({
@@ -1035,18 +1069,23 @@ export class WorkflowReconciler {
           namespace: ns,
         })
       ),
-      // The runtime JWT Secret is created for eager SDK hosts as well as
-      // workflow hosts. A capability removal must revoke it with the host;
-      // leaving it behind would allow a deleted workload to replay broker
-      // requests until token expiry.
-      this.teardownDelete(() =>
-        this.deps.coreApi.deleteNamespacedSecret({
-          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
-          namespace: ns,
-        })
-      ),
+      ...(preserveWorkflowRuntime
+        ? []
+        : [
+            // The runtime JWT Secret is created for eager SDK hosts as well as
+            // workflow hosts. SDK-only capability removal must revoke it with
+            // the host; hybrid workflow cleanup owns the shared Secret.
+            this.teardownDelete(() =>
+              this.deps.coreApi.deleteNamespacedSecret({
+                name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+                namespace: ns,
+              })
+            ),
+          ]),
     ])
-    await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames)
+    await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames, {
+      preserveWorkflowRuntime,
+    })
     if (revocationReceipt.state === 'revoking') {
       if (!revocationReceipt.revocationId) {
         throw new Error(`Plugin Workload SDK revocation receipt for ${recipeName} has no epoch`)
@@ -1071,48 +1110,53 @@ export class WorkflowReconciler {
   private async assertPluginWorkloadSdkResourcesAbsent(
     recipeName: string,
     namespace: string,
-    networkPolicyNames: string[]
+    networkPolicyNames: string[],
+    options: PluginWorkloadSdkCleanupOptions = {}
   ): Promise<void> {
-    const podGone = await waitForPodDeletion(
-      this.deps.coreApi,
-      `${recipeName}-mcp-host`,
-      namespace,
-      {
-        timeoutMs: 5_000,
-        pollIntervalMs: 250,
-      }
-    )
-    if (!podGone)
-      throw new Error(`Plugin Workload SDK pod for ${recipeName} still exists after teardown`)
     const checks: Array<Promise<unknown>> = [
       this.deps.coreApi.readNamespacedSecret({
         name: buildPluginWorkloadSdkTokenSecretName(recipeName),
         namespace,
       }),
-      this.deps.coreApi.readNamespacedSecret({
-        name: `wf-${recipeName}-mcp-host-runtime-tokens`,
-        namespace,
-      }),
-      this.deps.coreApi.readNamespacedService({
-        name: buildMcpHostServiceName(recipeName),
-        namespace,
-      }),
-      this.deps.coreApi.readNamespacedEndpoints({
-        name: buildMcpHostServiceName(recipeName),
-        namespace,
-      }),
       ...networkPolicyNames.map(name =>
         this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
       ),
-      this.deps.networkingApi.listNamespacedNetworkPolicy({
-        namespace,
-        labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
-      }),
-      this.deps.networkingApi.listNamespacedNetworkPolicy({
-        namespace: this.deps.config.mcpServerNamespace,
-        labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
-      }),
     ]
+    if (!options.preserveWorkflowRuntime) {
+      const podGone = await waitForPodDeletion(
+        this.deps.coreApi,
+        `${recipeName}-mcp-host`,
+        namespace,
+        {
+          timeoutMs: 5_000,
+          pollIntervalMs: 250,
+        }
+      )
+      if (!podGone)
+        throw new Error(`Plugin Workload SDK pod for ${recipeName} still exists after teardown`)
+      checks.push(
+        this.deps.coreApi.readNamespacedSecret({
+          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+          namespace,
+        }),
+        this.deps.coreApi.readNamespacedService({
+          name: buildMcpHostServiceName(recipeName),
+          namespace,
+        }),
+        this.deps.coreApi.readNamespacedEndpoints({
+          name: buildMcpHostServiceName(recipeName),
+          namespace,
+        }),
+        this.deps.networkingApi.listNamespacedNetworkPolicy({
+          namespace,
+          labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+        }),
+        this.deps.networkingApi.listNamespacedNetworkPolicy({
+          namespace: this.deps.config.mcpServerNamespace,
+          labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+        })
+      )
+    }
     const results = await Promise.allSettled(checks)
     const unexpected = results.find(result => {
       if (result.status !== 'fulfilled') return false
