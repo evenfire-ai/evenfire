@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../api'
 import {
   __resetRegistryCapabilityCacheForTests,
+  invalidateRegistryCapabilityCache,
   useRegistryCapability,
 } from '../useRegistryCapability'
 
@@ -120,5 +121,45 @@ describe('useRegistryCapability', () => {
     })
     render(<Probe />)
     await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument())
+  })
+
+  it('silent auth error → stops loading without surfacing an error (global handler navigates away)', async () => {
+    vi.mocked(api.getPublishScope).mockRejectedValue(
+      Object.assign(new Error('unauthorized'), { silent: true })
+    )
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      authEnabled: true,
+    })
+    render(<Probe />)
+    // Must not get stuck on "loading", and must not surface the Retry error.
+    await waitFor(() => expect(screen.getByText('none')).toBeInTheDocument())
+    expect(screen.queryByText('loading')).toBeNull()
+    expect(screen.queryByText('error')).toBeNull()
+  })
+
+  it('invalidateRegistryCapabilityCache clears the cached identity so the next mount refetches', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      authEnabled: true,
+    })
+    vi.mocked(api.getPublishScope).mockResolvedValue({
+      scope: '@acme',
+      curator: false,
+      orgName: 'acme',
+    })
+    const first = render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('acme'))
+    first.unmount()
+
+    // Logout clears the cache; a different user then logs in.
+    invalidateRegistryCapabilityCache()
+    vi.mocked(api.getPublishScope).mockResolvedValue({
+      scope: '@beta',
+      curator: false,
+      orgName: 'beta',
+    })
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('org').textContent).toBe('beta'))
   })
 })

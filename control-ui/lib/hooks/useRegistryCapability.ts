@@ -84,10 +84,19 @@ function sharedLoad(): Promise<RegistryCapability> {
   return inflight
 }
 
-/** Test hook: drop the module cache + in-flight request so each test is isolated. */
-export function __resetRegistryCapabilityCacheForTests(): void {
+/**
+ * Clear the session-stable identity cache + any in-flight probe. Call on auth
+ * changes (logout) so a same-tab logout→login does not serve the previous user's
+ * org identity until a manual reload.
+ */
+export function invalidateRegistryCapabilityCache(): void {
   capabilityCache = null
   inflight = null
+}
+
+/** Test hook: drop the module cache + in-flight request so each test is isolated. */
+export function __resetRegistryCapabilityCacheForTests(): void {
+  invalidateRegistryCapabilityCache()
 }
 
 /**
@@ -132,7 +141,14 @@ export function useRegistryCapability(): RegistryCapabilityState {
         setLoading(false)
       },
       err => {
-        if (cancelled || isSilentApiError(err)) return
+        if (cancelled) return
+        // A silent 401 is handled by the global auth handler (it navigates away),
+        // so don't surface an error — but still clear loading so the surface can't
+        // spin if that handler ever no-ops.
+        if (isSilentApiError(err)) {
+          setLoading(false)
+          return
+        }
         setError(true)
         setLoading(false)
       }
