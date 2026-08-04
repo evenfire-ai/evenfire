@@ -1838,6 +1838,13 @@ code {
   gap: 1rem;
 }
 
+.profile-app-frame-fallback {
+  display: grid;
+  min-height: 100vh;
+  align-items: start;
+  padding: var(--cu-space-8);
+}
+
 .profile-skeleton__row {
   display: grid;
   grid-template-columns: minmax(8rem, 1fr) minmax(10rem, 1.5fr) minmax(5rem, 0.65fr);

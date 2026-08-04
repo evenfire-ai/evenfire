@@ -7,7 +7,6 @@ export default defineConfig({
       '@': path.resolve(__dirname),
       '@components': path.resolve(__dirname, 'components'),
       '@constants': path.resolve(__dirname, 'app/constants'),
-      '@lib/profileAppFrame': path.resolve(__dirname, '../profile-ui/lib/profileAppFrame'),
       '@lib': path.resolve(__dirname, 'lib'),
       '@types': path.resolve(__dirname, 'app/types'),
       next: path.resolve(__dirname, 'node_modules/next'),

@@ -1,7 +1,8 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import '@testing-library/jest-dom/vitest'
 import { cleanup, render } from '@testing-library/react'
-import { ProfileShell } from '../../../profile-ui/app/components/ProfileShell'
+import { ProfileShell } from '@components/ProfileShell'
 
 const navigationState = vi.hoisted(() => ({
   pathname: '/members',
@@ -31,13 +32,6 @@ vi.mock('@components/Sidebar', () => ({
 vi.mock('@constants/routes', () => ({
   PROFILE_ROUTES: { home: '/' },
 }))
-
-vi.mock('@lib/profileAppFrame', async () => {
-  const actual = await vi.importActual<typeof import('../../../profile-ui/lib/profileAppFrame')>(
-    '../../../profile-ui/lib/profileAppFrame'
-  )
-  return actual
-})
 
 afterEach(() => {
   cleanup()
