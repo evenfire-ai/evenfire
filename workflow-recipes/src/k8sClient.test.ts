@@ -264,6 +264,40 @@ describe('shouldPatchRecipeStatus', () => {
     ).toBe(false)
   })
 
+  it('patches a contradictory persisted SDK capability message', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'promptBridge bootstrap policy proof is not ready',
+            },
+            conditions: [
+              {
+                type: 'PluginWorkloadSdkCapability',
+                status: 'True',
+                reason: 'Validated',
+                message: 'Capability validated (promptBridge)',
+                lastTransitionTime: 'now',
+              },
+            ],
+          },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+        }
+      )
+    ).toBe(true)
+  })
+
   it('patches when only the persisted workload status projection changes', () => {
     expect(
       shouldPatchRecipeStatus(

@@ -103,6 +103,12 @@ export function shouldPatchRecipeStatus(
   if (recipe.status?.message !== result.message) return true
   if (workloadStatusesChanged(recipe, result)) return true
 
+  // Merge-patching status maps preserves fields omitted by the next patch.
+  // Keep the SDK capability message aligned with its owned condition so a
+  // previous status-only refresh cannot leave a contradictory
+  // `state=validated` + `message=bootstrap not ready` record behind.
+  if (pluginWorkloadSdkStatusMessageChanged(recipe)) return true
+
   if (
     ownedConditionsChanged(recipe.status?.conditions, result.internalDependencyConditions, [
       'InternalDependenciesReady',
@@ -116,6 +122,16 @@ export function shouldPatchRecipeStatus(
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
 
   return false
+}
+
+function pluginWorkloadSdkStatusMessageChanged(recipe: WorkflowRecipeCRD): boolean {
+  const capability = recipe.status?.pluginWorkloadSdk
+  if (!capability) return false
+  const condition = recipe.status?.conditions?.find(
+    candidate => candidate.type === 'PluginWorkloadSdkCapability'
+  )
+  if (typeof condition?.message !== 'string') return false
+  return capability.message !== condition.message
 }
 
 function workflowRunIdForTelemetry(recipe: WorkflowRecipeCRD): string | undefined {
