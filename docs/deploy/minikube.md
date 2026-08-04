@@ -43,12 +43,16 @@ Ready before E2E results are interpreted.
 
 ## Prerequisites
 
-- **Docker Desktop** installed and running
+- **Docker Desktop** installed and running (**≥10 GB RAM / 6 CPUs**)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
 - **python3** (for JWT key sync)
 - **Node.js** 24+ (for building services and desktop app)
+- **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
+
+> Tip: run `make prereqs` (alias `make doctor`) to verify all of the above at
+> once, with per-platform install commands for anything missing.
 
 ---
 

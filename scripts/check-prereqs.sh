@@ -270,9 +270,11 @@ azure:AZURE_OPENAI_API_KEY"
   if [ -n "$LLM_KEYS_SET" ]; then
     ok ".env     LLM key set —$LLM_KEYS_SET"
   else
-    err ".env     no LLM key set (need ONE of 21 providers, e.g. OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …)"
-    echo    "        Set one in .env; setup infers the matching provider. Full list: docs/deploy/llm-providers.md"
-    MISSING=$((MISSING + 1))
+    # Non-fatal: setup boots with test placeholders (default zai). The agent
+    # just can't reach a model until a real key is added — matches the
+    # "optional" behavior documented in docs/deploy/minikube.md.
+    warn ".env     no LLM key set — setup will boot with placeholders (default zai); the agent can't call a model until you add one"
+    echo    "        Set one of 21 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
   fi
 
   # Provider/key consistency — non-fatal, catches a common mismatch.

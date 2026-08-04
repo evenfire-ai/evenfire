@@ -146,7 +146,8 @@ minikube-stop: ## Stop minikube cluster
 	minikube stop -p $(MINIKUBE_PROFILE)
 
 .PHONY: minikube-setup
-minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Needs ADMIN_PASSWORD in .env.
+minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
+	@if [ "$(SKIP_PREREQS)" != "true" ]; then $(MAKE) --no-print-directory prereqs; fi
 	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
 		scripts/minikube/full-setup.sh $(ARGS)
 
