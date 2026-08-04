@@ -23,10 +23,12 @@ function Probe() {
 }
 
 function RefreshProbe() {
-  const { scope, loading, refresh } = usePublishScope()
+  const { scope, loading, error, refresh } = usePublishScope()
   return (
     <div>
-      <div data-testid="scope">{loading ? 'loading' : (scope?.scope ?? 'none')}</div>
+      <div data-testid="scope">
+        {loading ? 'loading' : error ? 'error' : (scope?.scope ?? 'none')}
+      </div>
       <button type="button" onClick={() => void refresh({ force: true })}>
         Refresh
       </button>
@@ -145,6 +147,73 @@ describe('usePublishScope / isPublisherEnabled', () => {
 
     expect(await screen.findByTestId('next-route')).toBeInTheDocument()
     expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+  })
+
+  it('bypasses the resolved provider cache on forced refresh', async () => {
+    vi.mocked(api.getPublishScope)
+      .mockResolvedValueOnce(scope('@acme'))
+      .mockResolvedValueOnce(scope('@beta'))
+
+    const view = renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('@acme')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('@beta')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+
+    view.unmount()
+    renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('@beta')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps overlapping forced refreshes ordered after an existing cache hit', async () => {
+    const beta = deferred<api.PublishScope>()
+    const gamma = deferred<api.PublishScope>()
+    vi.mocked(api.getPublishScope)
+      .mockResolvedValueOnce(scope('@acme'))
+      .mockReturnValueOnce(beta.promise)
+      .mockReturnValueOnce(gamma.promise)
+
+    const view = renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('@acme')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(api.getPublishScope).toHaveBeenCalledTimes(3)
+
+    await act(async () => {
+      gamma.resolve(scope('@gamma'))
+      await gamma.promise
+    })
+    expect(await screen.findByText('@gamma')).toBeInTheDocument()
+
+    await act(async () => {
+      beta.resolve(scope('@beta'))
+      await beta.promise
+    })
+    expect(screen.getByText('@gamma')).toBeInTheDocument()
+    expect(screen.queryByText('@beta')).toBeNull()
+
+    view.unmount()
+    renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('@gamma')).toBeInTheDocument()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not expose a stale resolved scope after a forced refresh failure', async () => {
+    vi.mocked(api.getPublishScope)
+      .mockResolvedValueOnce(scope('@acme'))
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500 }))
+
+    renderWithProvider(<RefreshProbe />)
+    expect(await screen.findByText('@acme')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('error')).toBeInTheDocument()
+    expect(screen.queryByText('@acme')).toBeNull()
+    expect(api.getPublishScope).toHaveBeenCalledTimes(2)
   })
 
   it('does not expose a stale keyed request that resolves after reset', async () => {
