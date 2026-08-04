@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { McpServerTable } from '../McpServerTable'
 
@@ -235,5 +235,103 @@ describe('McpServerTable — connector access summaries', () => {
     fireEvent.change(search, { target: { value: 'agent-alpha' } })
     expect(screen.getByText('airtable-server')).toBeInTheDocument()
     expect(screen.queryByText('search-server')).not.toBeInTheDocument()
+  })
+})
+
+describe('McpServerTable — context membership', () => {
+  it('shows attached contexts and lets an operator remove the connector from one', async () => {
+    const onRemoveFromContext = vi.fn().mockResolvedValue(undefined)
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(
+      <McpServerTable
+        items={items}
+        contexts={[
+          { name: 'research', description: 'Research tools', mcpServers: ['airtable-server'] },
+          { name: 'sales', mcpServers: [] },
+        ]}
+        onAddToContexts={vi.fn().mockResolvedValue(undefined)}
+        onRemoveFromContext={onRemoveFromContext}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+
+    expect(screen.getByText('Available in contexts')).toBeInTheDocument()
+    expect(screen.getByText('research')).toBeInTheDocument()
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Remove connector airtable-server from context research',
+      })
+    )
+
+    expect(onRemoveFromContext).toHaveBeenCalledWith(
+      { namespace: 'mcp-server', name: 'airtable-server' },
+      'research'
+    )
+  })
+
+  it('uses the Context detail selection modal to add the connector to more contexts', () => {
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(
+      <McpServerTable
+        items={items}
+        contexts={[
+          { name: 'research', mcpServers: ['airtable-server'] },
+          { name: 'sales', description: 'Sales tools', mcpServers: [] },
+        ]}
+        onAddToContexts={vi.fn().mockResolvedValue(undefined)}
+        onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add contexts' }))
+
+    expect(screen.getByRole('dialog', { name: 'Add connector to contexts' })).toBeInTheDocument()
+    expect(screen.getByText('Contexts')).toBeInTheDocument()
+    expect(screen.getByText('No available contexts.')).not.toBeInTheDocument()
+  })
+
+  it('offers agent sharing with the agent Context and affected-agent impact visible', () => {
+    const onAddToContexts = vi.fn().mockResolvedValue(undefined)
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(
+      <McpServerTable
+        items={items}
+        contexts={[{ name: 'research', mcpServers: [] }]}
+        shareTargets={{
+          agents: [
+            {
+              id: 'research-agent',
+              label: 'Research Agent',
+              contextName: 'research',
+              affectedAgentCount: 3,
+            },
+          ],
+          teams: [],
+          members: [],
+        }}
+        onAddToContexts={onAddToContexts}
+        onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
+
+    expect(screen.getByRole('dialog', { name: 'Add connector to agents' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Research Agent' })).toHaveTextContent(
+      'Context: research · 3 agents affected'
+    )
+
+    fireEvent.click(screen.getByRole('option', { name: 'Research Agent' }))
+    expect(screen.getByText(/This adds the connector to Context research/)).toBeInTheDocument()
+    expect(screen.getByText(/Approximately 3 agents will gain access/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access to agent' }))
+    expect(onAddToContexts).toHaveBeenCalledWith(
+      { namespace: 'mcp-server', name: 'airtable-server' },
+      ['research']
+    )
   })
 })

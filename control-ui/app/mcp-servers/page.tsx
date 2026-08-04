@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { LoadingScreen } from '@components/LoadingScreen'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -12,17 +12,20 @@ import type {
   ConnectorAccessPrincipal,
   ConnectorAccessSummary,
   ConnectorAccessSummaryMap,
+  ConnectorContextShareTargets,
 } from '../../components/McpServerTable.types'
 import { useToast } from '../../components/Toast'
 import {
   apiSend,
   getContextTeams,
   getContextUsers,
+  getContexts,
   getHosts,
   getMcpServers,
   isSilentApiError,
+  updateContext,
 } from '../../lib/api'
-import type { HostResource, McpServerResource } from '../../lib/api'
+import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '../../lib/authRedirect'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
@@ -44,6 +47,19 @@ function getContextRef(resource: { spec?: Record<string, unknown> }): string {
 
 function sortPrincipals(items: ConnectorAccessPrincipal[]): ConnectorAccessPrincipal[] {
   return [...items].sort((a, b) => a.label.localeCompare(b.label))
+}
+
+function mergeAccessSummaries(summaries: ConnectorAccessSummary[]): ConnectorAccessSummary {
+  const mergeGroup = (group: keyof ConnectorAccessSummary) => {
+    const items = summaries.flatMap(summary => summary[group])
+    return sortPrincipals(Array.from(new Map(items.map(item => [item.id, item] as const)).values()))
+  }
+
+  return {
+    agents: mergeGroup('agents'),
+    users: mergeGroup('users'),
+    teams: mergeGroup('teams'),
+  }
 }
 
 function agentsForContext(hosts: HostResource[], contextRef: string): ConnectorAccessPrincipal[] {
@@ -108,9 +124,17 @@ export default function McpServersPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [mcpServers, setMcpServers] = useState<McpServerResource[]>([])
+  const [contexts, setContexts] = useState<ContextResource[]>([])
+  const [hosts, setHosts] = useState<HostResource[]>([])
   const [accessByConnectorKey, setAccessByConnectorKey] = useState<ConnectorAccessSummaryMap>({})
+  const [accessByContextName, setAccessByContextName] = useState<
+    Record<string, ConnectorAccessSummary>
+  >({})
   const [accessWarning, setAccessWarning] = useState('')
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
+  const [updatingContextMembershipKey, setUpdatingContextMembershipKey] = useState<string | null>(
+    null
+  )
   const { confirm, confirmDialog } = useConfirmDialog()
 
   async function loadAll() {
@@ -118,11 +142,21 @@ export default function McpServersPage() {
     setError('')
     setAccessWarning('')
     try {
-      const [serversResult, hostsResult] = await Promise.all([getMcpServers(), getHosts()])
+      const [serversResult, hostsResult, contextsResult] = await Promise.all([
+        getMcpServers(),
+        getHosts(),
+        getContexts(),
+      ])
       const connectors = (serversResult.items || []) as McpServerResource[]
       const hosts = (hostsResult.items || []) as HostResource[]
+      const nextContexts = (contextsResult.items || []) as ContextResource[]
       const contextRefs = [
-        ...new Set(connectors.map(connector => getContextRef(connector)).filter(Boolean)),
+        ...new Set([
+          ...connectors.map(connector => getContextRef(connector)).filter(Boolean),
+          ...nextContexts
+            .map(context => String(context.metadata?.name || context.spec?.contextId || '').trim())
+            .filter(Boolean),
+        ]),
       ]
       const accessResults = await Promise.all(
         contextRefs.map(
@@ -132,6 +166,7 @@ export default function McpServersPage() {
       const accessByContext = new Map(
         accessResults.map(([contextRef, [summary]]) => [contextRef, summary] as const)
       )
+      const nextAccessByContextName = Object.fromEntries(accessByContext)
       const accessLoadFailed = accessResults.some(([, [, failed]]) => failed)
       if (accessLoadFailed) {
         setAccessWarning(
@@ -140,20 +175,34 @@ export default function McpServersPage() {
       }
       const nextAccessByConnectorKey = connectors.reduce<ConnectorAccessSummaryMap>(
         (acc, connector) => {
-          const contextRef = getContextRef(connector)
-          if (contextRef) {
-            acc[connectorKey(connector)] = accessByContext.get(contextRef) ?? {
-              agents: [],
-              users: [],
-              teams: [],
-            }
+          const connectorName = resourceName(connector)
+          const connectorContexts = new Set(
+            [
+              getContextRef(connector),
+              ...nextContexts
+                .filter(context => context.spec?.mcpServers?.includes(connectorName))
+                .map(context =>
+                  String(context.metadata?.name || context.spec?.contextId || '').trim()
+                ),
+            ].filter(Boolean)
+          )
+          if (connectorContexts.size > 0) {
+            acc[connectorKey(connector)] = mergeAccessSummaries(
+              [...connectorContexts].map(
+                contextRef =>
+                  accessByContext.get(contextRef) ?? { agents: [], users: [], teams: [] }
+              )
+            )
           }
           return acc
         },
         {}
       )
       setMcpServers(connectors)
+      setContexts(nextContexts)
+      setHosts(hosts)
       setAccessByConnectorKey(nextAccessByConnectorKey)
+      setAccessByContextName(nextAccessByContextName)
     } catch (e) {
       if (isSilentApiError(e)) return
       setError(e instanceof Error ? e.message : 'Failed to load connectors')
@@ -191,6 +240,139 @@ export default function McpServersPage() {
     router.push(CONTROL_ROUTES.contexts.connectors(trimmed))
   }
 
+  function contextName(context: ContextResource): string {
+    return String(context.metadata?.name || context.spec?.contextId || '').trim()
+  }
+
+  function contextSpec(context: ContextResource): ContextSpec {
+    const name = contextName(context)
+    return {
+      contextId: context.spec?.contextId || name,
+      description: context.spec?.description,
+      mcpServers: Array.isArray(context.spec?.mcpServers) ? context.spec.mcpServers : [],
+      sharedFileSystems: context.spec?.sharedFileSystems ?? [],
+    }
+  }
+
+  const shareTargets = useMemo<ConnectorContextShareTargets>(() => {
+    const agentCountByContext = new Map<string, number>()
+    for (const host of hosts) {
+      const contextName = getContextRef(host)
+      if (contextName) {
+        agentCountByContext.set(contextName, (agentCountByContext.get(contextName) ?? 0) + 1)
+      }
+    }
+    const affectedAgentCount = (contextName: string) => agentCountByContext.get(contextName) ?? 0
+
+    return {
+      agents: hosts
+        .map(host => {
+          const name = resourceName(host)
+          const contextName = getContextRef(host)
+          return contextName
+            ? {
+                id: name,
+                label: name,
+                contextName,
+                affectedAgentCount: affectedAgentCount(contextName),
+              }
+            : null
+        })
+        .filter(
+          (target): target is ConnectorContextShareTargets['agents'][number] => target !== null
+        )
+        .sort((a, b) => a.label.localeCompare(b.label)),
+      teams: Object.entries(accessByContextName).flatMap(([contextName, access]) =>
+        access.teams.map(team => ({
+          id: `${team.id}:${contextName}`,
+          label: team.label,
+          contextName,
+          affectedAgentCount: affectedAgentCount(contextName),
+        }))
+      ),
+      members: Object.entries(accessByContextName).flatMap(([contextName, access]) =>
+        access.users.map(user => ({
+          id: `${user.id}:${contextName}`,
+          label: user.label,
+          contextName,
+          affectedAgentCount: affectedAgentCount(contextName),
+        }))
+      ),
+    }
+  }, [accessByContextName, hosts])
+
+  async function addConnectorToContexts(
+    server: { name: string; namespace: string },
+    contextNames: string[]
+  ) {
+    const key = `${server.namespace}/${server.name}`
+    const targets = contexts.filter(context => contextNames.includes(contextName(context)))
+    if (targets.length !== contextNames.length) {
+      setError('One or more selected contexts could not be loaded. Please refresh and try again.')
+      return
+    }
+
+    setUpdatingContextMembershipKey(key)
+    setError('')
+    try {
+      await Promise.all(
+        targets.map(context => {
+          const name = contextName(context)
+          const spec = contextSpec(context)
+          return updateContext(name, {
+            spec: {
+              ...spec,
+              mcpServers: Array.from(new Set([...spec.mcpServers, server.name])),
+            },
+          })
+        })
+      )
+      await loadAll()
+      showToast(
+        contextNames.length === 1
+          ? `Connector ${server.name} added to context.`
+          : `Connector ${server.name} added to ${contextNames.length} contexts.`,
+        { tone: 'success' }
+      )
+    } catch (e) {
+      if (isSilentApiError(e)) return
+      setError(e instanceof Error ? e.message : `Failed to add ${server.name} to contexts`)
+    } finally {
+      setUpdatingContextMembershipKey(null)
+    }
+  }
+
+  async function removeConnectorFromContext(
+    server: { name: string; namespace: string },
+    targetContextName: string
+  ) {
+    const key = `${server.namespace}/${server.name}`
+    const target = contexts.find(context => contextName(context) === targetContextName)
+    if (!target) {
+      setError('Context could not be loaded. Please refresh and try again.')
+      return
+    }
+
+    setUpdatingContextMembershipKey(key)
+    setError('')
+    try {
+      const spec = contextSpec(target)
+      await updateContext(targetContextName, {
+        spec: {
+          ...spec,
+          mcpServers: spec.mcpServers.filter(name => name !== server.name),
+        },
+      })
+      await loadAll()
+      showToast(`Connector ${server.name} removed from ${targetContextName}.`, { tone: 'success' })
+    } catch (e) {
+      if (isSilentApiError(e)) return
+      setError(e instanceof Error ? e.message : `Failed to remove ${server.name} from context`)
+    } finally {
+      setUpdatingContextMembershipKey(null)
+    }
+  }
+
   useEffect(() => {
     if (authState.isLoggedIn && !authState.isLoading) {
       void loadAll()
@@ -222,7 +404,18 @@ export default function McpServersPage() {
       <McpServerTable
         items={mcpServers as any}
         accessByConnectorKey={accessByConnectorKey}
+        contexts={contexts
+          .map(context => ({
+            name: contextName(context),
+            description: context.spec?.description,
+            mcpServers: context.spec?.mcpServers ?? [],
+          }))
+          .filter(context => context.name)}
+        shareTargets={shareTargets}
         onOpenContext={handleOpenContext}
+        onAddToContexts={addConnectorToContexts}
+        onRemoveFromContext={removeConnectorFromContext}
+        updatingContextMembershipKey={updatingContextMembershipKey}
         onDelete={handleDelete}
         onEdit={server => router.push(CONTROL_ROUTES.connectors.edit(server.name))}
         deletingKey={deletingKey}

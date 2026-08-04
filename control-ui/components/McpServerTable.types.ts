@@ -50,10 +50,34 @@ export type McpServerItem = {
 
 export type ServerRef = { name: string; namespace: string }
 
+export type ConnectorContextBinding = {
+  name: string
+  description?: string
+  mcpServers: string[]
+}
+
+export type ConnectorContextShareTarget = {
+  id: string
+  label: string
+  contextName: string
+  affectedAgentCount: number
+}
+
+export type ConnectorContextShareTargets = {
+  agents: ConnectorContextShareTarget[]
+  teams: ConnectorContextShareTarget[]
+  members: ConnectorContextShareTarget[]
+}
+
 export type McpServerTableProps = {
   items: McpServerItem[]
   accessByConnectorKey?: Record<string, ConnectorAccessSummary>
+  contexts?: ConnectorContextBinding[]
+  shareTargets?: ConnectorContextShareTargets
   onOpenContext?: (contextName: string) => void
+  onAddToContexts?: (server: ServerRef, contextNames: string[]) => Promise<void>
+  onRemoveFromContext?: (server: ServerRef, contextName: string) => Promise<void>
+  updatingContextMembershipKey?: string | null
   onDelete?: (server: ServerRef) => Promise<void>
   onEdit?: (server: ServerRef) => void
   deletingKey?: string | null
