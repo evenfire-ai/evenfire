@@ -235,6 +235,59 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(manifest.spec.agent).toEqual({ provider: 'openai', model: 'gpt-4o-mini' })
   })
 
+  it('keeps Install blocked when the promptBridge model is not in the operator catalog', async () => {
+    // Finding A: allowedModels is author-controlled, not constrained to the
+    // operator catalog. An unlisted model resolves to no provider, so no
+    // spec.agent is injected — Install must stay disabled, not submit a manifest
+    // that fails after install.
+    const unlistedEntry: RegistryEntry = {
+      ...RECIPE_ENTRY,
+      recipe_meta: {
+        recipeYaml: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'market-report' },
+            spec: {
+              triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
+              pluginWorkloadSdk: {
+                allowedCallers: ['orchestrator'],
+                promptBridge: { allowedModels: ['unlisted-model'], maxOutputTokens: 4096 },
+              },
+              workloads: [
+                {
+                  id: 'web-search',
+                  type: 'deployment',
+                  image: 'clerum/web-search:test',
+                  port: 3000,
+                  transport: { type: 'streamableHttp', path: '/mcp' },
+                },
+              ],
+              steps: [
+                {
+                  id: 'research',
+                  run: { type: 'snippet', language: 'typescript', code: 'return { ok: true }' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    }
+    vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(unlistedEntry)
+
+    render(<RegistryInstallPage />)
+
+    // Model prefills from the recipe, but the provider can't be derived (unlisted).
+    expect(await screen.findByLabelText('Model')).toHaveValue('unlisted-model')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // Package -> Security
+    // Security -> Install is gated on a resolved agent, so it stays disabled.
+    expect(await screen.findByRole('button', { name: 'Continue' })).toBeDisabled()
+    expect(installRecipeFromRegistry).not.toHaveBeenCalled()
+  })
+
   it('blocks registry recipe install when edited egress exceeds CRD cardinality', async () => {
     vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(RECIPE_ENTRY)
     render(<RegistryInstallPage />)

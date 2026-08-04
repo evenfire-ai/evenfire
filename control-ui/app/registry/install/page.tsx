@@ -259,12 +259,18 @@ function RegistryRecipeInstallPreview({
     ? (validation?.issues.filter(issue => issue.severity === 'error') ?? [])
     : []
   const egressErrors = egressFindings.filter(finding => finding.severity === 'error')
+  // A promptBridge recipe must resolve an agent before install, or it fails
+  // after install. When the recipe's allowedModels[0] is not in the operator
+  // catalog, providerForModel() returns '' and no spec.agent is injected — so
+  // block the submit until a provider + model are actually chosen.
+  const agentReady = !agentReq.needsAgent || (Boolean(agentProvider) && Boolean(agentModel))
   const canInstall =
     recipeText.length > 0 &&
     !parseResult.error &&
     validationErrors.length === 0 &&
     egressErrors.length === 0 &&
     !egressEditError &&
+    agentReady &&
     !submitting
   const canContinue = step === 0 ? Boolean(recipeText.trim()) && !parseResult.error : canInstall
 
