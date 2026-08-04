@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import type http from 'node:http'
-import { createMcpHostPreAuthRateLimit } from '../shared/httpRateLimit'
 import type { ConfigureResponse, PluginWorkloadSdkBootstrapRequest } from '../workflow/types'
 import {
   requireWorkflowAuth,
@@ -36,7 +36,16 @@ export class PluginWorkloadSdkBootstrapServer {
     // Bound invalid-token floods before Express parses request bodies. Scope
     // this guard to bootstrap so liveness/readiness cannot be starved by an
     // attacker exhausting an unrelated control bucket.
-    this.app.use('/api/v1/workflow/plugin-workload-sdk/bootstrap', createMcpHostPreAuthRateLimit())
+    this.app.use(
+      '/api/v1/workflow/plugin-workload-sdk/bootstrap',
+      rateLimit({
+        windowMs: 60_000,
+        limit: 600,
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        message: { error: 'Too Many Requests', retryable: true },
+      })
+    )
     this.app.use(express.json({ limit: '16kb' }))
     this.app.get('/v1/runtime/health', (_req, res) => {
       res.status(200).json({ status: 'healthy', mode: 'sdk-only', ready: true })

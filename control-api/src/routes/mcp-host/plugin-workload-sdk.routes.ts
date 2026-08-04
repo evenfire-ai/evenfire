@@ -1,11 +1,9 @@
 import { type Request, type Response, Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import {
-  createPluginWorkloadSdkPreAuthRateLimit,
-  createPluginWorkloadSdkRequestRateLimit,
-} from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import { createPluginWorkloadSdkRequestRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
@@ -520,7 +518,13 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // recipe-scoped PG limiter (the outer app bounds JSON bodies).
   router.use(
     '/mcp-host/plugin-workload-sdk',
-    createPluginWorkloadSdkPreAuthRateLimit(),
+    rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      message: { error: 'Too Many Requests', retryable: true },
+    }),
     requireMcpHostJwt,
     createPluginWorkloadSdkRequestRateLimit()
   )

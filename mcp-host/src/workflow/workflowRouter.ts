@@ -13,9 +13,9 @@
  * Source of truth: STAGE-1-CRD-TWO-POD-FOUNDATION.md §4.7
  */
 import { NextFunction, Request, Response, Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import * as fs from 'fs'
 import * as path from 'path'
-import { createMcpHostPreAuthRateLimit } from '../shared/httpRateLimit'
 import {
   ArtifactPathError,
   type OpenedArtifactFile,
@@ -100,7 +100,15 @@ export function createWorkflowRouter(service: WorkflowService): Router {
   // control-plane guard, while this high-ceiling IP bucket prevents
   // unauthenticated floods from making token verification the expensive
   // denial path.
-  router.use(createMcpHostPreAuthRateLimit())
+  router.use(
+    rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      message: { error: 'Too Many Requests', retryable: true },
+    })
+  )
 
   // POST /execute — execute a single step (requires scope: execute, sub: coordinator)
   router.post('/execute', requireWorkflowAuth('execute'), async (req: Request, res: Response) => {

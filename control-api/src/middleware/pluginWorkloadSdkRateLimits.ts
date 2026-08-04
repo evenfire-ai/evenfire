@@ -1,22 +1,5 @@
 import type { RequestHandler } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { rateLimitMiddleware } from './rateLimitMiddleware.js'
-
-/**
- * High-ceiling IP guard placed before mcp-host/internal JWT verification.
- * Business quotas and the authenticated recipe limiter remain separate: this
- * layer only bounds unauthenticated crypto work (the outer app owns the JSON
- * body-size/parser boundary).
- */
-export function createPluginWorkloadSdkPreAuthRateLimit(): RequestHandler {
-  return rateLimit({
-    windowMs: 60_000,
-    limit: 600,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    message: { error: 'Too Many Requests', retryable: true },
-  })
-}
 
 /**
  * Distributed recipe-scoped guard for all authenticated SDK gateway routes.
