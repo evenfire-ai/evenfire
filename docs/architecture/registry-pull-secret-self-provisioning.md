@@ -1,7 +1,12 @@
 # Self-provisioning the `evenfire-registry-pull` image-pull Secret
 
-**Status:** Draft / proposed
-**Date:** 2026-08-03
+**Status:** Implemented — shipped in PR #243 (`control-api`), together with the recipe-workload
+extension in [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md).
+The registry-side gate this depends on (§6.2 / §14-A1) is `evenfire-registry` PR #64,
+**merged and deployed to production 2026-08-04** — including the scope backfill for
+admin-approved deployments (evenfire-registry#65 / migration 021, §9-1). Reactive rotation
+(§7.6) remains open.
+**Date:** 2026-08-03 (design) · 2026-08-04 (as-built)
 **Area:** control-api registry integration · image pull · self-hosted / open-core
 **Supersedes (in effect):** the "MCC mints + creates the secret" role in the registry
 bridge design `evenfire-registry/docs/superpowers/specs/2026-06-30-registry-phase2-4-grant-pull-credential-bridge-design.md` §4.2, for **self-hosted** deployments.
@@ -11,6 +16,11 @@ bridge design `evenfire-registry/docs/superpowers/specs/2026-06-30-registry-phas
 ---
 
 ## 1. Summary
+
+> **Reading note (as-built).** This document is written in the design's future tense
+> ("this spec makes…", "ships in the same release"). It shipped as specified; read those
+> as descriptions of the delivered behavior, except where a section is explicitly marked
+> **not shipped**. §11 already distinguishes shipped from deliberately-skipped tests.
 
 On a **managed** cluster, the hosted operator ("MCC", out of this repo) creates the
 `evenfire-registry-pull` dockerconfigjson Secret in the plugin namespace, and
@@ -273,7 +283,7 @@ required — e.g. `mintOrgPullCredential(orgName): Promise<{ key, keyId }>` — 
 `orgRegistryFetch`, mirroring the existing `createOrgGrant` pattern
 (`registryClient.ts:584`). Listed in §13.
 
-### 6.2 The registry change (ships in the same release)
+### 6.2 The registry change — SHIPPED (`evenfire-registry` PR #64, deployed 2026-08-04)
 
 Relax `POST /org/:org/registry-pull-credential` so an **org-bound machine holding
 `registry:manage-keys`** can mint a pull-only key for its **own** org. Today the gate
@@ -636,27 +646,32 @@ cluster" is the **self-hosted/dedicated** truth; the managed operator's own mode
 shared multi-tenant with per-`mcp-server-<slug>` isolation. This spec targets the
 self-hosted single-tenant slice and does not regress the managed per-namespace model.
 
-> **KNOWN LIMITATION — recipe plugins are NOT covered by this spec.**
+> **CLOSED — recipe plugins were not covered by this spec as first written.**
 >
-> The auto-attach fires only for registry-built `McpServer`s, which land in
-> `mcp-server[-slug]`. A `WorkflowRecipe` workload pulling a private evenfire image
-> resolves to `sandbox-recipes[-slug]` or `sandbox-ui[-slug]`
-> (`control-api/src/routes/admin/recipes.ts:66-80`), where this spec provisions nothing —
-> and `install-recipe` has no pull-secret hook at all. Worse, a *mixed* recipe (transport
+> *Historical, kept because it explains the shape of the extension.* The auto-attach fired
+> only for registry-built `McpServer`s, which land in `mcp-server[-slug]`. A
+> `WorkflowRecipe` workload pulling a private evenfire image resolves to
+> `sandbox-recipes[-slug]` or `sandbox-ui[-slug]`
+> (`control-api/src/routes/admin/recipes.ts:66-80`), where this spec provisioned nothing —
+> and `install-recipe` had no pull-secret hook. Worse, a *mixed* recipe (transport
 > + non-transport) that declares the Secret by name gets it **silently stripped**: the
 > Issue-#637 gate classifies our `managed-by`-only Secret as unlabeled → `denied`, and
 > `combineSecretAccess` makes a denial in one namespace denial everywhere.
 >
-> This is a design gap, not a configuration one — nothing in the platform can currently
-> create a usable pull Secret for a recipe namespace (`POST /admin/recipes/secrets`
-> hardcodes `type: 'Opaque'`, which the kubelet ignores for image pulls).
+> This was a design gap, not a configuration one — nothing in the platform could create a
+> usable pull Secret for a recipe namespace. (One half of that is still true:
+> `POST /admin/recipes/secrets` still hardcodes `type: 'Opaque'`, which the kubelet ignores
+> for image pulls — the third-party BYO-registry path, still open.)
 >
-> Closing it is specified in
-> [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md),
-> which extends this model with a single-mint fan-out and platform-side injection. **Do
-> not** close it by labelling this Secret `clerum.io/shared=true` — the #637 predicate is
-> shared between `envSecret` and `imagePullSecrets`, so that would let any recipe read the
-> credential out of its own environment (see that spec, §5.1).
+> **Closed in the same PR** by
+> [`registry-pull-secret-recipe-workloads.md`](registry-pull-secret-recipe-workloads.md):
+> `ensureRegistryPullSecrets` fans out from a **single** mint to all three platform workload
+> namespaces, and WRC **injects** the reference after the #637 filter so the recipe never
+> names it. Note that WRC's injection is **not** mode-gated (that spec §9.1) — on a managed
+> cluster the external operator must provision the Secret in all three namespaces. **Do
+> not** close any of this by labelling the Secret `clerum.io/shared=true` — the #637
+> predicate is shared between `envSecret` and `imagePullSecrets`, so that would let any
+> recipe read the credential out of its own environment (see that spec, §5.1).
 
 ---
 
@@ -664,22 +679,36 @@ self-hosted single-tenant slice and does not regress the managed per-namespace m
 
 1. **Deploy the registry gate change (§6.2) first or together** — control-api's mint
    `403`s until the relaxed endpoint is live, so the `evenfire-registry` deploy must
-   land before (or with) the control-api rollout. Both are part of this release.
+   land before (or with) the control-api rollout. **Done:** PR #64 is merged and deployed to
+   production (2026-08-04), ahead of the control-api rollout.
 
-   > **Precondition the gate alone does not satisfy.** The relaxed endpoint authorizes on
-   > `registry:manage-keys`, but only the registry's **auto-approve** path grants that
-   > scope (`routes/deployments.ts`). A deployment approved through the **admin approve**
-   > route (`POST /deployments/:id/approve`) falls back to `approveDeployment`'s default
-   > scope set, which omits it — and the backfill migration is scoped
+   > **Precondition the gate alone does not satisfy — RESOLVED in the same PR.** The relaxed
+   > endpoint authorizes on `registry:manage-keys`, and originally only the registry's
+   > **auto-approve** path granted that scope. A deployment approved through the **admin
+   > approve** route (`POST /deployments/:id/approve`) fell back to `approveDeployment`'s
+   > default scope set, which omitted it; migration 015's backfill was scoped
    > `WHERE created_by = 'mcc-admin'` while that path writes `created_by =
-   > 'deployment-approval'`, so it is not covered either. Those deployments 403 forever
-   > with no self-service remedy. **Registry-side fix required:** pass the same scope set
-   > from the admin approve route and widen the backfill. Until then, self-provisioning
-   > only works for auto-approved (open-registration) deployments.
+   > 'deployment-approval'`, so it was not covered either. Because
+   > `CLERUM_REGISTRY_OPEN_REGISTRATION` is absent from every overlay, auto-approve is
+   > unreachable in prod — so this was *every* self-hosted deployment, not a subset.
+   >
+   > Registry PR #64 fixed it (tracked as evenfire-registry#65) rather than leaving it as a
+   > follow-up: the optional `scopes` parameter was **removed** from `approveDeployment` in
+   > favour of one exported `SELF_HOSTED_DEPLOYMENT_SCOPES`, so both approve paths grant the
+   > identical set and `tsc` now rejects any divergent call site. **Migration 021** repairs
+   > existing rows, keyed on `registry_deployments.kind = 'self-hosted'` — deliberately *not*
+   > on `created_by`, which is precisely the blind spot that made 015 miss this population —
+   > and scoped to `client_id = d.id::text` so operator-bound extra clients bound to the same
+   > org are not silently widened. Verified in production after the deploy: all seven approved
+   > self-hosted deployment clients hold `registry:manage-keys`; the eight managed deployments
+   > have no matching client row and were untouched.
 2. **Ship control-api self-provisioning** gated on `self-hosted`, with the comment/doc
-   scrub (§7.8). Managed clusters are inert (the managed operator keeps owning the
-   Secret) — the mode gate guarantees no double-writer, so no cross-repo coordination
-   with the managed operator is needed.
+   scrub (§7.8). **Done in PR #243.** Managed clusters take no *write* (the managed operator
+   keeps owning the Secret) — the mode gate guarantees no double-writer, so no cross-repo
+   coordination is needed for provisioning. It **is** needed for the recipe extension that
+   shipped alongside: WRC's injection is not mode-gated, so the managed operator must widen
+   its provisioning to all three platform workload namespaces
+   (`registry-pull-secret-recipe-workloads.md` §9.1).
 3. **Retire the managed operator's `install_registry_pull_secret`** (shared + dedicated)
    — a separate change in that repo, sequenced *after* managed clusters also
    self-provision (a future extension of the mode gate) **or** left as-is if managed
@@ -757,21 +786,17 @@ nothing. Mutation-verified: gating the hook on `credRequired` fails 3 of these 4
 
 **Still open**
 
-1. **Registry-side scope backfill (§9-1)** — admin-approved deployments lack
-   `registry:manage-keys` and 403 even after the gate relaxation ships. Needs the
-   two-line fix + migration in `evenfire-registry`. **This is the one item that gates
-   the release** for self-hosted clusters that were not auto-approved.
-2. **Rotation (§7.6)** — no reactive trigger shipped. A stale *host* is now self-healed
+1. **Rotation (§7.6)** — no reactive trigger shipped. A stale *host* is now self-healed
    (content is validated), but a key revoked *out-of-band* is not. Add a re-provision
    endpoint, or accept "delete the Secret and re-install" as the remedy?
-3. **HCC presence-validation (§7.7)** — follow-up PR, or never? It would turn a missing
+2. **HCC presence-validation (§7.7)** — follow-up PR, or never? It would turn a missing
    Secret into a clean condition instead of `ImagePullBackOff`.
-4. **`enforceNamespace` on the install route** — this PR guards only the *credential*
+3. **`enforceNamespace` on the install route** — this PR guards only the *credential*
    write (§7.1 step 2). Applying the repo's existing `enforceNamespace` middleware to
    `POST /admin/registry/install` would also constrain where the McpServer itself lands,
    consistent with every other admin secret route — but that changes pre-existing install
    semantics and was deliberately left out of scope here.
-5. **Managed-operator step retirement (§9-3)** — coordinate managed self-provisioning, or
+4. **Managed-operator step retirement (§9-3)** — coordinate managed self-provisioning, or
    leave managed on the operator indefinitely behind the mode gate?
 
 ---
@@ -810,9 +835,10 @@ They can be built concurrently; the only ordering constraint is at **deploy** ti
 must be live before B mints — §9-1). control-api uses the least-privilege pull-only
 credential from the first commit; there is no interim publish-scoped step.
 
-### Workstream A — registry pull-credential gate (`evenfire-registry`)
+### Workstream A — registry pull-credential gate (`evenfire-registry`) — **shipped (PR #64)**
 
-- **A1 — Relax the gate** (`src/routes/org.ts`). In `POST /:org/registry-pull-credential`,
+- **A1 — Relax the gate** (`src/routes/org.ts`). **Shipped and deployed to production
+  2026-08-04.** In `POST /:org/registry-pull-credential`,
   replace the `*`-admin gate (`:376`) with
   `authorizeMachineForOrg(auth, orgName, 'registry:manage-keys')` (§6.2) so an org-bound
   machine mints a pull-only key for its **own** org. `mintPullKey` (rotate-on-call,
@@ -820,10 +846,11 @@ credential from the first commit; there is no interim publish-scoped step.
   *Accept:* an org-bound `manage-keys` machine gets `201`; a foreign org still `403`s;
   `*`-admin still works (managed operator unaffected); audit log preserved.
 
-### Workstream B — control-api self-provisioner (`evenfire`)
+### Workstream B — control-api self-provisioner (`evenfire`) — **shipped (PR #243)**
 
 Ordered so each task is independently reviewable; **B1–B3** are the functional core,
-**B4–B7** are decoupling/quality.
+**B4–B7** are decoupling/quality. B1–B6 shipped; **B7 (HCC presence-validation) was not
+taken** and remains the follow-up in §12-3.
 
 - **B1 — `registryClient.mintOrgPullCredential(orgName)`** (`control-api/src/services/registryClient.ts`).
   New exported fn on the private `orgRegistryFetch` (machine Bearer, prefixes `/api/v1`),

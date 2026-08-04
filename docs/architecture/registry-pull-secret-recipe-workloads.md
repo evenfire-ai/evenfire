@@ -1,6 +1,8 @@
 # Platform image-pull credentials for recipe workloads
 
-**Status:** Implemented (see PR #243)
+**Status:** Implemented in PR #243, with two carve-outs recorded in place: WRC injection is
+deliberately **not** mode-gated, so the operator contract changes on managed clusters too
+(§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship with it.
 **Date:** 2026-08-04
 **Area:** control-api · workflow-recipes (WRC) · workflow-runtime-core · image pull · self-hosted
 **Follows:** [`registry-pull-secret-self-provisioning.md`](registry-pull-secret-self-provisioning.md)
@@ -8,29 +10,41 @@
 `WorkflowRecipe` workloads and deliberately reuses its decisions rather than inventing a
 parallel mechanism.
 
+> **Reading note.** §2 and §3 describe the **pre-#243 baseline** this spec was written
+> against — design history, kept because §5-§6 only make sense against it. They are not a
+> description of current behavior. §6-§8 describe the shipped design; §7 carries the
+> as-built deviations from the plan.
+
 ---
 
 ## 1. Summary
 
-PR #243 made control-api self-provision the `evenfire-registry-pull` dockerconfigjson
-Secret so **MCP-server** plugins on a self-hosted cluster can pull private images. That
-slice stops at the `mcp-server` namespace.
+The MCP-server slice of #243 made control-api self-provision the `evenfire-registry-pull`
+dockerconfigjson Secret so **MCP-server** plugins on a self-hosted cluster can pull private
+images. As first written, that slice stopped at the `mcp-server` namespace.
 
-**Recipe plugins are not covered, and cannot be made to work by configuration.** A
-`WorkflowRecipe` whose workload runs a private evenfire-registry image fails today, in one
-of two ways depending on the recipe's shape — and the platform has no supported path to
-fix it, because *nothing in the repo creates a usable pull Secret for recipe namespaces*.
+**Recipe plugins were not covered, and could not be made to work by configuration.** A
+`WorkflowRecipe` whose workload ran a private evenfire-registry image failed in one of two
+ways depending on the recipe's shape (§3), with no supported path to fix it, because
+*nothing in the repo created a usable pull Secret for recipe namespaces*.
 
-This spec closes that with the same shape as #243: **control-api owns the credential, the
-platform injects the reference, the recipe never names it.** The two changes of substance
-are (a) provisioning fans out to every platform workload namespace from a **single** mint,
-and (b) WRC injects the reference itself instead of trusting a recipe-declared name.
+This spec closes that with the same shape as the MCP-server slice: **control-api owns the
+credential, the platform injects the reference, the recipe never names it.** The two
+changes of substance, both shipped in #243, are (a) provisioning fans out to every platform
+workload namespace from a **single** mint, and (b) WRC injects the reference itself instead
+of trusting a recipe-declared name.
 
 ---
 
-## 2. What exists today
+## 2. What existed before this change (pre-#243 baseline)
+
+*Design history. §2.2's "nothing provisions" and §3's failure modes are what #243 removed;
+read them as the problem statement, not as current behavior.*
 
 ### 2.1 WRC projects and gates pull secrets — it never creates them
+
+*(Still accurate: WRC creates no Secret. What changed is that it now also **injects** the
+platform reference after the filter — §6.1.)*
 
 The CRD supports declaration: `workloads[].imagePullSecrets: string[]`
 (`charts/clerum-crds/crds/workflowrecipe.yaml:1100`, `workflow-recipes/src/types.ts:129`
@@ -62,8 +76,10 @@ This is live, not latent: the access map is threaded through the reconciler
 
 ### 2.2 Nothing provisions a recipe pull Secret
 
+*Closed by §6.3: the same service now fans out to all three platform workload namespaces.*
+
 The only `kubernetes.io/dockerconfigjson` writer in the repo is
-`control-api/src/services/registryPullSecretService.ts` (from #243), and it targets
+`control-api/src/services/registryPullSecretService.ts` (from #243), and it targeted
 `config.mcpServersNamespace` only.
 
 The endpoint that *does* create recipe-owned Secrets — `POST /admin/recipes/secrets` —
@@ -93,7 +109,12 @@ mirrored in WRC) splits three ways:
 
 ---
 
-## 3. The failure, precisely
+## 3. The failure, precisely (pre-#243)
+
+*Design history — §6 removes this on self-hosted clusters. On a **managed** cluster the
+platform still creates nothing (control-api's provisioner stays mode-gated), so the
+injected reference resolves only where the external operator has provisioned the Secret —
+see §9.*
 
 For a recipe workload running `registry.evenfire.ai/<org>/<img>`:
 
@@ -135,8 +156,10 @@ platform removes the reference to it.
   is deliberate: *platform credential for the platform registry, recipe-owned credential
   for everything else* (§8.3).
 - Changing the #637 ownership model, or exempting names from it (§6.1, rejected).
-- Managed-cluster behavior. As in #243, everything here is gated to `self-hosted`; the
-  managed operator keeps owning provisioning on its clusters.
+- Managed-cluster **provisioning**. control-api's writer keeps #243's `self-hosted` gate;
+  the managed operator keeps owning provisioning on its clusters. Note this is a non-goal
+  for the *write* side only — WRC's **injection** is not mode-gated and therefore does
+  change what the managed operator must provision (§9).
 - Reactive rotation of an out-of-band-revoked key (still open from #243 §12-2), though
   §6.3's fingerprint makes cross-namespace divergence detectable.
 
@@ -201,11 +224,19 @@ Both enforcement points get the injection, since both produce runnable specs:
 | Pod template | `resourceBuilder.ts` (after the `allowedPullSecrets` filter) | recipe workloads in any namespace |
 | McpServer delegation | `mcpDelegation.ts` (after `projectableImagePullSecrets`) | transport workloads → `McpServer` → HCC |
 
-**Reserved-name handling.** If a recipe explicitly declares the platform name, injection
-makes it redundant; the declared copy would be `denied` and stripped, and we would inject
-it anyway. To avoid that confusing silent no-op, recipe validation should **reject** the
-reserved name with a message saying it is platform-managed. Fail loudly rather than
-appear to honor a declaration we ignore.
+**Reserved-name handling — NOT shipped in #243** (still §12-2). The intent: if a recipe
+explicitly declares the platform name, injection makes it redundant, so recipe validation
+should **reject** the reserved name with a message saying it is platform-managed — fail
+loudly rather than appear to honor a declaration we ignore.
+
+What actually happens today, absent that validation, is *louder* than the "silent no-op"
+this paragraph feared: the #637 gate classifies the declared name `denied`, which makes the
+whole **workload** denied (`workflowRecipeReconciler.ts`, `collectSecretOwnership` counts
+`imagePullSecrets` refs alongside `envSecret`), so the workload is **not rendered at all** —
+it is torn down and reported `EnvSecretOwnershipDenied`. A recipe must therefore *not* name
+the reserved Secret. The injection sites still normalize the name defensively (§11), because
+the builders are re-entered with a denied access map on the StatefulSet revocation
+re-render path.
 
 ### 6.2 One source of truth, in `@clerum/workflow-runtime-core`
 
@@ -414,15 +445,54 @@ locally rather than trusting the registry's `registryTokenIssuer`-keyed blob.
 
 ## 9. Rollout
 
-1. Ship `workflow-runtime-core` first (additive; no behavior change).
-2. control-api: fan-out provisioning + the `install-recipe` hook. Safe alone — it only
-   creates Secrets nothing references yet.
-3. WRC: config + injection. This is the step that changes pod specs; a WRC rollout with a
-   *missing* registry URL simply injects nothing (degrades to today's behavior).
-4. `recipes.ts` `Opaque` fix — independent, can land any time.
+1. **Shipped** — `workflow-runtime-core` first (additive; no behavior change).
+2. **Shipped** — control-api: fan-out provisioning + the `install-recipe` hook. Safe alone —
+   it only creates Secrets nothing references yet.
+3. **Shipped** — WRC: config + injection. This is the step that changes pod specs; a WRC
+   rollout with a *missing* registry URL simply injects nothing (degrades to the prior
+   behavior).
+4. **Not shipped** — `recipes.ts` `Opaque` fix (§6.5). Independent of the above and still
+   open (§12); `POST /admin/recipes/secrets` continues to write `type: 'Opaque'`, so the
+   third-party BYO-registry path is still the silent failure described there.
 
-Managed clusters are inert throughout (the `self-hosted` gate from #243 is unchanged).
-Existing recipes that already declare their own third-party pull secrets are unaffected.
+Existing recipes that already declare their own third-party pull secrets are unaffected
+(§8.3).
+
+### 9.1 Managed clusters — only the control-api half is inert
+
+**Do not read this as "managed is unaffected".** Only the *write* side carries the
+`self-hosted` gate:
+
+- **control-api never writes on a managed cluster.** `ensureRegistryPullSecrets` returns
+  `skipped` for every target when `registryConnectionMode !== 'self-hosted'`
+  (`control-api/src/services/registryPullSecretService.ts`), exactly as in #243.
+- **WRC injection has no mode gate at all.** It keys solely on
+  `isPlatformRegistryImage(workload.image, loadConfig().registryUrl)`
+  (`workflow-recipes/src/reconciler/resourceBuilder.ts`, `.../mcpDelegation.ts`), and WRC's
+  `registryUrl` is `CLERUM_REGISTRY_URL` (`workflow-recipes/src/config.ts`) — which managed
+  clusters **do** set. So on a managed cluster WRC still appends
+  `imagePullSecrets: [evenfire-registry-pull]` to every recipe workload pulling a
+  platform-registry image, in whichever namespace that workload lands.
+
+This asymmetry is deliberate and must stay. Gating injection on the mode flag would break
+managed private recipes *even after* the operator provisions the credential — the whole
+point of injection is that the recipe never names the Secret, so there is no other way for
+the reference to appear. The correct resolution is on the operator side, not in the gate.
+
+**Consequent operator contract (this is the part that changed).** An external operator on a
+managed cluster must provision `evenfire-registry-pull` in **all three** platform workload
+namespaces — `mcp-server`, `sandbox-recipes`, `sandbox-ui` (the `resolveWorkloadSecretNamespace`
+split, §2.3) — not just the McpServer's own namespace, which was the pre-existing contract.
+The credential is per-org and the mint is rotate-on-call, so the operator must fan out from a
+**single** mint for the same reason control-api does (§6.3); minting once per namespace
+revokes the previous namespace's key.
+
+Until the operator does that, a managed recipe workload on a private platform image behaves
+as it did before this change: the injected name is *never classified* (the recipe does not
+declare it), so it is projected verbatim and a missing Secret surfaces as
+`ImagePullBackOff` — the same symptom as the pre-#243 baseline (§3), not a new failure mode.
+Transport workloads delegated into the operator-provisioned `mcp-server` namespace start
+working immediately.
 
 ---
 
@@ -434,7 +504,7 @@ Existing recipes that already declare their own third-party pull secrets are una
 | R2 | Partial write (mint OK, one namespace fails) leaves a stale, undetectable key. | Fingerprint annotation makes divergence detectable and repairable (§6.3). |
 | R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | Shared predicate (§6.2) + documented config pairing; consider surfacing both values on a status/health endpoint. |
 | R4 | Someone "fixes" #637 denial by labelling the Secret `shared`. | §5.1 recorded as an explicit, permanent non-goal; add a test asserting the Secret is NOT `shared`/`owner-recipe` labeled. |
-| R5 | A recipe declares the reserved name and expects it honored. | Validation rejects it with an explanatory message (§6.1). |
+| R5 | A recipe declares the reserved name and expects it honored. | **Closed.** Validation rejection (§6.1) shipped: `isPlatformManagedWorkflowSecretName` now reserves `EVENFIRE_REGISTRY_PULL_SECRET_NAME`, so `/validate`, POST, PUT and `POST /admin/recipes/secrets` reject the declaration at admission with a reserved-name rule. The #637 gate stays behind it as defense-in-depth for anything already persisted. |
 | R6 | Two extra copies of the credential. | Pull-only, org-scoped, no push; §8.2. |
 
 ---
@@ -474,7 +544,7 @@ Existing recipes that already declare their own third-party pull secrets are una
 1. **Scope of the third-party path (§6.5)** — ship the structured `kind: 'imagePull'`
    endpoint in this slice, or ship only the hard rejection now and the endpoint when a
    real BYO-registry recipe appears?
-2. **Reserved-name declaration (§6.1)** — hard-reject at validation, or accept-and-ignore
-   with a warning for backwards compatibility?
+2. ~~**Reserved-name declaration (§6.1)** — hard-reject at validation, or keep the #637
+   gate's ownership-worded denial?~~ **Resolved: hard-reject at validation shipped.**
 3. Should HCC gain the presence-validation from #243 §7.7 now that more namespaces
    reference the same Secret name?

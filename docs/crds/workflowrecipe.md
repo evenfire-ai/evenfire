@@ -844,6 +844,40 @@ install/upgrade (`422 workflowWorkloadSecretOwnershipDenied`) for early, clear
 feedback. An unlabeled Secret passes Control API (it may be labeled before the
 recipe runs) but still fails closed at the reconciler until labeled.
 
+### 3.4.2 Image Pull Secrets (format conversion + the platform credential)
+
+**`string[]` here, `{name}` objects downstream — this is intentional.** A WorkflowRecipe
+workload declares `imagePullSecrets` as a list of plain Secret **names**:
+
+```yaml
+imagePullSecrets:
+  - my-ghcr-creds
+```
+
+Kubernetes `PodSpec.imagePullSecrets` and the McpServer CRD (`spec.imagePullSecrets`) both
+take **object references** (`- name: my-ghcr-creds`). WRC performs that conversion: it
+applies the Issue-#637 ownership filter to the declared names, then normalizes the
+surviving names into `{ name }` references when it renders a pod template or an McpServer
+manifest. The recipe-facing string form is the ergonomic surface; the object form is the
+Kubernetes contract. **This is a documented format conversion at the contract boundary, not
+a desynchronization between the two CRDs** — do not "fix" either schema to match the other.
+
+**The platform registry credential is injected, never declared.** Images hosted on the
+platform registry are covered by a Secret named `evenfire-registry-pull`, provisioned by
+Control API and referenced automatically: WRC appends it **after** the ownership filter to
+any workload whose image host matches the configured registry host. A recipe must **not**
+name it in `imagePullSecrets` — the Secret is deliberately unlabeled to the #637 ownership
+model, so declaring it is `denied`, which denies the whole **workload** (it is torn down,
+not merely stripped). Recipes stay portable precisely because they never mention it. See
+`docs/architecture/registry-pull-secret-recipe-workloads.md`.
+
+**`envSecret` is a different mechanism — never use it for registry credentials.**
+`envSecret` (Section 3.4.1) projects Secret values into the container's **environment**;
+`imagePullSecrets` is consumed by the **kubelet** and never reaches the container. Routing a
+registry credential through `envSecret` hands it to the workload process (and to anything
+that can read that process's environment) — exactly the exfiltration path the #637
+ownership model exists to close.
+
 ### 3.5 Volume Mounts
 
 ```yaml
