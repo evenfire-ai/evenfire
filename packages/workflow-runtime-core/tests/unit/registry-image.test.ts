@@ -66,7 +66,13 @@ describe('isPlatformRegistryImage', () => {
 
   it('does not match on a host suffix or a lookalike host', () => {
     // A naive `endsWith`/`includes` would wrongly accept an attacker-controlled host.
-    expect(isPlatformRegistryImage('evil-registry.evenfire.ai/x/y:1', REGISTRY_URL)).toBe(false)
+    // The prefix case uses a neutral domain (the infra-identifier CI guard allows only
+    // registry/registration/brain `.evenfire.ai` in the public tree); the property under
+    // test is unchanged — `'evil-registry.example.com'.endsWith('registry.example.com')`
+    // is true, so only an exact host comparison rejects it.
+    expect(
+      isPlatformRegistryImage('evil-registry.example.com/x/y:1', 'https://registry.example.com')
+    ).toBe(false)
     expect(isPlatformRegistryImage('registry.evenfire.ai.evil.com/x/y:1', REGISTRY_URL)).toBe(false)
   })
 

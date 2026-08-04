@@ -9,6 +9,14 @@
  *
  * These tests pin both halves: the injection happens for our images, and the credential
  * stays unreachable to recipe-authored references.
+ *
+ * Layering note — these are BUILDER tests, not reconciler tests. The builders are the
+ * normalization layer (filter the declared names, then append ours exactly once). The
+ * authoritative gate for a recipe that declares the reserved name lives one level up, in
+ * the reconciler's ownership pass: a `denied` imagePullSecrets ref denies the whole
+ * WORKLOAD, which is then torn down rather than rendered. Cases below that feed the
+ * builders a `denied` access map are pinning the lower layer; see each one for how (or
+ * whether) production reaches it.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
@@ -87,10 +95,16 @@ describe('pod template — platform pull secret injection', () => {
     ])
   })
 
-  it('injects even though the #637 filter would DENY a recipe-declared reference', () => {
-    // The credential is unlabeled to the ownership model, so a recipe naming it is denied.
-    // Injection happens after that filter, so the workload still gets a working pull —
-    // and exactly once.
+  it('normalizes a denied recipe-declared reference: stripped, then injected exactly once', () => {
+    // Defense-in-depth on the normalization layer — NOT the path a recipe author hits.
+    // A recipe that declares the reserved name is denied and TORN DOWN by the reconciler
+    // (collectSecretOwnership counts imagePullSecrets refs into deniedWorkloadIds, and the
+    // workload is never rendered), so this input does not reach the builder that way.
+    // It does reach it via the StatefulSet revocation re-render: teardownDeniedWorkload
+    // re-renders the StatefulSet with the denied access map to strip the credential, and
+    // that goes through this same shared buildPodTemplate. The property pinned here is
+    // that re-entry with a denied map still yields the injected name once, not zero or
+    // twice.
     const access = new Map<string, SecretAccess>([
       [EVENFIRE_REGISTRY_PULL_SECRET_NAME, { state: 'denied' }],
     ])
@@ -116,7 +130,13 @@ describe('McpServer delegation — platform pull secret injection', () => {
     expect(mcpPullNames({ image: FOREIGN_IMAGE })).not.toContain(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
   })
 
-  it('injects past a denied recipe-declared reference', () => {
+  it('normalizes a denied recipe-declared reference on the delegation path too', () => {
+    // Also defense-in-depth, and more strictly so than the pod-template case: a transport
+    // workload with a denied ref is filtered out in preDeployMcpServers before this builder
+    // is called, and the reconciler tears the workload down anyway. Kept because
+    // buildMcpServerManifest is the last checkpoint before HCC — which materializes
+    // spec.imagePullSecrets verbatim — so the filter-then-inject order must hold here
+    // independently of the caller that happens to guard it today.
     const access = new Map<string, SecretAccess>([
       [EVENFIRE_REGISTRY_PULL_SECRET_NAME, { state: 'denied' }],
     ])
