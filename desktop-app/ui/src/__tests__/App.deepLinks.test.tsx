@@ -214,6 +214,14 @@ describe('App deep-link orchestration', () => {
     })
   }
 
+  async function confirmPendingAppLink(): Promise<void> {
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+  }
+
   it('keeps logged-out app links pending until the user confirms after login', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
@@ -254,6 +262,86 @@ describe('App deep-link orchestration', () => {
     await reportShortcutOpenResult()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+  })
+
+  it('requires confirmation before navigating an authenticated app link', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+  })
+
+  it('acknowledges an authenticated app link when confirmation is cancelled', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+  })
+
+  it('does not duplicate an authenticated confirmation for the same link id', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
+    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
   })
 
   it('purges user A links synchronously before user B can process them', async () => {
@@ -329,6 +417,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
@@ -367,6 +456,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(closeSandboxUi).toHaveBeenCalledOnce()
@@ -399,6 +489,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
@@ -437,6 +528,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
     await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
     liveTeamId = 'team-c'
     await act(async () => {
@@ -471,6 +563,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
@@ -500,6 +593,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
@@ -532,6 +626,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith(
@@ -582,6 +677,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith(
@@ -650,6 +746,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith(
@@ -686,6 +783,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
     await waitFor(() => {
@@ -724,6 +822,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
@@ -756,6 +855,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
     await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
 
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
@@ -763,6 +863,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 2, appRef: 'ns/next' })
     })
+    await confirmPendingAppLink()
     await waitFor(() => {
       expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(1)
     })

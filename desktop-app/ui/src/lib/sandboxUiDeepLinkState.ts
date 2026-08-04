@@ -42,7 +42,7 @@ export function isPendingSandboxUiDeepLinkAwaitingConfirmation(
   currentIdentity: string | null
 ): boolean {
   if (!currentIdentity) return false
-  return pending.receivedIdentity === null && pending.confirmedIdentity !== currentIdentity
+  return pending.confirmedIdentity !== currentIdentity
 }
 
 export function isPendingSandboxUiDeepLinkStale(

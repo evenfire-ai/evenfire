@@ -219,6 +219,18 @@ describe('pending sandbox UI deep-link state', () => {
     expect(isPendingSandboxUiDeepLinkStale(confirmed[0]!, 'user-b')).toBe(true)
   })
 
+  it('requires confirmation for links received by the authenticated identity', () => {
+    const pending = enqueuePendingSandboxUiDeepLink([], { id: 1, appRef: 'ns/app' }, null, 'user-a')
+
+    expect(isPendingSandboxUiDeepLinkAwaitingConfirmation(pending[0]!, 'user-a')).toBe(true)
+    expect(isPendingSandboxUiDeepLinkStale(pending[0]!, 'user-a')).toBe(false)
+
+    const confirmed = confirmPendingSandboxUiDeepLink(pending, 1, 'user-a')
+
+    expect(isPendingSandboxUiDeepLinkAwaitingConfirmation(confirmed[0]!, 'user-a')).toBe(false)
+    expect(isPendingSandboxUiDeepLinkStale(confirmed[0]!, 'user-b')).toBe(true)
+  })
+
   it('treats authenticated queued links as stale after an identity change', () => {
     const pending = enqueuePendingSandboxUiDeepLink([], { id: 1, appRef: 'ns/app' }, null, 'user-a')
 
