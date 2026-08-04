@@ -11,7 +11,6 @@ import {
   IconLlmPrices,
   IconModels,
   IconOutputs,
-  IconPublish,
   IconRobot,
   IconRunReplay,
   IconSettings,
@@ -89,11 +88,10 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconStore />,
   },
   'workflow-recipes': {
-    label: 'Plugins',
+    label: 'Installed plugins',
     href: CONTROL_ROUTES.plugins.root,
     icon: <IconWorkflow />,
   },
-  publisher: { label: 'Publisher', href: CONTROL_ROUTES.publisher.root, icon: <IconPublish /> },
   'llm-secrets': { label: 'Secrets', href: CONTROL_ROUTES.secrets.llm, icon: <IconKey /> },
   traces: {
     label: 'Traces',

@@ -1,9 +1,14 @@
 import React from 'react'
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
-import RegistryInstallPage from '../../app/registry/install/page'
-import { getRegistryEntryVersion, installRecipeFromRegistry } from '../../lib/api'
+import RegistryInstallPage, {
+  enabledProviders,
+  providerForModel,
+  recipeAgentRequirement,
+} from '../../app/registry/install/page'
+import type { LlmAllowedModel } from '../../lib/api'
+import { getLlmModels, getRegistryEntryVersion, installRecipeFromRegistry } from '../../lib/api'
 import type { RegistryEntry } from '../../lib/api'
 import { ToastProvider } from '../Toast'
 
@@ -28,8 +33,31 @@ vi.mock('../../lib/api', async () => {
     ...actual,
     getRegistryEntryVersion: vi.fn(),
     installRecipeFromRegistry: vi.fn(),
+    getLlmModels: vi.fn(),
   }
 })
+
+// Build an operator model-allowlist row; only provider/model/enabled matter to
+// the code under test, so the catalog-lifecycle fields are filled with stubs.
+const catalogRow = (provider: string, model: string, enabled = true): LlmAllowedModel =>
+  ({
+    id: `${provider}:${model}`,
+    provider,
+    model,
+    vendor: null,
+    display_name: null,
+    context_window_tokens: null,
+    enabled,
+    source: 'manual',
+    stale: false,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }) as LlmAllowedModel
+
+const DEFAULT_LLM_CATALOG: LlmAllowedModel[] = [
+  catalogRow('openai', 'gpt-4o-mini'),
+  catalogRow('claude', 'claude-3-5-sonnet'),
+]
 
 const RECIPE_ENTRY: RegistryEntry = {
   id: 'recipe-1',
@@ -88,6 +116,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+beforeEach(() => {
+  // Every page render mounts useLlmAllowedModels → getLlmModels; default it so
+  // the picker derives providers from a catalog instead of throwing.
+  vi.mocked(getLlmModels).mockResolvedValue({ rows: DEFAULT_LLM_CATALOG })
+})
+
 function render(children: ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
 }
@@ -136,6 +170,124 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(mockPush).toHaveBeenCalledWith('/plugins/sandbox-recipes/recipe-market-report')
   })
 
+  it('prompts for an agent and injects spec.agent when the recipe uses promptBridge', async () => {
+    const promptBridgeEntry: RegistryEntry = {
+      ...RECIPE_ENTRY,
+      recipe_meta: {
+        recipeYaml: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'market-report' },
+            spec: {
+              triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
+              pluginWorkloadSdk: {
+                allowedCallers: ['orchestrator'],
+                promptBridge: {
+                  allowedModels: ['gpt-4o-mini', 'claude-3-5-sonnet'],
+                  maxOutputTokens: 4096,
+                },
+              },
+              workloads: [
+                {
+                  id: 'web-search',
+                  type: 'deployment',
+                  image: 'clerum/web-search:test',
+                  port: 3000,
+                  transport: { type: 'streamableHttp', path: '/mcp' },
+                },
+              ],
+              steps: [
+                {
+                  id: 'research',
+                  run: { type: 'snippet', language: 'typescript', code: 'return { ok: true }' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    }
+    vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(promptBridgeEntry)
+    vi.mocked(installRecipeFromRegistry).mockResolvedValueOnce({
+      recipeName: 'recipe-market-report',
+      registryEntry: 'market-report',
+      registryVersion: '1.0.0',
+      correlationId: 'corr-1',
+    })
+
+    render(<RegistryInstallPage />)
+
+    // Agent picker appears with the recipe's allowedModels + derived provider.
+    expect(await screen.findByLabelText('Model')).toHaveValue('gpt-4o-mini')
+    // Provider is derived from the operator catalog (loaded async), not a guess.
+    await waitFor(() => expect(screen.getByLabelText('Provider')).toHaveValue('openai'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // Package -> Security
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' })) // Security -> Install
+    fireEvent.click(await screen.findByRole('button', { name: 'Install plugin' }))
+
+    await waitFor(() => expect(installRecipeFromRegistry).toHaveBeenCalledTimes(1))
+    const payload = vi.mocked(installRecipeFromRegistry).mock.calls[0][0]
+    const manifest = JSON.parse(payload.recipeManifest as string)
+    expect(manifest.spec.agent).toEqual({ provider: 'openai', model: 'gpt-4o-mini' })
+  })
+
+  it('keeps Install blocked when the promptBridge model is not in the operator catalog', async () => {
+    // Finding A: allowedModels is author-controlled, not constrained to the
+    // operator catalog. An unlisted model resolves to no provider, so no
+    // spec.agent is injected — Install must stay disabled, not submit a manifest
+    // that fails after install.
+    const unlistedEntry: RegistryEntry = {
+      ...RECIPE_ENTRY,
+      recipe_meta: {
+        recipeYaml: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'market-report' },
+            spec: {
+              triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
+              pluginWorkloadSdk: {
+                allowedCallers: ['orchestrator'],
+                promptBridge: { allowedModels: ['unlisted-model'], maxOutputTokens: 4096 },
+              },
+              workloads: [
+                {
+                  id: 'web-search',
+                  type: 'deployment',
+                  image: 'clerum/web-search:test',
+                  port: 3000,
+                  transport: { type: 'streamableHttp', path: '/mcp' },
+                },
+              ],
+              steps: [
+                {
+                  id: 'research',
+                  run: { type: 'snippet', language: 'typescript', code: 'return { ok: true }' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    }
+    vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(unlistedEntry)
+
+    render(<RegistryInstallPage />)
+
+    // Model prefills from the recipe, but the provider can't be derived (unlisted).
+    expect(await screen.findByLabelText('Model')).toHaveValue('unlisted-model')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // Package -> Security
+    // Security -> Install is gated on a resolved agent, so it stays disabled.
+    expect(await screen.findByRole('button', { name: 'Continue' })).toBeDisabled()
+    expect(installRecipeFromRegistry).not.toHaveBeenCalled()
+  })
+
   it('blocks registry recipe install when edited egress exceeds CRD cardinality', async () => {
     vi.mocked(getRegistryEntryVersion).mockResolvedValueOnce(RECIPE_ENTRY)
     render(<RegistryInstallPage />)
@@ -157,5 +309,96 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
 
     expect(installRecipeFromRegistry).not.toHaveBeenCalled()
+  })
+})
+
+describe('recipeAgentRequirement — step agent resolution reads spec.steps', () => {
+  const promptBridgeSpec = (extra: Record<string, unknown>) => ({
+    spec: {
+      pluginWorkloadSdk: {
+        promptBridge: { allowedModels: ['gpt-4o-mini'], maxOutputTokens: 4096 },
+      },
+      ...extra,
+    },
+  })
+
+  it('does not need an agent when a step agent is declared at spec.steps', () => {
+    // Regression guard: the wizard previously read spec.workflow.steps (no such
+    // CRD property), so a declared step agent was never seen — the wizard would
+    // inject spec.agent and override the author's step agent.
+    const parsed = promptBridgeSpec({
+      steps: [{ id: 'research', agent: { provider: 'claude', model: 'claude-sonnet-4-6' } }],
+    })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(false)
+  })
+
+  it('needs an agent when promptBridge is set but neither spec.agent nor a step agent exists', () => {
+    const parsed = promptBridgeSpec({ steps: [{ id: 'research', run: { type: 'snippet' } }] })
+    const result = recipeAgentRequirement(parsed)
+    expect(result.needsAgent).toBe(true)
+    expect(result.allowedModels).toEqual(['gpt-4o-mini'])
+  })
+
+  it('does not need an agent when spec.agent is present', () => {
+    const parsed = promptBridgeSpec({ agent: { provider: 'openai', model: 'gpt-4o-mini' } })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(false)
+  })
+
+  it('ignores a step agent at the non-CRD spec.workflow.steps path', () => {
+    // Guards against reverting to the wrong path: the reconciler resolves agents
+    // from spec.steps, so an agent under spec.workflow.steps must NOT satisfy it.
+    const parsed = promptBridgeSpec({
+      workflow: {
+        steps: [{ id: 'x', agent: { provider: 'claude', model: 'claude-sonnet-4-6' } }],
+      },
+      steps: [{ id: 'x', run: { type: 'snippet' } }],
+    })
+    expect(recipeAgentRequirement(parsed).needsAgent).toBe(true)
+  })
+
+  it('does not require an agent without promptBridge', () => {
+    expect(recipeAgentRequirement({ spec: { steps: [] } }).needsAgent).toBe(false)
+  })
+})
+
+describe('providerForModel — resolved from the operator catalog, not a heuristic', () => {
+  const catalog: LlmAllowedModel[] = [
+    catalogRow('openai', 'gpt-4o-mini'),
+    catalogRow('groq', 'llama-3.3-70b-versatile'),
+    catalogRow('cerebras', 'gpt-oss-120b'),
+    catalogRow('moonshot', 'kimi-k2.6'),
+    catalogRow('bailian', 'qwen3-coder-plus', false),
+  ]
+
+  // Each of these was mis-derived by the old string heuristic (→ openai).
+  it.each([
+    ['llama-3.3-70b-versatile', 'groq'],
+    ['gpt-oss-120b', 'cerebras'],
+    ['kimi-k2.6', 'moonshot'],
+    ['gpt-4o-mini', 'openai'],
+    ['qwen3-coder-plus', 'bailian'], // resolved even when the row is disabled
+  ])('maps %s → %s from the catalog', (model, provider) => {
+    expect(providerForModel(model, catalog)).toBe(provider)
+  })
+
+  it('returns "" for a model not in the catalog, so the user picks explicitly', () => {
+    expect(providerForModel('some-unlisted-model', catalog)).toBe('')
+    expect(providerForModel('anything', [])).toBe('')
+  })
+})
+
+describe('enabledProviders — distinct, sorted, enabled-only', () => {
+  it('excludes disabled rows and de-dupes providers', () => {
+    const catalog: LlmAllowedModel[] = [
+      catalogRow('openai', 'gpt-4o-mini'),
+      catalogRow('openai', 'gpt-4o'),
+      catalogRow('groq', 'llama-3.3-70b-versatile'),
+      catalogRow('bailian', 'qwen3-coder-plus', false),
+    ]
+    expect(enabledProviders(catalog)).toEqual(['groq', 'openai'])
+  })
+
+  it('returns [] for an empty catalog', () => {
+    expect(enabledProviders([])).toEqual([])
   })
 })

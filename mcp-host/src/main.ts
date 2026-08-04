@@ -69,6 +69,14 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import {
+  AuthoritativeMcpFleetCoordinator,
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  pollAuthoritativeMcpSnapshotIfCurrent,
+  reconcileAuthoritativeMcpSnapshot,
+  replaceAuthoritativeMcpFleet,
+  runAuthoritativeMcpInitialization,
+} from './mcp/authoritativeFleet'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
@@ -162,6 +170,7 @@ let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
@@ -181,6 +190,7 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+let mcpInitializationGeneration = 0
 // Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
 let statelessHeartbeat: StatelessHeartbeat | null = null
 
@@ -747,56 +757,91 @@ async function initializeProvider(
   }
 }
 
+const mcpFleetCoordinator = new AuthoritativeMcpFleetCoordinator(
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  true
+)
+
 /**
- * Initialize MCP servers for the host's context using skill-mapper.
+ * Admit development MCP servers independently.
+ *
+ * McpManager.addServer propagates connection failures so production fleet
+ * reconciliation can leave a failed revision retryable. Development startup
+ * has no authoritative polling loop, so one unavailable optional server must
+ * not prevent the remaining servers or the host itself from starting.
  */
+export async function admitDevelopmentMcpServers(
+  servers: McpServerInfo[],
+  manager: Pick<McpManager, 'addServer'>
+): Promise<void> {
+  for (const server of servers) {
+    try {
+      await manager.addServer(server)
+    } catch (error) {
+      console.error(`[Main] Dev MCP server admission failed; continuing: ${server.name}`, error)
+    }
+  }
+}
+
 async function initializeMcpServers(contextRef: string): Promise<void> {
   console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
+  const initializationGeneration = ++mcpInitializationGeneration
+  const isInitializationCurrent = (): boolean =>
+    !isShuttingDown && mcpInitializationGeneration === initializationGeneration
 
-  // Clean up existing manager
-  if (mcpManager) {
-    await mcpManager.disconnectAll()
+  const replaceFleet = async (servers: McpServerInfo[]): Promise<void> => {
+    const previousManager = mcpManager
+    await replaceAuthoritativeMcpFleet({
+      servers,
+      previousManager,
+      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      getAuthToken: async serverName => {
+        if (!contextMapperClient) {
+          throw new Error('Context Mapper client is required to fetch MCP server auth')
+        }
+        return contextMapperClient.getAuthToken(serverName)
+      },
+      installFleet: (nextManager, nextServerState) => {
+        mcpManager = nextManager
+        lastServerState = nextServerState
+        agent?.setMcpManager(nextManager)
+      },
+      coordinator: mcpFleetCoordinator,
+      onColdStartPublished: () => ensureContextMapperPolling(contextRef),
+      isPreviousManagerCurrent: () => mcpManager === previousManager,
+      isFleetLifecycleCurrent: isInitializationCurrent,
+    })
   }
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
-  lastServerState.clear()
 
-  // In production mode, fetch from context-mapper
+  // In production mode, fetch an authoritative snapshot before replacing the
+  // current fleet. An unavailable Context Mapper leaves the prior state intact.
   if (!config.devMode) {
     if (!contextMapperClient) {
       contextMapperClient = getContextMapperClient()
     }
 
-    // Wait for context-mapper to be available
-    const maxRetries = 5
-    let retries = 0
-    while (retries < maxRetries) {
-      const healthy = await contextMapperClient.healthCheck()
-      if (healthy) {
-        console.log('[Main] Context Mapper is available')
-        break
-      }
-      retries++
-      console.log(`[Main] Waiting for Context Mapper... (${retries}/${maxRetries})`)
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-
-    const servers = await contextMapperClient.listServersByContext(contextRef)
-
-    for (const server of servers) {
-      let authToken: string | undefined
-
-      // Get auth token if configured
-      if (server.auth?.secretRef) {
-        authToken = await contextMapperClient.getAuthToken(server.name)
-      }
-
-      await mcpManager.addServer(server, authToken)
-      lastServerState.set(server.name, JSON.stringify(server))
-    }
+    await runAuthoritativeMcpInitialization({
+      contextRef,
+      client: contextMapperClient,
+      replaceFleet,
+      isCurrent: isInitializationCurrent,
+    })
+  } else {
+    await replaceFleet([])
   }
 
+  // Successful discovery always installs a manager, including an
+  // authoritative HTTP 200 empty snapshot.
+  if (!mcpManager) {
+    throw new Error('MCP manager was not installed after authoritative discovery')
+  }
   const connectedServers = mcpManager.getConnectedServers()
-  console.log(`[Main] Connected to ${connectedServers.length} MCP server(s)`)
+  console.log(
+    config.devMode
+      ? `[Main] Connected to ${connectedServers.length} MCP server(s)`
+      : `[Main] Published the initial MCP fleet manager with ${connectedServers.length} currently connected server(s); background reconciliation may still be in progress`
+  )
 
   if (connectedServers.length > 0) {
     const tools = mcpManager.getAllTools()
@@ -813,71 +858,115 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
  * Poll context-mapper for McpServer changes.
  */
 async function pollContextMapper(contextRef: string): Promise<void> {
-  if (!contextMapperClient || !mcpManager) return
+  if (!contextMapperClient) return
 
   try {
-    const { servers } = await contextMapperClient.pollServers(contextRef)
-    const currentNames = new Set(servers.map(s => s.name))
-    const previousNames = new Set(lastServerState.keys())
-
-    // Detect added or modified servers
-    for (const server of servers) {
-      const previousState = lastServerState.get(server.name)
-      const currentState = JSON.stringify(server)
-
-      if (!previousState) {
-        console.log(`[Main] MCP server added: ${server.name}`)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      } else if (previousState !== currentState) {
-        console.log(`[Main] MCP server modified: ${server.name}`)
-        await mcpManager.removeServer(server.name)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      }
+    // Cold-start discovery failures intentionally leave the manager unset.
+    // Retry the authoritative initialization instead of declaring an empty
+    // fleet or permanently no-oping every reconciliation tick.
+    if (!mcpManager) {
+      await initializeMcpServers(contextRef)
+      return
     }
 
-    // Detect deleted servers
-    for (const name of previousNames) {
-      if (!currentNames.has(name)) {
-        console.log(`[Main] MCP server deleted: ${name}`)
-        await mcpManager.removeServer(name)
-        lastServerState.delete(name)
-      }
-    }
+    const manager = mcpManager
+    await pollAuthoritativeMcpSnapshotIfCurrent({
+      poll: () => contextMapperClient!.pollServers(contextRef),
+      // A delayed fetch may resolve after shutdown or after a manager swap.
+      // Never publish that stale snapshot into a closed/retired manager.
+      isCurrent: () => !isShuttingDown && mcpManager === manager,
+      reconcile: servers =>
+        reconcileAuthoritativeMcpSnapshot({
+          servers,
+          manager,
+          serverState: lastServerState,
+          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
+          coordinator: mcpFleetCoordinator,
+        }),
+    })
   } catch (error) {
     console.error('[Main] Error polling skill-mapper:', error)
   }
 }
 
 /**
+ * Serialize periodic polling while coalescing any number of overlapping ticks
+ * into at most one trailing run. This keeps reconciliation bounded without
+ * losing the latest post-flight snapshot opportunity.
+ */
+export function createCoalescedPollRunner(poll: () => Promise<void>): {
+  trigger(): void
+  stop(): void
+} {
+  let inFlight = false
+  let trailing = false
+  let stopped = false
+
+  const trigger = (): void => {
+    if (stopped) return
+    if (inFlight) {
+      trailing = true
+      return
+    }
+
+    inFlight = true
+    void poll()
+      .catch(error => {
+        console.error('[Main] Context Mapper poll runner failed:', error)
+      })
+      .finally(() => {
+        inFlight = false
+        if (trailing && !stopped) {
+          trailing = false
+          trigger()
+        }
+      })
+  }
+
+  return {
+    trigger,
+    stop: () => {
+      stopped = true
+      trailing = false
+    },
+  }
+}
+
+/**
  * Start polling context-mapper for McpServer changes.
  */
-function startContextMapperPolling(contextRef: string): void {
+export function startContextMapperPolling(contextRef: string): void {
+  if (isShuttingDown) return
+  // Re-entry replaces the complete producer/runner pair. Stopping only the
+  // runner would leave the previous interval dispatching into the new runner.
+  stopContextMapperPolling()
+
   console.log(
     `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
   )
 
+  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper(contextRef))
   contextMapperPollTimer = setInterval(() => {
-    pollContextMapper(contextRef)
+    contextMapperPollRunner?.trigger()
   }, config.contextMapperPollInterval)
+}
+
+export function ensureContextMapperPolling(contextRef: string): void {
+  if (isShuttingDown || (contextMapperPollTimer && contextMapperPollRunner)) return
+  startContextMapperPolling(contextRef)
 }
 
 /**
  * Stop polling context-mapper.
  */
-function stopContextMapperPolling(): void {
+export function stopContextMapperPolling(): void {
   if (contextMapperPollTimer) {
     console.log('[Main] Stopping context-mapper polling')
     clearInterval(contextMapperPollTimer)
     contextMapperPollTimer = null
   }
+  contextMapperPollRunner?.stop()
+  contextMapperPollRunner = null
 }
 
 /**
@@ -2472,8 +2561,19 @@ async function shutdown(signal: string): Promise<void> {
     return
   }
   isShuttingDown = true
+  mcpInitializationGeneration += 1
 
   console.log(`[Main] Received ${signal}, shutting down`)
+
+  // Fence MCP authority and detach live tools before any awaited shutdown
+  // phase. Delayed polls and in-flight connects cannot reopen a closed manager.
+  const closingMcpManager = mcpManager
+  if (closingMcpManager) {
+    mcpFleetCoordinator.closeManager(closingMcpManager)
+  }
+  const mcpClosePromise = closingMcpManager?.close(cleanup =>
+    mcpFleetCoordinator.scheduleCleanup(cleanup)
+  )
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
@@ -2515,7 +2615,8 @@ async function shutdown(signal: string): Promise<void> {
 
   cronScheduler?.stop()
   spilloverStorage?.stopGc()
-  await mcpManager?.disconnectAll()
+  await mcpClosePromise
+  await mcpFleetCoordinator.drainForShutdown()
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
@@ -2592,9 +2693,7 @@ async function startDevMode(): Promise<void> {
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
-    for (const server of config.devMcpServers) {
-      await mcpManager.addServer(server)
-    }
+    await admitDevelopmentMcpServers(config.devMcpServers, mcpManager)
 
     const tools = mcpManager.getAllTools()
     console.log(`[Main] Total tools available: ${tools.length}`)
@@ -2675,7 +2774,7 @@ async function startProductionMode(): Promise<void> {
   // reconciles the catalog (the platform tolerates the 'connecting' sweep).
   startMcpInitializationInBackground({
     initialize: () => initializeMcpServers(host.spec.contextRef),
-    afterInitialAttempt: () => startContextMapperPolling(host.spec.contextRef),
+    afterInitialAttempt: () => ensureContextMapperPolling(host.spec.contextRef),
   })
 
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
@@ -2890,11 +2989,15 @@ async function main(): Promise<void> {
   }
 }
 
-// Run main
-main().catch(error => {
-  console.error('[Main] Fatal error:', error)
-  process.exit(1)
-})
+// Run main only when this module is the executable entry point. Keeping imports
+// side-effect free allows the authoritative initialization contract to be
+// regression-tested without starting the service.
+if (require.main === module) {
+  main().catch(error => {
+    console.error('[Main] Fatal error:', error)
+    process.exit(1)
+  })
+}
 
 // Export for external access
 export { messageQueue, agent, cronScheduler }

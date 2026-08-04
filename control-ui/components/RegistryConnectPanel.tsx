@@ -1,6 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RegistryRecoveryError,
   disconnectRegistryConnection,
@@ -33,6 +35,7 @@ type View =
 
 export default function RegistryConnectPanel() {
   const { showToast } = useToast()
+  const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
   // request-form fields
@@ -252,10 +255,11 @@ export default function RegistryConnectPanel() {
   }
 
   // From the `connecting` view: with re-registration blocked server-side by
-  // recovery_in_progress, this DELETE is now the ONLY remaining path that can
+  // recovery_in_progress, this DELETE is the ONLY remaining path that can
   // destroy a recoverable deployment — it deletes the keypair and permanently
-  // squats the org name at the registry. Route it through the same confirm
-  // dialog as handleDisconnect instead of a bare button.
+  // squats the org name at the registry. It is a broken-state recovery action
+  // (the connection never completed), so unlike the removed connected-state
+  // Disconnect it is kept — but gated behind a danger confirm, never a bare button.
   async function handleStartOverFromConnecting() {
     const ok = await confirm({
       title: 'Start over',
@@ -278,42 +282,10 @@ export default function RegistryConnectPanel() {
     setView({ kind: 'request' })
   }
 
-  async function handleDisconnect() {
-    const ok = await confirm({
-      title: 'Disconnect from the Evenfire Registry',
-      message:
-        'This deletes this deployment’s stored registry credentials. It will stop publishing and pulling private images until you connect again. This cannot be undone.',
-      confirmLabel: 'Disconnect',
-      tone: 'danger',
-    })
-    if (!ok) return
-    try {
-      await disconnectRegistryConnection()
-      showToast('Disconnected from the Evenfire Registry.', { tone: 'success' })
-    } catch {
-      showToast('Could not disconnect.', { tone: 'error' })
-    }
-    setView({ kind: 'request' })
-  }
-
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader
-          title="Connect to Evenfire Registry"
-          actions={
-            view.kind === 'connected' ? (
-              <Button
-                type="button"
-                variant="danger"
-                size="sm"
-                onClick={() => void handleDisconnect()}
-              >
-                Disconnect
-              </Button>
-            ) : null
-          }
-        />
+        <TablePanelHeader title="Connect to Evenfire Registry" />
 
         <div className="cu-card__body">
           {view.kind === 'loading' ? <p>Loading…</p> : null}
@@ -485,10 +457,25 @@ export default function RegistryConnectPanel() {
           ) : null}
 
           {view.kind === 'connected' ? (
-            <p className="cu-banner cu-banner--ok">
-              Connected to the Evenfire Registry{view.org ? ` as @${view.org}` : ''}. This
-              deployment can now publish entries and push/pull images.
-            </p>
+            <div className="cu-form-stack">
+              <p className="cu-banner cu-banner--ok">
+                Connected to the Evenfire Registry{view.org ? ` as @${view.org}` : ''}. This
+                deployment can now publish entries and push/pull images.
+              </p>
+              <p className="cu-muted-note">
+                This connection is permanent: the organization name is tied to this deployment.
+                Removing it later takes a change to the cluster.
+              </p>
+              <div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
+                >
+                  Go to your organization
+                </Button>
+              </div>
+            </div>
           ) : null}
         </div>
       </div>
