@@ -2,6 +2,7 @@
  * Workload Recipes Controller (WRC) configuration.
  * Follows the same env-config pattern as host-context-controller/src/config.ts
  */
+import { registryHostFromUrl } from '@clerum/workflow-runtime-core'
 
 export interface DbConfig {
   connectionString?: string
@@ -174,6 +175,34 @@ function getNetworkPolicyEnforcementMode(): NetworkPolicyEnforcementMode {
   if (value === 'warn' || value === 'required') return value
   throw new Error(
     `Invalid value for CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE: "${value}" (must be "warn" or "required")`
+  )
+}
+
+/**
+ * Startup warning for a `CLERUM_REGISTRY_URL` the platform-registry predicate cannot use.
+ *
+ * `isPlatformRegistryImage(image, registryUrl)` derives a host from this URL and returns
+ * false for EVERY image when it cannot — so an unset or unparseable value silently turns
+ * off platform image-pull credential injection altogether. control-api still mints and
+ * writes the pull Secret and reports success; WRC just never references it, and recipe
+ * pods sit in ImagePullBackOff with no failing request to attribute it to. Unset is a
+ * legitimate configuration (no platform registry), so this warns rather than throwing —
+ * but it must not be silent. Risk R3 in
+ * docs/architecture/registry-pull-secret-recipe-workloads.md.
+ *
+ * Returns null when the URL yields a host, otherwise the message to log.
+ */
+export function registryUrlStartupWarning(registryUrl: string): string | null {
+  if (registryHostFromUrl(registryUrl)) return null
+  const cause = registryUrl?.trim()
+    ? `CLERUM_REGISTRY_URL="${registryUrl.trim()}" has no parseable host (it needs a scheme, e.g. https://)`
+    : 'CLERUM_REGISTRY_URL is not set'
+  return (
+    `[Clerum] WARN: ${cause} — platform registry image-pull credential injection is DISABLED. ` +
+    'Recipe workloads whose images come from the platform registry will fail with ImagePullBackOff ' +
+    '("unauthorized: authentication required") even though control-api provisioned the credential. ' +
+    'Project control-api-config.CLERUM_REGISTRY_URL into this Deployment — see ' +
+    'deploy/base/control-plane/workflow-recipes.yaml.'
   )
 }
 

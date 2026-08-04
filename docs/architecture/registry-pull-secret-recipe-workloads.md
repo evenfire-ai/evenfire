@@ -277,11 +277,24 @@ service feeds it a different value.
 
 What actually makes it safe is a single *definition*, not a single name:
 `control-api-config.CLERUM_REGISTRY_URL` is the only place the URL is written, and WRC
-projects that key via `configMapKeyRef` (`deploy/overlays/minikube/patches/registry-env.yaml`).
-Divergence is then unrepresentable in the overlay rather than merely discouraged. Any other
-overlay (notably the GCP/prod overlay, which lives in `evenfire-infra`) must establish the
-same pairing; WRC's base Deployment sets no `CLERUM_REGISTRY_URL`, so an overlay that
-neither patches it nor projects the key leaves it empty, which disables injection silently.
+projects that key via `configMapKeyRef`. That projection lives in the **base** Deployment
+(`deploy/base/control-plane/workflow-recipes.yaml`), alongside the two workflow limits
+already sourced from the same ConfigMap, so anything built from `deploy/base` inherits the
+pairing and no overlay has to remember it. The reference is `optional: true` because base
+ships no `CLERUM_REGISTRY_URL` key — only overlays set the value — and a hard reference
+would put a plain `deploy/base` install into `CreateContainerConfigError`. The minikube
+overlay consequently no longer redeclares the env var; it only supplies the ConfigMap value
+(`deploy/overlays/minikube/configmaps/control-api-config.yaml`).
+
+Two caveats remain. Overlays that live outside this repo — the GCP dev/prod overlays in
+`evenfire-infra`, and MCC tenant rendering — still set `CLERUM_REGISTRY_URL` for both
+services independently; they agree today, but base cannot enforce that from here. And an
+overlay is still free to leave the key unset, which leaves WRC's value empty and disables
+injection; WRC now logs a startup WARN naming the consequence
+(`registryUrlStartupWarning` in `workflow-recipes/src/config.ts`, printed from `main.ts`)
+rather than failing silently. The base projection is pinned by
+`workflow-recipes/tests/unit/workflow/deployManifest.test.ts` so a later edit cannot quietly
+revert it to a literal or drop it.
 
 ### 6.3 One mint, fanned out — the core correctness rule
 
@@ -519,7 +532,7 @@ working immediately.
 | --- | --- | --- |
 | R1 | Per-namespace minting revokes other namespaces' keys → partial cluster-wide `ImagePullBackOff`. | Single mint + fan-out write (§6.3); post-condition asserted in tests. |
 | R2 | Partial write (mint OK, one namespace fails) leaves a stale, undetectable key. | Fingerprint annotation makes divergence detectable and repairable (§6.3). |
-| R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | **Was live, not hypothetical** — the shipped minikube overlay pinned WRC to the in-cluster registry while control-api used the shared one, so every recipe install hit it (found in live testing 2026-08-04). Closed for this overlay by making `control-api-config.CLERUM_REGISTRY_URL` the single definition and projecting it into WRC via `configMapKeyRef` (§6.2). Shared predicate alone was insufficient. **Still open elsewhere:** WRC's base Deployment sets no default, so any other overlay (GCP/prod in `evenfire-infra`) must repeat the pairing or injection silently disables; surfacing both values on a status/health endpoint is still worth doing. |
+| R3 | WRC/control-api registry URL drift → recipe pods get no credential while MCP servers do. | **Was live, not hypothetical** — the shipped minikube overlay pinned WRC to the in-cluster registry while control-api used the shared one, so every recipe install hit it (found in live testing 2026-08-04). Closed in-repo: the **base** WRC Deployment now projects `control-api-config.CLERUM_REGISTRY_URL` via an `optional: true` `configMapKeyRef`, so every deployment built from `deploy/base` — including OSS self-hosted, the only mode where control-api provisioning actually runs — reads the same definition control-api does, and the minikube overlay no longer redeclares it (§6.2). Pinned by `workflow-recipes/tests/unit/workflow/deployManifest.test.ts`. Shared predicate alone was insufficient. **Residual:** the GCP dev/prod overlays and MCC tenant rendering live outside this repo and still set the value for both services independently (they agree today); and an overlay may still leave the key unset, which disables injection — WRC now emits a startup WARN naming that consequence instead of failing silently. Surfacing both values on a status/health endpoint is still worth doing. |
 | R4 | Someone "fixes" #637 denial by labelling the Secret `shared`. | §5.1 recorded as an explicit, permanent non-goal; add a test asserting the Secret is NOT `shared`/`owner-recipe` labeled. |
 | R5 | A recipe declares the reserved name and expects it honored. | **Closed.** Validation rejection (§6.1) shipped: `isPlatformManagedWorkflowSecretName` now reserves `EVENFIRE_REGISTRY_PULL_SECRET_NAME`, so `/validate`, POST, PUT and `POST /admin/recipes/secrets` reject the declaration at admission with a reserved-name rule. The #637 gate stays behind it as defense-in-depth for anything already persisted. |
 | R6 | Two extra copies of the credential. | Pull-only, org-scoped, no push; §8.2. |

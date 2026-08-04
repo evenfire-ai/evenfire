@@ -1,22 +1,13 @@
 ---
-# Minikube: workflow-recipes reads the SAME registry URL as control-api, sourced from the
-# one key that defines it (`control-api-config.CLERUM_REGISTRY_URL`) rather than a second
-# hardcoded copy here.
+# Minikube: registry auth off for workflow-recipes.
 #
-# This pairing is load-bearing, not tidiness. WRC decides whether to attach the platform
-# pull credential with `isPlatformRegistryImage(workload.image, registryUrl)`, which
-# compares the IMAGE host against this URL's host. control-api provisions that credential
-# using its own copy. When the two disagree, control-api mints and writes the Secret but
-# WRC never references it, so recipe pods get `ImagePullBackOff`
-# (`unauthorized: authentication required`) with an empty pod-level `imagePullSecrets`
-# while McpServers — whose reference control-api writes itself — keep working. That is
-# risk R3 in docs/architecture/registry-pull-secret-recipe-workloads.md, and it is exactly
-# what this file used to cause: it pinned WRC to the in-cluster registry while
-# control-api pointed at https://registry.evenfire.ai.
-#
-# Sourcing both from one key makes the divergence unrepresentable. Point
-# control-api-config at a different registry (e.g. your own in-cluster deploy) and WRC
-# follows automatically.
+# CLERUM_REGISTRY_URL is deliberately NOT here. The base Deployment projects it from the
+# one key that defines it (`control-api-config.CLERUM_REGISTRY_URL`), and this overlay
+# supplies that key's value in configmaps/control-api-config.yaml — so WRC and control-api
+# read the same URL by construction. Re-declaring the env var here would only add a second
+# place to keep in sync; point the ConfigMap at a different registry (e.g. your own
+# in-cluster deploy) and WRC follows automatically. See the comment on that env entry in
+# deploy/base/control-plane/workflow-recipes.yaml for why divergence is risk R3.
 #
 # Auth stays disabled here: WRC's catalog client has no machine credentials wired, and
 # with auth off it reads anonymously instead of throwing.
@@ -31,10 +22,5 @@ spec:
       containers:
         - name: workflow-recipes
           env:
-            - name: CLERUM_REGISTRY_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: control-api-config
-                  key: CLERUM_REGISTRY_URL
             - name: CLERUM_REGISTRY_AUTH_ENABLED
               value: "false"

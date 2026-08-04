@@ -21,8 +21,10 @@
 // (could be a legitimate shared Secret an operator must mark `clerum.io/shared`,
 // or the exact cross-recipe reference #637 guards against) and is never
 // auto-claimed. Already-labeled Secrets (including those owned by a different
-// recipe, or conflicting owner+shared) are left untouched.
+// recipe, or conflicting owner+shared) are left untouched. The platform registry
+// pull credential is excluded outright — see the note in `addRef` below.
 import {
+  EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
   parseSecretOwnership,
@@ -197,6 +199,17 @@ export function planSecretOwnershipBackfill(
   const refs = new Map<string, string[]>()
   const order: string[] = []
   const addRef = (namespace: string, name: string, recipe: string) => {
+    // The platform registry pull credential is control-api-owned infrastructure, not a
+    // recipe Secret: control-api writes it into each platform workload namespace labeled
+    // only `clerum.io/managed-by: control-api`. It carries NEITHER ownership label, so
+    // isUnlabeled() reads it as legacy-unlabeled — and a recipe that references the
+    // reserved name (persisted before the reserved-name validation landed, or applied
+    // straight with kubectl) would make `--apply` stamp `clerum.io/owner-recipe` on it.
+    // That would flip isSecretAccessibleByRecipe to true, so the #637 gate would stop
+    // denying and tearing down the very workload it exists to deny — and the claim would
+    // hold until the next mint rewrites the Secret. Never a back-fill candidate: not
+    // stampable, not ambiguous, not reportable as missing.
+    if (name === EVENFIRE_REGISTRY_PULL_SECRET_NAME) return
     const key = `${namespace}${SEP}${name}`
     let recipesForKey = refs.get(key)
     if (!recipesForKey) {
