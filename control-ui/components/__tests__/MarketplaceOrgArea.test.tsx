@@ -18,6 +18,9 @@ vi.mock('../PublisherView/OwnedEntries', () => ({
   OwnedEntries: () => <div>owned-entries</div>,
 }))
 vi.mock('../RegistryApiKeysPanel', () => ({ default: () => <div>api-keys-panel</div> }))
+vi.mock('../PublisherView/DockerCredentials', () => ({
+  DockerCredentialsPanel: () => <div>docker-credentials-panel</div>,
+}))
 vi.mock('../RegistryConnectPanel', () => ({ default: () => <div>connect-panel</div> }))
 
 function cap(overrides: Partial<RegistryCapability>): RegistryCapabilityState {
@@ -94,6 +97,19 @@ describe('MarketplaceOrgArea', () => {
     render(<MarketplaceOrgArea activeTab="credentials" />)
     expect(screen.getByText('api-keys-panel')).toBeInTheDocument()
     expect(screen.queryByText(/Name your organization/i)).toBeNull()
+    // No org scope yet → the Docker push-credential panel can't build coordinates.
+    expect(screen.queryByText('docker-credentials-panel')).toBeNull()
+  })
+
+  it('credentials: also renders the Docker push credential once the org scope is known', () => {
+    // canManageOrg false (publishing UI off) but a claimed scope — push
+    // credentials are gated on the scope, not the publishing toggle (§6).
+    vi.mocked(capHook.useRegistryCapability).mockReturnValue(
+      cap({ orgName: 'acme', scope: '@acme', canManageOrg: false })
+    )
+    render(<MarketplaceOrgArea activeTab="credentials" />)
+    expect(screen.getByText('api-keys-panel')).toBeInTheDocument()
+    expect(screen.getByText('docker-credentials-panel')).toBeInTheDocument()
   })
 
   it('connection: always renders the connect panel', () => {

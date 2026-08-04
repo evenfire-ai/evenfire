@@ -6,6 +6,7 @@ import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { useRegistryCapability } from '../../lib/hooks/useRegistryCapability'
 import { MarketplaceOrgImages } from '../MarketplaceOrgImages'
 import { MarketplaceTabs } from '../MarketplaceTabs'
+import { DockerCredentialsPanel } from '../PublisherView/DockerCredentials'
 import { OwnedEntries } from '../PublisherView/OwnedEntries'
 import RegistryApiKeysPanel from '../RegistryApiKeysPanel'
 import RegistryConnectPanel from '../RegistryConnectPanel'
@@ -81,8 +82,11 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
           {/* Entries is a publishing surface, so it follows the publishing-UI
               toggle (canManageOrg). Credentials and Connection do NOT — turning
               publishing off must not remove push credentials or the connection
-              status (design spec §6). DockerCredentialsPanel self-gates via the
-              keys API, so it renders regardless. */}
+              status (design spec §6). The Credentials tab renders the registry
+              API keys (self-gating) and, once the org scope is known, the Docker
+              push credential — the target of the Images tab's "get a push
+              credential from the API Keys tab" pointer. Design spec §5.1 folds
+              both into a unified RegistryCredentials view in Phase 5. */}
           {activeTab === 'entries' ? (
             loading ? (
               <p>Loading…</p>
@@ -107,7 +111,15 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
             )
           ) : null}
 
-          {activeTab === 'credentials' ? <RegistryApiKeysPanel /> : null}
+          {activeTab === 'credentials' ? (
+            <>
+              <RegistryApiKeysPanel />
+              {/* Gated on the org scope (needed to build the push coordinates),
+                  not on the publishing toggle — push credentials survive
+                  publishing being turned off (§6). */}
+              {orgScope ? <DockerCredentialsPanel orgScope={orgScope} /> : null}
+            </>
+          ) : null}
 
           {activeTab === 'connection' ? <RegistryConnectPanel /> : null}
         </div>
