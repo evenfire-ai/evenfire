@@ -42,6 +42,7 @@
     "make:linux:arm64": "electron-forge make --platform=linux --arch=arm64"
   },
   "dependencies": {
+    "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@tanstack/react-query": "5.100.10",
     "js-yaml": "^4.1.1",
     "keytar": "^7.9.0",

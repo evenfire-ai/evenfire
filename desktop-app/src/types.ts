@@ -15,6 +15,19 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type SandboxUiApp = {
+  appRef: string
+  title?: string
+  description?: string
+  icon?: string
+  defaultPath: string
+  ready: boolean
+  phase: string | null
+  updatedAt: string | null
+}
+
+export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+
 export type SessionMe = {
   id: string
   email: string

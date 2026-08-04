@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import type { NextFunction, Response as ExpressResponse } from 'express'
+import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
 import { config } from '../config.js'
 import {

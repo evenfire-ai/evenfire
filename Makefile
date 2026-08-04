@@ -41,12 +41,14 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
-# Services that have unit tests (vitest)
+# Services that have unit tests
 TEST_SERVICES := \
 	workflow-approval-request-reader \
 	mcp-host \
@@ -59,8 +61,10 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 

@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { HostMessageRequest, ProfileSettingsOpenOptions } from './types.js'
+import type {
+  HostMessageRequest,
+  ProfileSettingsOpenOptions,
+  SandboxUiDeepLinkEnvelope,
+} from './types.js'
 
 const clerum = Object.freeze({
   auth: {
@@ -350,6 +354,7 @@ const clerum = Object.freeze({
   },
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
+    rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
@@ -419,14 +424,25 @@ const clerum = Object.freeze({
       recipeNs: string
       recipeName: string
       defaultPath?: string
+      routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
+    listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
+      ipcRenderer.on('sandboxUi:deepLink', listener)
+      return () => ipcRenderer.off('sandboxUi:deepLink', listener)
+    },
     onClosed: (callback: (args: { appRef: string }) => void) => {
       const listener = (_event: unknown, args: { appRef: string }) => callback(args)
       ipcRenderer.on('sandboxUi:closed', listener)

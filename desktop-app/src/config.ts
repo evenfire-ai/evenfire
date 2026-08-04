@@ -14,6 +14,7 @@ type DesktopConfig = Omit<DesktopRuntimeConfig, 'appName' | 'rpcProxyBaseUrl'> &
   rpcProxyBaseUrl: string
   memberRegistrationServiceBaseUrl: string
   desktopProfileUiBaseUrl: string
+  desktopProfileUiBaseUrlExplicit: boolean
   requestTimeoutMs: number
   appName: string
 }
@@ -172,6 +173,10 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
   }
 
   return 'http://127.0.0.1:3001'
+}
+
+function hasExplicitProfileUiBaseUrl(): boolean {
+  return Boolean(process.env.PROFILE_UI_BASE_URL?.trim())
 }
 
 function runtimeConfigDirectoryPath(): string {
@@ -529,6 +534,7 @@ export const config: DesktopConfig = {
     'https://registration.evenfire.ai'
   ),
   desktopProfileUiBaseUrl: deriveProfileUiBaseUrl(initialRuntimeConfig.externalRestApiBaseUrl),
+  desktopProfileUiBaseUrlExplicit: hasExplicitProfileUiBaseUrl(),
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),
   appName: initialRuntimeConfig.appName?.trim() || DEFAULT_APP_NAME,
 }
@@ -538,6 +544,7 @@ function applyRuntimeConfig(next: DesktopRuntimeConfig, markConfigured: boolean)
   config.rpcProxyBaseUrl = next.rpcProxyBaseUrl || ''
   config.appName = next.appName?.trim() || DEFAULT_APP_NAME
   config.desktopProfileUiBaseUrl = deriveProfileUiBaseUrl(next.externalRestApiBaseUrl)
+  config.desktopProfileUiBaseUrlExplicit = hasExplicitProfileUiBaseUrl()
   if (markConfigured) desktopRuntimeConfigured = true
 }
 
