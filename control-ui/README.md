@@ -21,22 +21,21 @@ Control UI requires an admin login — it is not an open dashboard.
 
 Sidebar destinations map to canonical App Router routes (`components/Sidebar/constants.tsx`):
 
-| Sidebar label     | Route                                                    | Contents                                                                         |
-| ----------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Agents            | `/hosts`                                                 | Host list, detail tabs, guided creation wizard, per-tool approval overrides      |
-| Connectors        | `/mcp-servers`                                           | MCP server resources: list, create, edit, egress policy                          |
-| Plugins           | `/workflow-recipes`                                      | Workflow recipes by namespace/name: editor, secrets, integrations, runs          |
-| Shared Files      | `/shared-filesystems`                                    | Shared filesystem resources                                                      |
-| Global Files      | `/gfs`                                                   | Global File System browser and grant delegation                                  |
-| Marketplace       | `/registry`                                              | Registry catalog plus `/registry/install`, `/registry/keys`, `/registry/publish` |
-| Publisher         | `/publisher`                                             | Publisher credentials, entries, shared-with-me                                   |
-| External Channels | `/communication-channels`                                | Communication channel resources                                                  |
-| Users & Teams     | `/profile-admin/users`                                   | Users, teams, and admins administration                                          |
-| Contexts          | `/contexts`                                              | Context resources with per-context tabs                                          |
-| Secrets           | `/secrets`                                               | Secrets by scope, plus recipe secrets (values are write-only from the UI)        |
-| Outputs           | `/outputs`                                               | Generated outputs                                                                |
-| Cost & Usage      | `/cost/usage`, `/cost/llm-prices`, `/cost/token-budgets` | Token usage dashboard, model prices, token budgets                               |
-| Settings          | `/settings`                                              | Control settings panel                                                           |
+| Sidebar label     | Route                                                    | Contents                                                                                                               |
+| ----------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Agents            | `/hosts`                                                 | Host list, detail tabs, guided creation wizard, per-tool approval overrides                                            |
+| Connectors        | `/mcp-servers`                                           | MCP server resources: list, create, edit, egress policy                                                                |
+| Installed plugins | `/plugins`                                               | Installed plugins by namespace/name: editor, secrets, integrations, runs                                               |
+| Shared Files      | `/shared-filesystems`                                    | Shared filesystem resources                                                                                            |
+| Global Files      | `/gfs`                                                   | Global File System browser and grant delegation                                                                        |
+| Marketplace       | `/marketplace`                                           | Connectors catalog plus the org-named tab `/marketplace/org` (entries, credentials, connection) — the folded Publisher |
+| External Channels | `/communication-channels`                                | Communication channel resources                                                                                        |
+| Users & Teams     | `/profile-admin/users`                                   | Users, teams, and admins administration                                                                                |
+| Contexts          | `/contexts`                                              | Context resources with per-context tabs                                                                                |
+| Secrets           | `/secrets`                                               | Secrets by scope, plus recipe secrets (values are write-only from the UI)                                              |
+| Outputs           | `/outputs`                                               | Generated outputs                                                                                                      |
+| Cost & Usage      | `/cost/usage`, `/cost/llm-prices`, `/cost/token-budgets` | Token usage dashboard, model prices, token budgets                                                                     |
+| Settings          | `/settings`                                              | Control settings panel                                                                                                 |
 
 Routes not in the sidebar: `/control-admins/new` (invite a control admin), `/plugin-workload-sdk` (SDK grants and invocation search), and the public token flows listed above. Old top-level `/usage`, `/llm-prices`, and `/token-budgets` paths permanently redirect under `/cost/*` (`next.config.js`).
 

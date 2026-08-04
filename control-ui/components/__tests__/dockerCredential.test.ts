@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildDockerLoginCommand,
+  buildDockerPushCommand,
+  buildDockerTagCommand,
+  buildImageCoordinate,
   buildPushCoordinate,
   deriveDockerconfigjson,
   resolveDockerCredential,
@@ -61,5 +64,20 @@ describe('dockerCredential helpers', () => {
     })
     expect(out.registry).toBe('registry.evenfire.ai')
     expect(JSON.parse(out.dockerconfigjson).auths['registry.evenfire.ai'].password).toBe('efrk_x')
+  })
+
+  it('builds a per-entry image coordinate, dropping the @ from the namespace', () => {
+    expect(buildImageCoordinate('registry.evenfire.ai', '@acme', 'my-connector', '1.2.0')).toBe(
+      'registry.evenfire.ai/acme/my-connector:1.2.0'
+    )
+  })
+
+  it('generates docker tag and push commands from the entry name + org scope', () => {
+    expect(buildDockerTagCommand('registry.evenfire.ai', '@acme', 'my-connector', '1.2.0')).toBe(
+      'docker tag <local-image> registry.evenfire.ai/acme/my-connector:1.2.0'
+    )
+    expect(buildDockerPushCommand('registry.evenfire.ai', '@acme', 'my-connector', '1.2.0')).toBe(
+      'docker push registry.evenfire.ai/acme/my-connector:1.2.0'
+    )
   })
 })
