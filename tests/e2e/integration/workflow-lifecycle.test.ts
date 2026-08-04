@@ -20,14 +20,13 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { CONTROL_API_URL, deleteJson, fetchJson, postJson } from './helpers.integration.js'
 import {
-  CONTROL_API_URL,
-  deleteJson,
-  fetchJson,
-  isServiceUp,
-  postJson,
-} from './helpers.integration.js'
-import { adminLogin, adminSessionHeader } from './mcpCredentialRotation.helpers.js'
+  adminLogin,
+  adminSessionHeader,
+  requireControlApiUp,
+  skipEachIfClusterDown,
+} from './mcpCredentialRotation.helpers.js'
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -44,6 +43,8 @@ const SANDBOX_NS = 'sandbox-recipes'
 
 let controlApiUp = false
 let adminToken = ''
+
+skipEachIfClusterDown(() => controlApiUp)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -128,11 +129,8 @@ async function waitForKubectlOutput(args: string, timeoutMs = 5_000): Promise<st
 // ─── Setup / Teardown ────────────────────────────────────────────────────────
 
 beforeAll(async () => {
-  controlApiUp = await isServiceUp(CONTROL_API_URL)
-  if (!controlApiUp) {
-    console.log('[workflow-lifecycle] control-api not available — tests will be skipped')
-    return
-  }
+  controlApiUp = await requireControlApiUp('workflow-lifecycle')
+  if (!controlApiUp) return
 
   try {
     adminToken = await adminLogin()
@@ -167,27 +165,22 @@ afterAll(async () => {
 
 describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', () => {
   it('control-api is reachable', async () => {
-    if (!controlApiUp) return
     const { status } = await fetchJson(`${CONTROL_API_URL}/health`)
     expect(status).toBe(200)
   })
 
   it('admin login succeeds', async () => {
-    if (!controlApiUp) return
     expect(adminToken).toBeTruthy()
     expect(adminToken.length).toBeGreaterThan(10)
   })
 
   it('WRC is running in control-plane', () => {
-    if (!controlApiUp) return
     const out = kubectl('get deployment workflow-recipes -n control-plane --no-headers')
     expect(out).toBeTruthy()
     expect(out).toContain('1/1')
   })
 
   it('creates WorkflowRecipe with two steps — default model zai/glm-4.7', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const recipeBody = {
       metadata: { name: SMOKE_RECIPE },
       spec: {
@@ -223,8 +216,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 15_000)
 
   it('WRC creates coordinator Pod in sandbox-recipes within 60s', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const found = await waitForPod(
       SANDBOX_NS,
       `clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-coordinator`,
@@ -235,8 +226,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 70_000)
 
   it('WRC creates mcp_host Pod in sandbox-recipes within 60s', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const found = await waitForPod(
       SANDBOX_NS,
       `clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host`,
@@ -247,8 +236,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 70_000)
 
   it('mcp_host Pod env has CLERUM_WORKFLOW_ENABLED=true', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const out = await waitForKubectlOutput(
       `get pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host -o jsonpath={.items[0].spec.containers[0].env}`
     )
@@ -264,8 +251,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   it(
     'WorkflowRecipe reaches terminal phase (completed or failed) within 5 minutes',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       const terminalPhases = ['completed', 'failed', 'timed_out']
       const finalPhase = await waitForWorkflowPhase(
         SMOKE_RECIPE,
@@ -283,8 +268,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   )
 
   it('coordinator Pod reached terminal state (Succeeded or Failed)', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const out = kubectl(
       `get pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-coordinator --no-headers`
     )
@@ -304,8 +287,6 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 15_000)
 
   it('WorkflowRecipe CRD has workflowExecution.phase after workflow runs', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const { status, data } = await fetchJson<Record<string, unknown>>(
       `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}/status`,
       { headers: adminSessionHeader(adminToken) }

@@ -22,6 +22,7 @@
  *     deletes are allowed to swallow errors — that mirrors existing
  *     convention and never masks a test's own assertions.
  */
+import { beforeEach } from 'vitest'
 import { execFileSync, spawn } from 'child_process'
 import { createHash, randomBytes } from 'crypto'
 import {
@@ -264,10 +265,9 @@ export async function adminLogin(): Promise<string> {
 
 /**
  * Fail-loud cluster reachability check. Returns `false` ONLY when the
- * explicit opt-out env var is set — the caller then must skip the whole
- * suite by returning early from every `it()`, matching the established
- * `if (!controlApiUp) return` convention in this directory. Never a silent
- * default skip.
+ * explicit opt-out env var is set; the caller should pair this with
+ * `skipEachIfClusterDown()` so individual tests render as vitest "skipped"
+ * (yellow) rather than silently passing with zero assertions.
  */
 export async function requireControlApiUp(suiteName: string): Promise<boolean> {
   const up = await isServiceUp(CONTROL_API_URL)
@@ -281,6 +281,20 @@ export async function requireControlApiUp(suiteName: string): Promise<boolean> {
     `${msg}. This E2E suite requires control-api to be reachable. Run ` +
       '`make minikube-pf-control-ui` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.'
   )
+}
+
+/**
+ * Register a beforeEach hook that marks each test as "skipped" via
+ * ctx.skip() when the cluster is unreachable. This replaces the old
+ * `if (!controlApiUp) return` pattern which silently passed tests
+ * with zero assertions — a fail-open violation.
+ */
+export function skipEachIfClusterDown(isUp: () => boolean): void {
+  beforeEach(ctx => {
+    if (!isUp()) {
+      ctx.skip()
+    }
+  })
 }
 
 // ─── mcp-secrets / mcp-servers HTTP contract ────────────────────────────────

@@ -43,14 +43,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'child_process'
 import { randomBytes } from 'crypto'
+import { CONTROL_API_URL, deleteJson, postJson, putJson } from './helpers.integration.js'
 import {
-  CONTROL_API_URL,
-  deleteJson,
-  isServiceUp,
-  postJson,
-  putJson,
-} from './helpers.integration.js'
-import { adminLogin, adminSessionHeader } from './mcpCredentialRotation.helpers.js'
+  adminLogin,
+  adminSessionHeader,
+  requireControlApiUp,
+  skipEachIfClusterDown,
+} from './mcpCredentialRotation.helpers.js'
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -127,25 +126,11 @@ async function waitFor<T>(
 let controlApiUp = false
 let adminToken = ''
 
-// Opt-in skip: set when running unit-test pipelines that don't have the
-// minikube/dev cluster up. Default behavior is fail-fast — silently passing
-// when the E2E environment is missing hides broken setups.
-const SKIP_IF_UNREACHABLE = process.env.E2E_SKIP_IF_CLUSTER_UNREACHABLE === '1'
+skipEachIfClusterDown(() => controlApiUp)
 
 beforeAll(async () => {
-  controlApiUp = await isServiceUp(CONTROL_API_URL)
-  if (!controlApiUp) {
-    const msg = `[channel-reader-via-api] control-api not reachable at ${CONTROL_API_URL}`
-    if (SKIP_IF_UNREACHABLE) {
-      console.log(`${msg} — tests will be skipped (E2E_SKIP_IF_CLUSTER_UNREACHABLE=1)`)
-      return
-    }
-    throw new Error(
-      `${msg}. ` +
-        `This E2E suite requires control-api to be reachable. ` +
-        `Run \`make minikube-pf-control-ui\` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.`
-    )
-  }
+  controlApiUp = await requireControlApiUp('channel-reader-via-api')
+  if (!controlApiUp) return
 
   adminToken = await adminLogin()
 
@@ -193,15 +178,12 @@ describe('channel-reader via control-api', () => {
   let initialAnnotationHash = ''
 
   it('admin login produced a JWT', () => {
-    if (!controlApiUp) return
     expect(adminToken.length).toBeGreaterThan(0)
   })
 
   it(
     'Host CRD is reconciled by HCC into a per-host channel-reader Deployment',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       const dep = await waitFor(
         `Deployment ${DEPLOY_NAME} in ${CHANNELS_NAMESPACE}`,
         () =>
@@ -224,8 +206,6 @@ describe('channel-reader via control-api', () => {
   )
 
   it('POST /admin/communication-channels creates the CC', async () => {
-    if (!controlApiUp || !adminToken) return
-
     // The generic admin/:resource router uses POST for create and PUT for
     // update (PUT requires existing resource). UI hits PUT for both because
     // its create flow first POSTs then re-GETs; here we go straight to POST.
@@ -257,8 +237,6 @@ describe('channel-reader via control-api', () => {
   })
 
   it('PUT /admin/communication-channels/:name updates the CC (rotation of allowed senders)', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const { status } = await putJson(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}`,
       {
@@ -284,8 +262,6 @@ describe('channel-reader via control-api', () => {
   })
 
   it('PUT /admin/communication-channels/:name/credentials rotates existing credentials', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const { status, data } = await putJson<{
       name: string
       secretName: string
@@ -316,8 +292,6 @@ describe('channel-reader via control-api', () => {
   it(
     'HCC patches credentials-revision annotation within timeout',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       const annotationHash = await waitFor(
         `clerum.io/credentials-revision annotation on ${DEPLOY_NAME}`,
         () => {
@@ -337,8 +311,6 @@ describe('channel-reader via control-api', () => {
   it(
     'pod rolls and ends up Running without static credential env values',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       // Wait for the new ReplicaSet's pod to be Ready
       await waitFor(
         `pod for ${DEPLOY_NAME} Running 1/1`,
@@ -378,8 +350,6 @@ describe('channel-reader via control-api', () => {
   )
 
   it('channel-reader egress policy does not allow the workflow approval gateway', () => {
-    if (!controlApiUp || !adminToken) return
-
     const policy = kubectl(
       `get networkpolicy channel-reader-${TEST_HOST}-egress -n ${CHANNELS_NAMESPACE} -o yaml`
     )
@@ -394,8 +364,6 @@ describe('channel-reader via control-api', () => {
   it.skipIf(!HAS_LIVE_BOT_TOKEN)(
     'channel-reader connects to Telegram (requires real TG_BOT_TOKEN)',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       await waitFor(
         `"[Telegram] Connected as @" log line in pod`,
         () => {
@@ -409,8 +377,6 @@ describe('channel-reader via control-api', () => {
   )
 
   it('PUT /admin/communication-channels/:name/credentials with same data is idempotent', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const { status, data } = await putJson<{ rotated: boolean }>(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}/credentials`,
       { 'telegram-bot-token': TG_BOT_TOKEN },
@@ -430,8 +396,6 @@ describe('channel-reader via control-api', () => {
   it(
     'PUT /admin/communication-channels/:name/credentials with different data updates the annotation',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       const { status, data } = await putJson<{ rotated: boolean }>(
         `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}/credentials`,
         { 'telegram-bot-token': TG_BOT_TOKEN_ROTATED },
@@ -457,8 +421,6 @@ describe('channel-reader via control-api', () => {
   )
 
   it('CommunicationChannel still points at the credentials Secret after rotation', () => {
-    if (!controlApiUp || !adminToken) return
-
     const ref = kubectl(
       `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
     )
@@ -466,8 +428,6 @@ describe('channel-reader via control-api', () => {
   })
 
   it('DELETE /admin/communication-channels/:name removes the credentials Secret', async () => {
-    if (!controlApiUp || !adminToken) return
-
     const { status } = await deleteJson(
       `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NAME)}`,
       adminSessionHeader(adminToken)
@@ -500,8 +460,6 @@ describe('channel-reader via control-api', () => {
   it(
     'DELETE Host CRD cascades the channel-reader Deployment',
     async () => {
-      if (!controlApiUp || !adminToken) return
-
       kubectl(`delete host ${TEST_HOST} -n ${HOST_NAMESPACE} --ignore-not-found`)
 
       await waitFor(
