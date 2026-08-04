@@ -129,6 +129,7 @@ jobs:
               - 'nginx-egress-proxy/**'
             profile-ui:
               - 'profile-ui/**'
+              - 'packages/desktop-app-links/**'
             rpc-proxy:
               - 'rpc-proxy/**'
             workflow-recipes:
@@ -225,6 +226,7 @@ jobs:
             changed: ${{ needs.detect.outputs.nginx-egress-proxy }}
           - image: profile-ui
             path: profile-ui
+            rooted: true
             changed: ${{ needs.detect.outputs.profile-ui }}
           - image: rpc-proxy
             path: rpc-proxy

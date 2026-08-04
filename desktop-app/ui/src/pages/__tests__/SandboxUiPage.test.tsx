@@ -9,6 +9,7 @@ const sandboxUi = {
   open: vi.fn(),
   close: vi.fn(),
   reload: vi.fn(),
+  copyDeepLink: vi.fn(),
   setBounds: vi.fn(),
   setVisible: vi.fn(),
   capturePreview: vi.fn(),
@@ -51,8 +52,9 @@ describe('SandboxUiPage', () => {
     } as DOMRect)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup()
+    await new Promise(resolve => window.setTimeout(resolve, 0))
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     delete (window as { clerum?: unknown }).clerum
@@ -86,6 +88,18 @@ describe('SandboxUiPage', () => {
     expect(screen.getByText('Support Desk')).toBeTruthy()
     expect(screen.queryByText('No available apps yet')).toBeNull()
     expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(2)
+  })
+
+  it('does not let an old unmount timer close an immediate replacement page', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.close.mockResolvedValue(undefined)
+    const first = render(<SandboxUiPage />)
+
+    first.unmount()
+    render(<SandboxUiPage />)
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+
+    expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
   it('renders the empty apps page with calm centered guidance', async () => {
@@ -147,7 +161,78 @@ describe('SandboxUiPage', () => {
       })
     })
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /^Back to .+ planning$/ })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
+  })
+
+  it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onEmbeddedAppOpening = vi.fn()
+    const onShortcutOpenResult = vi.fn()
+
+    render(
+      <SandboxUiPage
+        shortcutApp={{
+          appRef: 'sandbox-recipes/task-board',
+          label: 'Agentic Task Board',
+          defaultPath: '/',
+          routePath: '/tasks/task-42',
+        }}
+        shortcutOpenRequestId={1}
+        onEmbeddedAppOpening={onEmbeddedAppOpening}
+        onShortcutOpenResult={onShortcutOpenResult}
+      />
+    )
+
+    await waitFor(() => {
+      expect(sandboxUi.open).toHaveBeenCalledWith({
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'task-board',
+        defaultPath: '/',
+        routePath: '/tasks/task-42',
+        bounds: {
+          x: 16,
+          y: 12,
+          width: 400,
+          height: 300,
+          dpr: expect.any(Number),
+        },
+      })
+    })
+    expect(onEmbeddedAppOpening).toHaveBeenCalledWith({
+      appRef: 'sandbox-recipes/task-board',
+      label: 'Agentic Task Board',
+      defaultPath: '/',
+      routePath: '/tasks/task-42',
+    })
+    await waitFor(() => {
+      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, { status: 'mounted' })
+    })
+  })
+
+  it('reports a failed deep-linked shortcut open without acknowledging success', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+    sandboxUi.open.mockRejectedValueOnce(new Error('native mount failed'))
+    const onShortcutOpenResult = vi.fn()
+
+    render(
+      <SandboxUiPage
+        shortcutApp={{
+          appRef: 'sandbox-recipes/task-board',
+          label: 'Agentic Task Board',
+          defaultPath: '/',
+        }}
+        shortcutOpenRequestId={1}
+        onShortcutOpenResult={onShortcutOpenResult}
+      />
+    )
+
+    await waitFor(() => {
+      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, {
+        status: 'failed',
+        message: 'native mount failed',
+      })
+    })
   })
 
   it('returns to the originating conversation from an app', async () => {
@@ -184,6 +269,109 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('keeps the app mounted when returning to the conversation fails', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onBackToConversation = vi.fn().mockRejectedValue(new Error('team switch failed'))
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{
+          agentName: 'sales-agent',
+          chatId: 'chat-123',
+          title: 'Quarterly planning',
+          teamId: 'team-b',
+        }}
+        onBackToConversation={onBackToConversation}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to Quarterly planning' }))
+
+    await waitFor(() => expect(onBackToConversation).toHaveBeenCalledOnce())
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Back to apps' })).toBeTruthy()
+  })
+
+  it('keeps the conversation origin during Strict Mode effect replay', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/task-board',
+          title: 'Agentic Task Board',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onBackToConversation = vi.fn()
+    const onEmbeddedAppBack = vi.fn()
+
+    render(
+      <React.StrictMode>
+        <SandboxUiPage
+          conversationOrigin={{
+            agentName: 'task-board-agent',
+            chatId: 'chat-123',
+            title: 'Plan the launch',
+          }}
+          onBackToConversation={onBackToConversation}
+          onEmbeddedAppBack={onEmbeddedAppBack}
+        />
+      </React.StrictMode>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Agentic Task Board' }))
+
+    expect(await screen.findByRole('button', { name: 'Back to Plan the launch' })).toBeTruthy()
+    expect(onEmbeddedAppBack).not.toHaveBeenCalled()
+  })
+
+  it('copies a deep link for the current app route and active team', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/accounts',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.copyDeepLink.mockResolvedValueOnce({
+      url: 'evenfire://app/sandbox-recipes/sales-crm?path=%2Faccounts&team=team-123',
+    })
+    const onNotify = vi.fn()
+
+    render(<SandboxUiPage currentTeamId="team-123" onNotify={onNotify} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy current app link' }))
+
+    await waitFor(() => {
+      expect(sandboxUi.copyDeepLink).toHaveBeenCalledWith('team-123')
+      expect(onNotify).toHaveBeenCalledWith('App link copied to clipboard.', 'success')
     })
   })
 

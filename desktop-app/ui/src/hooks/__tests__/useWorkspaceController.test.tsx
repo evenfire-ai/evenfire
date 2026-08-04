@@ -108,6 +108,34 @@ describe('useWorkspaceController', () => {
     uninstallMockClerum()
   })
 
+  it('restores the session without waiting for a slow dependency-health probe', async () => {
+    const clerum = installClerumHarness({ delayHealth: true })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+
+    clerum.resolveHealth()
+  })
+
+  it('logs dependency-health probe failures without blocking session restoration', async () => {
+    const healthError = new Error('health endpoint unavailable')
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const clerum = installClerumHarness({ healthError })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+    await waitFor(() =>
+      expect(consoleWarn).toHaveBeenCalledWith(
+        '[Desktop] Could not refresh dependency health:',
+        healthError
+      )
+    )
+  })
+
   it('preserves a workflow nav selection while login session hydration finishes', async () => {
     const clerum = installClerumHarness({ delayAuthenticatedLoad: true })
 

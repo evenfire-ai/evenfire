@@ -10,7 +10,11 @@ import {
   createMockNetworkingApi,
   createMockRbacApi,
 } from '../test/__fixtures__/testMocks'
-import { HostFleetReconcileError, HostReconciler, destructiveCleanupAllowed } from './hostReconciler'
+import {
+  HostFleetReconcileError,
+  HostReconciler,
+  destructiveCleanupAllowed,
+} from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import { registry } from './metrics'
 import { HostCRD } from './types'
@@ -355,14 +359,20 @@ describe('HostReconciler fleet failure isolation', () => {
         metadata: {
           name: 'orphan-a',
           namespace: 'mcp-host',
-          labels: { 'clerum.io/managed-by': 'host-context-controller', 'clerum.io/host': 'orphan-a' },
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/host': 'orphan-a',
+          },
         },
       } as k8s.V1Deployment,
       {
         metadata: {
           name: 'orphan-b',
           namespace: 'mcp-host',
-          labels: { 'clerum.io/managed-by': 'host-context-controller', 'clerum.io/host': 'orphan-b' },
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/host': 'orphan-b',
+          },
         },
       } as k8s.V1Deployment,
     ])
@@ -417,7 +427,12 @@ describe('HostReconciler bounded fleet workers', () => {
       rbacApi: asRbacApi(createMockRbacApi()),
     })
     // Isolate reconcile concurrency from the cleanup phase.
-    vi.spyOn(reconciler as unknown as { collectHostCleanupFailures(...args: unknown[]): Promise<unknown[]> }, 'collectHostCleanupFailures').mockResolvedValue([])
+    vi.spyOn(
+      reconciler as unknown as {
+        collectHostCleanupFailures(...args: unknown[]): Promise<unknown[]>
+      },
+      'collectHostCleanupFailures'
+    ).mockResolvedValue([])
     let active = 0
     let maxActive = 0
     const gates: Array<() => void> = []
@@ -450,7 +465,12 @@ describe('HostReconciler bounded fleet workers', () => {
       networkingApi: asNetworkingApi(createMockNetworkingApi()),
       rbacApi: asRbacApi(createMockRbacApi()),
     })
-    vi.spyOn(reconciler as unknown as { collectHostCleanupFailures(...args: unknown[]): Promise<unknown[]> }, 'collectHostCleanupFailures').mockResolvedValue([])
+    vi.spyOn(
+      reconciler as unknown as {
+        collectHostCleanupFailures(...args: unknown[]): Promise<unknown[]>
+      },
+      'collectHostCleanupFailures'
+    ).mockResolvedValue([])
     let active = 0
     let maxActive = 0
     const gates = new Map<string, () => void>()

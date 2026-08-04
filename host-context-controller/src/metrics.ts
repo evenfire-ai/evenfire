@@ -47,9 +47,7 @@ function gauge(options: {
  * (15s), and wake (45s) budgets, plus longer diagnostic tails. Shared by every
  * HCC reconcile/recovery latency histogram.
  */
-const RECONCILE_LATENCY_BUCKETS = [
-  0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120,
-] as const
+const RECONCILE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120] as const
 
 /** Idempotent Histogram helper mirroring counter()/gauge(). */
 function histogram(options: {

@@ -47,6 +47,19 @@ describe('classifyEmbedNavigation', () => {
     })
   })
 
+  it('does not allow sibling paths that only share a string prefix', () => {
+    const prefixWithoutSlash = allowed.replace(/\/$/, '')
+    const sibling = `${prefixWithoutSlash}-other/x`
+    expect(classifyEmbedNavigation(sibling, prefixWithoutSlash)).toEqual({
+      kind: 'external',
+      url: sibling,
+    })
+    expect(classifyEmbedNavigation(`${prefixWithoutSlash}x/secret`, prefixWithoutSlash)).toEqual({
+      kind: 'external',
+      url: `${prefixWithoutSlash}x/secret`,
+    })
+  })
+
   it('routes a different recipe under the same proxy origin to the OS browser (not allow)', () => {
     // Different recipe — the proxy would 401 it anyway via the JWT
     // claim binding, but the embed should never even attempt to load
