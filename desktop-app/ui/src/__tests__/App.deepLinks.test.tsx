@@ -551,6 +551,71 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
+  it('keeps the target team during cross-team starting app retries', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    let ready = false
+    listApps.mockImplementation(async () => ({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready,
+          phase: ready ? 'active' : 'deploying',
+        },
+      ],
+    }))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+    ready = true
+    await act(async () => {
+      vi.advanceTimersByTime(2_000)
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps a failed native mount unacked and continues with later links', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({

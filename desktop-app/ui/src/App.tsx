@@ -177,6 +177,7 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
@@ -275,6 +276,7 @@ export function App() {
     setPendingSandboxUiDeepLinks([])
     processingSandboxUiDeepLinkIdRef.current = null
     launchingSandboxUiDeepLinkRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -406,6 +408,7 @@ export function App() {
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -416,7 +419,11 @@ export function App() {
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
-    (pending: PendingSandboxUiDeepLink, message: string, tone: 'info' | 'error' = 'error') => {
+    (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      tone: 'info' | 'error' = 'error'
+    ): boolean => {
       clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
@@ -426,7 +433,7 @@ export function App() {
         )
         setPendingSandboxUiDeepLinkState(next)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
-        return
+        return true
       }
       const next = deferPendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
@@ -435,6 +442,7 @@ export function App() {
       )
       setPendingSandboxUiDeepLinkState(next)
       vm.pushToast(message, tone)
+      return false
     },
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
@@ -530,21 +538,32 @@ export function App() {
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
-      const originalTeamId = vm.getCurrentTeamId()
-      let switchedTeam = false
+      const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
+      const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      let switchedTeam = Boolean(
+        restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
+      )
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
-            switchedTeam = await vm.handleEnsureTeamContext({
+            const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
             })
+            switchedTeam = switchedTeam || didSwitchTeam
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
           } catch (error) {
             switchedTeam =
-              originalTeamId !== pending.link.teamId &&
-              vm.getCurrentTeamId() === pending.link.teamId
+              switchedTeam ||
+              (originalTeamId !== pending.link.teamId &&
+                vm.getCurrentTeamId() === pending.link.teamId)
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
             throw error
           }
         }
@@ -567,12 +586,14 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
           }
-          await restoreSandboxUiDeepLinkTeam(launchContext)
-          deferSandboxUiDeepLink(
+          const exhaustedRetryBudget = deferSandboxUiDeepLink(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
             'info'
           )
+          if (exhaustedRetryBudget) {
+            await restoreSandboxUiDeepLinkTeam(launchContext)
+          }
           return
         }
         const requestId = launchSandboxUiApp(
