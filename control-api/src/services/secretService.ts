@@ -117,6 +117,8 @@ export class SecretService {
     if (req.type !== undefined) {
       assertValidSecretType(req.type)
     }
+    // No annotation validation — merge body intentionally never writes metadata.annotations.
+    // If annotations are added below, switch to assertValidSecretConstraints.
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 
