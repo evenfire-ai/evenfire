@@ -69,7 +69,7 @@ function WorkflowRecipesPageContent() {
         items={recipes}
         loading={loading}
         error={surfaceError}
-        onInstall={() => router.push(CONTROL_ROUTES.marketplace.org)}
+        onInstall={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
         onRefresh={refresh}
       />
     </DashboardLayout>

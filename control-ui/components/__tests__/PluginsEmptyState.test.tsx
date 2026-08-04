@@ -57,10 +57,11 @@ describe('PluginsEmptyState', () => {
       'href',
       '/marketplace/org/entries'
     )
-    // "Install Plugin" is a link to the org area.
+    // "Install Plugin" links to the org's Entries tab (install owned plugins),
+    // not /marketplace/org, which redirects to the API Keys tab.
     expect(screen.getByRole('link', { name: 'Install Plugin' })).toHaveAttribute(
       'href',
-      '/marketplace/org'
+      '/marketplace/org/entries'
     )
     // No setup walkthrough for an already-configured org.
     expect(screen.queryByText(/name your organization/i)).toBeNull()

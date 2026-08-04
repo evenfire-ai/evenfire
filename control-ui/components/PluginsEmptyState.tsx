@@ -72,7 +72,7 @@ export function PluginsEmptyState() {
           )}
           {setup.hasKeys === true ? ' and already has API keys' : ''}. Publish a plugin, then
           install it across your cluster with{' '}
-          <a className="cu-link" href={CONTROL_ROUTES.marketplace.org}>
+          <a className="cu-link" href={CONTROL_ROUTES.marketplace.orgEntries}>
             Install Plugin
           </a>
           .
