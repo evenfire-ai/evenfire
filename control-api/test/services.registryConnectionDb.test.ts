@@ -66,6 +66,16 @@ interface RawRowShape {
   registry_url: string | null
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 // Build a DB row whose private_key_encrypted is valid ciphertext under encKeyHex
 // (getRegistryConnection always decrypts it), with overridable columns.
 function makeRawRow(encKeyHex: string, overrides: Partial<RawRowShape> = {}): RawRowShape {
@@ -182,6 +192,103 @@ describe('getRegistryConnection', () => {
     expect(row!.clientSecret).toBe('the-secret')
     expect(row!.orgName).toBe('acme')
     expect(row!.status).toBe('connected')
+  })
+
+  it('does not reinstall a stale pending row after a successful connect', async () => {
+    const encKey = randomBytes(32).toString('hex')
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = encKey
+    const key = deriveOAuthEncryptionKey(encKey)
+    const pendingRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const currentRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const connectedRow = makeRawRow(encKey, {
+      status: 'connected',
+      client_id: 'cid-current',
+      client_secret_encrypted: encryptOAuthSecret(key, 'secret-current'),
+      org_name: 'current-org',
+    })
+
+    dbQuery.mockImplementationOnce(() => pendingRead.promise)
+    const staleCaller = getRegistryConnection()
+
+    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    await markConnected({
+      deploymentId: 'dep-1',
+      clientId: 'cid-current',
+      clientSecret: 'secret-current',
+      orgName: 'current-org',
+    })
+
+    dbQuery.mockImplementationOnce(() => currentRead.promise)
+    const currentCaller = getRegistryConnection()
+    currentRead.resolve({ rows: [connectedRow], rowCount: 1 })
+
+    await expect(currentCaller).resolves.toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+
+    pendingRead.resolve({
+      rows: [
+        makeRawRow(encKey, {
+          status: 'pending',
+          client_id: null,
+          client_secret_encrypted: null,
+          org_name: null,
+        }),
+      ],
+      rowCount: 1,
+    })
+
+    await expect(staleCaller).resolves.toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
+    expect(await getRegistryConnection()).toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+  })
+
+  it('does not reinstall a stale connected row after disconnect', async () => {
+    const encKey = randomBytes(32).toString('hex')
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = encKey
+    const key = deriveOAuthEncryptionKey(encKey)
+    const staleRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const currentRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+
+    dbQuery.mockImplementationOnce(() => staleRead.promise)
+    const staleCaller = getRegistryConnection()
+
+    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    await deleteConnection()
+
+    dbQuery.mockImplementationOnce(() => currentRead.promise)
+    const currentCaller = getRegistryConnection()
+    currentRead.resolve({ rows: [], rowCount: 0 })
+
+    await expect(currentCaller).resolves.toBeNull()
+
+    staleRead.resolve({
+      rows: [
+        makeRawRow(encKey, {
+          status: 'connected',
+          client_id: 'cid-old',
+          client_secret_encrypted: encryptOAuthSecret(key, 'secret-old'),
+          org_name: 'old-org',
+        }),
+      ],
+      rowCount: 1,
+    })
+
+    await expect(staleCaller).resolves.toBeNull()
+    expect(await isRegistryAuthActive()).toBe(false)
+    await expect(getRegistryConnection()).resolves.toBeNull()
   })
 })
 
