@@ -384,6 +384,7 @@ export function buildPluginWorkloadSdkStatus(args: {
       state: 'validated',
       promptBridge,
       clientNotifications,
+      message: `Capability validated (${families})`,
       validatedAt: now,
       ...(bootstrapProof
         ? {

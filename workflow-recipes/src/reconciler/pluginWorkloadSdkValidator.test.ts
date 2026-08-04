@@ -322,6 +322,7 @@ describe('buildPluginWorkloadSdkStatus', () => {
       policyRevision: 1,
       state: 'validated',
       promptBridge: true,
+      message: 'Capability validated (promptBridge, clientNotifications)',
       validatedAt: NOW,
       verifiedAt: NOW,
     })
