@@ -344,17 +344,16 @@ export class ClerumMcpServer {
     routeRecipeName: string,
     subPath: string
   ): Promise<void> {
-    const url = req.url ?? ''
     const authHeader = req.headers.authorization
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
     let claims
     try {
       claims = await verifyIncomingToken(token)
-    } catch (authErr) {
-      console.error(
-        `[WRC-AUTH] Token verification failed for ${req.method} ${url}:`,
-        authErr instanceof Error ? authErr.message : authErr
-      )
+    } catch {
+      // Do not reflect the request URL or parser error in logs: both can carry
+      // attacker-controlled control characters or format tokens. The stable
+      // event is sufficient for auth telemetry and avoids log/format injection.
+      console.error('[WRC-AUTH] Token verification failed')
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
