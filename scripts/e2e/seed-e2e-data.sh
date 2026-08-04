@@ -454,6 +454,25 @@ put_json() {
   fi
 }
 
+# CAS-aware agent-grant replace. The admin agents endpoints
+# (control-api routes/admin/agentGrants.ts) guard writes with a compare-and-swap:
+# the body must carry expectedCurrentAgentNames, or the server rejects it with
+# 428 agent_grant_precondition_required. We GET the current grant first and send
+# its full stored set (active + deleted history) as the precondition, which keeps
+# the seed idempotent across re-runs. (The parallel contexts endpoints have no
+# such guard, so those still use put_json directly.)
+put_agents() {
+  local url="$1" agent="$2" label="$3"
+  ADMIN_GET_BODY=""
+  admin_get "$url" "GET $label"
+  local expected
+  expected="$(echo "$ADMIN_GET_BODY" | jq -c '([.agentNames[]?] + [.deletedAgentNames[]?])')"
+  put_json "$url" \
+    "$(jq -cn --arg a "$agent" --argjson e "$expected" \
+        '{agentNames: [$a], expectedCurrentAgentNames: $e}')" \
+    "$label"
+}
+
 ensure_seed_user_and_team() {
   local email="$1"
   local name="$2"
@@ -498,8 +517,7 @@ TEAM_ID="$ENSURE_TEAM_ID"
 # ─── Step 3: Idempotent user↔agent and user↔context bindings ───────────
 
 log "Binding user $DEV_EMAIL ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-put_json "$CAPI_BASE/admin/users/$USER_ID/agents" \
-  "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+put_agents "$CAPI_BASE/admin/users/$USER_ID/agents" "$AGENT_NAME" \
   "PUT /admin/users/:userId/agents"
 
 put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
@@ -509,8 +527,7 @@ put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
 # ─── Step 4: Team-level bindings (if the user has a team) ──────────────
 if [ -n "$TEAM_ID" ]; then
   log "Binding team ${TEAM_ID:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/teams/$TEAM_ID/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/teams/$TEAM_ID/agents" "$AGENT_NAME" \
     "PUT /admin/teams/:teamId/agents"
   put_json "$CAPI_BASE/admin/teams/$TEAM_ID/contexts" \
     "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
@@ -527,8 +544,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
 
   # ─── Step 6: Idempotent user2↔agent and user2↔context bindings ───────
   log "Binding user $DEV_EMAIL_2 ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/users/$USER_ID_2/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/users/$USER_ID_2/agents" "$AGENT_NAME" \
     "PUT /admin/users/:userId2/agents"
 
   put_json "$CAPI_BASE/admin/users/$USER_ID_2/contexts" \
@@ -538,8 +554,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
   # ─── Step 7: Team-level bindings for second user (if the user has a team)
   if [ -n "$TEAM_ID_2" ]; then
     log "Binding team ${TEAM_ID_2:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-    put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" \
-      "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+    put_agents "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" "$AGENT_NAME" \
       "PUT /admin/teams/:teamId2/agents"
     put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/contexts" \
       "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \

@@ -92,7 +92,8 @@ five steps live together.
    applies to custom coordinator images in workflow recipes, not to
    connector images, and it is required by default there. A self-hosted
    deployment [connects to the registry](../how-to/connect-to-registry.md) once
-   (operator-approved) before it can install or
+   (automatically, or after an operator approves it, depending on the
+   registry) before it can install or
    [publish](../how-to/publish-plugin-to-registry.md) under its own org.
 
    ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.webp)
@@ -120,6 +121,7 @@ resources and grants inside it — it never writes that CR.
 | Cost & Usage       | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | cost (non-CRD)                   |
 | External Channels  | `/external-channels`                                                                   | `CommunicationChannel`           |
 | Global File System | `/global-file-system`                                                                  | gfs resources & grants (non-CRD) |
+| LLM Models         | `/llm-models`, `/llm-models/discovery`                                                 | model allowlist (non-CRD)        |
 | Marketplace        | `/marketplace/connectors`                                                              | registry (non-CRD)               |
 | Plugins            | `/plugins`                                                                             | `WorkflowRecipe`                 |
 | Publisher          | `/publisher`                                                                           | publisher (non-CRD)              |

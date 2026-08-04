@@ -204,3 +204,53 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.status).toBe(401)
   })
 })
+
+describe('GET /me/gfs/grants (delegation list passthrough)', () => {
+  it('forwards drive + resourceId and returns the id-bearing items verbatim', async () => {
+    const items = [
+      {
+        id: 'aaaa1111-0000-4000-8000-000000000001',
+        drive: 'main',
+        resourceId: '11111111-1111-1111-1111-111111111111',
+        subject: { type: 'host', id: '1st:mcp-host/agent-a' },
+        permissions: ['read', 'write'],
+        inherit: true,
+      },
+    ]
+    clientMock.controlApiRequest.mockResolvedValue({ items })
+    const res = await request(buildApp())
+      .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ items })
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/grants', {
+      userSessionToken: 'sess-xyz',
+      query: { drive: 'main', resourceId: '11111111-1111-1111-1111-111111111111' },
+    })
+  })
+
+  it('propagates the manage_acl_required 403 verbatim', async () => {
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError('forbidden', 403, { error: 'manage_acl_required' })
+    )
+    const res = await request(buildApp())
+      .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'manage_acl_required' })
+  })
+
+  it('propagates the delegation-plane 429 with retryAfterSeconds intact', async () => {
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError('rate limited', 429, {
+        error: 'Too Many Requests',
+        retryAfterSeconds: 17,
+      })
+    )
+    const res = await request(buildApp())
+      .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
+  })
+})

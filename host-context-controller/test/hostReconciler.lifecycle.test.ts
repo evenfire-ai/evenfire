@@ -90,11 +90,11 @@ vi.mock('../src/mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../src/gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
+  mintHostGfsToken: vi.fn(async (namespace: string, name: string) => ({
     ['to' + 'ken']: 'gfs-runtime-value',
     expiresInSeconds: 600,
-    subject: 'host:1st:mcp-host/stateless-host',
-  }),
+    subject: `host:1st:${namespace}/${name}`,
+  })),
 }))
 
 function makeHost(overrides?: Partial<HostCRD>): HostCRD {
@@ -793,7 +793,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(writes[1].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 5,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
     expect(rejectedCondition(writes[1])).toMatchObject({
       status: 'True',
@@ -872,7 +873,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(writes[1].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 6,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -988,7 +990,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     )
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(2)
-    expect(writes[1].lifecycle?.reason).toBe('1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle')
+    expect(writes[1].lifecycle?.reason).toBe(
+      '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle'
+    )
   })
 
   it('does not repeat bootstrap provisioning when channel ingress already existed in spec', async () => {
@@ -1388,7 +1392,8 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
     expect(writes[0].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 3,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
     expect(rejectedCondition(writes[0]).status).toBe('True')
   })
@@ -1602,7 +1607,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 3,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -1630,7 +1636,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 2,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -1656,7 +1663,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'suspended',
       wakeHandledGeneration: 5,
-      reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 

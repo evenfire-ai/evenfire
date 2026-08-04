@@ -4362,6 +4362,124 @@ textarea.cu-input {
   border-top-right-radius: 0;
 }
 
+.cu-app-layout .cu-main.cu-detail-layout:has(> .cu-agent-detail-card) {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.cu-agent-detail-card {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.cu-agent-detail-card > .cu-card__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.cu-agent-detail-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--cu-space-5);
+  overflow-y: auto;
+}
+
+.cu-card:not(.cu-agent-detail-card) > .cu-card__body > .cu-agent-detail-scroll {
+  display: contents;
+}
+
+.cu-agent-detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+  margin-bottom: var(--cu-space-4);
+}
+
+.cu-agent-detail-heading__actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+  margin-left: auto;
+}
+
+.cu-agent-detail-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--cu-space-3);
+  margin: calc(var(--cu-space-5) * -1) calc(var(--cu-space-5) * -1) var(--cu-space-4);
+  padding: var(--cu-space-4) var(--cu-space-5);
+  border-bottom: 1px solid var(--cu-border-subtle);
+  background: var(--cu-surface);
+}
+
+.cu-agent-detail-toolbar__actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+  margin-left: auto;
+}
+
+.cu-agent-detail-toolbar__actions .cu-btn--primary {
+  min-width: var(--cu-create-action-min-width);
+}
+
+.cu-agent-detail-scroll:has(> .cu-host-approval-section) {
+  overflow: hidden;
+}
+
+.cu-host-approval-section {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.cu-host-approval-section__description {
+  flex: 0 0 auto;
+  margin: 0;
+  padding-bottom: var(--cu-space-3);
+  font-size: 0.8125rem;
+}
+
+.cu-host-approval-section__content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cu-host-approval-section__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--cu-space-2);
+  padding-top: var(--cu-space-3);
+  border-top: 1px solid var(--cu-border-subtle);
+  background: var(--cu-surface);
+}
+
+.cu-host-approval-section__actions .cu-btn--primary {
+  min-width: var(--cu-create-action-min-width);
+}
+
 .cu-marketplace-detail {
   display: grid;
   gap: 0;
@@ -5357,8 +5475,15 @@ textarea.cu-input {
 
 .cu-agent-radio-group {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem;
   width: min(36rem, 100%);
+}
+
+@media (max-width: 640px) {
+  .cu-agent-radio-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .cu-agent-radio--card {
@@ -5639,8 +5764,19 @@ textarea.cu-input {
   outline-offset: 2px;
 }
 
+.cu-selection-dropdown__button[aria-invalid='true'] {
+  border-color: var(--cu-danger);
+}
+
 .cu-selection-dropdown__button--placeholder {
   color: var(--cu-text-soft);
+}
+
+.cu-selection-dropdown__button-value {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-width: 0;
 }
 
 .cu-selection-dropdown__button-copy {
@@ -5794,6 +5930,12 @@ textarea.cu-input {
   color: var(--cu-text);
   background: rgba(var(--cu-accent-rgb), 0.16);
   outline: none;
+}
+
+.cu-selection-dropdown__option-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
 }
 
 .cu-selection-dropdown__check {
@@ -6698,6 +6840,64 @@ textarea.cu-input {
   align-items: center;
 }
 
+/* Chip + optional remove icon-button on the right side of a group head. */
+.cu-llm-cred-group__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Empty state of the additive editor (no provider sections mounted yet). */
+.cu-llm-cred-empty {
+  margin: 0;
+}
+
+/* Stored keys queued for retirement. The deletion lands on SAVE, so this is
+   the only signal between the click and the write — warning tone, not the
+   muted hint color it inherits from .cu-field__hint. The element stays mounted
+   as a live region even with nothing queued, so :empty (never whitespace — it
+   renders no children at all) takes it out of the flow instead of leaving the
+   editor's column gap around a blank line. */
+.cu-llm-cred-removed {
+  margin: 0;
+  color: var(--cu-warning);
+}
+
+.cu-llm-cred-removed:empty {
+  display: none;
+}
+
+/* Match the monospace key-name inputs the listed keys were typed into (same
+   stack as .cu-input--monospace — the codebase has no mono font token). */
+.cu-llm-cred-removed code {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 0.95em;
+}
+
+/* The "Add provider" picker of the additive editor (a SelectionDropdown, so
+   the width cap lands on its root element, not on a native <select>). The cap
+   also bounds the popover menu, so it stays wide enough for the longest
+   provider labels; inline mode (update modal) keeps the surface's full width. */
+.cu-selection-dropdown.cu-llm-cred-add:not(.cu-selection-dropdown--inline) {
+  max-width: 16rem;
+}
+
+/* The picker is a MENU (value is always empty): entries mount a provider
+   section and vanish from the list, so the never-filled selection squares
+   would read as 21 uncheckable checkboxes. */
+.cu-llm-cred-add .cu-selection-dropdown__check {
+  display: none;
+}
+
+/* The picker's Field is the last child of the editor's flex column, which
+   already spaces children with its gap — drop the Field's own trailing
+   margin so the editor doesn't end in dead space (visible in the modal). */
+.cu-llm-cred-groups > .cu-field:last-child {
+  margin-bottom: 0;
+}
+
 /* ── Host LLM config surface (spec Topic 1b, jury design C) ───────────────── */
 .cu-llm-config {
   display: flex;
@@ -6750,6 +6950,58 @@ textarea.cu-input {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.75rem;
+}
+
+.cu-llm-provider-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  flex: 0 0 1.45rem;
+  overflow: hidden;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: 0.35rem;
+  background: var(--cu-bg-panel);
+  color: var(--cu-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.cu-llm-provider-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0.18rem;
+  object-fit: contain;
+}
+
+:root[data-theme='dark']
+  .cu-llm-provider-icon:is(
+    [data-provider='nebius'],
+    [data-provider='moonshot'],
+    [data-provider='xai'],
+    [data-provider='groq'],
+    [data-provider='openrouter']
+  )
+  img {
+  filter: brightness(0) invert(1);
+}
+
+:root[data-theme='light'] .cu-llm-provider-icon[data-provider='zai'] img {
+  filter: brightness(0);
+}
+
+/* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
+   knocked back to black. Scoped to the PROVIDER pickers only (the agents LLM
+   provider select and the secrets "＋ Add provider" picker) — the model
+   dropdown reuses the same icon on a different treatment and must not inherit
+   this. */
+:root[data-theme='light']
+  :is(.cu-llm-config__provider-select, .cu-llm-cred-add)
+  .cu-llm-provider-icon[data-provider='openai']
+  img {
+  filter: brightness(0);
 }
 
 .cu-llm-config__fallback-creds {

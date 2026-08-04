@@ -15,49 +15,89 @@ import {
  */
 
 const KEY = { subjectsKey: "user:u1", resourceId: "r1", op: "read" };
+const ALLOW_DECISION = {
+  allowed: true,
+  via: "grant" as const,
+  matchedSubject: "user:u1",
+  authorizationSource: "direct_grant" as const,
+};
+const DENY_DECISION = {
+  allowed: false,
+  via: null,
+  matchedSubject: null,
+  authorizationSource: null,
+};
 
 describe("DecisionCache", () => {
   it("returns a cached decision within the TTL and misses after it", () => {
     let t = 1000;
     const cache = new DecisionCache({ ttlMs: 100, now: () => t });
-    cache.set(KEY, true);
-    expect(cache.get(KEY)).toBe(true);
+    cache.set(KEY, ALLOW_DECISION);
+    expect(cache.get(KEY)).toEqual(ALLOW_DECISION);
     t += 99;
-    expect(cache.get(KEY)).toBe(true);
+    expect(cache.get(KEY)).toEqual(ALLOW_DECISION);
     t += 1; // now at +100 = expiry boundary
     expect(cache.get(KEY)).toBeUndefined();
   });
 
   it("flushAll drops entries so the next op re-checks (immediate revocation)", () => {
     const cache = new DecisionCache({ ttlMs: 10_000 });
-    cache.set(KEY, true);
-    expect(cache.get(KEY)).toBe(true);
+    cache.set(KEY, ALLOW_DECISION);
+    expect(cache.get(KEY)).toEqual(ALLOW_DECISION);
     cache.flushAll();
     expect(cache.get(KEY)).toBeUndefined();
   });
 
+  it("bumps generation on every flushAll and holds it stable otherwise", () => {
+    let t = 1000;
+    const cache = new DecisionCache({ ttlMs: 100, now: () => t });
+    expect(cache.generation).toBe(0);
+    // Ordinary reads/writes/expiry never move the revocation counter.
+    cache.set(KEY, ALLOW_DECISION);
+    expect(cache.get(KEY)).toEqual(ALLOW_DECISION);
+    t += 1000; // force expiry on the next get
+    expect(cache.get(KEY)).toBeUndefined();
+    expect(cache.generation).toBe(0);
+    // Each revocation NOTIFY (flushAll) advances it by exactly one.
+    cache.flushAll();
+    expect(cache.generation).toBe(1);
+    cache.flushAll();
+    expect(cache.generation).toBe(2);
+  });
+
+  it("keeps attribution isolated from caller mutation", () => {
+    const cache = new DecisionCache({ ttlMs: 10_000 });
+    cache.set(KEY, ALLOW_DECISION);
+    const first = cache.get(KEY)!;
+    first.matchedSubject = "user:changed";
+    expect(cache.get(KEY)).toMatchObject({
+      matchedSubject: "user:u1",
+      authorizationSource: "direct_grant",
+    });
+  });
+
   it("serves and stores NOTHING while bypassed (fail-closed)", () => {
     const cache = new DecisionCache({ ttlMs: 10_000 });
-    cache.set(KEY, true);
+    cache.set(KEY, ALLOW_DECISION);
     cache.setBypassed(true);
     expect(cache.isBypassed).toBe(true);
     expect(cache.get(KEY)).toBeUndefined(); // existing entry not served
-    cache.set(KEY, true); // ignored while bypassed
+    cache.set(KEY, ALLOW_DECISION); // ignored while bypassed
     expect(cache.size).toBe(0);
     cache.setBypassed(false);
     expect(cache.get(KEY)).toBeUndefined(); // was never stored
-    cache.set(KEY, false);
-    expect(cache.get(KEY)).toBe(false); // caching works again
+    cache.set(KEY, DENY_DECISION);
+    expect(cache.get(KEY)).toEqual(DENY_DECISION); // caching works again
   });
 
   it("evicts the oldest entry past maxEntries", () => {
     const cache = new DecisionCache({ ttlMs: 10_000, maxEntries: 2 });
-    cache.set({ ...KEY, resourceId: "a" }, true);
-    cache.set({ ...KEY, resourceId: "b" }, true);
-    cache.set({ ...KEY, resourceId: "c" }, true); // evicts "a"
+    cache.set({ ...KEY, resourceId: "a" }, ALLOW_DECISION);
+    cache.set({ ...KEY, resourceId: "b" }, ALLOW_DECISION);
+    cache.set({ ...KEY, resourceId: "c" }, ALLOW_DECISION); // evicts "a"
     expect(cache.size).toBe(2);
     expect(cache.get({ ...KEY, resourceId: "a" })).toBeUndefined();
-    expect(cache.get({ ...KEY, resourceId: "c" })).toBe(true);
+    expect(cache.get({ ...KEY, resourceId: "c" })).toEqual(ALLOW_DECISION);
   });
 
   it("rejects a non-positive ttl", () => {

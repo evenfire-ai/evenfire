@@ -41,12 +41,16 @@ function seedGfsBlob(resourceId: string, content: Buffer): void {
   }
 }
 
-function cleanupGfsBlob(resourceId: string): void {
-  const blobKey = ridOf(resourceId)
-  kubectlOut(
-    ['-n', 'gfs', 'exec', gfsWriterPod(), '--', 'rm', '-f', `/data/gfs/${blobKey}`],
-    20_000
-  )
+function cleanupGfsBlob(resourceId: string, blobKey?: string | null): void {
+  const physicalPath = blobKey
+    ? (() => {
+        if (!/^[0-9a-f]{32}\/[0-9a-f-]{36}$/i.test(blobKey)) {
+          throw new Error(`refusing to clean invalid GFS generation key: ${blobKey}`)
+        }
+        return `/data/gfs/.generations/${blobKey}`
+      })()
+    : `/data/gfs/${ridOf(resourceId)}`
+  kubectlOut(['-n', 'gfs', 'exec', gfsWriterPod(), '--', 'rm', '-f', physicalPath], 20_000)
 }
 
 export function seedGfsDirectoryFixture(name: string): GfsDirectoryFixture {
@@ -182,13 +186,14 @@ export function seedGfsGrant(input: {
   permissions: GfsPermission[]
   inherit?: boolean
   grantedBy?: string
-}): void {
+}): string {
   const subjectId = input.subjectType === 'operator' ? '' : (input.subjectId ?? '')
   if (input.subjectType !== 'operator' && subjectId.length === 0) {
     throw new Error(`subjectId is required for ${input.subjectType} GFS grants`)
   }
   const permissions = `ARRAY[${input.permissions.map(sqlLiteral).join(', ')}]::text[]`
-  runControlPostgresSql(`
+  const grantId = firstDataLine(
+    runControlPostgresSql(`
     INSERT INTO gfs_grants (
       drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by
     )
@@ -206,8 +211,12 @@ export function seedGfsGrant(input: {
       permissions = EXCLUDED.permissions,
       inherit = EXCLUDED.inherit,
       granted_by = EXCLUDED.granted_by,
-      updated_at = now();
+      updated_at = now()
+    RETURNING id::text;
   `)
+  )
+  if (!UUID_RE.test(grantId)) throw new Error(`failed to seed GFS grant: ${grantId}`)
+  return grantId
 }
 
 export function getGfsGrantSummary(input: {
@@ -292,10 +301,42 @@ export function getGfsChildResourceSummary(input: {
   }
 }
 
+/**
+ * Count LIVE (non-tombstoned) direct children of a parent that carry an exact
+ * name. Used to prove a rejected copy left the existing child intact. The
+ * partial unique index gfs_resources_sibling_uniq (control-api/src/db.ts) makes
+ * two LIVE same-name siblings physically impossible, so this returns 0 or 1;
+ * its value over getGfsChildResourceSummary is the deleted_at filter — that
+ * helper does not exclude tombstones and would still return non-null after a
+ * destructive delete, whereas `count === 1` proves a live row still exists.
+ */
+export function countGfsLiveChildrenByName(input: {
+  parentResourceId: string
+  name: string
+}): number {
+  if (!UUID_RE.test(input.parentResourceId)) {
+    throw new Error(`invalid parent resource id: ${input.parentResourceId}`)
+  }
+  const row = firstDataLine(
+    runControlPostgresSql(`
+      SELECT count(*)::text
+        FROM gfs_resources
+       WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+         AND parent_resource_id = ${sqlLiteral(input.parentResourceId)}::uuid
+         AND name = ${sqlLiteral(input.name)}
+         AND deleted_at IS NULL;
+    `)
+  )
+  if (!row) throw new Error('count query returned no row')
+  const count = Number(row.trim())
+  if (!Number.isInteger(count)) throw new Error(`unexpected count result: ${row}`)
+  return count
+}
+
 export function cleanupGfsFixture(name: string): void {
   assertFixtureName(name)
-  const resourceIds = runControlPostgresSql(`
-    SELECT resource_id::text
+  const resources = runControlPostgresSql(`
+    SELECT resource_id::text || '|' || coalesce(blob_key, '')
       FROM gfs_resources
      WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
        AND kind = 'file'
@@ -303,11 +344,15 @@ export function cleanupGfsFixture(name: string): void {
   `)
     .split('\n')
     .map(line => line.trim())
-    .filter(line => UUID_RE.test(line))
+    .filter(Boolean)
+    .map(splitSqlRow)
+    .filter(
+      (parts): parts is [string, string] => parts.length === 2 && UUID_RE.test(parts[0] ?? '')
+    )
   const cleanupErrors: unknown[] = []
-  for (const resourceId of resourceIds) {
+  for (const [resourceId, blobKey] of resources) {
     try {
-      cleanupGfsBlob(resourceId)
+      cleanupGfsBlob(resourceId, blobKey || null)
     } catch (error) {
       cleanupErrors.push(error)
     }

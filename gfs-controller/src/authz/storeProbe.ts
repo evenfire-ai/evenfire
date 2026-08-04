@@ -45,6 +45,8 @@ export interface StoreProbeOptions {
   connectionString: string;
   /** Amortization window for the fresh-connection probe (e.g. 60_000). */
   intervalMs: number;
+  /** Selects the exact least-privilege readiness contract; never inferred. */
+  storageRole: "writer" | "reader";
   /**
    * Hard bound on each fresh-probe step (connect AND coherence query).
    * Without it, a black-hole partition (unreachable but not refusing) leaves
@@ -81,9 +83,42 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
 // INSERT on gfs_audit breaks every request too (audit-write failures propagate
 // — no un-audited op is served), so either one must flip readiness instead of
 // surfacing as chronic per-request 503s.
-const COHERENCE_SQL =
+const BASE_COHERENCE_SQL =
   "SELECT has_table_privilege(current_user, 'gfs_resources', 'SELECT') AS can_read, " +
-  "has_table_privilege(current_user, 'gfs_audit', 'INSERT') AS can_audit";
+  "has_table_privilege(current_user, 'gfs_audit', 'INSERT') AS can_audit, " +
+  "has_column_privilege(current_user, 'gfs_resources', 'blob_key', 'SELECT') AS can_read_blob_key, " +
+  "has_column_privilege(current_user, 'gfs_resources', 'content_sha256', 'SELECT') AS can_read_digest, " +
+  "EXISTS (SELECT 1 FROM (SELECT blob_key, content_sha256 FROM gfs_resources WHERE false) AS resource_probe) = false AS resource_schema_ready, " +
+  "(SELECT count(*) = 5 AND bool_and(atttypid = 'text'::regtype) " +
+  "AND bool_and(attname <> 'record_type' OR attnotnull) FROM pg_attribute " +
+  "WHERE attrelid = 'gfs_audit'::regclass AND attnum > 0 AND NOT attisdropped " +
+  "AND attname = ANY (ARRAY['record_type', 'matched_subject', 'authorization_source', 'cached_authorization_source', 'mutation_outcome'])) AS audit_schema_ready, " +
+  "(SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = 'gfs_audit'::regclass " +
+  "AND conname = ANY (ARRAY['gfs_audit_record_type_valid', 'gfs_audit_authorization_source_valid', 'gfs_audit_cached_authorization_source_valid', 'gfs_audit_mutation_outcome_valid', 'gfs_audit_record_type_fields_valid']) " +
+  "AND contype = 'c' AND convalidated) AS audit_constraints_ready";
+
+// The reader is deliberately read-only except for append-only audit records.
+// Positive checks alone are insufficient: a stale/manual grant would keep the
+// role Ready while silently expanding its blast radius. These checks use the
+// effective current_user privileges, so inherited or PUBLIC grants fail too.
+const READER_COHERENCE_SQL =
+  BASE_COHERENCE_SQL +
+  ", has_table_privilege(current_user, 'gfs_resources', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_resources, " +
+  "has_table_privilege(current_user, 'gfs_grants', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_grants, " +
+  "has_table_privilege(current_user, 'gfs_shares', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_shares, " +
+  "has_table_privilege(current_user, 'gfs_blob_manifests', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_manifests, " +
+  "has_table_privilege(current_user, 'gfs_audit', 'UPDATE, DELETE, TRUNCATE') AS can_mutate_audit, " +
+  "has_sequence_privilege(current_user, 'gfs_audit_sequence_no_seq', 'UPDATE') AS can_update_audit_sequence";
+
+const WRITER_COHERENCE_SQL =
+  BASE_COHERENCE_SQL +
+  ", has_table_privilege(current_user, 'gfs_blob_manifests', 'SELECT') AS can_read_manifests, " +
+  "has_table_privilege(current_user, 'gfs_blob_manifests', 'INSERT') AS can_insert_manifests, " +
+  "has_table_privilege(current_user, 'gfs_blob_manifests', 'UPDATE') AS can_update_manifests, " +
+  "has_table_privilege(current_user, 'gfs_blob_manifests', 'DELETE') AS can_delete_manifests, " +
+  "has_table_privilege(current_user, 'gfs_resources', 'INSERT') AS can_insert_resources, " +
+  "has_table_privilege(current_user, 'gfs_resources', 'UPDATE') AS can_update_resources, " +
+  "EXISTS (SELECT 1 FROM (SELECT blob_key, candidate_kind, state, content_sha256, bytes FROM gfs_blob_manifests WHERE false) AS manifest_probe) = false AS manifest_schema_ready";
 
 export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promise<void> {
   const now = opts.now ?? Date.now;
@@ -159,7 +194,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       // instead of dangling until the OS TCP timeout.
       await withTimeout(client.connect(), connectTimeoutMs, "permission store connect");
       const result = await withTimeout(
-        client.query(COHERENCE_SQL),
+        client.query(opts.storageRole === "writer" ? WRITER_COHERENCE_SQL : READER_COHERENCE_SQL),
         connectTimeoutMs,
         "permission store coherence query"
       );
@@ -174,6 +209,51 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
         throw new Error(
           "permission store coherence check failed: role lacks INSERT on gfs_audit " +
             "(audit-write failures would 503 every request; control-api migration 0048 not applied?)"
+        );
+      }
+      if (
+        row?.can_read_blob_key !== true ||
+        row?.can_read_digest !== true ||
+        row?.resource_schema_ready !== true
+      ) {
+        throw new Error(
+          "permission store coherence check failed: immutable GFS blob schema/reader privileges " +
+            "are missing (control-api migration 0068 not applied?)"
+        );
+      }
+      if (row?.audit_schema_ready !== true || row?.audit_constraints_ready !== true) {
+        throw new Error(
+          "permission store coherence check failed: GFS audit decision evidence schema is missing " +
+            "(control-api migration 0070 not applied?)"
+        );
+      }
+      if (
+        opts.storageRole === "reader" &&
+        (row?.can_mutate_resources !== false ||
+          row?.can_mutate_grants !== false ||
+          row?.can_mutate_shares !== false ||
+          row?.can_mutate_manifests !== false ||
+          row?.can_mutate_audit !== false ||
+          row?.can_update_audit_sequence !== false)
+      ) {
+        throw new Error(
+          "permission store coherence check failed: reader has forbidden GFS mutation privileges " +
+            "(control-api migration 0069 grants drifted?)"
+        );
+      }
+      if (
+        opts.storageRole === "writer" &&
+        (row?.can_read_manifests !== true ||
+          row?.manifest_schema_ready !== true ||
+          row?.can_insert_manifests !== true ||
+          row?.can_update_manifests !== true ||
+          row?.can_delete_manifests !== true ||
+          row?.can_insert_resources !== true ||
+          row?.can_update_resources !== true)
+      ) {
+        throw new Error(
+          "permission store coherence check failed: writer lacks GFS manifest/resource mutation " +
+            "privileges (control-api migration 0068 not applied?)"
         );
       }
       lastFreshOkAt = now(); // cache SUCCESS only — failures always retry

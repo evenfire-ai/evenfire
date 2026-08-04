@@ -5,221 +5,39 @@ import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
+import {
+  type AppControllerClerumOptions,
+  installAppControllerClerum,
+} from '../domain/__tests__/__fixtures__/appControllerHarness'
+import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 import { useWorkspaceController } from '../useWorkspaceController'
 
-type Deferred<T> = {
-  promise: Promise<T>
-  resolve: (value: T) => void
+/**
+ * `useWorkspaceController` is a deprecated re-export of `useAppController`, so
+ * the `window.clerum` bridge these tests need is the same one
+ * `hooks/domain/__tests__/chatSelectionAcrossRouteChange` needs. It lives in the
+ * shared fixture; only the deltas this suite depends on are spelled out here.
+ */
+const OUTDATED_DESKTOP_RELEASE = {
+  checked: true,
+  currentVersion: '0.1.249',
+  latestVersion: '0.1.250',
+  minimumVersion: '0.1.250',
+  updateRequired: true,
+  releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
 }
 
-type SessionState = {
-  authenticated: boolean
-  me: { id: string; email: string; name: string; teamId: string; teamName: string } | null
-}
-
-function createDeferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(res => {
-    resolve = res
-  })
-  return { promise, resolve }
-}
-
-function createCatalog() {
-  return {
-    userId: 'user-1',
-    teamId: '',
+/**
+ * Boots at the login screen (these tests drive `handlePasswordLogin` themselves),
+ * with no agents in the access catalog and an update-required release status.
+ */
+function installClerumHarness(options: AppControllerClerumOptions = {}) {
+  return installAppControllerClerum({
+    startAuthenticated: false,
     agentNames: [],
-    userAgentNames: [],
-    teamAgentNames: [],
-    mcpServersByAgent: {},
-    agentContextByName: {},
-    contextIds: [],
-    userContextIds: [],
-    teamContextIds: [],
-  }
-}
-
-function createHealth() {
-  return {
-    externalRestApi: { ok: true },
-    rpcProxy: { ok: true },
-  }
-}
-
-function createSessionState(authenticated: boolean): SessionState {
-  return authenticated
-    ? {
-        authenticated: true,
-        me: {
-          id: 'user-1',
-          email: 'test@clerum.io',
-          name: 'Test User',
-          teamId: 'team-1',
-          teamName: 'Test Team',
-        },
-      }
-    : {
-        authenticated: false,
-        me: null,
-      }
-}
-
-function installClerumHarness(
-  options: { delayAuthenticatedLoad?: boolean; passwordLoginError?: unknown } = {}
-) {
-  let authenticated = false
-  const teamDirectoryDeferred = createDeferred<{ items: []; currentTeamId: string }>()
-  const catalogDeferred = createDeferred<ReturnType<typeof createCatalog>>()
-  const approvalsDeferred = createDeferred<[]>()
-
-  const getSessionState = vi.fn(async () => createSessionState(authenticated))
-  const passwordLogin = vi.fn(async () => {
-    if (options.passwordLoginError) throw options.passwordLoginError
-    authenticated = true
-    return createSessionState(true)
-  })
-
-  const teamDirectory = vi.fn(async () =>
-    options.delayAuthenticatedLoad && authenticated
-      ? teamDirectoryDeferred.promise
-      : { items: [], currentTeamId: '' }
-  )
-  const refreshCatalog = vi.fn(async () =>
-    options.delayAuthenticatedLoad && authenticated ? catalogDeferred.promise : createCatalog()
-  )
-  const listPending = vi.fn(async () =>
-    options.delayAuthenticatedLoad && authenticated ? approvalsDeferred.promise : []
-  )
-  const getDesktopReleaseStatus = vi.fn(async () => ({
-    checked: true,
-    currentVersion: '0.1.249',
-    latestVersion: '0.1.250',
-    minimumVersion: '0.1.250',
-    updateRequired: true,
-    releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
-  }))
-
-  Object.defineProperty(window, 'clerum', {
-    configurable: true,
-    writable: true,
-    value: {
-      auth: {
-        getRuntimeConfigState: vi.fn(async () => ({
-          activeProfileId: null,
-          configured: false,
-          isPackaged: false,
-          options: [],
-        })),
-        getDependenciesHealth: vi.fn(async () => createHealth()),
-        getSessionState,
-        passwordLogin,
-        onDesktopSetupToken: vi.fn(() => () => undefined),
-        onDesktopEnvironmentSetup: vi.fn(() => () => undefined),
-        onExternalLogout: vi.fn(() => () => undefined),
-        getDesktopReleaseStatus,
-        openDesktopRelease: vi.fn(async () => undefined),
-        logout: vi.fn(async () => undefined),
-      },
-      team: {
-        list: vi.fn(async () => ({ items: [], currentTeamId: '' })),
-        members: vi.fn(async () => []),
-        directory: teamDirectory,
-        initialDirectory: teamDirectory,
-        switch: vi.fn(async () => undefined),
-      },
-      access: {
-        refreshCatalog,
-      },
-      notificationPreferences: {
-        get: vi.fn(async () => ({
-          preferredMedium: null,
-          channelFallbackEnabled: true,
-          verifiedMedia: [],
-        })),
-        update: vi.fn(async (next: unknown) => ({
-          ...(next && typeof next === 'object' ? next : {}),
-          verifiedMedia: [],
-        })),
-      },
-      approvals: {
-        listPending,
-        decide: vi.fn(async () => ({ ok: true })),
-      },
-      notifications: {
-        ack: vi.fn(async () => undefined),
-        subscribe: vi.fn(async (onEvent: (event: unknown) => void) => {
-          onEvent({
-            type: 'notification.snapshot',
-            items: [],
-            cursor: null,
-            observedAt: new Date().toISOString(),
-          })
-          return async () => undefined
-        }),
-        status: vi.fn(async () => ({
-          active: 1,
-          open: 1,
-          connecting: 0,
-          error: 0,
-          approvalRequested: 0,
-          snapshot: 1,
-          updated: 0,
-        })),
-        isSupported: vi.fn(async () => false),
-        show: vi.fn(async (payload: { id: string }) => ({ supported: false, id: payload.id })),
-        onClick: vi.fn(() => () => undefined),
-        onAction: vi.fn(() => () => undefined),
-        onFailed: vi.fn(() => () => undefined),
-      },
-      rpc: {
-        listServers: vi.fn(async () => ({ servers: [] })),
-        subscribeHostStatus: vi.fn(async () => async () => undefined),
-        approveToolCall: vi.fn(async () => undefined),
-        denyToolCall: vi.fn(async () => undefined),
-        cancelTask: vi.fn(async () => undefined),
-        listSessions: vi.fn(async () => ({ items: [] })),
-        loadSessionMessages: vi.fn(async () => ({ agent: '', chatId: '', turns: [] })),
-      },
-      chat: {
-        list: vi.fn(async () => []),
-        create: vi.fn(async (_agentRef: string, chatId: string) => ({
-          id: chatId,
-          title: 'New Chat',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })),
-        rename: vi.fn(async () => undefined),
-        delete: vi.fn(async () => undefined),
-        loadMessages: vi.fn(async () => []),
-        appendMessages: vi.fn(async () => undefined),
-        getLastActive: vi.fn(async () => null),
-        setLastActive: vi.fn(async () => undefined),
-        getIndex: vi.fn(async () => ({ chats: [] })),
-      },
-      desktop: {
-        onWindowClosed: vi.fn(() => () => undefined),
-        getStatus: vi.fn(async () => ({ status: 'inactive' })),
-      },
-      workflows: {
-        list: vi.fn(async () => ({ items: [], count: 0 })),
-        runs: vi.fn(async () => ({ items: [] })),
-        listRunArtifacts: vi.fn(async () => ({ artifacts: [] })),
-        trigger: vi.fn(async () => undefined),
-      },
-    },
-  })
-
-  return {
-    passwordLogin,
-    getSessionState,
-    getDesktopReleaseStatus,
-    resolveAuthenticatedLoad() {
-      teamDirectoryDeferred.resolve({ items: [], currentTeamId: '' })
-      catalogDeferred.resolve(createCatalog())
-      approvalsDeferred.resolve([])
-    },
-  }
+    desktopReleaseStatus: OUTDATED_DESKTOP_RELEASE,
+    ...options,
+  }).handle
 }
 
 function renderControllerHarness() {
@@ -287,7 +105,7 @@ describe('useWorkspaceController', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
-    delete (window as { clerum?: unknown }).clerum
+    uninstallMockClerum()
   })
 
   it('preserves a workflow nav selection while login session hydration finishes', async () => {

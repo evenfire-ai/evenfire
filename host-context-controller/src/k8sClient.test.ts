@@ -268,6 +268,35 @@ describe('McpServerWatcher startup', () => {
     )
   })
 
+  it('preserves Host UID from the Kubernetes inventory boundary', async () => {
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        return {
+          items: [
+            {
+              metadata: {
+                name: 'uid-host',
+                namespace: 'mcp-host',
+                uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+                generation: 4,
+              },
+              spec: { host: 'uid-host', contextRef: 'context-a', secretRef: 'host-secret' },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+
+    await expect(listAllHosts()).resolves.toEqual([
+      expect.objectContaining({
+        name: 'uid-host',
+        uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+        generation: 4,
+      }),
+    ])
+  })
+
   it('reconciles startup external egress before runtime full reconciliation', async () => {
     const eventLog: string[] = []
     const server = {
@@ -2370,9 +2399,10 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       order.push(`watch:${host.name}:${host.generation}`)
     })
     await (watcher as any).startHostWatch('test-host-rv')
-    if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
-    // Cache already synced: the full pass blocks purely on the mocked
-    // fullReconcile and does not drive recovery, isolating admission behavior.
+    if (!hostWatchCallback)
+      throw new Error('Host watch callback was not installed')
+      // Cache already synced: the full pass blocks purely on the mocked
+      // fullReconcile and does not drive recovery, isolating admission behavior.
     ;(watcher as any).hostCacheSynced = true
 
     const full = (watcher as any).requestHostFleetReconcile(
@@ -2446,11 +2476,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       spec: { host: 'same-host' },
     })
 
-    expect(order).toEqual([
-      'reconcile:same-host:1',
-      'reconcile:same-host:2',
-      'delete:same-host',
-    ])
+    expect(order).toEqual(['reconcile:same-host:1', 'reconcile:same-host:2', 'delete:same-host'])
     expect((watcher as any).hosts.has('same-host')).toBe(false)
     watcher.stop()
   })
@@ -2938,10 +2964,14 @@ describe('McpServerWatcher Host watch generation', () => {
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
     await callbacks[0]('MODIFIED', {
-      metadata: { name: 'retry-host', namespace: 'mcp-host', generation: 1 },
+      metadata: { name: 'retry-host', namespace: 'mcp-host', uid: 'retry-host-uid', generation: 1 },
       spec: { host: 'retry-host', lifecycle: { stateless: true } },
     })
     expect(reconcile).toHaveBeenCalledOnce()
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ uid: 'retry-host-uid' }),
+      'urgent'
+    )
     expect((watcher as any).hostWatchRetryTimers.size).toBe(1)
     expect((watcher as any).latestHostWatchEventRevisions.size).toBe(1)
 
@@ -2956,6 +2986,7 @@ describe('McpServerWatcher Host watch generation', () => {
     })
     expect(reconcile).toHaveBeenCalledOnce()
     expect((watcher as any).hosts.get('retry-host')).toMatchObject({
+      uid: 'retry-host-uid',
       generation: 1,
       spec: { lifecycle: { stateless: true } },
     })
@@ -3199,11 +3230,7 @@ describe('McpServerWatcher Host watch generation', () => {
       expect(reconcileDelete).toHaveBeenCalledWith('gone-host', 'mcp-host', expect.anything())
     )
     // A Host still present in the fresh snapshot is never deleted.
-    expect(reconcileDelete).not.toHaveBeenCalledWith(
-      'live-host',
-      'mcp-host',
-      expect.anything()
-    )
+    expect(reconcileDelete).not.toHaveBeenCalledWith('live-host', 'mcp-host', expect.anything())
     watcher.stop()
   })
 
@@ -3291,7 +3318,12 @@ describe('McpServerWatcher Host watch generation', () => {
 
   it('suppresses a watch event whose identity (uid) differs from the cached Host (#827 item 2)', () => {
     const watcher = new McpServerWatcher()
-    ;(watcher as any).hosts.set('x', { name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 3 })
+    ;(watcher as any).hosts.set('x', {
+      name: 'x',
+      namespace: 'mcp-host',
+      uid: 'uid-B',
+      generation: 3,
+    })
     ;(watcher as any).latestHostWatchEventRevisions.set('x', 7)
     // A stale MODIFIED carrying the OLD identity must not act on the recreated one.
     expect(
@@ -3349,10 +3381,7 @@ describe('McpServerWatcher Host watch generation', () => {
       new Map([['waker', 'u1']]) // NOT recreated (same uid)
     )
     await vi.waitFor(() =>
-      expect(reconcile).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'waker' }),
-        'urgent'
-      )
+      expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ name: 'waker' }), 'urgent')
     )
     watcher.stop()
   })
@@ -3374,7 +3403,15 @@ describe('McpServerWatcher Host watch generation', () => {
       spec: { host: 'steady' },
     })
     ;(watcher as any).enqueueRecoveredUrgentHosts(
-      [{ name: 'steady', namespace: 'mcp-host', uid: 'u1', generation: 4, spec: { host: 'steady' } }],
+      [
+        {
+          name: 'steady',
+          namespace: 'mcp-host',
+          uid: 'u1',
+          generation: 4,
+          spec: { host: 'steady' },
+        },
+      ],
       new Set(['steady']),
       new Map([['steady', 4]]),
       new Map([['steady', 'u1']])

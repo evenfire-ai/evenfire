@@ -74,6 +74,7 @@ export {
 } from './contextAccess.js'
 
 export {
+  AgentGrantPreconditionError,
   getTeamAgents,
   getUserAgents,
   listTeamAgentsByTeam,

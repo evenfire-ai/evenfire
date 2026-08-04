@@ -12,6 +12,10 @@ export interface GfsResource {
   pathCache: string | null;
   version: number;
   bytes: number;
+  /** Internal committed physical generation. Never exposed in GfsResourceView. */
+  blobKey: string | null;
+  /** Digest of the committed generation. Never exposed in GfsResourceView. */
+  contentSha256: string | null;
   deletedAt: string | null;
 }
 
@@ -45,7 +49,7 @@ export interface ResourceStore {
 }
 
 export interface BlobReader {
-  read(resourceId: string): Promise<Readable>;
+  read(resourceId: string, blobKey?: string | null): Promise<Readable>;
 }
 
 export const DEFAULT_LIMIT = 100;
@@ -182,7 +186,7 @@ export async function downloadResource(
     throw new GfsError("is_a_directory", `resource is a directory: ${resourceId}`);
   }
   try {
-    const stream = await blobs.read(normalized);
+    const stream = await blobs.read(normalized, resource.blobKey);
     return { resource: toView(resource), stream };
   } catch (err) {
     if ((err as { code?: string }).code === "not_found") {

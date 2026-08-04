@@ -15,15 +15,26 @@ import {
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { GfsSubjectBatchError, runGfsSubjectBatch } from '@lib/gfsSubjectBatch'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { GfsDelegationPanel, type GfsDelegationSubjectOption } from '@/gfs/delegation'
+import { GfsAgentAccessSection } from '@/gfs/GfsAgentAccessSection'
+import { GfsGrantList } from '@/gfs/GfsGrantList'
+import {
+  type GfsAgentSubjectOption,
+  GfsDelegationPanel,
+  type GfsDelegationSubjectOption,
+} from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
-import type { FilesPageProps, GfsDriveResource, GfsPreviewResource } from './FilesPage.types'
+import type {
+  FilesPageProps,
+  GfsDriveResource,
+  GfsPreviewResource,
+  MyAgentEntry,
+} from './FilesPage.types'
 
 async function fileToEncodedData(file: File): Promise<string> {
   assertGfsFileUploadSize(file.size)
@@ -83,6 +94,17 @@ function delegationSubjectOptions(
   )
 }
 
+function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjectOption[] {
+  if (!agents) return []
+  const options = new Map<string, GfsAgentSubjectOption>()
+  for (const agent of agents) {
+    // Only agents with a canonical host gfsSubject are grantable targets.
+    if (agent.gfsSubject?.type !== 'host' || !agent.gfsSubject.id) continue
+    options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
+  }
+  return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
+}
+
 function resourceSource(resource: GfsDriveResource, currentFolderName?: string): string {
   if (currentFolderName) return currentFolderName
   return resource.sources?.length ? resource.sources.join(' + ') : 'Shared'
@@ -101,7 +123,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
-  const ctrl = useGfsBrowserController()
+  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const {
     current,
     crumbs,
@@ -128,6 +150,18 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const delegationSubjects = useMemo(
     () => delegationSubjectOptions(teamDirectoryQuery.data),
     [teamDirectoryQuery.data]
+  )
+  // MY agents (with canonical gfsSubject) load when the Manage dialog opens:
+  // they feed both the agent grant section and grant-list label resolution.
+  const myAgentsQuery = useQuery({
+    queryKey: desktopQueryKeys.myAgents,
+    queryFn: () => window.clerum.agents.listMine(),
+    enabled: manageOpen,
+  })
+  const agentSubjects = useMemo(() => agentSubjectOptions(myAgentsQuery.data), [myAgentsQuery.data])
+  const grantsError = useMemo(
+    () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
+    [ctrl.grantsError]
   )
   const canWriteCurrent = hasBit(affordances, 'write')
   const canDeleteCurrent = hasBit(affordances, 'delete')
@@ -195,40 +229,41 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [manageOpen, openLinkOpen])
 
+  // One atomic bulk grant for every selected subject — the server grants all or
+  // none (a `subjects_invalid` rejects the whole request), so there is no
+  // partial-success outcome. A failure propagates to the panel's catch, which
+  // maps the server verdict via describeGfsGrantError. No inherit argument here:
+  // the user/team panel keeps inherit:false.
   const handleGrant = async (subjectKeys: string[], bits: string[]) => {
-    try {
-      await runGfsSubjectBatch('Grant access', subjectKeys, subjectKey =>
-        ctrl.grant(subjectKey, bits)
-      )
-    } catch (error) {
-      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
-        pushToast?.(
-          `Access granted to ${error.succeededSubjectKeys.length} of ${subjectKeys.length} subjects`,
-          'success'
-        )
-      }
-      throw error
-    }
+    await ctrl.grant(subjectKeys, bits)
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
     )
+    // The grant PUT returns no ids — list-after-write is the revoke-id source.
+    await ctrl.refreshGrants()
+  }
+
+  const handleGrantAgents = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
+    await ctrl.grant(subjectKeys, bits, inherit)
+    pushToast?.(
+      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'agent' : 'agents'}`,
+      'success'
+    )
+    await ctrl.refreshGrants()
+  }
+
+  const handleRevokeGrant = async (grantId: string, label: string) => {
+    try {
+      await ctrl.revokeGrant(grantId)
+      pushToast?.(`Access revoked for ${label}`, 'success')
+    } catch (revokeError) {
+      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+    }
   }
 
   const handleCreateShare = async (subjectKeys: string[]) => {
-    try {
-      await runGfsSubjectBatch('Create share', subjectKeys, subjectKey =>
-        ctrl.createShare(subjectKey)
-      )
-    } catch (error) {
-      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
-        pushToast?.(
-          `${error.succeededSubjectKeys.length} of ${subjectKeys.length} shares created`,
-          'success'
-        )
-      }
-      throw error
-    }
+    await ctrl.createShare(subjectKeys)
     pushToast?.(
       `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
       'success'
@@ -931,23 +966,60 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                 ) : affordancesError ? (
                   <StatusBanner tone="error" text={affordancesError} />
                 ) : affordances ? (
-                  <GfsDelegationPanel
-                    affordances={affordances}
-                    subjectOptions={delegationSubjects}
-                    subjectOptionsLoading={teamDirectoryQuery.isFetching}
-                    subjectOptionsError={
-                      teamDirectoryQuery.error instanceof Error
-                        ? teamDirectoryQuery.error.message
-                        : teamDirectoryQuery.error
-                          ? String(teamDirectoryQuery.error)
-                          : null
-                    }
-                    onGrant={handleGrant}
-                    onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
-                  />
+                  <>
+                    <GfsDelegationPanel
+                      affordances={affordances}
+                      subjectOptions={delegationSubjects}
+                      subjectOptionsLoading={teamDirectoryQuery.isFetching}
+                      subjectOptionsError={
+                        teamDirectoryQuery.error instanceof Error
+                          ? teamDirectoryQuery.error.message
+                          : teamDirectoryQuery.error
+                            ? String(teamDirectoryQuery.error)
+                            : null
+                      }
+                      onGrant={handleGrant}
+                      onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
+                    />
+                    {affordances.canDelegate ? (
+                      <GfsAgentAccessSection
+                        agents={agentSubjects}
+                        agentsLoading={myAgentsQuery.isFetching}
+                        agentsError={
+                          myAgentsQuery.error instanceof Error
+                            ? myAgentsQuery.error.message
+                            : myAgentsQuery.error
+                              ? String(myAgentsQuery.error)
+                              : null
+                        }
+                        isDirectory={Boolean(currentIsFolder)}
+                        onGrantAgents={handleGrantAgents}
+                      />
+                    ) : null}
+                  </>
                 ) : (
                   <p className="muted">Loading permissions…</p>
                 )}
+              </section>
+
+              <section className="da-gfs-manage-section da-gfs-manage-section--grants">
+                <div className="da-gfs-manage-section__header">
+                  <div>
+                    <h4>Who has access</h4>
+                    <p className="muted">
+                      Existing grants on this resource. Revoking is immediate.
+                    </p>
+                  </div>
+                </div>
+                <GfsGrantList
+                  agents={agentSubjects}
+                  error={grantsError}
+                  items={ctrl.grants}
+                  loading={ctrl.loadingGrants}
+                  onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
+                  revoking={ctrl.revoking}
+                  subjects={delegationSubjects}
+                />
               </section>
             </div>
           </section>

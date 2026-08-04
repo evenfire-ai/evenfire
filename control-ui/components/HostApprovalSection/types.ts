@@ -12,6 +12,10 @@ export interface HostApprovalSectionProps {
   onSave: (tools: Record<string, boolean>) => Promise<void>
   busy: boolean
   canWrite: boolean
+  // Render the full editable tool list immediately instead of the read-only
+  // summary. The section stays expanded through Save/Cancel (Cancel discards
+  // the in-progress draft but keeps the list visible).
+  defaultEditing?: boolean
 }
 
 export type { CodeDefault, NativeToolMeta }

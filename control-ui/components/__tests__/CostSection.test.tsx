@@ -85,6 +85,12 @@ describe('Cost & Usage sidebar entry', () => {
       'href',
       '/cost-and-usage/token-budgets'
     )
+    expect(
+      screen
+        .getAllByRole('link')
+        .filter(link => link.getAttribute('href')?.startsWith('/cost-and-usage/'))
+        .map(link => link.textContent)
+    ).toEqual(['Usage', 'Token Budgets', 'LLM Prices'])
   })
 
   it.each([

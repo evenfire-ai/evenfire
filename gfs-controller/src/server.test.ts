@@ -13,6 +13,12 @@ const baseConfig: GfsConfig = {
   driveName: "main",
   decisionCacheTtlMs: 5000,
   credentialProbeIntervalMs: 60_000,
+  blobCleanupSafetyWindowMs: 3_600_000,
+  blobCleanupIntervalMs: 60_000,
+  blobCleanupBatchSize: 100,
+  syncCopyMaxObjects: 1000,
+  syncCopyMaxBytes: 1073741824,
+  syncCopyTimeoutMs: 30000,
   devMode: true,
 };
 

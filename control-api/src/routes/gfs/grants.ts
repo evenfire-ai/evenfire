@@ -34,6 +34,8 @@ export interface GrantsDb {
 const DEFAULT_DRIVE = 'main'
 export const PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
 export type GfsPermission = (typeof PERMISSIONS)[number]
+const MANAGED_FIRST_PARTY_HOST_PERMISSIONS = new Set<GfsPermission>(['read', 'write'])
+const LEGACY_STANDALONE_HOST_SUBJECT_ID = '1st:mcp-host/standalone'
 const SUBJECT_TYPES = ['operator', 'user', 'team', 'host', 'context'] as const
 export type GfsSubjectType = (typeof SUBJECT_TYPES)[number]
 export const UUID_RE =
@@ -234,7 +236,7 @@ export async function assertMayGrant(
   resourceId: string,
   permissions: GfsPermission[],
   target: GfsSubject,
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): Promise<void> {
   await assertMayGrantBatch(db, caller, drive, resourceId, permissions, [target], opts)
 }
@@ -334,16 +336,45 @@ function assertTargetPolicy(
   caller: GfsCaller,
   permissions: readonly GfsPermission[],
   target: GfsSubject,
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): void {
+  const isLegacyStandaloneSubject =
+    target.type === 'host' && target.id === LEGACY_STANDALONE_HOST_SUBJECT_ID
+  const isLegacyRetirement = isLegacyStandaloneSubject && opts.allowLegacyRetirement === true
+
+  // The historical fleet-wide subject remains parseable so operators can
+  // inventory, migrate, and revoke its stored rows. It must never receive a
+  // new grant after the individual-Host cutover — single or bulk. Revocation
+  // callers opt in explicitly via allowLegacyRetirement; every create and
+  // delegation path remains fail-closed.
+  if (isLegacyStandaloneSubject && !isLegacyRetirement) {
+    throw new GfsGrantError(403, 'legacy_standalone_subject_reserved')
+  }
   // Agent (host) restriction (spec §Delegation): manage_acl/share are never
   // grantable to a host by a folder owner — only the operator can. `share` as a
-  // share-grant is for users/teams only, never a host.
+  // share-grant is for users/teams only, never a host. Caller authority is
+  // adjudicated before the per-target permission envelope below.
   const grantsManagerBit = permissions.includes('manage_acl') || permissions.includes('share')
   if (!caller.isOperator && target.type === 'host' && grantsManagerBit) {
     throw new GfsGrantError(403, 'agent_manager_forbidden')
   }
-  if (opts.isShare && target.type === 'host') {
+  // HCC-issued first-party Host credentials intentionally carry data-plane
+  // authority only. Enforce the same boundary on stored grants before the
+  // operator bypass so a future token-policy regression cannot activate a
+  // dormant destructive/governance grant. Third-party hosts retain their
+  // existing grant compatibility; their runtime token scopes are constrained
+  // independently by provisionerScopePolicy. Revocation (the only caller that
+  // sets allowLegacyRetirement) is exempt: an over-privileged stored row from
+  // before this envelope existed must remain deletable, never locked in.
+  if (
+    target.type === 'host' &&
+    target.id?.startsWith('1st:') &&
+    opts.allowLegacyRetirement !== true &&
+    permissions.some(permission => !MANAGED_FIRST_PARTY_HOST_PERMISSIONS.has(permission))
+  ) {
+    throw new GfsGrantError(403, 'managed_agent_permission_forbidden')
+  }
+  if (opts.isShare && target.type === 'host' && !isLegacyRetirement) {
     throw new GfsGrantError(403, 'share_to_agent_forbidden')
   }
   // A non-operator may not grant/share TO the operator subject — the operator is
@@ -392,7 +423,7 @@ export async function assertMayGrantBatch(
   resourceId: string,
   permissions: readonly GfsPermission[],
   targets: readonly GfsSubject[],
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): Promise<void> {
   for (const target of targets) {
     assertTargetPolicy(caller, permissions, target, opts)
@@ -821,35 +852,80 @@ export function registerGfsGrantRoutes(router: Router): void {
   )
 }
 
+export interface GfsGrantListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  inherit: boolean
+}
+
+/** One resource's grant rows in the canonical list shape (`id` powers revoke). */
+export async function queryGrantItems(
+  drive: string,
+  resourceId: string
+): Promise<GfsGrantListItem[]> {
+  const result = await pool.query(
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
+       FROM gfs_grants
+      WHERE drive = $1 AND resource_id = $2::uuid
+      ORDER BY created_at ASC, id ASC`,
+    [drive, resourceId]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => {
+    const subjectId = String(row.subject_id ?? '')
+    return {
+      id: String(row.id),
+      drive: String(row.drive),
+      resourceId: String(row.resource_id),
+      subject: {
+        type: String(row.subject_type),
+        ...(subjectId ? { id: subjectId } : {}),
+      },
+      permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
+      inherit: Boolean(row.inherit),
+    }
+  })
+}
+
 export async function handleGrantRead(
   req: Request,
   res: import('express').Response
 ): Promise<void> {
   try {
     const { drive, resourceId } = permissionReadFilter(req)
-    const result = await pool.query(
-      `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
-         FROM gfs_grants
-        WHERE drive = $1 AND resource_id = $2::uuid
-        ORDER BY created_at ASC, id ASC`,
-      [drive, resourceId]
-    )
-    res.status(200).json({
-      items: (result.rows as Record<string, unknown>[]).map(row => {
-        const subjectId = String(row.subject_id ?? '')
-        return {
-          id: String(row.id),
-          drive: String(row.drive),
-          resourceId: String(row.resource_id),
-          subject: {
-            type: String(row.subject_type),
-            ...(subjectId ? { id: subjectId } : {}),
-          },
-          permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
-          inherit: Boolean(row.inherit),
-        }
-      }),
-    })
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
+  } catch (err) {
+    if (err instanceof GfsGrantError) {
+      sendGfsGrantError(res, err)
+      return
+    }
+    throw err
+  }
+}
+
+/**
+ * Non-operator grants listing for the external (folder-owner) plane. The ACL of
+ * a resource is delegation metadata naming third-party subjects, so viewing it
+ * requires the same authority as changing it: `manage_acl` on the resource,
+ * held directly or through an inheriting ancestor (view-ACL = manage-ACL).
+ * A missing resource yields the same 403 — no existence oracle.
+ */
+export async function handleGrantListForCaller(
+  req: Request,
+  res: import('express').Response
+): Promise<void> {
+  try {
+    const caller = resolveCaller(req)
+    const { drive, resourceId } = permissionReadFilter(req)
+    if (!caller.isOperator) {
+      const held = await heldPermissions(pool, caller, drive, resourceId)
+      if (!held.includes('manage_acl')) {
+        throw new GfsGrantError(403, 'manage_acl_required')
+      }
+    }
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
   } catch (err) {
     if (err instanceof GfsGrantError) {
       sendGfsGrantError(res, err)
@@ -940,7 +1016,7 @@ export async function handleGrantDelete(
           String(row.resource_id),
           (row.permissions as GfsPermission[]) ?? ['manage_acl'],
           subject,
-          { isShare: false }
+          { isShare: false, allowLegacyRetirement: true }
         )
       } catch (error) {
         if (!(error instanceof GfsGrantError)) throw error

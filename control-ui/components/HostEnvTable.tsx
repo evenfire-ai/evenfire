@@ -196,8 +196,7 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
         }}
       >
         <div>
-          <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Environment variables</h2>
-          <p className="cu-muted" style={{ margin: '0.25rem 0 0', fontSize: '0.85rem' }}>
+          <p className="cu-muted" style={{ margin: 0, fontSize: '0.85rem' }}>
             Operator-managed env vars for this Host. Applied within ~1 second; no pod restart.
             Provider keys live in the LLM Secrets tab.
           </p>

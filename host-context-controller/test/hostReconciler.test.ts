@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
+import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
   HostReconciler,
@@ -173,6 +174,106 @@ function createReconciler(
 }
 
 describe('HostReconciler', () => {
+  it('keys GFS lifecycle evidence by canonical namespace/name', () => {
+    const helper = HostReconciler as unknown as {
+      gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name'>): string
+    }
+
+    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name' })).toBe(
+      'tenant-a/shared-name'
+    )
+    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-b', name: 'shared-name' })).toBe(
+      'tenant-b/shared-name'
+    )
+  })
+
+  it('binds GFS material to the exact Host and records only safe lifecycle annotations', async () => {
+    const { reconciler, coreApi } = createReconciler()
+    const boundHost = makeHost({ uid: 'host-uid-1', generation: 7 })
+
+    await reconciler.reconcile(boundHost)
+
+    expect(mintHostGfsToken).toHaveBeenCalledWith({ name: 'alpha-host', namespace: 'mcp-host' })
+    const runtimeSecretWrite = coreApi.replaceNamespacedSecret.mock.calls.find(
+      ([request]) => request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+    )?.[0].body as k8s.V1Secret
+    expect(runtimeSecretWrite.metadata?.annotations).toMatchObject({
+      'clerum.io/gfs-token-expected-subject': 'host:1st:mcp-host/alpha-host',
+      'clerum.io/gfs-token-host-uid': 'host-uid-1',
+      'clerum.io/gfs-token-host-generation': '7',
+      'clerum.io/gfs-token-capability-set-hash': expect.stringMatching(/^[0-9a-f]{64}$/),
+      'clerum.io/gfs-token-expires-at': expect.any(String),
+      'clerum.io/gfs-token-refresh-before': expect.any(String),
+    })
+    expect(JSON.stringify(runtimeSecretWrite.metadata?.annotations)).not.toContain(
+      'gfs-runtime-value'
+    )
+  })
+
+  it('leaves the per-Host Secret untouched when binding validation rejects the response', async () => {
+    const { reconciler, coreApi } = createReconciler()
+    const validationError = new Error('gfs host token subject mismatch')
+    validationError.name = 'GfsHostTokenValidationError'
+    vi.mocked(mintHostGfsToken).mockRejectedValueOnce(validationError)
+
+    await expect(reconciler.reconcile(makeHost({ uid: 'host-uid-1' }))).rejects.toThrow(
+      /subject mismatch/
+    )
+
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('rotates for a recreated same-name Host without changing its grants identity', async () => {
+    const reporter = createTelemetryReporterMock()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      infrastructureTelemetryReporter: reporter,
+    })
+
+    await reconciler.reconcile(makeHost({ uid: 'old-host-uid', generation: 3 }))
+    const firstWrite = coreApi.replaceNamespacedSecret.mock.calls.find(
+      ([request]) => request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+    )?.[0].body as k8s.V1Secret
+    coreApi.readNamespacedSecret.mockImplementation(({ name }: { name?: string } = {}) => {
+      if (name === 'host-alpha-host-mcp-host-runtime-tokens') return Promise.resolve(firstWrite)
+      return Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} })
+    })
+    coreApi.replaceNamespacedSecret.mockClear()
+    appsApi.replaceNamespacedDeployment.mockClear()
+
+    await reconciler.reconcile(makeHost({ uid: 'new-host-uid', generation: 1 }))
+
+    expect(mintHostGfsToken).toHaveBeenLastCalledWith({
+      name: 'alpha-host',
+      namespace: 'mcp-host',
+    })
+    const recreationWrite = coreApi.replaceNamespacedSecret.mock.calls.find(
+      ([request]) => request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+    )?.[0].body as k8s.V1Secret
+    expect(recreationWrite.metadata?.annotations).toMatchObject({
+      'clerum.io/gfs-token-expected-subject': 'host:1st:mcp-host/alpha-host',
+      'clerum.io/gfs-token-host-uid': 'new-host-uid',
+      'clerum.io/gfs-token-host-generation': '1',
+      'clerum.io/runtime-token-rollout-required': 'true',
+    })
+    expect(reporter.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'reconcile_outcome',
+        payload: expect.objectContaining({
+          gfs_subject: 'host:1st:mcp-host/alpha-host',
+          gfs_old_host_uid: 'old-host-uid',
+          gfs_new_host_uid: 'new-host-uid',
+          gfs_outcome: 'rotated',
+        }),
+      })
+    )
+    expect(
+      appsApi.replaceNamespacedDeployment.mock.calls.every(
+        ([request]) => request.name === 'alpha-host'
+      )
+    ).toBe(true)
+  })
+
   it('creates deployment, service, and pvc for valid host', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
 

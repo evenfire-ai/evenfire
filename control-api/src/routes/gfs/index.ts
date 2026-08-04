@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { registerGfsGrantRoutes } from './grants.js'
+import { registerLegacyStandaloneGrantReportRoute } from './legacyStandaloneGrants.js'
 import { registerGfsProvisionerTokenRoute } from './provisionerToken.js'
 import { registerGfsProxyRoute } from './proxy.js'
 import { registerGfsResolveRoutes } from './resolve.js'
@@ -23,6 +24,7 @@ export function createGfsRouter(): Router {
   registerGfsTreeRoutes(router)
   registerGfsSeedRoute(router)
   registerGfsGrantRoutes(router)
+  registerLegacyStandaloneGrantReportRoute(router)
   registerGfsShareRoutes(router)
   registerGfsResourceRoutes(router)
   registerGfsProxyRoute(router)

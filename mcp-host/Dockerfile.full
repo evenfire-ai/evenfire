@@ -30,9 +30,14 @@ FROM node:24.16.0@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0
 
 WORKDIR /app
 
-# Fill gaps in full Debian base
+# Fill gaps in full Debian base.
+#
+# This base already ships ca-certificates, unlike node:*-slim. Listing it is a
+# no-op layer that makes the CA bundle a stated dependency of the tools we ship
+# instead of a property of whichever base digest is pinned.
+# Guarded by scripts/check-dockerfile-ca-certificates.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq wget \
+    ca-certificates jq wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the shared package + package files, install production dependencies only
