@@ -420,9 +420,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`
   if (clientRoutePath && clientRoutePath !== viewPath) {
+    const encodedClientRoutePath = encodeSandboxUiRoutePath(clientRoutePath)
     const clientRouteUrl =
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
+      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${encodedClientRoutePath}`
     let lastNavigation = { url: '', status: 0 }
     let handoffFinished = false
     let handoffTimeout: NodeJS.Timeout | null = null
@@ -538,6 +539,13 @@ const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
 
 function pathHasDotSegment(pathname: string): boolean {
   return pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))
+}
+
+function encodeSandboxUiRoutePath(routePath: string): string {
+  return routePath
+    .split('/')
+    .map((segment, index) => (index === 0 ? '' : encodeURIComponent(segment)))
+    .join('/')
 }
 
 function sharedPathForDefaultPath(defaultPath: string): string {

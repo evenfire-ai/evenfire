@@ -48,6 +48,42 @@ test('web and desktop links use the same canonical route contract', () => {
   })
 })
 
+test('route normalization canonicalizes safe percent-encoded paths once', () => {
+  for (const [input, expected] of [
+    ['/café', '/café'],
+    ['/caf%C3%A9', '/café'],
+    ['/space here', '/space here'],
+    ['/space%20here', '/space here'],
+    ['/literal%percent', '/literal%percent'],
+    ['/literal%25percent', '/literal%percent'],
+    ['/already%2520encoded', '/already encoded'],
+  ]) {
+    assert.equal(links.normalizeSandboxUiRoute(input), expected)
+  }
+
+  const unicode = links.parseSandboxUiDeepLink(
+    links.buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/caf%C3%A9',
+    })
+  )
+  const decoded = links.parseSandboxUiDeepLink(
+    links.buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/café',
+    })
+  )
+
+  assert.deepEqual(unicode, {
+    appRef: 'sandbox-recipes/task-board',
+    path: '/café',
+  })
+  assert.deepEqual(decoded, unicode)
+  assert.equal(links.sandboxUiDeepLinkTargetsEqual(unicode, decoded), true)
+})
+
 test('shared app links carry only client-side pathnames', () => {
   for (const pathValue of [
     '/tasks?authorization=secret',

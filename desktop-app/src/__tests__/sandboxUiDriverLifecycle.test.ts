@@ -33,6 +33,10 @@ const electronMocks = vi.hoisted(() => {
       return this
     }
 
+    emit(event: string, ...args: unknown[]): void {
+      this.listeners.get(event)?.forEach(handler => handler(...args))
+    }
+
     getURL(): string {
       return this.currentUrl
     }
@@ -266,6 +270,35 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     expect(electronMocks.views).toHaveLength(0)
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(parentWindow.listenerCount('closed')).toBe(0)
+  })
+
+  it('encodes the canonical client route before handing it to the mounted app', async () => {
+    const parentWindow = new FakeParentWindow()
+
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        routePath: '/café menu/literal%percent',
+      })
+    )
+    const view = electronMocks.views[0]
+    expect(view).toBeDefined()
+    view!.webContents.executeJavaScript.mockResolvedValue(true)
+    view!.webContents.emit(
+      'did-navigate',
+      {},
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/',
+      200
+    )
+    view!.webContents.emit('did-finish-load')
+
+    await vi.waitFor(() => {
+      expect(view!.webContents.executeJavaScript).toHaveBeenCalledOnce()
+    })
+    expect(view!.webContents.executeJavaScript.mock.calls[0]?.[0]).toContain(
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/' +
+        'caf%C3%A9%20menu/literal%25percent'
+    )
   })
 
   it('rejects a refresh cookie scoped to a different recipe', async () => {
