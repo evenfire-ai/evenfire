@@ -163,7 +163,10 @@ if command -v docker >/dev/null 2>&1; then
     MEM_BYTES="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
     CPUS="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 0)"
     if [ "${MEM_BYTES:-0}" -gt 0 ]; then
-      MEM_GB=$((MEM_BYTES / 1024 / 1024 / 1024))
+      # Round to the nearest GB (+0.5 GB before the integer divide): docker's
+      # MemTotal sits a little below physical RAM, so a 10 GB allocation reports
+      # ~9.7 GB and would truncate to 9 → a spurious "wants >= 10 GB" warning.
+      MEM_GB=$(((MEM_BYTES + 512 * 1024 * 1024) / (1024 * 1024 * 1024)))
       if [ "$MEM_GB" -lt 10 ]; then
         warn "docker has ~${MEM_GB} GB RAM allocated (setup wants >= 10 GB — raise it in Docker Desktop → Settings → Resources)"
       else
@@ -195,8 +198,9 @@ fi
 # Parse the specific keys instead of sourcing .env (never execute it).
 env_value() {
   # Last non-comment assignment wins; strips surrounding quotes/whitespace.
+  # Tolerates an optional leading `export ` (a common .env habit).
   local key="$1" file="$2" raw
-  raw="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n1)" || return 0
+  raw="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1)" || return 0
   raw="${raw#*=}"
   raw="${raw%\"}"; raw="${raw#\"}"
   raw="${raw%\'}"; raw="${raw#\'}"

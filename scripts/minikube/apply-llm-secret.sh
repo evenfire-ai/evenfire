@@ -51,6 +51,10 @@ if [ -z "$ENV_FILE" ]; then
   if [ -z "$ENV_FILE" ] && [ -f .env ]; then ENV_FILE=".env"; fi
 fi
 if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+  # Sourced by design (unlike check-prereqs.sh, which grep-parses .env): the
+  # per-provider `${!env_name}` indirect expansion below needs the real values
+  # in the environment. This mirrors the original inline Makefile behavior. A
+  # normal KEY=value .env is safe; a malformed line could abort under set -e.
   set -a; . "$ENV_FILE"; set +a
 fi
 
