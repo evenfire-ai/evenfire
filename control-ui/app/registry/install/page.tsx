@@ -18,9 +18,10 @@ import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import { getRegistryEntryVersion, installRecipeFromRegistry } from '@lib/api'
-import type { RegistryEntry } from '@lib/api'
+import type { LlmAllowedModel, RegistryEntry } from '@lib/api'
 import { analyzeWorkflowRecipeEgress } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
+import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import { validateRecipe } from '@lib/recipeValidator'
 
 type TransportWorkloadEditorTarget = {
@@ -114,41 +115,26 @@ function applyWorkflowWorkloadEgress(
   return JSON.stringify(next, null, 2)
 }
 
-// spec.agent.provider enum (WorkflowRecipe CRD).
-const AGENT_PROVIDERS = [
-  'openai',
-  'claude',
-  'zai',
-  'bailian',
-  'vertex',
-  'openrouter',
-  'gemini',
-  'deepseek',
-  'groq',
-  'together',
-  'fireworks',
-  'mistral',
-  'xai',
-  'cerebras',
-  'deepinfra',
-  'perplexity',
-  'moonshot',
-  'nebius',
-  'novita',
-] as const
+// Resolve a model's provider from the operator's authoritative model allowlist
+// (useLlmAllowedModels → /admin/llm-models) — the single source of the exact
+// model→provider mapping. Returns '' when the model isn't in the catalog so the
+// user picks a provider explicitly instead of being handed a wrong guess; this
+// follows the "no hardcoded fallback" rule the rest of the LLM UI uses
+// (lib/llm.ts, spec R4.5.1). A string heuristic mis-derived roughly half the
+// providers (e.g. groq/cerebras/moonshot/perplexity/bailian models → openai).
+export function providerForModel(model: string, catalog: LlmAllowedModel[]): string {
+  return catalog.find(row => row.model === model)?.provider ?? ''
+}
 
-// Best-effort provider guess from a model id; the user can override it.
-function providerForModel(model: string): string {
-  const m = model.toLowerCase()
-  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('chatgpt'))
-    return 'openai'
-  if (m.includes('claude')) return 'claude'
-  if (m.includes('glm')) return 'zai'
-  if (m.includes('gemini')) return 'gemini'
-  if (m.includes('deepseek')) return 'deepseek'
-  if (m.includes('grok')) return 'xai'
-  if (m.includes('mistral') || m.includes('mixtral')) return 'mistral'
-  return 'openai'
+// Distinct providers the operator has enabled, for the override dropdown. Keeps
+// the picker honest — only providers with configured credentials are offered,
+// instead of a static enum of all 21.
+export function enabledProviders(catalog: LlmAllowedModel[]): string[] {
+  const seen = new Set<string>()
+  for (const row of catalog) {
+    if (row.enabled) seen.add(row.provider)
+  }
+  return Array.from(seen).sort()
 }
 
 // A recipe whose plugin SDK enables promptBridge must resolve an agent
@@ -219,6 +205,10 @@ function RegistryRecipeInstallPreview({
   // Agent to inject when the recipe's promptBridge needs one (provider + model).
   const [agentModel, setAgentModel] = useState('')
   const [agentProvider, setAgentProvider] = useState('')
+  // Operator-declared model allowlist (/admin/llm-models): the authoritative
+  // model→provider map and the set of providers enabled in this deployment.
+  const { models: llmCatalog } = useLlmAllowedModels()
+  const catalogKey = llmCatalog.map(r => `${r.provider}:${r.model}:${r.enabled}`).join('\n')
 
   useEffect(() => {
     setRecipeText(
@@ -243,13 +233,20 @@ function RegistryRecipeInstallPreview({
     if (agentReq.needsAgent && agentReq.allowedModels.length > 0) {
       const first = agentReq.allowedModels[0]
       setAgentModel(first)
-      setAgentProvider(providerForModel(first))
+      setAgentProvider(providerForModel(first, llmCatalog))
     } else {
       setAgentModel('')
       setAgentProvider('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentReq.needsAgent, allowedModelsKey])
+  }, [agentReq.needsAgent, allowedModelsKey, catalogKey])
+  const agentProviderOptions = useMemo(() => {
+    const opts = enabledProviders(llmCatalog)
+    // Keep the derived/selected provider selectable even if the operator has not
+    // enabled it yet, so the value is never silently dropped from the picker.
+    return agentProvider && !opts.includes(agentProvider) ? [agentProvider, ...opts] : opts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogKey, agentProvider])
   const transportEgressTargets = useMemo(
     () => workflowTransportWorkloads(parsedRecipe as Record<string, unknown> | null),
     [parsedRecipe]
@@ -377,7 +374,7 @@ function RegistryRecipeInstallPreview({
                     onChange={e => {
                       const m = e.target.value
                       setAgentModel(m)
-                      setAgentProvider(providerForModel(m))
+                      setAgentProvider(providerForModel(m, llmCatalog))
                     }}
                   >
                     {agentReq.allowedModels.length === 0 ? (
@@ -397,7 +394,10 @@ function RegistryRecipeInstallPreview({
                     value={agentProvider}
                     onChange={e => setAgentProvider(e.target.value)}
                   >
-                    {AGENT_PROVIDERS.map(p => (
+                    {agentProviderOptions.length === 0 ? (
+                      <option value="">(no providers enabled)</option>
+                    ) : null}
+                    {agentProviderOptions.map(p => (
                       <option key={p} value={p}>
                         {p}
                       </option>

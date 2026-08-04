@@ -1,9 +1,14 @@
 import React from 'react'
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
-import RegistryInstallPage, { recipeAgentRequirement } from '../../app/registry/install/page'
-import { getRegistryEntryVersion, installRecipeFromRegistry } from '../../lib/api'
+import RegistryInstallPage, {
+  enabledProviders,
+  providerForModel,
+  recipeAgentRequirement,
+} from '../../app/registry/install/page'
+import type { LlmAllowedModel } from '../../lib/api'
+import { getLlmModels, getRegistryEntryVersion, installRecipeFromRegistry } from '../../lib/api'
 import type { RegistryEntry } from '../../lib/api'
 import { ToastProvider } from '../Toast'
 
@@ -28,8 +33,31 @@ vi.mock('../../lib/api', async () => {
     ...actual,
     getRegistryEntryVersion: vi.fn(),
     installRecipeFromRegistry: vi.fn(),
+    getLlmModels: vi.fn(),
   }
 })
+
+// Build an operator model-allowlist row; only provider/model/enabled matter to
+// the code under test, so the catalog-lifecycle fields are filled with stubs.
+const catalogRow = (provider: string, model: string, enabled = true): LlmAllowedModel =>
+  ({
+    id: `${provider}:${model}`,
+    provider,
+    model,
+    vendor: null,
+    display_name: null,
+    context_window_tokens: null,
+    enabled,
+    source: 'manual',
+    stale: false,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }) as LlmAllowedModel
+
+const DEFAULT_LLM_CATALOG: LlmAllowedModel[] = [
+  catalogRow('openai', 'gpt-4o-mini'),
+  catalogRow('claude', 'claude-3-5-sonnet'),
+]
 
 const RECIPE_ENTRY: RegistryEntry = {
   id: 'recipe-1',
@@ -86,6 +114,12 @@ const RECIPE_ENTRY: RegistryEntry = {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+beforeEach(() => {
+  // Every page render mounts useLlmAllowedModels → getLlmModels; default it so
+  // the picker derives providers from a catalog instead of throwing.
+  vi.mocked(getLlmModels).mockResolvedValue({ rows: DEFAULT_LLM_CATALOG })
 })
 
 function render(children: ReactNode) {
@@ -188,7 +222,8 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
 
     // Agent picker appears with the recipe's allowedModels + derived provider.
     expect(await screen.findByLabelText('Model')).toHaveValue('gpt-4o-mini')
-    expect(screen.getByLabelText('Provider')).toHaveValue('openai')
+    // Provider is derived from the operator catalog (loaded async), not a guess.
+    await waitFor(() => expect(screen.getByLabelText('Provider')).toHaveValue('openai'))
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // Package -> Security
     fireEvent.click(await screen.findByRole('button', { name: 'Continue' })) // Security -> Install
@@ -270,5 +305,47 @@ describe('recipeAgentRequirement — step agent resolution reads spec.steps', ()
 
   it('does not require an agent without promptBridge', () => {
     expect(recipeAgentRequirement({ spec: { steps: [] } }).needsAgent).toBe(false)
+  })
+})
+
+describe('providerForModel — resolved from the operator catalog, not a heuristic', () => {
+  const catalog: LlmAllowedModel[] = [
+    catalogRow('openai', 'gpt-4o-mini'),
+    catalogRow('groq', 'llama-3.3-70b-versatile'),
+    catalogRow('cerebras', 'gpt-oss-120b'),
+    catalogRow('moonshot', 'kimi-k2.6'),
+    catalogRow('bailian', 'qwen3-coder-plus', false),
+  ]
+
+  // Each of these was mis-derived by the old string heuristic (→ openai).
+  it.each([
+    ['llama-3.3-70b-versatile', 'groq'],
+    ['gpt-oss-120b', 'cerebras'],
+    ['kimi-k2.6', 'moonshot'],
+    ['gpt-4o-mini', 'openai'],
+    ['qwen3-coder-plus', 'bailian'], // resolved even when the row is disabled
+  ])('maps %s → %s from the catalog', (model, provider) => {
+    expect(providerForModel(model, catalog)).toBe(provider)
+  })
+
+  it('returns "" for a model not in the catalog, so the user picks explicitly', () => {
+    expect(providerForModel('some-unlisted-model', catalog)).toBe('')
+    expect(providerForModel('anything', [])).toBe('')
+  })
+})
+
+describe('enabledProviders — distinct, sorted, enabled-only', () => {
+  it('excludes disabled rows and de-dupes providers', () => {
+    const catalog: LlmAllowedModel[] = [
+      catalogRow('openai', 'gpt-4o-mini'),
+      catalogRow('openai', 'gpt-4o'),
+      catalogRow('groq', 'llama-3.3-70b-versatile'),
+      catalogRow('bailian', 'qwen3-coder-plus', false),
+    ]
+    expect(enabledProviders(catalog)).toEqual(['groq', 'openai'])
+  })
+
+  it('returns [] for an empty catalog', () => {
+    expect(enabledProviders([])).toEqual([])
   })
 })
