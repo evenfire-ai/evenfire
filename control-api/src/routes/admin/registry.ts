@@ -11,7 +11,7 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { createKey, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
+import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import {
   RegistryProxyError,
   applyPublishScope,
@@ -2267,6 +2267,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       const { keys } = await listKeys(ctx.admin, ctx.orgName)
       res.json({ org: ctx.orgName, keys })
+    } catch (err) {
+      handleKeysError(err, res, next, ctx.orgName)
+    }
+  })
+
+  // Org container images (+ tags) for the Marketplace images area. Same
+  // owner-gated org resolution + error mapping as the keys read.
+  router.get('/admin/registry/images', keysRateLimit, async (req, res, next) => {
+    const ctx = await prepareKeysRequest(req, res)
+    if (!ctx) return
+    try {
+      const { images } = await listImages(ctx.admin, ctx.orgName)
+      res.json({ org: ctx.orgName, images })
     } catch (err) {
       handleKeysError(err, res, next, ctx.orgName)
     }

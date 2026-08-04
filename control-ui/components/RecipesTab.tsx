@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
+import { PluginsEmptyState } from './PluginsEmptyState'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconWorkflow } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -124,13 +125,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         </div>
       ) : filteredItems.length === 0 ? (
         <div className="cu-empty">
-          {normalizedSearch ? (
-            'No plugins match this search.'
-          ) : (
-            <>
-              No plugins installed. Select <strong>Install Plugin</strong> to deploy one.
-            </>
-          )}
+          {normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
         </div>
       ) : (
         <div className="cu-table-wrap">

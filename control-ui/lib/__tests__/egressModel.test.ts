@@ -155,6 +155,34 @@ describe('egressModel', () => {
     })
   })
 
+  it('reports egress for non-transport workloads that declare egressBindings', () => {
+    const findings = analyzeWorkflowRecipeEgress({
+      spec: {
+        workloads: [
+          {
+            id: 'analyzer',
+            type: 'deployment',
+            egressBindings: [
+              { dns: 'api.github.com', port: 443, protocol: 'TCP' },
+              { dns: 'mirror.gcr.io', port: 443, protocol: 'TCP' },
+            ],
+          },
+          // A plain workload with no egress stays silent (no default-deny noise).
+          { id: 'db', type: 'statefulset', image: 'postgres:16' },
+        ],
+      },
+    })
+
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({
+      label: 'Workload "analyzer"',
+      mode: 'exact-host',
+      bindingCount: 2,
+    })
+    expect(findings[0].targets).toEqual(['api.github.com', 'mirror.gcr.io'])
+    expect(findings[0].ports).toEqual([443])
+  })
+
   it('reports exact-host, public-web, and over-limit workload egress findings', () => {
     const findings = analyzeWorkflowRecipeEgress({
       spec: {

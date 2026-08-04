@@ -10,12 +10,14 @@ import {
 } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { RegistryEntry, RegistryInstalledState } from '../../lib/api'
+import { __resetRegistryCapabilityCacheForTests } from '../../lib/hooks/useRegistryCapability'
 import RegistryCatalog from '../RegistryCatalog'
 import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', () => ({
   getRegistryCatalog: vi.fn(),
   getRegistryConnection: vi.fn(),
+  getPublishScope: vi.fn(),
   deleteRegistryEntry: vi.fn(),
   installRecipeFromRegistry: vi.fn(),
 }))
@@ -108,8 +110,14 @@ function mockApiSuccess(
 }
 
 beforeEach(() => {
-  // Default: managed deployment (not_self_hosted) so the large pre-existing
-  // catalog suite is undisturbed. Connect-discoverability tests override per case.
+  __resetRegistryCapabilityCacheForTests()
+  // Default persona: curator (administers the shared catalog), which keeps
+  // inline edit/remove + Publish visible so the large pre-existing suite is
+  // undisturbed. canManageOrg stays false for a curator, so the API-key and
+  // ownership-badge cases set an org-bound scope explicitly.
+  vi.mocked(api.getPublishScope).mockResolvedValue({ scope: null, curator: true, orgName: null })
+  // Default: managed deployment (not_self_hosted) so the connect surfaces stay
+  // hidden. Connect-discoverability tests override per case.
   vi.mocked(api.getRegistryConnection).mockRejectedValue(
     Object.assign(new Error('409 not_self_hosted'), { code: 'not_self_hosted' })
   )
@@ -129,7 +137,9 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(await screen.findByText('brave-search')).toBeInTheDocument()
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
-    expect(screen.getByText('Marketplace (1)')).toBeInTheDocument()
+    // Panel title is "Connectors" (the "Marketplace" tab labels the section); no count.
+    expect(screen.getByText('Connectors')).toBeInTheDocument()
+    expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 
   it('shows only plugin entries on the plugins route', async () => {
@@ -139,7 +149,6 @@ describe('RegistryCatalog tabs and columns', () => {
 
     expect(await screen.findByText('market-report')).toBeInTheDocument()
     expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Search plugins...')).toBeInTheDocument()
   })
 
   it('uses the same compact columns for both tabs', async () => {
@@ -159,12 +168,12 @@ describe('RegistryCatalog tabs and columns', () => {
     }
   })
 
-  it('shows only the connectors Marketplace tab', async () => {
+  it('shows the top-level Marketplace tab, no public Plugins tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    expect(screen.getByRole('tab', { name: 'Connectors' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Marketplace' })).toHaveAttribute(
       'href',
       '/marketplace/connectors'
     )
@@ -271,73 +280,50 @@ describe('RegistryCatalog expansion and actions', () => {
 })
 
 describe('RegistryCatalog controls', () => {
-  it('searches and filters only the current tab', async () => {
-    mockApiSuccess([
-      MOCK_MCP_ENTRY,
-      { ...MOCK_MCP_ENTRY, id: '3', name: 'private-search', visibility: 'private' },
-      MOCK_RECIPE_ENTRY,
-    ])
+  it('filters the catalog by the search box', async () => {
+    mockApiSuccess([MOCK_MCP_ENTRY, { ...MOCK_MCP_ENTRY, id: '3', name: 'private-search' }])
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
     fireEvent.change(screen.getByPlaceholderText('Search connectors...'), {
       target: { value: 'private' },
     })
-
     expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
     expect(screen.getByText('private-search')).toBeInTheDocument()
-    expect(screen.queryByText('market-report')).not.toBeInTheDocument()
   })
 
-  it('applies category and mode filters to the current tab', async () => {
+  it('applies the category filter to the current tab', async () => {
     mockApiSuccess([
-      MOCK_MCP_ENTRY,
-      {
-        ...MOCK_MCP_ENTRY,
-        id: '3',
-        name: 'remote-db',
-        category: 'database',
-        server_mode: 'remote',
-      },
+      MOCK_MCP_ENTRY, // category 'search'
+      { ...MOCK_MCP_ENTRY, id: '3', name: 'analytics-db', category: 'analytics' },
     ])
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Filter by mode' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Remote' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by category' }))
+    fireEvent.click(screen.getByRole('option', { name: 'analytics' }))
     expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
-    expect(screen.getByText('remote-db')).toBeInTheDocument()
+    expect(screen.getByText('analytics-db')).toBeInTheDocument()
   })
 
-  it('preselects the publish type from the active tab', async () => {
-    navigation.pathname = '/marketplace/plugins'
-    mockApiSuccess()
-    render(<RegistryCatalog />)
-    await screen.findByText('market-report')
+  // Publish-to-Marketplace is commented out under the distribution strategy
+  // narrowing (users don't publish to a public catalog), so the preselect-type
+  // test was removed with it.
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Publish to Marketplace' }))
-    expect(navigation.push).toHaveBeenCalledWith('/marketplace/publish?type=recipe')
-  })
-
-  it('opens API-key management from the Marketplace title menu', async () => {
-    mockApiSuccess()
-    render(<RegistryCatalog />)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Marketplace actions' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage API keys' }))
-
-    expect(navigation.push).toHaveBeenCalledWith('/marketplace/keys')
-  })
-
+  // API-key management moved to the org tab's "API Keys" sub-tab; the single-item
+  // catalog title kebab was removed, so its menu test was removed with it.
 })
 
 describe('RegistryCatalog state handling', () => {
-  it('renders thirty-five skeleton cells for the seven-column table', () => {
+  it('renders a skeleton across the compact columns while capability is resolving', () => {
     vi.mocked(api.getRegistryCatalog).mockReturnValue(new Promise(() => {}))
+    // Role is unknown while capability resolves, so the curator-only actions
+    // column is absent and the six visible columns render 30 skeleton cells
+    // across five rows.
+    vi.mocked(api.getPublishScope).mockReturnValue(new Promise(() => {}))
     const { container } = render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(35)
-    expect(screen.getByPlaceholderText('Search connectors...')).toBeDisabled()
+    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(30)
   })
 
   it('shows an API error', async () => {
@@ -347,15 +333,10 @@ describe('RegistryCatalog state handling', () => {
     expect(await screen.findByText('Error: Network error')).toBeInTheDocument()
   })
 
-  it('shows the empty filter state', async () => {
-    mockApiSuccess()
+  it('shows the empty state when no entries match', async () => {
+    mockApiSuccess([MOCK_RECIPE_ENTRY])
     render(<RegistryCatalog />)
-    await screen.findByText('brave-search')
-
-    fireEvent.change(screen.getByPlaceholderText('Search connectors...'), {
-      target: { value: 'not-present' },
-    })
-    expect(screen.getByText('No entries match your filters.')).toBeInTheDocument()
+    expect(await screen.findByText('No entries match your filters.')).toBeInTheDocument()
   })
 })
 
@@ -376,13 +357,17 @@ describe('RegistryCatalog - connect discoverability', () => {
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/connect')
   })
 
-  it('self-hosted + connected → no banner, header Connect button present', async () => {
+  it('self-hosted + connected → no banner and no header Connect button (nothing to connect)', async () => {
     mockApiSuccess()
     vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'connected' })
     render(<RegistryCatalog />)
     await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
 
-    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+    // A connected deployment has nothing to connect, so the "Connect" control is
+    // removed rather than presented as a no-op (design spec §5.1).
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument()
+    )
     expect(screen.queryByText(/This deployment isn't connected/i)).not.toBeInTheDocument()
   })
 
@@ -430,5 +415,57 @@ describe('RegistryCatalog - connect discoverability', () => {
     // The banner CTA still routes to the connect flow even inside the error branch.
     fireEvent.click(screen.getByRole('button', { name: 'Connect to registry' }))
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/connect')
+  })
+})
+
+describe('RegistryCatalog - capability-gated controls (§5.1)', () => {
+  const ORG_OWNER = { scope: '@acme', curator: false, orgName: 'acme' }
+
+  it('org owner: publish + API-key kebab hidden, inline edit/remove hidden', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getPublishScope).mockResolvedValue(ORG_OWNER)
+    render(<RegistryCatalog />)
+    const row = (await screen.findByText('brave-search')).closest('tr')!
+
+    // Publishing is commented out under the distribution strategy narrowing, and
+    // API-key management moved to the org tab — the catalog title kebab is gone.
+    expect(
+      screen.queryByRole('button', { name: '+ Publish to Marketplace' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Marketplace actions' })).not.toBeInTheDocument()
+    // Editing/removing moves to the ownership area, so the discovery row no
+    // longer offers them (design spec §5.4).
+    expect(
+      within(row).queryByRole('button', { name: 'Actions for brave-search v1.0.0' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Edit or remove' })).not.toBeInTheDocument()
+  })
+
+  it('org owner: owned entries are badged and lead to the ownership area', async () => {
+    mockApiSuccess([{ ...MOCK_MCP_ENTRY, id: '9', name: '@acme/internal-tool' }, MOCK_MCP_ENTRY])
+    vi.mocked(api.getPublishScope).mockResolvedValue(ORG_OWNER)
+    render(<RegistryCatalog />)
+
+    const ownedRow = (await screen.findByText('@acme/internal-tool')).closest('tr')!
+    expect(within(ownedRow).getByRole('link', { name: 'You own this' })).toHaveAttribute(
+      'href',
+      '/publisher/entries'
+    )
+    // A catalog entry the org does not own carries no ownership badge.
+    const otherRow = screen.getByText('brave-search').closest('tr')!
+    expect(within(otherRow).queryByRole('link', { name: 'You own this' })).not.toBeInTheDocument()
+  })
+
+  it('browse-only (unbound, non-curator): no Publish, no API-key menu, no inline actions', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getPublishScope).mockResolvedValue({ scope: null, curator: false, orgName: null })
+    render(<RegistryCatalog />)
+    await screen.findByText('brave-search')
+
+    expect(
+      screen.queryByRole('button', { name: '+ Publish to Marketplace' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Marketplace actions' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Edit or remove' })).not.toBeInTheDocument()
   })
 })

@@ -52,9 +52,6 @@ export function DashboardLayout({ children, isDetailPage = false }: DashboardLay
     if (isControlRouteSection(pathname, CONTROL_ROUTES.marketplace.root)) {
       return 'registry-catalog'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.publisher.root)) {
-      return 'publisher'
-    }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.llmModels.root)) {
       return 'llm-models'
     }

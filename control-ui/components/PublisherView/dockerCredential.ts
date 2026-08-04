@@ -20,6 +20,38 @@ export function buildPushCoordinate(registry: string, orgScope: string): string 
   return `${registry}/${dockerNamespace(orgScope)}/<name>:<tag>`
 }
 
+/**
+ * The fully-qualified image coordinate for a specific entry — the user never
+ * composes this by hand (design spec §5.5), so malformed-path pushes become
+ * unreachable rather than documented.
+ */
+export function buildImageCoordinate(
+  registry: string,
+  orgScope: string,
+  name: string,
+  tag: string
+): string {
+  return `${registry}/${dockerNamespace(orgScope)}/${name}:${tag}`
+}
+
+export function buildDockerTagCommand(
+  registry: string,
+  orgScope: string,
+  name: string,
+  tag: string
+): string {
+  return `docker tag <local-image> ${buildImageCoordinate(registry, orgScope, name, tag)}`
+}
+
+export function buildDockerPushCommand(
+  registry: string,
+  orgScope: string,
+  name: string,
+  tag: string
+): string {
+  return `docker push ${buildImageCoordinate(registry, orgScope, name, tag)}`
+}
+
 export function deriveDockerconfigjson(registry: string, key: string): string {
   return JSON.stringify(
     {
