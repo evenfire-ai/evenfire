@@ -8168,6 +8168,29 @@ textarea.cu-input {
   box-shadow: var(--cu-shadow);
 }
 
+/* Wider variant for modals with long content (e.g. Docker commands + config). */
+.cu-modal--wide {
+  width: min(46rem, 96vw);
+}
+
+/* Preformatted command / config snippet inside a modal or panel. Wraps long
+   lines (docker login … -p <secret>, push coordinates, dockerconfigjson) so
+   nothing is clipped, rather than overflowing a fixed-width dialog. */
+.cu-code-block {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--cu-surface-alt, var(--cu-surface));
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-sm, var(--cu-radius));
+  font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 /* Quick-pick chips row for multi-choice shortcuts */
 .cu-quick-picks {
   display: flex;

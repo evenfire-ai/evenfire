@@ -55,7 +55,7 @@ export default function RegistryApiKeysPanel() {
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
-  const [revealed, setRevealed] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState<CreatedRegistryApiKey | null>(null)
   // The auth-disabled view needs mode-specific copy: self-hosted fixes it by
   // connecting, managed fixes it via CLERUM_REGISTRY_AUTH_ENABLED (no connect
   // flow exists there). Same best-effort detection RegistryCatalog uses for its
@@ -102,7 +102,7 @@ export default function RegistryApiKeysPanel() {
   async function handleCreate(input: CreateRegistryApiKeyInput) {
     const created: CreatedRegistryApiKey = await createRegistryApiKey(input)
     setCreating(false)
-    setRevealed(created.key)
+    setRevealed(created)
     await load()
   }
 
@@ -155,8 +155,7 @@ export default function RegistryApiKeysPanel() {
         ) : null}
         {view.kind === 'no-org' ? (
           <p className="cu-banner cu-banner--warn">
-            This deployment is not bound to a registry org, so there are no org API keys to
-            manage.
+            This deployment is not bound to a registry org, so there are no org API keys to manage.
           </p>
         ) : null}
         {view.kind === 'auth-disabled' ? (
@@ -239,7 +238,13 @@ export default function RegistryApiKeysPanel() {
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}
-      {revealed ? <RevealApiKeyModal apiKey={revealed} onClose={() => setRevealed(null)} /> : null}
+      {revealed ? (
+        <RevealApiKeyModal
+          created={revealed}
+          orgScope={view.kind === 'ready' ? view.org : ''}
+          onClose={() => setRevealed(null)}
+        />
+      ) : null}
       {confirmDialog}
     </section>
   )
