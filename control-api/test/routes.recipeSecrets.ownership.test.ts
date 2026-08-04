@@ -43,7 +43,8 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
   app.use(createAdminSecretsRouter(gateway as never))
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
+      const message = err instanceof Error ? err.message : 'unknown'
+      res.status(500).json({ error: 'Internal Server Error', message })
     }
   )
   return app
@@ -101,7 +102,7 @@ describe('POST /admin/recipe-secrets — ownership', () => {
         ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
       })
       .expect(500)
-    expect(res.body.error).toContain('apiserver unavailable')
+    expect(res.body.message).toContain('apiserver unavailable')
     expect(gateway.createSecret).not.toHaveBeenCalled()
   })
 

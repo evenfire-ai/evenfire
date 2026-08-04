@@ -66,6 +66,8 @@ const TEST_HOST = `cr-e2e-${RUN_ID}`
 const CHANNEL_NAME = `cr-e2e-channel-${RUN_ID}`
 const SECRET_NAME = `cc-${CHANNEL_NAME}-credentials`
 const DEPLOY_NAME = `channel-reader-${TEST_HOST}`
+const CHANNEL_NOCRED_NAME = `cr-e2e-nocred-${RUN_ID}`
+const SECRET_NOCRED_NAME = `cc-${CHANNEL_NOCRED_NAME}-credentials`
 const HOST_NAMESPACE = 'mcp-host'
 const CHANNELS_NAMESPACE = 'channels'
 
@@ -172,7 +174,13 @@ afterAll(() => {
     `delete secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found --timeout=10s`
   )
   kubectlSafe(
+    `delete secret ${SECRET_NOCRED_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found --timeout=10s`
+  )
+  kubectlSafe(
     `delete communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found --timeout=10s`
+  )
+  kubectlSafe(
+    `delete communicationchannel ${CHANNEL_NOCRED_NAME} -n ${CHANNELS_NAMESPACE} --ignore-not-found --timeout=10s`
   )
   kubectlSafe(`delete host ${TEST_HOST} -n ${HOST_NAMESPACE} --ignore-not-found --timeout=10s`)
 })
@@ -238,6 +246,17 @@ describe('channel-reader via control-api', () => {
       `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.hostRef}`
     )
     expect(cc).toBe(TEST_HOST)
+
+    // L6: verify the credentials Secret was created and the CRD references it
+    const secretName = kubectl(
+      `get secret ${SECRET_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.name}`
+    )
+    expect(secretName).toBe(SECRET_NAME)
+
+    const credRef = kubectl(
+      `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
+    )
+    expect(credRef).toBe(SECRET_NAME)
   })
 
   it('PUT /admin/communication-channels/:name updates the CC (rotation of allowed senders)', async () => {
@@ -429,6 +448,60 @@ describe('channel-reader via control-api', () => {
       `get communicationchannel ${CHANNEL_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
     )
     expect(ref).toBe(SECRET_NAME)
+  })
+
+  it('POST without credentials creates a hostRef-only channel (no Secret)', async () => {
+    const { status } = await postJson(
+      `${CONTROL_API_URL}/api/v1/admin/communication-channels`,
+      {
+        metadata: { name: CHANNEL_NOCRED_NAME },
+        spec: {
+          hostRef: TEST_HOST,
+          telegram: [
+            {
+              channelId: '516801778',
+              chatType: 'private',
+              userIds: ['516801778'],
+            },
+          ],
+        },
+      },
+      adminSessionHeader(adminToken)
+    )
+    expect([200, 201]).toContain(status)
+
+    const cc = kubectl(
+      `get communicationchannel ${CHANNEL_NOCRED_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.hostRef}`
+    )
+    expect(cc).toBe(TEST_HOST)
+
+    const credRef = kubectlSafe(
+      `get communicationchannel ${CHANNEL_NOCRED_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.spec.credentialsSecretRef.name}`
+    )
+    expect(credRef ?? '').toBe('')
+  })
+
+  it('PUT credentials on a hostRef-only channel returns rotated:false (first-time creation)', async () => {
+    const { status, data } = await putJson<{
+      name: string
+      secretName: string
+      namespace: string
+      rotated: boolean
+    }>(
+      `${CONTROL_API_URL}/api/v1/admin/communication-channels/${encodeURIComponent(CHANNEL_NOCRED_NAME)}/credentials`,
+      { 'telegram-bot-token': TG_BOT_TOKEN },
+      adminSessionHeader(adminToken)
+    )
+    expect(status).toBe(200)
+    expect(data.name).toBe(CHANNEL_NOCRED_NAME)
+    expect(data.secretName).toBe(SECRET_NOCRED_NAME)
+    expect(data.namespace).toBe(CHANNELS_NAMESPACE)
+    expect(data.rotated).toBe(false)
+
+    const secretName = kubectl(
+      `get secret ${SECRET_NOCRED_NAME} -n ${CHANNELS_NAMESPACE} -o jsonpath={.metadata.name}`
+    )
+    expect(secretName).toBe(SECRET_NOCRED_NAME)
   })
 
   it('DELETE /admin/communication-channels/:name removes the credentials Secret', async () => {

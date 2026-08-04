@@ -270,17 +270,7 @@ export async function adminLogin(): Promise<string> {
  * (yellow) rather than silently passing with zero assertions.
  */
 export async function requireControlApiUp(suiteName: string): Promise<boolean> {
-  const up = await isServiceUp(CONTROL_API_URL)
-  if (up) return true
-  const msg = `[${suiteName}] control-api not reachable at ${CONTROL_API_URL}`
-  if (SKIP_IF_UNREACHABLE) {
-    console.log(`${msg} — tests will be skipped (E2E_SKIP_IF_CLUSTER_UNREACHABLE=1)`)
-    return false
-  }
-  throw new Error(
-    `${msg}. This E2E suite requires control-api to be reachable. Run ` +
-      '`make minikube-pf-control-ui` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.'
-  )
+  return requireServiceUp(suiteName, 'control-api', CONTROL_API_URL, 'make minikube-pf-control-ui')
 }
 
 /**
@@ -293,7 +283,8 @@ export async function requireControlApiUp(suiteName: string): Promise<boolean> {
 export async function requireServiceUp(
   suiteName: string,
   serviceName: string,
-  url: string
+  url: string,
+  portForwardHint = 'make minikube-pf-all'
 ): Promise<boolean> {
   const up = await isServiceUp(url)
   if (up) return true
@@ -304,7 +295,7 @@ export async function requireServiceUp(
   }
   throw new Error(
     `${msg}. This E2E suite requires ${serviceName} to be reachable. Run ` +
-      '`make minikube-pf-all` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.'
+      `\`${portForwardHint}\` first, or set E2E_SKIP_IF_CLUSTER_UNREACHABLE=1 to skip.`
   )
 }
 

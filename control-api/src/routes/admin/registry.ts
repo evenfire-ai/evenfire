@@ -9,6 +9,7 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
 import { createKey, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import {
@@ -730,6 +731,8 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     recipeKeys: [...recipeKeys].sort((a, b) => a.localeCompare(b)),
   }
 }
+
+const log = rootLogger.child({ module: 'admin-registry' })
 
 export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
   const router = Router()
@@ -2180,7 +2183,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       authActive = await isRegistryAuthActive()
     } catch (err) {
-      console.error('[REGISTRY] isRegistryAuthActive failed:', err)
+      log.error(
+        {
+          event: 'isRegistryAuthActive_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'registry auth check failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2203,7 +2212,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       orgName = (await resolvePublishScope()).orgName
       if (!orgName) orgName = (await resolvePublishScope({ force: true })).orgName
     } catch (err) {
-      console.error('[REGISTRY] resolvePublishScope failed:', err)
+      log.error(
+        {
+          event: 'resolvePublishScope_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'publish scope resolution failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2291,7 +2306,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       authActive = await isRegistryAuthActive()
     } catch (err) {
-      console.error('[REGISTRY] isRegistryAuthActive failed:', err)
+      log.error(
+        {
+          event: 'isRegistryAuthActive_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'registry auth check failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -2318,7 +2339,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         scope = await resolvePublishScope({ force: true })
       }
     } catch (err) {
-      console.error('[REGISTRY] resolvePublishScope failed:', err)
+      log.error(
+        {
+          event: 'resolvePublishScope_failed',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'publish scope resolution failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }

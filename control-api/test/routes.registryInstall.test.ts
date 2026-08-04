@@ -3171,6 +3171,79 @@ describe('POST /admin/registry/upgrade', () => {
       data: { API_KEY: 'prior-base64' },
     })
   })
+
+  it('strips blocked annotation keys from the rollback snapshot', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      labels: { existing: 'true' },
+      annotations: {
+        'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
+        'custom/safe-key': 'preserved',
+      },
+      data: { API_KEY: 'prior-base64' },
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-secret' },
+      })
+      .expect(409)
+
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    const rollbackReq = updateSecretSpy.mock.calls[1][0] as { annotations?: Record<string, string> }
+    expect(rollbackReq.annotations).toEqual({ 'custom/safe-key': 'preserved' })
+    expect(rollbackReq.annotations).not.toHaveProperty(
+      'kubectl.kubernetes.io/last-applied-configuration'
+    )
+  })
+
+  it('sets annotations to empty object on rollback when the original secret had no annotations', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      labels: { existing: 'true' },
+      data: { API_KEY: 'prior-base64' },
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-secret' },
+      })
+      .expect(409)
+
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    const rollbackReq = updateSecretSpy.mock.calls[1][0] as { annotations?: Record<string, string> }
+    expect(rollbackReq.annotations).toEqual({})
+  })
 })
 
 describe('POST /admin/registry/upgrade — evenfire imagePullSecrets recompute', () => {
