@@ -14,9 +14,7 @@
  */
 import { NextFunction, Request, Response, Router } from 'express'
 import * as fs from 'fs'
-import { importSPKI, jwtVerify } from 'jose'
 import * as path from 'path'
-import { config } from '../config'
 import {
   ArtifactPathError,
   type OpenedArtifactFile,
@@ -26,143 +24,8 @@ import {
 } from './artifactPaths'
 import { getOutputDir } from './internalTools'
 import { ConfigureRequest, ExecuteStepRequest, PluginWorkloadSdkBootstrapRequest } from './types'
+import { requireWorkflowAuth, validateWorkflowBinding, workflowClaims } from './workflowAuth'
 import { WorkflowService } from './workflowService'
-
-// ─── V1 fix: JWT auth middleware for workflow endpoints ──────────────────
-// Workflow tokens are signed by WRC (iss: clerum-wrc, aud: mcp-host) using
-// the WRC private key. This is separate from the general mcp-host auth tokens
-// (iss: control-api) — different signer, different trust boundary.
-
-interface WorkflowTokenClaims {
-  sub: 'wrc' | 'coordinator'
-  recipeName: string
-  recipeNamespace?: string
-  runId?: string
-  artifactName?: string
-  scopes: string[]
-}
-
-// SEC-04 fix: cache the imported SPKI key to avoid per-request PEM parsing.
-// Cache is keyed to PEM value so key rotation (Secret update + Pod restart) is handled.
-let cachedPublicKey: Awaited<ReturnType<typeof importSPKI>> | null = null
-let cachedPem = ''
-
-async function verifyWorkflowToken(token: string): Promise<WorkflowTokenClaims> {
-  const publicKeyPem = config.wrcPublicKey
-  if (!publicKeyPem) throw new Error('WRC public key not configured')
-
-  if (!cachedPublicKey || cachedPem !== publicKeyPem) {
-    cachedPublicKey = await importSPKI(publicKeyPem, 'RS256')
-    cachedPem = publicKeyPem
-  }
-  const { payload } = await jwtVerify(token, cachedPublicKey, {
-    algorithms: ['RS256'],
-    issuer: 'clerum-wrc',
-    audience: 'mcp-host',
-  })
-
-  if (
-    typeof payload.sub !== 'string' ||
-    !Array.isArray(payload['scopes']) ||
-    typeof payload['recipeName'] !== 'string'
-  ) {
-    throw new Error('Invalid workflow token claims')
-  }
-
-  return {
-    sub: payload.sub as 'wrc' | 'coordinator',
-    recipeName: payload['recipeName'] as string,
-    recipeNamespace:
-      typeof payload['recipeNamespace'] === 'string'
-        ? (payload['recipeNamespace'] as string)
-        : undefined,
-    runId: typeof payload['runId'] === 'string' ? (payload['runId'] as string) : undefined,
-    artifactName:
-      typeof payload['artifactName'] === 'string' ? (payload['artifactName'] as string) : undefined,
-    scopes: payload['scopes'] as string[],
-  }
-}
-
-// Supported workflow scopes, all emitted exclusively by WRC (iss: clerum-wrc).
-// The middleware itself is generic — any string is accepted — but this list
-// documents the authoritative vocabulary and lets reviewers grep for callers.
-//
-//   configure       - POST /configure    (sub: wrc,         long-lived Secret)
-//   execute         - POST /execute      (sub: coordinator, per-step token)
-//   mode_read       - GET  /mode         (sub: *,           read-only)
-//   health:read     - GET  /runtime/*    (sub: *,           read-only)
-//   kill_switch:write - POST /kill-switch (sub: wrc)
-//   status_read     - GET  /status       (sub: *)
-//   artifact_read   - GET  /artifacts/:  (sub: wrc, 60s TTL)
-//   artifact_delete - DELETE /artifacts  (sub: wrc,         60s TTL, cleanup)
-function requireWorkflowAuth(requiredScope: string) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!config.enableAuth) {
-      next()
-      return
-    }
-
-    const header = req.headers.authorization
-    if (!header?.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'Missing workflow auth token' })
-      return
-    }
-
-    verifyWorkflowToken(header.slice(7))
-      .then(claims => {
-        if (!claims.scopes.includes(requiredScope)) {
-          res.status(403).json({ error: `Missing scope: ${requiredScope}` })
-          return
-        }
-        ;(req as Request & { workflowClaims: WorkflowTokenClaims }).workflowClaims = claims
-        next()
-      })
-      .catch(() => {
-        res.status(401).json({ error: 'Invalid workflow token' })
-      })
-  }
-}
-
-function workflowClaims(req: Request): WorkflowTokenClaims | undefined {
-  return (req as Request & { workflowClaims?: WorkflowTokenClaims }).workflowClaims
-}
-
-function validateWorkflowBinding(
-  req: Request,
-  res: Response,
-  options: { expectedSub?: WorkflowTokenClaims['sub'] } = {}
-): WorkflowTokenClaims | null {
-  if (!config.enableAuth) return workflowClaims(req) ?? ({} as WorkflowTokenClaims)
-
-  const claims = workflowClaims(req)
-  const expectedRecipe = process.env.CLERUM_WORKFLOW_RECIPE ?? ''
-  const expectedNamespace = process.env.CLERUM_WORKFLOW_NAMESPACE ?? ''
-  if (!claims) {
-    res.status(401).json({ error: 'Missing workflow auth token' })
-    return null
-  }
-  if (!expectedRecipe) {
-    res.status(500).json({ error: 'Workflow recipe not configured' })
-    return null
-  }
-  if (!expectedNamespace) {
-    res.status(500).json({ error: 'Workflow namespace not configured' })
-    return null
-  }
-  if (options.expectedSub && claims.sub !== options.expectedSub) {
-    res.status(403).json({ error: `Endpoint requires sub: ${options.expectedSub}` })
-    return null
-  }
-  if (claims.recipeName !== expectedRecipe) {
-    res.status(403).json({ error: 'recipeName mismatch' })
-    return null
-  }
-  if (claims.recipeNamespace !== expectedNamespace) {
-    res.status(403).json({ error: 'recipeNamespace mismatch' })
-    return null
-  }
-  return claims
-}
 
 const EXECUTE_HEARTBEAT_MS = 15_000
 const WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS = 60_000

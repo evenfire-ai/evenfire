@@ -4,10 +4,12 @@ import {
   consumePeriodQuota,
   deleteGrant,
   failStaleInvocations,
+  finalizePluginWorkloadSdkRevocation,
   getPluginWorkloadSdkLegacyGrantInventory,
   redeemPluginWorkloadSdkCredentialTicketJti,
   registerPluginWorkloadSdkCredentialTicketJti,
   resolveRecipientProfiles,
+  revokePluginWorkloadSdkForRecipe,
   updateInvocationStatus,
   upsertGrant,
 } from '../src/services/pluginWorkloadSdkDb.js'
@@ -550,5 +552,92 @@ describe('Plugin Workload SDK governed permission events', () => {
       }),
       expect.objectContaining({ action: 'revoke', subject: { kind: 'user', id: U1 } }),
     ])
+  })
+})
+
+describe('Plugin Workload SDK internal revocation audit actor', () => {
+  const REVOCATION_ID = '55555555-5555-4555-8555-555555555555'
+  const internalPrincipal = {
+    kind: 'wrc_internal_control',
+    sourceService: 'workflow-recipes',
+    serviceSub: 'wrc-provisioner',
+    credentialId: 'wrc-revocation-jti',
+    allowedKinds: ['linked_outcome', 'service_action'],
+  } as const
+  const actor = { operatorSub: 'wrc-provisioner', internalPrincipal }
+
+  beforeEach(() => {
+    vi.mocked(pool.query).mockReset()
+    permissionEvents.append.mockReset()
+    permissionEvents.append.mockResolvedValue('operation-id')
+  })
+
+  it('forwards the WRC principal through the transactional revoke audit', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            capability_family: 'promptBridge',
+            policy_state: 'active',
+            revocation_id: null,
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+    await expect(
+      revokePluginWorkloadSdkForRecipe('sandbox-recipes', 'sdk-recipe', actor)
+    ).resolves.toMatchObject({ state: 'revoking', revoked: 1 })
+    expect(permissionEvents.append).toHaveBeenCalledWith(
+      expect.objectContaining({ query: pool.query }),
+      expect.objectContaining({
+        operatorSub: 'wrc-provisioner',
+        internalPrincipal,
+        changes: [expect.objectContaining({ status: 'revoking' })],
+      })
+    )
+  })
+
+  it('forwards the same WRC principal when finalizing the fenced epoch', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            capability_family: 'promptBridge',
+            policy_state: 'revoking',
+            revocation_id: REVOCATION_ID,
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            capability_family: 'promptBridge',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+
+    await expect(
+      finalizePluginWorkloadSdkRevocation('sandbox-recipes', 'sdk-recipe', REVOCATION_ID, actor)
+    ).resolves.toMatchObject({ state: 'disabled', disabled: 1 })
+    expect(permissionEvents.append).toHaveBeenCalledWith(
+      expect.objectContaining({ query: pool.query }),
+      expect.objectContaining({
+        operatorSub: 'wrc-provisioner',
+        internalPrincipal,
+        changes: [expect.objectContaining({ status: 'disabled' })],
+      })
+    )
   })
 })

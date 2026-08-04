@@ -2362,6 +2362,14 @@ export class WorkflowRecipeReconciler {
         : undefined
       sdkOnlyProviderUnavailable = sdkOnlyRuntime?.phase === 'provider_unavailable'
       const sdkOnlyPolicyPending = sdkOnlyRuntime?.phase === 'awaiting_policy'
+      // Defense in depth: an active promptBridge recipe is impossible without
+      // a fresh v2 proof tied to the eager Pod. Keep the recipe in a progress
+      // phase if an adapter regression ever omits it; never publish
+      // active+BootstrapNotReady as a settled state.
+      const sdkOnlyBootstrapPending =
+        sdkOnlyRuntime?.phase === 'active' &&
+        recipe.spec.pluginWorkloadSdk?.promptBridge !== undefined &&
+        sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -2378,9 +2386,10 @@ export class WorkflowRecipeReconciler {
         workloadStatuses.every(ws => ws.ready) &&
         webhookHealthy &&
         sdkOnlyRuntime?.phase !== 'deploying' &&
-        sdkOnlyRuntime?.phase !== 'provider_unavailable'
+        sdkOnlyRuntime?.phase !== 'provider_unavailable' &&
+        !sdkOnlyBootstrapPending
       let finalPhase: RecipePhase
-      if (sdkOnlyRuntime?.phase === 'deploying') {
+      if (sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending) {
         // A level-triggered SDK host must stay in a progress phase until it is
         // Ready so the watcher requeues provider configuration. `degraded`
         // would incorrectly describe a normal first boot as workload failure.
@@ -2403,8 +2412,10 @@ export class WorkflowRecipeReconciler {
           ? sdkOnlyRuntime.message
           : sdkOnlyPolicyPending
             ? sdkOnlyRuntime.message
-            : sdkOnlyRuntime?.phase === 'deploying'
-              ? sdkOnlyRuntime.message
+            : sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending
+              ? sdkOnlyBootstrapPending
+                ? 'Plugin Workload SDK bootstrap identity proof pending'
+                : sdkOnlyRuntime.message
               : !allReady && !webhookHealthy
                 ? (webhookOutcome.message ?? 'Webhook gateway not ready')
                 : allReady
@@ -2430,7 +2441,8 @@ export class WorkflowRecipeReconciler {
           deniedTeardownFailed ||
           sdkOnlyRuntime?.phase === 'deploying' ||
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
-          sdkOnlyPolicyPending
+          sdkOnlyPolicyPending ||
+          sdkOnlyBootstrapPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
         requeueFixedInterval: sdkOnlyPolicyPending,

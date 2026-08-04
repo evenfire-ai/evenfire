@@ -259,6 +259,15 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'active',
       message: 'Plugin Workload SDK mcp-host registered',
+      pluginWorkloadSdkBootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'sdk-pod-uid',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyReady: true,
+        verifiedAt: '2026-08-04T00:00:00.000Z',
+      },
     })
     const workflowReconcile = vi.fn()
     ;(
@@ -297,6 +306,44 @@ describe('WorkflowRecipeReconciler', () => {
       recipe.spec
     )
     expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('never settles promptBridge active when the SDK adapter omits bootstrap proof', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Plugin Workload SDK mcp-host registered',
+    })
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+      })
+    )
+
+    expect(result).toMatchObject({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK bootstrap identity proof pending',
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
   })
 
   it('keeps an SDK-only recipe deploying and requeues while the eager host boots', async () => {

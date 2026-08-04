@@ -7,7 +7,6 @@
  * - Model/provider can be swapped per-step without restart
  * - SOUL content can be overridden per-step, reverted after execution
  */
-import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import { BudgetClient } from '../budget/budgetClient'
 import type { BudgetVerdict } from '../budget/types'
 import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
@@ -17,6 +16,7 @@ import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import { configurePluginWorkloadSdkBootstrapIdentity } from '../pluginWorkloadSdk/bootstrapIdentity'
 import type { PluginWorkloadSdkBootstrapProof } from '../pluginWorkloadSdk/promptBridge/controlApiClient'
 import type { ApiKeys } from '../types'
 import { type LlmUsageEvent, type UsageReporter, newRequestId } from '../usage/usageReporter'
@@ -366,47 +366,14 @@ export class WorkflowService {
   async configurePluginWorkloadSdkBootstrap(
     req?: PluginWorkloadSdkBootstrapRequest
   ): Promise<ConfigureResponse> {
-    if (!req?.provider) {
-      return { configured: false, message: 'provider is required' }
-    }
-    if (!isLlmProvider(req.provider)) {
-      return { configured: false, message: `Unknown provider: ${req.provider}` }
-    }
-    const model = typeof req.model === 'string' ? req.model.trim() : ''
-    if (!isRunnableLlmModelId(model)) {
-      return { configured: false, message: 'model is required and has an invalid format' }
-    }
-    const proof = this.verifyPluginWorkloadSdkBootstrapV2
-      ? await this.verifyPluginWorkloadSdkBootstrapV2(req.provider, model)
-      : null
-    if (this.verifyPluginWorkloadSdkBootstrapV2 && !proof) {
-      return {
-        configured: false,
-        ready: false,
-        contractVersion: 2,
-        message: 'Plugin Workload SDK identity bootstrap contract is not ready',
-      }
-    }
-    this.onPluginWorkloadSdkBootstrapConfigured?.({
-      provider: req.provider as import('../types').ModelConfig['provider'],
-      defaultModel: model,
-    })
-    return {
-      configured: true,
-      ready: true,
-      provider: req.provider,
-      model,
-      contractVersion: 2,
-      ...(proof ? { policyReady: proof.policyReady, policyState: proof.policyState } : {}),
-      ...(proof?.policyReason ? { policyReason: proof.policyReason } : {}),
-      ...(proof?.policyRevision !== undefined ? { policyRevision: proof.policyRevision } : {}),
-      ...(proof?.policyHash !== undefined ? { policyHash: proof.policyHash } : {}),
-      ...(proof?.defaultTargetRef !== undefined
-        ? { defaultTargetRef: proof.defaultTargetRef }
+    return configurePluginWorkloadSdkBootstrapIdentity(req, {
+      ...(this.onPluginWorkloadSdkBootstrapConfigured
+        ? { onConfigured: this.onPluginWorkloadSdkBootstrapConfigured }
         : {}),
-      ...(proof?.defaultProvider !== undefined ? { defaultProvider: proof.defaultProvider } : {}),
-      ...(proof?.defaultModel !== undefined ? { defaultModel: proof.defaultModel } : {}),
-    }
+      ...(this.verifyPluginWorkloadSdkBootstrapV2
+        ? { verify: this.verifyPluginWorkloadSdkBootstrapV2 }
+        : {}),
+    })
   }
 
   isReady(): boolean {

@@ -568,6 +568,10 @@ export function buildMcpHostPod(
   options: McpHostPodOptions
 ): k8s.V1Pod {
   const mountWorkflowOutput = options.mountWorkflowOutput
+  const runtimeMode = options.pluginWorkloadSdkRuntimeMode ?? 'workflow'
+  if (runtimeMode === 'sdk-only' && options.pluginWorkloadSdkEnabled !== true) {
+    throw new Error('sdk-only mcp-host runtime requires pluginWorkloadSdkEnabled=true')
+  }
   if (mountWorkflowOutput && !workflowOutputClaimName) {
     throw new Error('workflowOutputClaimName is required for workflow mcp-host pods')
   }
@@ -622,7 +626,10 @@ export function buildMcpHostPod(
             capabilities: { drop: ['ALL'] },
           },
           env: [
-            { name: 'CLERUM_WORKFLOW_ENABLED', value: 'true' },
+            {
+              name: 'CLERUM_WORKFLOW_ENABLED',
+              value: runtimeMode === 'workflow' ? 'true' : 'false',
+            },
             { name: 'CLERUM_HOST_NAME', value: `${config.sandboxNamespace}/${recipeName}` },
             { name: 'CLERUM_WORKFLOW_RECIPE', value: recipeName },
             { name: 'CLERUM_WORKFLOW_NAMESPACE', value: config.sandboxNamespace },
@@ -714,7 +721,7 @@ export function buildMcpHostPod(
                   { name: 'PLUGIN_WORKLOAD_SDK_ENABLED', value: 'true' },
                   {
                     name: 'PLUGIN_WORKLOAD_SDK_RUNTIME_MODE',
-                    value: options.pluginWorkloadSdkRuntimeMode ?? 'workflow',
+                    value: runtimeMode,
                   },
                   {
                     name: 'PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR',

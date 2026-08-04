@@ -2,9 +2,11 @@ import { Router } from 'express'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalControlJwt } from '../../middleware/internalControlJwt.js'
 import {
+  type PluginWorkloadSdkRevocationActor,
   finalizePluginWorkloadSdkRevocation,
   revokePluginWorkloadSdkForRecipe,
 } from '../../services/pluginWorkloadSdkDb.js'
+import type { InternalControlClaims } from '../../utils/auth/internalControlToken.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 
 function recipeBinding(body: unknown): { recipeNamespace: string; recipeName: string } | null {
@@ -25,6 +27,19 @@ function revocationId(body: unknown): string | null {
   if (!isPlainObject(body) || typeof body.revocationId !== 'string') return null
   const value = body.revocationId.trim()
   return REVOCATION_ID_RE.test(value) ? value : null
+}
+
+function wrcRevocationActor(claims: InternalControlClaims): PluginWorkloadSdkRevocationActor {
+  return {
+    operatorSub: claims.sub,
+    internalPrincipal: {
+      kind: 'wrc_internal_control',
+      sourceService: 'workflow-recipes',
+      serviceSub: 'wrc-provisioner',
+      credentialId: claims.jti,
+      allowedKinds: ['linked_outcome', 'service_action'],
+    },
+  }
 }
 
 /**
@@ -51,7 +66,7 @@ export function createInternalPluginWorkloadSdkRouter(): Router {
       const result = await revokePluginWorkloadSdkForRecipe(
         binding.recipeNamespace,
         binding.recipeName,
-        internalControl.sub
+        wrcRevocationActor(internalControl)
       )
       res.status(200).json(result)
     })
@@ -76,7 +91,7 @@ export function createInternalPluginWorkloadSdkRouter(): Router {
         binding.recipeNamespace,
         binding.recipeName,
         expectedRevocationId,
-        internalControl.sub
+        wrcRevocationActor(internalControl)
       )
       res.status(result.state === 'conflict' ? 409 : 200).json(result)
     })

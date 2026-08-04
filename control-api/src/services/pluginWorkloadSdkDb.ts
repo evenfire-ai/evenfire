@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../db.js'
+import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
   type ControlApiPermissionChange,
@@ -655,6 +656,11 @@ export interface PluginWorkloadSdkRevocationReceipt {
   disabled?: number
 }
 
+export interface PluginWorkloadSdkRevocationActor {
+  operatorSub: string
+  internalPrincipal: AdministrativeEventSubmitterPrincipalV1
+}
+
 /**
  * Fence every SDK capability for a recipe before its runtime resources are
  * torn down. This is deliberately recipe-scoped and transactional: the
@@ -665,7 +671,7 @@ export interface PluginWorkloadSdkRevocationReceipt {
 export async function revokePluginWorkloadSdkForRecipe(
   recipeNamespace: string,
   recipeName: string,
-  operatorSub: string
+  actor: PluginWorkloadSdkRevocationActor
 ): Promise<PluginWorkloadSdkRevocationReceipt> {
   return withTransaction(async db => {
     const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
@@ -771,7 +777,11 @@ export async function revokePluginWorkloadSdkForRecipe(
         status: 'revoking',
       }))
     if (changes.length > 0) {
-      await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: actor.operatorSub,
+        internalPrincipal: actor.internalPrincipal,
+        changes,
+      })
     }
     return {
       state:
@@ -795,7 +805,7 @@ export async function finalizePluginWorkloadSdkRevocation(
   recipeNamespace: string,
   recipeName: string,
   expectedRevocationId: string,
-  operatorSub: string
+  actor: PluginWorkloadSdkRevocationActor
 ): Promise<PluginWorkloadSdkRevocationReceipt> {
   return withTransaction(async db => {
     const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
@@ -868,7 +878,11 @@ export async function finalizePluginWorkloadSdkRevocation(
       status: 'disabled',
     }))
     if (changes.length > 0) {
-      await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: actor.operatorSub,
+        internalPrincipal: actor.internalPrincipal,
+        changes,
+      })
     }
     return {
       state: 'disabled',
