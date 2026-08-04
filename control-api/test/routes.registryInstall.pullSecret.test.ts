@@ -272,6 +272,27 @@ describe('POST /admin/registry/install-recipe — pull-secret provisioning (self
     }
   })
 
+  it('provisions BEFORE persisting the WorkflowRecipe CRD', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
+    )
+    const { app, gw } = makeInstallApp()
+    // Spy AFTER the fixture context is seeded, so only route writes are recorded.
+    const createResource = vi.spyOn(gw, 'createResource')
+
+    await request(app).post('/admin/registry/install-recipe').send(recipeBody()).expect(201)
+
+    // Ordering is the point: a CRD persisted first would reference a Secret that does not
+    // exist yet, and a provisioning failure after the write leaves it stranded.
+    const recipeWrite = createResource.mock.calls.findIndex(
+      ([plural]) => plural === 'workflowrecipes'
+    )
+    expect(recipeWrite).toBeGreaterThanOrEqual(0)
+    expect(vi.mocked(mintOrgPullCredential).mock.invocationCallOrder[0]).toBeLessThan(
+      createResource.mock.invocationCallOrder[recipeWrite]
+    )
+  })
+
   it('does not provision for a recipe with no platform-registry image', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(
       recipeEntry('ghcr.io/acme/plugin:1.0') as never
@@ -297,6 +318,12 @@ describe('POST /admin/registry/install-recipe — pull-secret provisioning (self
     expect(res.status).toBeGreaterThanOrEqual(500)
     expect(res.body.error).toBe('registry_pull_secret_provision_failed')
     // No WorkflowRecipe may be persisted referencing a credential that does not exist.
-    await expect(gw.getResource('workflowrecipes', 'intel-report', NS)).rejects.toBeTruthy()
+    // Assert on the persisted SET, not on a guessed name: the route derives the CRD name
+    // (`recipe-<entry>-v<version>-<hash>`), so a by-name lookup 404s whether the route
+    // wrote something or nothing — an assertion that cannot fail.
+    const persisted = (await gw.listResource('workflowrecipes', '*')) as Array<{
+      metadata: { name: string }
+    }>
+    expect(persisted.map(r => r.metadata.name)).toEqual([])
   })
 })

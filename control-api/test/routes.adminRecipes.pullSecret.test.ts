@@ -17,7 +17,11 @@ import request from 'supertest'
 import { config } from '../src/config.js'
 import { createAdminRecipesRouter } from '../src/routes/admin/recipes.js'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '../src/routes/admin/registryImagePullSecret.js'
-import { mintOrgPullCredential, resolvePublishScope } from '../src/services/registryClient.js'
+import {
+  RegistryProxyError,
+  mintOrgPullCredential,
+  resolvePublishScope,
+} from '../src/services/registryClient.js'
 import { isRegistryAuthActive } from '../src/services/registryConnectionDb.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -134,6 +138,28 @@ describe('POST /admin/recipes — pull-secret provisioning (self-hosted)', () =>
     })
     await expect(gateway.getResource('workflowrecipes', 'plat', SANDBOX_NS)).rejects.toBeTruthy()
   })
+
+  it('maps a registry rejection to 502 registry_rejected, not a bare 500', async () => {
+    // The mint endpoint 403s when the registry has not been upgraded to support tenant
+    // pull-credential minting, or this deployment lacks `registry:manage-keys`. That is a
+    // deploy-ordering problem the operator can act on — collapsing it into a generic 500
+    // (which is what a plain K8s-error mapping does, since it cannot read
+    // RegistryProxyError.status) makes it look like a control-api bug.
+    vi.mocked(mintOrgPullCredential).mockRejectedValue(
+      new RegistryProxyError(403, { error: 'forbidden' })
+    )
+    const gateway = new MockGateway(MCP_NS)
+
+    const res = await request(makeApp(gateway)).post('/admin/recipes').send(platformRecipe('plat'))
+
+    expect(res.status).toBe(502)
+    expect(res.body).toMatchObject({
+      error: 'registry_pull_secret_provision_failed',
+      reason: 'registry_rejected',
+      upstreamStatus: 403,
+    })
+    await expect(gateway.getResource('workflowrecipes', 'plat', SANDBOX_NS)).rejects.toBeTruthy()
+  })
 })
 
 describe('PUT /admin/recipes/:name — pull-secret provisioning (self-hosted)', () => {
@@ -163,6 +189,20 @@ describe('PUT /admin/recipes/:name — pull-secret provisioning (self-hosted)', 
       }
       expect(secret.type).toBe('kubernetes.io/dockerconfigjson')
     }
+  })
+
+  it('mints NOTHING for a PUT naming a recipe that does not exist', async () => {
+    const gateway = new MockGateway(MCP_NS)
+
+    const res = await request(makeApp(gateway))
+      .put('/admin/recipes/ghost')
+      .send({ spec: platformRecipe('ghost').spec })
+
+    // The mint is rotate-on-call — it revokes the org's previous key. A request that was
+    // always going to 404 must not spend one, or it strands every namespace already
+    // holding a Secret built from the key it just replaced.
+    expect(res.status).toBe(404)
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
   })
 
   it('provisions nothing when the update keeps a third-party image', async () => {

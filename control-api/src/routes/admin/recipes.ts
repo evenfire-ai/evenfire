@@ -1849,22 +1849,25 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         return
       }
       const pendingCredentials = workflowSecretResult.pendingCredentials
-      // Same guard as create: an update is how a recipe FIRST acquires a platform image
-      // (edit the workload's image, keep the name), and the stored CRD is what WRC
-      // reconciles. Provision before the write, never after — a failure must leave the
-      // persisted recipe as it was.
-      if (recipeReferencesPlatformImage(body.spec ?? {})) {
-        try {
-          await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
-        } catch (err) {
-          const mapped = pullSecretErrorResponse(err)
-          res.status(mapped.status).json(mapped.body)
-          return
-        }
-      }
       // Discover the canonical recipe resource and update it in sandbox-recipes.
       try {
         const { ns, resource } = await findRecipeNamespace(req.params.name)
+        // Same guard as create: an update is how a recipe FIRST acquires a platform image
+        // (edit the workload's image, keep the name), and the stored CRD is what WRC
+        // reconciles. Provision AFTER the existence lookup, so a PUT naming a recipe that
+        // does not exist 404s without minting — the mint is rotate-on-call, and it would
+        // revoke the org key every other namespace's Secret is already carrying. And
+        // before the write, never after — a failure must leave the persisted recipe as
+        // it was.
+        if (recipeReferencesPlatformImage(body.spec ?? {})) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (provisionErr) {
+            const mapped = pullSecretErrorResponse(provisionErr)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
         const currentLabels = isPlainObject(resource)
           ? stringLabels(isPlainObject(resource.metadata) ? resource.metadata.labels : undefined)
           : undefined

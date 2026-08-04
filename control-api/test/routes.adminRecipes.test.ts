@@ -1654,6 +1654,26 @@ describe.sequential('routes/admin/recipes', () => {
     ).rejects.toThrow()
   })
 
+  it('POST /admin/recipes/secrets — refuses a pull-secret-shaped payload', async () => {
+    // This route writes `type: Opaque`, and the kubelet honors ONLY
+    // kubernetes.io/dockerconfigjson (or .dockercfg) for image pulls. Storing the key on an
+    // Opaque Secret would be accepted here and then SILENTLY ignored at pull time — an
+    // unexplained ImagePullBackOff long after the 201 that caused it.
+    for (const key of ['.dockerconfigjson', '.dockercfg']) {
+      const res = await request(app)
+        .post('/admin/recipes/secrets')
+        .send({
+          name: 'third-party-pull',
+          ownership: { kind: 'owner-recipe', recipeName: 'snippet-secret-recipe' },
+          stringData: { [key]: '{"auths":{}}' },
+        })
+        .expect(400)
+
+      expect(res.body.error).toMatch(/Kubernetes ignores for image pulls/)
+      await expect(gateway.getSecret('third-party-pull', SANDBOX_NS)).rejects.toThrow()
+    }
+  })
+
   it('POST /admin/recipes/secrets — rejects invalid keys and non-string values', async () => {
     await request(app)
       .post('/admin/recipes/secrets')
