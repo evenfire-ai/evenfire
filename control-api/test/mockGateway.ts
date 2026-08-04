@@ -48,6 +48,11 @@ export class MockGateway {
       type?: string
       labels?: Record<string, string>
       annotations?: Record<string, string>
+      // Server-assigned identity. Real Secrets always carry both; seeding them is optional
+      // so existing tests are unaffected, and only a test that cares about object identity
+      // (e.g. a takeover between two reads of the same name) has to set them.
+      uid?: string
+      resourceVersion?: string
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
@@ -98,6 +103,8 @@ export class MockGateway {
       type?: string
       labels?: Record<string, string>
       annotations?: Record<string, string>
+      uid?: string
+      resourceVersion?: string
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
@@ -109,6 +116,8 @@ export class MockGateway {
       type: options?.type,
       labels: options?.labels,
       annotations: options?.annotations,
+      uid: options?.uid,
+      resourceVersion: options?.resourceVersion,
       data: options?.data,
       stringData: options?.stringData,
     })
@@ -263,6 +272,9 @@ export class MockGateway {
         namespace: entry.namespace,
         labels: entry.labels,
         annotations: entry.annotations,
+        // Only surfaced when seeded, so no existing assertion on this object changes shape.
+        ...(entry.uid !== undefined && { uid: entry.uid }),
+        ...(entry.resourceVersion !== undefined && { resourceVersion: entry.resourceVersion }),
       },
       type: entry.type || 'Opaque',
       data: entry.data,

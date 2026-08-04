@@ -90,12 +90,13 @@ async function readStored(
  * delegates to it), so a test aimed at one namespace's state must settle the others too —
  * an absent sibling alone forces a mint and swamps what the test is about.
  */
-function seedValid(mock: MockGateway, namespaces: string[], key: string): void {
+function seedValid(mock: MockGateway, namespaces: string[], key: string, uid?: string): void {
   for (const ns of namespaces) {
     mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, {
       type: 'kubernetes.io/dockerconfigjson',
       labels: OURS,
       annotations: { [FINGERPRINT_ANNOTATION]: fingerprintOf(key) },
+      ...(uid && { uid }),
       data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, key) },
     })
   }
@@ -677,6 +678,215 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
       false
     )
     expect((await readStored(mock)).blob).toBeTruthy()
+  })
+})
+
+/**
+ * TOCTOU: the pass classifies every namespace ONCE, then acts on that decision later — the
+ * wrong-type delete and the credential write both happen after the classify read.
+ *
+ * The advisory lock does not close this. It serializes control-api replicas against each
+ * other; it says nothing about an operator, another controller, or a `kubectl` replacing the
+ * same name in between. And the reconcile cron re-opens the window on every tick, so it is
+ * not a once-per-install race but a standing one. Invariant 1 ("never write a Secret we do
+ * not own") therefore has to be re-proved immediately before each mutation, against the
+ * OBJECT the pass classified — identity (`metadata.uid`), not just the name.
+ */
+describe('ensureRegistryPullSecrets — ownership taken over between classify and mutate', () => {
+  /**
+   * Simulate an EXTERNAL actor mutating one namespace's Secret in the window that opens the
+   * instant the pass has classified it. The classify read is served from the real store,
+   * and `mutate` runs immediately after — so the takeover lands at the same point in the
+   * sequence whether or not the service re-reads later. (Arming it on a LATER read would
+   * make the test describe the fix instead of the race: with no re-read, the mutation would
+   * slide onto whatever read came next, including the assertions'.)
+   */
+  function takeoverAfterClassify(
+    mock: MockGateway,
+    ns: string,
+    mutate: (mock: MockGateway) => void
+  ): void {
+    const real = mock.getSecret.bind(mock)
+    let fired = false
+    vi.spyOn(mock, 'getSecret').mockImplementation(async (name: string, namespace?: string) => {
+      const result = await real(name, namespace)
+      if (namespace === ns && !fired) {
+        fired = true
+        mutate(mock)
+      }
+      return result
+    })
+  }
+
+  /** What a stranger's Secret looks like: usable, and NOT carrying our ownership marker. */
+  function seedStranger(mock: MockGateway, ns: string, uid: string): void {
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, {
+      type: 'kubernetes.io/dockerconfigjson',
+      uid,
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, 'stranger-key') },
+    })
+  }
+
+  // The wrong-type path is the destructive one: `Secret.type` is immutable, so a broken copy
+  // is DELETED and recreated. Deleting on a stale classification means deleting whatever now
+  // holds that name — here, an external operator's freshly-installed credential.
+  it('does not delete a wrong-typed Secret that a foreign owner replaced after classification', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [SANDBOX, UI], 'efrk_live')
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'Opaque',
+      labels: OURS,
+      uid: 'uid-ours',
+      data: {},
+    })
+    const deleteSpy = vi.spyOn(mock, 'deleteSecret')
+    takeoverAfterClassify(mock, NS, m => seedStranger(m, NS, 'uid-theirs'))
+
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'ownership_changed',
+      status: 409,
+    })
+    expect(deleteSpy).not.toHaveBeenCalledWith(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS)
+    const squatter = await readStored(mock, NS)
+    expect(squatter.labels['clerum.io/managed-by']).toBeUndefined()
+    expect(squatter.blob).toBe(encodeDockercfg(HOST, 'stranger-key'))
+  })
+
+  // Same window, other mutation. `SecretService.updateSecret` re-reads to pick up the latest
+  // `resourceVersion`, which makes it ALWAYS win the write — it proves nothing about the
+  // object still being the one we classified, so the guard has to live here.
+  it('does not overwrite an owned Secret whose UID changed after classification', async () => {
+    const { gateway, mock } = gw()
+    // mcp-server + sandbox-recipes are ours and current; sandbox-ui is absent, so the pass
+    // must mint and rewrite EVERY namespace it owns — including the one changing hands.
+    seedValid(mock, [NS], 'efrk_live', 'uid-ns')
+    seedValid(mock, [SANDBOX], 'efrk_live', 'uid-sandbox')
+    takeoverAfterClassify(mock, SANDBOX, m => {
+      // The marker is copied, so only the uid can prove this is a different object.
+      m.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, SANDBOX, {
+        type: 'kubernetes.io/dockerconfigjson',
+        labels: OURS,
+        uid: 'uid-stranger',
+        annotations: { [FINGERPRINT_ANNOTATION]: fingerprintOf('efrk_live') },
+        data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, 'stranger-key') },
+      })
+    })
+
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'ownership_changed',
+      status: 409,
+    })
+    expect((await readStored(mock, SANDBOX)).blob).toBe(encodeDockercfg(HOST, 'stranger-key'))
+  })
+
+  it('does not overwrite an owned Secret whose ownership label was removed after classification', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [NS], 'efrk_live', 'uid-ns')
+    seedValid(mock, [SANDBOX], 'efrk_live', 'uid-sandbox')
+    // Same object (same uid), but the marker is gone: an external owner adopted the name.
+    takeoverAfterClassify(mock, SANDBOX, m => seedStranger(m, SANDBOX, 'uid-sandbox'))
+
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'ownership_changed',
+      status: 409,
+    })
+    expect((await readStored(mock, SANDBOX)).blob).toBe(encodeDockercfg(HOST, 'stranger-key'))
+  })
+
+  // The benign half of the same race, and the reason the guard cannot just be "refuse if
+  // anything changed": a Secret that vanished under us is not a takeover. The mint has
+  // already revoked whatever key it held, so leaving the namespace empty is the one outcome
+  // that guarantees an ImagePullBackOff.
+  it('creates the Secret when it was deleted externally between classify and write', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [NS], 'efrk_live', 'uid-ns')
+    seedValid(mock, [SANDBOX], 'efrk_live', 'uid-sandbox')
+    // The mock's deleteSecret has no await before its Map.delete, so the effect lands before
+    // the read it precedes.
+    takeoverAfterClassify(mock, NS, m => {
+      void m.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS)
+    })
+
+    const res = await ensureRegistryPullSecrets(gateway, ALL)
+
+    expect(res.get(NS)).toBe('created')
+    const stored = await readStored(mock, NS)
+    expect(stored.labels['clerum.io/managed-by']).toBe('control-api')
+    expect(stored.annotations[FINGERPRINT_ANNOTATION]).toBe(fingerprintOf('efrk_test_key'))
+  })
+
+  it('skips the delete and still recreates when the wrong-typed Secret is already gone', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [SANDBOX, UI], 'efrk_live')
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'Opaque',
+      labels: OURS,
+      uid: 'uid-ours',
+      data: {},
+    })
+    const deleteSpy = vi.spyOn(mock, 'deleteSecret')
+    takeoverAfterClassify(mock, NS, m => {
+      void m.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS)
+    })
+
+    const res = await ensureRegistryPullSecrets(gateway, ALL)
+
+    expect(res.get(NS)).toBe('repaired')
+    // Exactly one delete of this name: the external one the test performed. A second would
+    // be the service deleting on a stale classification.
+    expect(deleteSpy.mock.calls.filter(c => c[1] === NS)).toHaveLength(1)
+    expect((await readStored(mock, NS)).type).toBe('kubernetes.io/dockerconfigjson')
+  })
+
+  // Scoped like every other recorded failure in this service: the pass sweeps the whole
+  // platform set for the mint-once collapse, so a takeover in a namespace this caller never
+  // references must not fail its install — while the Secret still goes untouched.
+  it('fails only the callers that need the taken-over namespace', async () => {
+    const { gateway, mock } = gw()
+    seedValid(mock, [NS], 'efrk_live', 'uid-ns')
+    seedValid(mock, [UI], 'efrk_live', 'uid-ui')
+    const updateSpy = vi.spyOn(mock, 'updateSecret')
+    // sandbox-recipes is absent, so the pass mints and rewrites what it owns.
+    takeoverAfterClassify(mock, UI, m => seedStranger(m, UI, 'uid-theirs'))
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('exists-ours')
+    // Asserted on the WRITE, not on the stored bytes: a post-pass read would itself be the
+    // read the takeover is armed on, and would make this pass for the wrong reason.
+    expect(updateSpy.mock.calls.some(c => (c[0] as { namespace?: string }).namespace === UI)).toBe(
+      false
+    )
+  })
+
+  // This is a narrow compare-and-swap, not an atomic one — the proof read is a separate
+  // request from the mutation. What keeps it worth having is that NOTHING happens between
+  // them, so the window is one round trip rather than the whole pass (read all, mint, write
+  // all). Pin both halves: one extra read per mutating namespace, and it is the last thing
+  // before the mutation.
+  it('re-reads immediately before each mutation, and only then', async () => {
+    const { gateway, mock } = gw()
+    // One of each mutating shape: wrong-typed (delete + create), valid (update), absent
+    // (create — a create is already its own compare-and-swap, it 409s if the name is taken).
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'Opaque',
+      labels: OURS,
+      uid: 'uid-ns',
+      data: {},
+    })
+    seedValid(mock, [SANDBOX], 'efrk_live', 'uid-sandbox')
+    const getSpy = vi.spyOn(mock, 'getSecret')
+    const deleteSpy = vi.spyOn(mock, 'deleteSecret')
+    const updateSpy = vi.spyOn(mock, 'updateSecret')
+
+    await ensureRegistryPullSecrets(gateway, ALL)
+
+    const readsOf = (ns: string) => getSpy.mock.calls.filter(c => c[1] === ns).length
+    expect(readsOf(NS)).toBe(2)
+    expect(readsOf(SANDBOX)).toBe(2)
+    expect(readsOf(UI)).toBe(1)
+    const lastReadOrder = (ns: string) =>
+      Math.max(...getSpy.mock.invocationCallOrder.filter((_, i) => getSpy.mock.calls[i][1] === ns))
+    expect(lastReadOrder(NS)).toBeLessThan(deleteSpy.mock.invocationCallOrder[0])
+    expect(lastReadOrder(SANDBOX)).toBeLessThan(updateSpy.mock.invocationCallOrder[0])
   })
 })
 

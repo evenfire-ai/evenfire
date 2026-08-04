@@ -65,6 +65,18 @@
  * another host) is not serving any pull for this registry, so rotating the org key cannot
  * break a working path through it and it does not block the mint. It is still fatal to a
  * caller that references its namespace — via `foreign_secret_unusable`, per invariant 1.
+ *
+ * Invariant 1 is about a moment, not a name. Ownership is classified once per pass, and the
+ * mutations that follow (the wrong-type delete, the credential write) happen later, with a
+ * mint in between. `withPullSecretLock` does not help: it serializes control-api replicas
+ * against each other, not against an operator, another controller or a `kubectl` replacing
+ * the same NAME — and the reconcile cron reopens that window on every tick rather than once
+ * per install. So every mutation re-proves ownership immediately before it acts, comparing
+ * `metadata.uid` and the ownership marker against what was classified (`recheckOwnership`).
+ * A namespace that changed hands is recorded (`ownership_changed`) and left alone; one that
+ * merely vanished is created, since the mint has already revoked whatever key it held. This
+ * is a narrow compare-and-swap, not an atomic one — the proof read is a separate request —
+ * and the residual is spelled out on `recheckOwnership`.
  */
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
@@ -160,7 +172,21 @@ function dockerconfigMatchesHost(blob: string | undefined, host: string): boolea
   }
 }
 
-interface SecretView {
+/**
+ * Which OBJECT a read saw, as opposed to what was in it.
+ *
+ * `uid` is the only thing that survives a delete-and-recreate of the same name: labels,
+ * annotations and data can all be reproduced by whoever took the name over, and
+ * `resourceVersion` only says "something changed", not "this is a different object". It is
+ * what lets a mutation prove it is acting on the thing `classify` decided about rather than
+ * on whatever now answers to that name (see `recheckOwnership`).
+ */
+interface SecretIdentity {
+  uid: string | undefined
+  resourceVersion: string | undefined
+}
+
+interface SecretView extends SecretIdentity {
   labels: Record<string, string>
   annotations: Record<string, string>
   type: string | undefined
@@ -169,13 +195,20 @@ interface SecretView {
 
 function readSecret(raw: unknown): SecretView {
   const s = (raw ?? {}) as {
-    metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+    metadata?: {
+      labels?: Record<string, string>
+      annotations?: Record<string, string>
+      uid?: string
+      resourceVersion?: string
+    }
     type?: string
     data?: Record<string, string>
   }
   return {
     labels: s.metadata?.labels ?? {},
     annotations: s.metadata?.annotations ?? {},
+    uid: s.metadata?.uid,
+    resourceVersion: s.metadata?.resourceVersion,
     type: s.type,
     dockerconfig: s.data?.[DOCKERCONFIG_KEY],
   }
@@ -249,15 +282,19 @@ const inflight = new Map<string, Promise<EnsurePass>>()
  *              copy (`operator_secret_missing`). Fragments ("it does not exist", "it exists
  *              but …"), because the caller-facing sentence names every missing namespace at
  *              once and only `ensureRegistryPullSecrets` knows which ones the caller needs.
+ * `taken`    — a namespace we OWNED at classify time whose Secret changed hands before we
+ *              could mutate it (`ownership_changed`). Fragments, like `unusable`: the
+ *              caller-facing sentence is assembled by `ensureRegistryPullSecrets`.
  *
- * The three are mutually exclusive by mode: `unusable`/`blocked` come from the
- * provisioning pass, `missing` from the verification pass, and a pass is one or the other.
+ * `missing` is mutually exclusive with the rest by mode: it comes from the verification
+ * pass, the others from the provisioning pass, and a pass is one or the other.
  */
 type EnsurePass = {
   results: Map<string, EnsurePullSecretResult>
   unusable: Map<string, string>
   blocked: Map<string, string>
   missing: Map<string, string>
+  taken: Map<string, string>
 }
 
 /** The platform workload namespaces a pull credential may legitimately be written into. */
@@ -300,7 +337,7 @@ export async function ensureRegistryPullSecrets(
     run = ensureInner(gateway, targets).finally(() => inflight.delete(dedupeKey))
     inflight.set(dedupeKey, run)
   }
-  const { results, unusable, blocked, missing } = await run
+  const { results, unusable, blocked, missing, taken } = await run
 
   // A recorded failure is fatal only to a caller that needs THAT namespace. A pass covers
   // the whole platform set (for the mint-once collapse), so an MCP install must not be
@@ -336,6 +373,22 @@ export async function ensureRegistryPullSecrets(
       throw new PullSecretProvisionError(
         `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}" is externally owned and cannot serve an image pull: ${why}. Fix it in place, or delete it to let control-api manage that namespace. (A well-shaped foreign Secret is accepted even if its key has since been revoked — checking that would take a registry round-trip.)`,
         'foreign_secret_unusable',
+        409
+      )
+    }
+  }
+  // A namespace that changed hands mid-pass. Same scoping as `unusable` — the pass sweeps
+  // the whole platform set, so only a caller that references this namespace may be failed by
+  // it — and after `unusable`, which names a defect that is there to stay: a takeover is a
+  // race, and the retry this message asks for may well find a settled cluster.
+  // Order against `blocked` is not load-bearing: `blocked` is recorded on a path that
+  // returns before anything is mutated, so the two maps are never both populated.
+  for (const ns of required) {
+    const why = taken.get(ns)
+    if (why) {
+      throw new PullSecretProvisionError(
+        `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret in namespace "${ns}" changed hands while this pass was running: ${why}. control-api classified it as its own, then found a different object under that name before writing, so it wrote nothing — it never touches a Secret it does not own. Retry: the next pass classifies what is actually there, so a usable external copy settles into the normal externally-provisioned case and an unusable one comes back as foreign_secret_unusable, naming the concrete defect.`,
+        'ownership_changed',
         409
       )
     }
@@ -379,12 +432,21 @@ export async function ensureRegistryPullSecret(
   return results.get(targetNs) ?? 'skipped'
 }
 
-/** Classification of one namespace's current Secret, decided before anything is minted. */
+/**
+ * Classification of one namespace's current Secret, decided before anything is minted.
+ *
+ * The two states that lead to a MUTATION carry `observed`: the identity of the object the
+ * decision was made about. Everything downstream of `classify` acts on a snapshot — the
+ * mint sits between the read and the write — so a mutation has to be able to say which
+ * object it meant. `foreign` and `absent` carry none: nothing is ever mutated on a foreign
+ * target, and an absent one is created (a create is its own compare-and-swap — it 409s if
+ * the name is taken, which `writeCredential` already handles).
+ */
 type TargetState =
   | { kind: 'foreign'; unusable: string | null }
-  | { kind: 'valid'; fingerprint: string }
+  | { kind: 'valid'; fingerprint: string; observed: SecretIdentity }
   | { kind: 'absent' }
-  | { kind: 'broken'; wrongType: boolean }
+  | { kind: 'broken'; wrongType: boolean; observed: SecretIdentity }
 
 /**
  * Why a Secret we do NOT own cannot serve an image pull, or null when it can.
@@ -416,15 +478,96 @@ function classify(current: SecretView | null, host: string): TargetState {
   if (current.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
     return { kind: 'foreign', unusable: foreignUsabilityProblem(current, host) }
   }
+  const observed: SecretIdentity = {
+    uid: current.uid,
+    resourceVersion: current.resourceVersion,
+  }
   const wrongType = current.type !== DOCKERCONFIG_TYPE
   // Presence alone is not enough: a blob keyed on a previous registry host can never be
   // selected by the kubelet, and a copy with no fingerprint cannot be compared across
   // namespaces.
   const fingerprint = current.annotations[FINGERPRINT_ANNOTATION]
   if (wrongType || !dockerconfigMatchesHost(current.dockerconfig, host) || !fingerprint) {
-    return { kind: 'broken', wrongType }
+    return { kind: 'broken', wrongType, observed }
   }
-  return { kind: 'valid', fingerprint }
+  return { kind: 'valid', fingerprint, observed }
+}
+
+/** What a pre-mutation re-read concluded about the object still sitting under that name. */
+type OwnershipRecheck =
+  | { verdict: 'same' }
+  | { verdict: 'gone' }
+  | { verdict: 'taken'; why: string }
+
+/**
+ * Re-prove, immediately before mutating `ns`, that the Secret there is still the object
+ * `classify` decided about and still carries our ownership marker.
+ *
+ * WHY IT IS NEEDED. Everything after `classify` acts on a snapshot: the wrong-type delete
+ * and the credential write both happen later, with a mint in between. `withPullSecretLock`
+ * does not cover this — it serializes control-api replicas against each other, not against
+ * an operator, another controller or a `kubectl` replacing the same NAME. And
+ * `SecretService.updateSecret` cannot cover it either: it re-reads to pick up the latest
+ * `resourceVersion`, which makes it always WIN the write; it never asks whether it is still
+ * the same object. Without this check, invariant 1 ("never write a Secret we do not own")
+ * only holds for as long as nobody else moves — and the reconcile cron reopens the window
+ * every tick rather than once per install.
+ *
+ * WHAT IT IS. A narrow compare-and-swap, NOT an atomic one: the proof read is a separate
+ * API request from the mutation, so a takeover landing between the two still slips through.
+ * What it buys is the size of the window — one round trip instead of the whole pass (read
+ * all → mint → write all, with a registry call in the middle). Closing it completely means
+ * an `If-Match`-style precondition on the write itself: `metadata.resourceVersion` on the
+ * replace, and `preconditions.uid` on the delete. Both live in `SecretService`, which is
+ * shared with the admin /secrets routes and inter-service token rotation, so changing their
+ * semantics is out of scope here.
+ *
+ * WHAT IT COMPARES. `uid` and the ownership label, per the two ways a name changes hands:
+ *   - `uid` differs ⇒ deleted and recreated. Data, labels and annotations can all be
+ *     reproduced by the new owner; the uid cannot.
+ *   - the marker is gone ⇒ adopted in place by an external owner, and `classify` would now
+ *     call it `foreign`.
+ * `resourceVersion` is deliberately NOT a gate. It changes on any edit, including benign
+ * ones by something that left our marker in place — and refusing there would be worse than
+ * writing: the mint has already revoked the key that copy holds, so declining to overwrite
+ * leaves the namespace on a dead credential. It is carried for the log line, which is where
+ * "still ours, but someone edited it" is worth seeing.
+ *
+ * `uid` is compared only when both reads surfaced one. The API server always sets it; a
+ * caller that cannot see it (an older gateway, a fake) falls back to the ownership label,
+ * which is exactly the evidence `classify` itself used.
+ *
+ * A read failure other than 404 propagates, same as everywhere else here. Before the mint
+ * that aborts the pass having changed nothing; after it, it leaves the remaining namespaces
+ * unwritten — which is the pre-existing behaviour of any post-mint write failure, and the
+ * fingerprint divergence check converges it on the next pass.
+ */
+async function recheckOwnership(
+  gateway: K8sGateway,
+  ns: string,
+  observed: SecretIdentity
+): Promise<OwnershipRecheck> {
+  const now = await readCurrent(gateway, ns)
+  if (!now) return { verdict: 'gone' }
+  if (now.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
+    return {
+      verdict: 'taken',
+      why: `its ${MANAGED_BY_LABEL} label is no longer "${MANAGED_BY_VALUE}", so an external owner has adopted that name`,
+    }
+  }
+  if (observed.uid && now.uid && observed.uid !== now.uid) {
+    return {
+      verdict: 'taken',
+      why: 'it was deleted and recreated by something else (metadata.uid changed), so it is no longer the Secret this pass classified',
+    }
+  }
+  if (observed.resourceVersion && now.resourceVersion !== observed.resourceVersion) {
+    logger.info(
+      { namespace: ns, from: observed.resourceVersion, to: now.resourceVersion },
+      'evenfire-registry-pull Secret was modified between classification and write; still ours, proceeding'
+    )
+  }
+  return { verdict: 'same' }
 }
 
 /**
@@ -454,19 +597,30 @@ async function withPullSecretLock<T>(orgName: string, work: () => Promise<T>): P
   })
 }
 
+/** An empty pass, ready to be recorded into. */
+function newPass(): EnsurePass {
+  return {
+    results: new Map(),
+    unusable: new Map(),
+    blocked: new Map(),
+    missing: new Map(),
+    taken: new Map(),
+  }
+}
+
 async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<EnsurePass> {
-  const out = new Map<string, EnsurePullSecretResult>()
-  const unusable = new Map<string, string>()
-  const blocked = new Map<string, string>()
-  const missing = new Map<string, string>()
+  // One record-and-decide accumulator threaded through the pass, rather than a growing list
+  // of positional Maps: which reason a namespace lands in is the whole output of this
+  // service, and every writer needs to reach more than one of them.
+  const pass = newPass()
 
   // ── Legitimate no-ops ─────────────────────────────────────────────────────
   // No registry host: nothing references it, and there is no host to check a blob
   // against either — the pull secret is not in play at all.
   const host = registryHostFromUrl(config.registryUrl)
   if (!host) {
-    for (const ns of targets) out.set(ns, 'skipped')
-    return { results: out, unusable, blocked, missing }
+    for (const ns of targets) pass.results.set(ns, 'skipped')
+    return pass
   }
   // Managed clusters: the operator owns this Secret; never contend with it — but do check
   // that what the caller is about to reference is actually there.
@@ -509,7 +663,7 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
   // Everything from here — read, classify, mint, write — must be serialized across
   // replicas, not just within this process (see withPullSecretLock).
   return withPullSecretLock(orgName, () =>
-    ensureLocked(gateway, targets, host, orgName as string, out, unusable, blocked, missing)
+    ensureLocked(gateway, targets, host, orgName as string, pass)
   )
 }
 
@@ -536,32 +690,31 @@ async function verifyOperatorProvisioned(
   targets: string[],
   host: string
 ): Promise<EnsurePass> {
-  const out = new Map<string, EnsurePullSecretResult>()
-  const missing = new Map<string, string>()
+  const pass = newPass()
   const platform = new Set(platformWorkloadNamespaces())
   for (const ns of targets) {
     // Provisioning is genuinely not our job on this cluster, so the result stays 'skipped'
     // whichever way the check goes; the verdict travels in `missing`.
-    out.set(ns, 'skipped')
+    pass.results.set(ns, 'skipped')
     if (!platform.has(ns)) continue
     const current = await readCurrent(gateway, ns)
     if (!current) {
-      missing.set(ns, 'it does not exist')
+      pass.missing.set(ns, 'it does not exist')
       continue
     }
     const problem = foreignUsabilityProblem(current, host)
-    if (problem) missing.set(ns, `it exists but ${problem}`)
+    if (problem) pass.missing.set(ns, `it exists but ${problem}`)
   }
   // Deliberately not logged at warn: this runs on every reconcile tick as well as every
   // install, and on a managed cluster an unpopulated namespace is a normal state until
   // something actually asks for it. The caller that asks gets the loud failure.
-  if (missing.size > 0) {
+  if (pass.missing.size > 0) {
     logger.debug(
-      { namespaces: [...missing.keys()] },
+      { namespaces: [...pass.missing.keys()] },
       'managed cluster: no usable operator-provisioned evenfire-registry-pull Secret in these namespaces'
     )
   }
-  return { results: out, unusable: new Map(), blocked: new Map(), missing }
+  return pass
 }
 
 /**
@@ -573,13 +726,12 @@ async function ensureLocked(
   targets: string[],
   host: string,
   orgName: string,
-  out: Map<string, EnsurePullSecretResult>,
-  unusable: Map<string, string>,
-  blocked: Map<string, string>,
-  // Always empty on this path: a namespace with nothing in it is one we PROVISION, not one
-  // we report as missing. It rides along so both passes return the same shape.
-  missing: Map<string, string>
+  // `pass.missing` is always empty on this path: a namespace with nothing in it is one we
+  // PROVISION, not one we report as missing. It rides along so both passes return the same
+  // shape.
+  pass: EnsurePass
 ): Promise<EnsurePass> {
+  const { results: out, unusable, blocked } = pass
   // ── Read + classify every target BEFORE minting anything ──────────────────
   const states = new Map<string, TargetState>()
   for (const ns of targets) {
@@ -612,7 +764,7 @@ async function ensureLocked(
     }
     out.set(ns, 'exists-foreign')
   }
-  if (ours.length === 0) return { results: out, unusable, blocked, missing }
+  if (ours.length === 0) return pass
 
   // A mint is needed when any namespace we own lacks a usable credential, OR when the
   // copies have diverged — divergence means an earlier pass wrote some namespaces and
@@ -626,7 +778,7 @@ async function ensureLocked(
 
   if (!needsMint) {
     for (const ns of ours) out.set(ns, 'exists-ours')
-    return { results: out, unusable, blocked, missing }
+    return pass
   }
 
   // ── All-or-nothing: a USABLE foreign copy anywhere forbids the mint ───────
@@ -671,7 +823,7 @@ async function ensureLocked(
       { external: blocking, unfillable },
       'usable externally-owned evenfire-registry-pull Secret present; refusing to mint (the mint is org-wide and rotate-on-call, so it would revoke the external key) — installs that need the unfillable namespaces will fail'
     )
-    return { results: out, unusable, blocked, missing }
+    return pass
   }
 
   if (diverged) {
@@ -684,35 +836,86 @@ async function ensureLocked(
   // `Secret.type` is immutable, so a wrong-typed Secret must be deleted and recreated.
   // Do every delete BEFORE minting: a delete that fails must not leave us holding a
   // freshly-minted key that has already revoked the credential the cluster was using.
+  //
+  // A delete acts on a name, not on the object we classified, so re-prove ownership first
+  // (`recheckOwnership`). This is the destructive half of the TOCTOU: without it, a Secret
+  // replaced between the classify read and here is deleted on the strength of a decision
+  // made about something that no longer exists — an external operator's credential removed
+  // by a reconcile tick.
   const recreate = new Set<string>()
+  const surrendered = new Set<string>()
   for (const ns of ours) {
     const state = states.get(ns)!
-    if (state.kind === 'broken' && state.wrongType) {
-      await gateway.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)
-      recreate.add(ns)
+    if (state.kind !== 'broken' || !state.wrongType) continue
+    const recheck = await recheckOwnership(gateway, ns, state.observed)
+    if (recheck.verdict === 'taken') {
+      recordTakeover(pass, ns, recheck.why)
+      surrendered.add(ns)
+      continue
     }
+    // 'gone': already deleted by someone else, so there is nothing to delete — but the
+    // namespace still needs the credential, and `recreate` is exactly "create, do not
+    // update" downstream. Falling through to the update path would 404.
+    if (recheck.verdict === 'same') {
+      await gateway.deleteSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)
+    }
+    recreate.add(ns)
   }
+  // Namespaces that changed hands are no longer ours to write. Every caller that references
+  // one fails on `ownership_changed`; the rest of the pass proceeds for the namespaces we
+  // still own, because they need the credential regardless.
+  //
+  // KNOWN RESIDUAL: a copy that turns up here is NOT fed back into the all-or-nothing mint
+  // block above, so if it is a usable foreign Secret the mint below can still revoke the key
+  // sealed in it. Closing that would mean re-classifying the whole set and rebuilding the
+  // `blocked` messages mid-pass, for a window measured in one round trip — and the same
+  // residual already exists for a foreign Secret that appears any time after the classify
+  // read, including on the create-race path in `writeCredential`. What is fixed here is the
+  // part that is unrecoverable: we no longer DELETE or OVERWRITE somebody else's object.
+  const writable = ours.filter(ns => !surrendered.has(ns))
+  if (writable.length === 0) return pass
 
   // ── Mint ONCE, then fan the same credential out to every namespace we own ──
   // Namespaces that were already valid are rewritten too: the mint just revoked the key
   // they were holding.
   const cred = await mintCredential(orgName, host)
-  for (const ns of ours) {
+  for (const ns of writable) {
     const state = states.get(ns)!
     const outcome = await writeCredential(gateway, ns, state, cred, recreate.has(ns), {
       host,
-      unusable,
+      pass,
     })
     out.set(ns, outcome)
   }
 
   auditPullSecret('registry_pull_secret_provisioned', {
-    namespaces: ours,
+    namespaces: writable,
     org: orgName,
     fingerprint: cred.fingerprint,
   })
-  logger.info({ namespaces: ours, orgName }, 'registry pull secret provisioned')
-  return { results: out, unusable, blocked, missing }
+  logger.info({ namespaces: writable, orgName }, 'registry pull secret provisioned')
+  return pass
+}
+
+/**
+ * Record a namespace whose Secret changed hands between classification and mutation.
+ *
+ * Recorded, not thrown, for the same reason `unusable` is: the pass spans the whole platform
+ * set so the mint can be collapsed across callers, and only a caller that actually
+ * references this namespace should be failed by what happens in it.
+ *
+ * The result is `'exists-foreign'` because that is now literally true — someone else owns
+ * that name — and it keeps `results` complete, so a caller that does NOT require this
+ * namespace gets a truthful answer instead of falling through the single-namespace
+ * wrapper's `?? 'skipped'` (which would claim provisioning was never our job).
+ */
+function recordTakeover(pass: EnsurePass, ns: string, why: string): void {
+  pass.taken.set(ns, why)
+  pass.results.set(ns, 'exists-foreign')
+  logger.warn(
+    { namespace: ns, problem: why },
+    'evenfire-registry-pull Secret changed owner between classification and write; leaving it untouched — installs that reference this namespace will fail until the cluster settles'
+  )
 }
 
 /** Write `cred` into one namespace, choosing create/update/recreate from its prior state. */
@@ -722,9 +925,9 @@ async function writeCredential(
   state: TargetState,
   cred: MintedCredential,
   alreadyDeleted: boolean,
-  // The pass's `unusable` map, so a foreign Secret discovered on the race path below is
-  // recorded exactly as one discovered by `classify` would be — see the comment there.
-  pass: { host: string; unusable: Map<string, string> }
+  // The whole pass, so a foreign Secret discovered on either race path below is recorded
+  // exactly as one discovered by `classify` would be — see the comments there.
+  ctx: { host: string; pass: EnsurePass }
 ): Promise<EnsurePullSecretResult> {
   // Wrong-typed Secrets were deleted before the mint (see ensureInner), so they are now
   // absent and must be created, not updated.
@@ -758,9 +961,9 @@ async function writeCredential(
         // this namespace the same verdict the classify path would: a foreign Secret the
         // kubelet will ignore must fail the callers that reference it, not sail past them
         // and leave a CRD pointing at a credential no pod can use.
-        const problem = foreignUsabilityProblem(winner, pass.host)
+        const problem = foreignUsabilityProblem(winner, ctx.host)
         if (problem) {
-          pass.unusable.set(ns, problem)
+          ctx.pass.unusable.set(ns, problem)
           logger.warn(
             { namespace: ns, problem },
             'lost the create race to an externally-owned evenfire-registry-pull Secret that cannot serve an image pull; leaving it untouched — installs that reference this namespace will fail until it is fixed or removed'
@@ -768,9 +971,35 @@ async function writeCredential(
         }
         return 'exists-foreign'
       }
+      // Read-then-write with no gap: `winner` was read immediately above, and the ownership
+      // check on it is this path's compare-and-swap. Nothing more can be proved here — the
+      // object had no prior classification to compare against, it did not exist yet.
       await gateway.updateSecret(buildSecretReq(ns, cred))
       return 'created'
     }
+  }
+  if (state.kind === 'foreign') {
+    // Unreachable: foreign targets are filtered out of `ours` before the write loop. Kept as
+    // a typed dead end rather than a cast, so a future caller that forgets the filter cannot
+    // turn invariant 1 into a runtime accident.
+    return 'exists-foreign'
+  }
+  // The update path. `SecretService.updateSecret` re-reads to pick up the latest
+  // `resourceVersion` and therefore ALWAYS wins the write — it proves the object is current,
+  // never that it is still ours — so ownership has to be re-proved here, against the object
+  // `classify` decided about. See `recheckOwnership` for what this does and does not buy.
+  const recheck = await recheckOwnership(gateway, ns, state.observed)
+  if (recheck.verdict === 'taken') {
+    recordTakeover(ctx.pass, ns, recheck.why)
+    return 'exists-foreign'
+  }
+  if (recheck.verdict === 'gone') {
+    // Deleted under us. NOT a takeover — nobody else holds the name — and the mint above has
+    // already revoked whatever key that copy carried, so leaving the namespace empty is the
+    // one outcome guaranteed to ImagePullBackOff. Create, because an update against an
+    // absent Secret 404s.
+    await gateway.createSecret(buildSecretReq(ns, cred))
+    return 'created'
   }
   await gateway.updateSecret(buildSecretReq(ns, cred))
   return state.kind === 'valid' ? 'exists-ours' : 'repaired'
