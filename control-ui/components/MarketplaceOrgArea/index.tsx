@@ -8,6 +8,7 @@ import { MarketplaceOrgImages } from '../MarketplaceOrgImages'
 import { MarketplaceTabs } from '../MarketplaceTabs'
 import { DockerCredentialsPanel } from '../PublisherView/DockerCredentials'
 import { OwnedEntries } from '../PublisherView/OwnedEntries'
+import { RetryBanner } from '../PublisherView/RetryBanner'
 import RegistryApiKeysPanel from '../RegistryApiKeysPanel'
 import RegistryConnectPanel from '../RegistryConnectPanel'
 import { TabBar } from '../TabBar'
@@ -45,7 +46,7 @@ function NotClaimed({ action }: { action: string }) {
  * connection status, so those sub-tabs are always reachable.
  */
 export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
-  const { capability, loading } = useRegistryCapability()
+  const { capability, loading, error, reload } = useRegistryCapability()
   const inbound = useInboundGrants()
 
   const orgName = capability?.orgName ?? null
@@ -90,6 +91,10 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
           {activeTab === 'entries' ? (
             loading ? (
               <p>Loading…</p>
+            ) : error ? (
+              // A transient capability-probe failure must NOT be read as an
+              // unclaimed org — that would falsely prompt a re-claim. Offer Retry.
+              <RetryBanner message="Couldn’t load your organization." onRetry={reload} />
             ) : canManageOrg && orgScope ? (
               <OwnedEntries
                 orgScope={orgScope}
@@ -104,6 +109,8 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
           {activeTab === 'images' ? (
             loading ? (
               <p>Loading…</p>
+            ) : error ? (
+              <RetryBanner message="Couldn’t load your organization." onRetry={reload} />
             ) : canManageOrg && orgScope ? (
               <MarketplaceOrgImages orgScope={orgScope} />
             ) : (

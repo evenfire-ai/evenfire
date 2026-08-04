@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import * as grantsHook from '../../lib/hooks/useInboundGrants'
 import * as capHook from '../../lib/hooks/useRegistryCapability'
 import type {
@@ -89,6 +89,37 @@ describe('MarketplaceOrgArea', () => {
     )
     render(<MarketplaceOrgArea activeTab="images" />)
     expect(screen.getByText('org-images')).toBeInTheDocument()
+  })
+
+  it('entries: shows Retry, not the claim prompt, on a transient capability-probe error', () => {
+    // A failed getPublishScope() probe must not be read as an unclaimed org —
+    // that falsely prompts a re-claim (the "unclaimed latch" bug).
+    const reload = vi.fn()
+    vi.mocked(capHook.useRegistryCapability).mockReturnValue({
+      capability: null,
+      loading: false,
+      error: true,
+      reload,
+    })
+    render(<MarketplaceOrgArea activeTab="entries" />)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText(/Name your organization/i)).toBeNull()
+    expect(screen.queryByText('owned-entries')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('images: shows Retry, not the claim prompt, on a transient capability-probe error', () => {
+    vi.mocked(capHook.useRegistryCapability).mockReturnValue({
+      capability: null,
+      loading: false,
+      error: true,
+      reload: vi.fn(),
+    })
+    render(<MarketplaceOrgArea activeTab="images" />)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText(/Name your organization/i)).toBeNull()
+    expect(screen.queryByText('org-images')).toBeNull()
   })
 
   it('credentials: renders the API keys panel even when publishing is off (§6 decision)', () => {
