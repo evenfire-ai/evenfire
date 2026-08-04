@@ -25,6 +25,14 @@ import {
 import { isRegistryAuthActive } from '../src/services/registryConnectionDb.js'
 import { MockGateway } from './mockGateway.js'
 
+vi.mock('../src/db.js', () => ({
+  // The provisioner takes a cross-process advisory lock; without this the suite reaches a
+  // real Postgres and every test times out. The lock itself is asserted in
+  // registryPullSecretService.test.ts.
+  withTransaction: (work: (db: unknown) => unknown) =>
+    work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+}))
+
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async () => [{ address: '93.184.216.34' }]),
 }))

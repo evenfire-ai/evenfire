@@ -28,6 +28,13 @@ import {
 import { isRegistryAuthActive } from '../src/services/registryConnectionDb.js'
 import { MockGateway } from './mockGateway.js'
 
+vi.mock('../src/db.js', () => ({
+  // The cross-process advisory lock is exercised for real in the integration suite; here
+  // it is a passthrough so the unit tests stay Postgres-free.
+  withTransaction: (work: (db: unknown) => unknown) =>
+    work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+}))
+
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
 }))
@@ -325,5 +332,100 @@ describe('POST /admin/registry/install-recipe — pull-secret provisioning (self
       metadata: { name: string }
     }>
     expect(persisted.map(r => r.metadata.name)).toEqual([])
+  })
+})
+
+describe('POST /admin/registry/upgrade-recipe — pull-secret provisioning (self-hosted)', () => {
+  const PLATFORM_NAMESPACES = ['mcp-server', 'sandbox-recipes', 'sandbox-ui']
+
+  /** An upgrade target whose NEW spec runs `image`. */
+  function upgradeEntry(image: string) {
+    return {
+      id: 'r2',
+      name: 'workflow-template',
+      version: '2.0.0',
+      entry_type: 'recipe',
+      description: 'Workflow template',
+      author: 'acme',
+      recipe_meta: {
+        recipeYaml: JSON.stringify({
+          spec: {
+            description: 'Workflow template',
+            steps: [{ id: 's1', instruction: 'Run step' }],
+            workloads: [{ id: 'w1', type: 'deployment', image }],
+          },
+        }),
+      },
+    }
+  }
+
+  function makeUpgradeApp() {
+    const gw = new MockGateway(NS)
+    gw.createResource(
+      'workflowrecipes',
+      {
+        metadata: { name: 'existing-recipe' },
+        spec: { steps: [{ id: 's1', instruction: 'Run step' }] },
+      },
+      'sandbox-recipes'
+    )
+    return { app: makeApp(gw), gw }
+  }
+
+  function upgradeBody() {
+    return {
+      recipeName: 'existing-recipe',
+      registryEntryName: 'workflow-template',
+      registryEntryVersion: '2.0.0',
+    }
+  }
+
+  it('provisions when an upgrade moves a recipe from a PUBLIC to a PRIVATE image', async () => {
+    // The regression this guards: the pre-existing CRD is public, so nothing was ever
+    // provisioned; the upgrade introduces a platform image. Without a hook here the new
+    // CRD persists, returns 200, and then fails at pull time.
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      upgradeEntry(`${REGISTRY_HOST}/acme/plugin:2.0`) as never
+    )
+    const { app, gw } = makeUpgradeApp()
+
+    await request(app).post('/admin/registry/upgrade-recipe').send(upgradeBody()).expect(200)
+
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    for (const ns of PLATFORM_NAMESPACES) {
+      const secret = (await gw.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)) as {
+        type?: string
+      }
+      expect(secret.type).toBe('kubernetes.io/dockerconfigjson')
+    }
+  })
+
+  it('does not provision when the upgraded recipe stays on a public image', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      upgradeEntry('ghcr.io/acme/plugin:2.0') as never
+    )
+    const { app, gw } = makeUpgradeApp()
+
+    await request(app).post('/admin/registry/upgrade-recipe').send(upgradeBody()).expect(200)
+
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    await expect(
+      gw.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, 'sandbox-recipes')
+    ).rejects.toBeTruthy()
+  })
+
+  it('fails the upgrade loudly when provisioning fails', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      upgradeEntry(`${REGISTRY_HOST}/acme/plugin:2.0`) as never
+    )
+    vi.mocked(mintOrgPullCredential).mockRejectedValueOnce(new Error('registry unavailable'))
+    const { app, gw } = makeUpgradeApp()
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade-recipe').send(upgradeBody())
+    expect(res.status).toBeGreaterThanOrEqual(500)
+    expect(res.body.error).toBe('registry_pull_secret_provision_failed')
+    // The CRD must not be updated to reference a credential that does not exist.
+    expect(updateSpy).not.toHaveBeenCalled()
   })
 })

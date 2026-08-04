@@ -53,6 +53,7 @@
  */
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
+import { withTransaction } from '../db.js'
 import type { K8sGateway } from '../k8s.js'
 import { rootLogger } from '../observability/logger.js'
 import {
@@ -385,6 +386,33 @@ function classify(current: SecretView | null, host: string): TargetState {
   return { kind: 'valid', fingerprint }
 }
 
+/**
+ * Serialize the read->mint->write pass ACROSS PROCESSES.
+ *
+ * The in-process dedupe map only covers one replica, and `replicas: 1` with the default
+ * RollingUpdate means two control-api pods coexist on every deploy. Without this, their
+ * mints interleave: A mints k1, B mints k2 (revoking k1), and whichever writes last leaves
+ * some namespaces holding a revoked key. The fingerprint check makes that self-healing,
+ * but only on the NEXT pass — pulls fail until then.
+ *
+ * `pg_advisory_xact_lock` blocks rather than failing, which is what we want: the second
+ * pod waits, then re-reads and finds a valid, agreeing credential, so it returns
+ * `exists-ours` without minting at all. The lock auto-releases on commit/rollback, so it
+ * cannot leak — the same mechanism the registry uses inside `mintPullKey`, and that
+ * `traceMaintenance` uses for cross-replica dedup.
+ *
+ * The transaction is held across the K8s and registry calls inside `work`. That is
+ * deliberate and bounded: the mint carries a timeout and the K8s calls are few.
+ */
+async function withPullSecretLock<T>(orgName: string, work: () => Promise<T>): Promise<T> {
+  return withTransaction(async db => {
+    await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+      `registry-pull-secret:${orgName}`,
+    ])
+    return work()
+  })
+}
+
 async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<EnsurePass> {
   const out = new Map<string, EnsurePullSecretResult>()
   const unusable = new Map<string, string>()
@@ -430,6 +458,26 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
     )
   }
 
+  // Everything from here — read, classify, mint, write — must be serialized across
+  // replicas, not just within this process (see withPullSecretLock).
+  return withPullSecretLock(orgName, () =>
+    ensureLocked(gateway, targets, host, orgName as string, out, unusable, blocked)
+  )
+}
+
+/**
+ * The read -> classify -> mint -> write pass. Runs while holding the cross-process lock,
+ * so it may assume no other replica is minting for this org concurrently.
+ */
+async function ensureLocked(
+  gateway: K8sGateway,
+  targets: string[],
+  host: string,
+  orgName: string,
+  out: Map<string, EnsurePullSecretResult>,
+  unusable: Map<string, string>,
+  blocked: Map<string, string>
+): Promise<EnsurePass> {
   // ── Read + classify every target BEFORE minting anything ──────────────────
   const states = new Map<string, TargetState>()
   for (const ns of targets) {

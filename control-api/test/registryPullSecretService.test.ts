@@ -12,6 +12,19 @@ import {
 } from '../src/services/registryPullSecretService.js'
 import { MockGateway } from './mockGateway.js'
 
+// Records every SQL the service issues, so the cross-process advisory lock is asserted
+// rather than mocked into invisibility. Passthrough otherwise, to stay Postgres-free.
+const dbCalls = vi.hoisted(() => ({ queries: [] as Array<{ text: string; values?: unknown[] }> }))
+vi.mock('../src/db.js', () => ({
+  withTransaction: (work: (db: unknown) => unknown) =>
+    work({
+      query: async (text: string, values?: unknown[]) => {
+        dbCalls.queries.push({ text, values })
+        return { rows: [], rowCount: 0 }
+      },
+    }),
+}))
+
 vi.mock('../src/services/registryConnectionDb.js', () => ({
   isRegistryAuthActive: vi.fn(),
 }))
@@ -100,6 +113,7 @@ let savedUrl: string
 
 beforeEach(() => {
   vi.clearAllMocks()
+  dbCalls.queries.length = 0
   savedMode = config.registryConnectionMode
   savedUrl = config.registryUrl
   config.registryConnectionMode = 'self-hosted'
@@ -694,5 +708,28 @@ describe('ensureRegistryPullSecrets — fan-out across platform namespaces', () 
     expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
     const seen = await Promise.all(ALL.map(ns => blobIn(mock, ns)))
     expect(new Set(seen.map(s => s.fingerprint))).toEqual(new Set([fingerprintOf('efrk_test_key')]))
+  })
+})
+
+describe('ensureRegistryPullSecrets — cross-process serialization', () => {
+  it('takes a per-org advisory lock BEFORE minting', async () => {
+    const { gateway } = gw()
+    await ensureRegistryPullSecrets(gateway, ALL)
+
+    // Two replicas coexist on every RollingUpdate; without this lock their mints
+    // interleave and some namespaces end up holding a revoked key.
+    const lock = dbCalls.queries.find(q => q.text.includes('pg_advisory_xact_lock'))
+    expect(lock).toBeDefined()
+    expect(lock?.values?.[0]).toBe('registry-pull-secret:acme')
+    // An xact lock auto-releases on commit, so there is no explicit unlock to leak.
+    expect(dbCalls.queries.some(q => q.text.includes('pg_advisory_unlock'))).toBe(false)
+  })
+
+  it('does not reach the lock when the pass is a legitimate no-op', async () => {
+    config.registryConnectionMode = 'managed'
+    const { gateway } = gw()
+    await ensureRegistryPullSecrets(gateway, ALL)
+    // Managed clusters must not touch Postgres (or anything else) on this path.
+    expect(dbCalls.queries).toHaveLength(0)
   })
 })

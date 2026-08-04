@@ -1,10 +1,11 @@
 # Platform image-pull credentials for recipe workloads
 
-**Status:** Implemented in PR #243 — **not approved; five blocking review findings open**
-(§13), four of them P1. The most consequential (§13.1) reverses this document's
-install-time trigger decision: provisioning must become a standing invariant, because a
+**Status:** Implemented in PR #243. Five blocking review findings were raised against it
+(§13); **the four P1s are fixed** — including §13.1, which reversed this document's
+install-time trigger decision (provisioning is now a standing invariant, because a
 `WorkflowRecipe` can be created without control-api while WRC injects the pull-secret
-reference regardless. Two earlier carve-outs also remain recorded in place: WRC injection
+reference regardless). **§13.5 — end-to-end runtime evidence — remains open and is the
+last acceptance gate.** Two earlier carve-outs also remain recorded in place: WRC injection
 is deliberately **not** mode-gated, so the operator contract changes on managed clusters
 too (§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship.
 **Date:** 2026-08-04
@@ -598,7 +599,7 @@ accepted; none is dismissed. **§13.1 is the important one** — it invalidates 
 recorded in §12 and changes the shape of the feature from an install-time side effect into
 a standing cluster invariant.
 
-### 13.1 [P1] Provisioning must be a standing invariant, not an install-time hook
+### 13.1 [P1] ✅ SHIPPED — Provisioning is a standing invariant, not an install-time hook
 
 **The mismatch.** As shipped, the two halves of this feature are triggered by different
 things:
@@ -664,7 +665,7 @@ a credential that does not exist, but the pod still cannot pull, so it trades on
 failure for another. The presence-*surfacing* idea (§12-3 / #243 §7.7 — emit a condition
 instead of a bare `ImagePullBackOff`) is complementary and still worth doing.
 
-### 13.2 [P1] Minting can revoke a valid foreign copy
+### 13.2 [P1] ✅ SHIPPED — Minting can revoke a valid foreign copy
 
 The "never touch a foreign Secret" rule protects the **Secret object**; it does not protect
 the **credential inside it**. `mintPullKey` revokes `WHERE org_id = $1 AND kind = 'pull'`
@@ -685,7 +686,7 @@ actionable error (`foreign_secret_present`: remove it, or provision every namesp
 same way) rather than silently invalidating it. Reading the credential out of a foreign
 Secret and reusing it is explicitly rejected — that is someone else's credential.
 
-### 13.3 [P1] Serialization is per-process only
+### 13.3 [P1] ✅ SHIPPED — Serialization is per-process only
 
 `replicas: 1` in `deploy/base/control-plane/control-api.yaml:15` with no explicit
 `strategy` takes the default `RollingUpdate`, so two pods coexist on every deploy. The
@@ -702,7 +703,7 @@ control-api already has Postgres, so `pg_advisory_lock` is the natural mechanism
 no dependency — mirroring what the registry itself does inside `mintPullKey`. The
 in-process map stays as a cheap first-level dedupe.
 
-### 13.4 [P1] `upgrade-recipe` has no provisioning hook
+### 13.4 [P1] ✅ SHIPPED — `upgrade-recipe` has no provisioning hook
 
 `POST /admin/registry/upgrade-recipe` (`control-api/src/routes/admin/registry.ts:2001`)
 never calls `ensureRegistryPullSecret(s)`. The three existing hooks are at `:1206`
@@ -716,7 +717,7 @@ fails at pull time, with a `200` on the API call.
 install-recipe placement. Fix it explicitly even once §13.1 lands: the reconcile is a
 safety net, not a substitute for failing the request that introduced the problem.
 
-### 13.5 [Acceptance] No end-to-end runtime evidence
+### 13.5 [Acceptance] ⏳ OPEN — No end-to-end runtime evidence
 
 Coverage is unit- and route-level against `MockGateway`. Nothing exercises
 `Secret → WRC → McpServer/HCC → Pod Ready → private image pull`.
@@ -733,7 +734,31 @@ MCP-server plugin, (b) a recipe plugin with a non-transport workload, (c) a reci
 by `kubectl apply` (the §13.1 path), each asserting `Pod Ready` rather than just Secret
 contents.
 
-### 13.6 Sequencing
+### 13.7 As-built
+
+| # | Status | Where |
+| --- | --- | --- |
+| 13.1 | ✅ | `services/registryPullSecretReconcileCron.ts` (boot pass + timer, wired in `main.ts`); interval via `REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS` (default 10 min) |
+| 13.2 | ✅ | `registryPullSecretService.ts` — `foreign_secret_would_be_revoked`, all-or-nothing refusal |
+| 13.3 | ✅ | `withPullSecretLock` — `pg_advisory_xact_lock(hashtext('registry-pull-secret:<org>'))` around read→mint→write |
+| 13.4 | ✅ | `registry.ts` — hook on `upgrade-recipe`, keyed on the INCOMING spec |
+| 13.5 | ⏳ | still open — the only remaining acceptance gate |
+
+Notes worth carrying forward:
+
+- **The reconcile is why 13.3 was not optional.** A periodic loop without the lock does not
+  race occasionally, it fights continuously. The lock blocks rather than fails, so the
+  second replica waits, re-reads, finds an agreeing credential, and returns `exists-ours`
+  without minting — which is the convergence property the whole design wants.
+- **Failure semantics are split as specified**: `ensureRegistryPullSecrets` throws, the
+  install path surfaces that as a 4xx/5xx, and the cron swallows it into a warning and
+  retries. Both directions are mutation-tested (letting the error escape the cron fails 3
+  tests; removing the install-path throw fails the route tests).
+- **The unit suites now mock `../src/db.js`.** The advisory lock made them reach Postgres
+  and hang. The lock itself is still asserted — the mock records the SQL, so a test checks
+  the lock is taken, is keyed on the org, and is taken *before* the mint.
+
+### 13.6 Sequencing (as planned)
 
 ```
 §13.3 lock ──┬──> §13.1 periodic reconcile ──> §13.5 e2e

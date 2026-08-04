@@ -102,6 +102,7 @@ type Config = {
   usageRollupDailyIntervalMs: number
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
+  registryPullSecretReconcileIntervalMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
   userApprovalRequestArchiveCronEnabled: boolean
@@ -598,6 +599,15 @@ export const config: Config = {
   // filter, so a coarse interval (default 60s) is fine.
   budgetReservationSweepIntervalMs: Number(
     process.env.BUDGET_RESERVATION_SWEEP_INTERVAL_MS || 60_000
+  ),
+  // How often to re-assert the platform image-pull credential. This is a standing
+  // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
+  // `deploy_recipe` tool never touches control-api, so the credential has to be there
+  // already. Installs still provision synchronously, so this interval only bounds how long
+  // a CRD created OUTSIDE control-api waits. Coarse (10 min) on purpose — each tick is a
+  // few reads and no mint once the cluster is healthy.
+  registryPullSecretReconcileIntervalMs: Number(
+    process.env.REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS || 600_000
   ),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has

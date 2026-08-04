@@ -2144,6 +2144,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         )
 
+        // Ensure the platform pull credential before the CRD that will reference it.
+        // Keyed on the INCOMING spec: an upgrade is exactly how a recipe moves from a
+        // public image to a private one, and without this the new CRD persists and then
+        // fails at pull time while the request returns 200.
+        if (recipeReferencesPlatformImage(recipeSpec)) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
         await updateResourceWithConflictRetry(
           gateway,
           'workflowrecipes',
