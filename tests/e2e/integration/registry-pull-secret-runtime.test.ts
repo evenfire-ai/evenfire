@@ -239,7 +239,14 @@ function authHosts(secret: K8sSecret): string[] {
 }
 
 type PodTemplateHolder = {
-  spec?: { template?: { spec?: { imagePullSecrets?: Array<{ name?: string }> } } }
+  spec?: {
+    template?: {
+      spec?: {
+        imagePullSecrets?: Array<{ name?: string }>
+        containers?: Array<{ image?: string }>
+      }
+    }
+  }
   metadata?: { labels?: Record<string, string> }
 }
 
@@ -319,10 +326,12 @@ function podsFor(
   name: string
   ready: boolean
   phase: string
+  images: string[]
 }> {
   const list = kubectlJson<{
     items?: Array<{
       metadata?: { name?: string }
+      spec?: { containers?: Array<{ image?: string }> }
       status?: { phase?: string; containerStatuses?: Array<{ ready?: boolean }> }
     }>
   }>(`get pods -n ${namespace} -l ${labelSelector}`)
@@ -332,6 +341,10 @@ function podsFor(
     ready:
       (p.status?.containerStatuses ?? []).length > 0 &&
       (p.status?.containerStatuses ?? []).every(c => c.ready === true),
+    // The image the kubelet was actually told to run. Readiness alone cannot tell a pod
+    // running the PRIVATE image from one running a public or stale one, so a suite that
+    // asserts only Ready can go green without the pull credential ever mattering.
+    images: (p.spec?.containers ?? []).map(c => c.image ?? ''),
   }))
 }
 
@@ -374,6 +387,31 @@ function unmet(reason: string): void {
  */
 function notApplicable(reason: string): void {
   console.log(`[pull-secret-runtime] ${reason} — not applicable on this cluster, skipping`)
+}
+
+/**
+ * The harness is fine and the test CAN run — but the specific thing it exists to prove is
+ * not provable in this state. Concretely: the node still holds the image, so `IfNotPresent`
+ * short-circuits and the kubelet never presents a credential to the registry.
+ *
+ * This is the subtler sibling of `unmet`, and the more dangerous one. An unwired harness at
+ * least fails visibly at the first assertion; a warm cache lets every assertion pass while
+ * the single claim this suite exists to make — "a private image pulled with the credential
+ * we provisioned" — is quietly not made. A run that stops making it must not be reported as
+ * one that did, so under REQUIRE_CLUSTER this is a failure, not a downgrade.
+ *
+ * Locally it stays a warning: a developer re-running the suite against a warm node is a
+ * normal state, and the log line says plainly that this run proves less.
+ */
+function unprovable(reason: string): void {
+  const msg = `[pull-secret-runtime] ${reason}`
+  if (REQUIRE_CLUSTER) {
+    throw new Error(
+      `${msg}. Refusing to pass: E2E_REQUIRE_CLUSTER/CI is set, and this run would otherwise ` +
+        `report success without ever exercising the pull credential.`
+    )
+  }
+  console.log(`${msg} — this run does NOT prove the private pull`)
 }
 
 // ─── Setup / teardown ───────────────────────────────────────────────────────
@@ -730,8 +768,8 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
       5_000
     )
     if (free === null) {
-      console.log(
-        `[pull-secret-runtime] ${mcpImage} is still held by a running container (or the node is unreachable) — cannot cold-start the node`
+      unprovable(
+        `${mcpImage} is still held by a running container (or the node is unreachable) — cannot cold-start the node`
       )
       return
     }
@@ -740,7 +778,7 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
     const remaining = nodeExec(`docker images -q ${mcpImage}`)
     nodeWasCold = !remaining
     if (!nodeWasCold) {
-      console.log(`[pull-secret-runtime] failed to evict ${mcpImage} from the node docker cache`)
+      unprovable(`failed to evict ${mcpImage} from the node docker cache`)
     }
   }, 120_000)
 
@@ -790,9 +828,16 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
       (dep!.spec?.template?.spec?.imagePullSecrets ?? []).map(r => r.name),
       'HCC dropped the pull-secret reference'
     ).toContain(PULL_SECRET)
+    // The reference is only meaningful if the workload it rides on is actually the private
+    // image. Without this, a Deployment carrying the pull secret but running some public or
+    // stale image would satisfy every other assertion in this block.
+    expect(
+      (dep!.spec?.template?.spec?.containers ?? []).map(c => c.image),
+      `HCC materialized a Deployment that does not run the private image ${mcpImage}`
+    ).toContain(mcpImage)
   }, 200_000)
 
-  it('the Pod reaches Ready', async () => {
+  it('the Pod reaches Ready, running the private registry image', async () => {
     if (!mcpInstalled || !deploymentName) return
 
     const pods = await waitFor(
@@ -804,22 +849,31 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
     // OWN failure ("no Pulled event …") instead of chain-skipping. A missing credential
     // should surface as two independent failures, not one plus a silent skip.
     const observed = pods ?? podsFor(`app=${MCP_NAME}`, MCP_SERVERS_NS)
-    podName = (observed.find(p => p.ready) ?? observed[0])?.name ?? ''
+    const readyPod = observed.find(p => p.ready) ?? observed[0]
+    podName = readyPod?.name ?? ''
     expect(
       pods,
       `no Ready Pod for McpServer ${MCP_NAME}; last seen ${JSON.stringify(observed)}`
     ).not.toBeNull()
+    // Ready is not the claim — "Ready ON THE PRIVATE IMAGE" is. A pod that came up on a
+    // public or cached image proves the plumbing and nothing about the credential.
+    expect(
+      readyPod?.images ?? [],
+      `the Ready Pod is not running ${mcpImage}; it runs ${JSON.stringify(readyPod?.images ?? [])}`
+    ).toContain(mcpImage)
+    expect(mcpImage.startsWith(registryHost), `${mcpImage} is not on the private registry`).toBe(
+      true
+    )
   }, 300_000)
 
   it('the kubelet performed a REAL authenticated pull, not a cache hit', () => {
     if (!mcpInstalled || !podName) return
     if (!nodeWasCold) {
       // Asserting a genuine pull against a warm node proves nothing: `IfNotPresent` would
-      // short-circuit and the credential would never be exercised. Say so instead of
-      // silently downgrading the assertion.
-      console.log(
-        '[pull-secret-runtime] node was not cold — skipping the genuine-pull assertion (this run does NOT prove the private pull)'
-      )
+      // short-circuit and the credential would never be exercised. Under REQUIRE_CLUSTER
+      // that is a failure — this is the assertion the whole suite is built around, and a
+      // run that skips it must not be counted as one that made it.
+      unprovable('node was not cold, so the kubelet never had to present a credential')
       return
     }
 
