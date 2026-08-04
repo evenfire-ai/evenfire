@@ -969,7 +969,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         }
         if (workflowNeedsInfrastructureReconcile(latest)) {
           await this.eventQueue.enqueue(recipeName, () =>
-            this.handleRecipeEvent('MODIFIED', latest)
+            // Infrastructure retries are timer-driven with an unchanged CRD
+            // generation. Force the full reconcile; otherwise the watcher
+            // classifies this synthetic MODIFIED event as status-only and
+            // returns before re-running the eager SDK bootstrap lane.
+            this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
           )
         }
       } catch (error) {

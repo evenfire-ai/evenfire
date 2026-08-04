@@ -483,6 +483,40 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
+  it('forces timer-driven infrastructure retries past the status-only generation guard', async () => {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    const sdkOnly = makeWorkflowRecipe({
+      metadata: { name: 'sdk-only', namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+        pluginWorkloadSdk: { promptBridge: {} },
+      },
+      status: { phase: 'active' },
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      eventQueue: { enqueue: typeof enqueue }
+      handleRecipeEvent: typeof handleRecipeEvent
+      refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void>
+      stopped: boolean
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[sdkOnly.metadata.name, sdkOnly]])
+    internal.eventQueue = { enqueue }
+    internal.handleRecipeEvent = handleRecipeEvent
+    internal.stopped = false
+
+    await internal.refreshRuntimeCredentialsForInProgressRecipes()
+
+    expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
+      forceReconcile: true,
+    })
+  })
+
   it('keeps reconciling a promptBridge SDK recipe with no run so the eager mcp-host stays configured', () => {
     // phase=active, workflowExecution cleared (eager SDK path) — must still requeue.
     expect(
@@ -609,7 +643,9 @@ describe('runtime credential refresh loop helpers', () => {
 
     expect(refreshInProgressWorkflowRuntimeCredentials).toHaveBeenCalledWith(initializing)
     expect(enqueue).toHaveBeenCalledWith(initializing.metadata.name, expect.any(Function))
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing)
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing, {
+      forceReconcile: true,
+    })
   })
 })
 
