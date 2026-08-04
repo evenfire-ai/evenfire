@@ -690,9 +690,8 @@ minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin se
 	@echo "DB reset complete. First-time admin setup is available again."
 
 .PHONY: minikube-seed-test-data
-minikube-seed-test-data: ## Seed E2E user + agent + context on minikube via admin API (idempotent; default password: changeme123!)
-	@PASS=$${TEST_ADMIN_PASSWORD:-$${ADMIN_PASSWORD:-changeme123!}}; \
-	 CONTEXT=$(MINIKUBE_PROFILE) ADMIN_PASSWORD=$$PASS bash scripts/e2e/seed-e2e-data.sh
+minikube-seed-test-data: ## Seed E2E user + agent + context via canonical-root credentials (local fallback only when unset)
+	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/e2e/seed-e2e-data.sh
 
 .PHONY: minikube-seed-sandbox-ui-test-data
 minikube-seed-sandbox-ui-test-data: ## Seed default sandbox-ui nginx fixture on minikube

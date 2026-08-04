@@ -54,6 +54,14 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
+
 # ─── Config (all overridable) ──────────────────────────────────────────
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
 KC="kubectl --context=${CONTEXT}"
@@ -91,7 +99,7 @@ CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@clerum.io}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" || true)"
 DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 SEED_DESKTOP_LOGIN="${E2E_SEED_DESKTOP_PASSWORDS:-}"
 SEED_PLUGIN_SDK_DEMO_GRANTS="${E2E_SEED_PLUGIN_SDK_DEMO_GRANTS:-}"

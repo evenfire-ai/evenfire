@@ -5,12 +5,18 @@ set -u
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT_DIR/scripts/e2e/e2e-plugin-workload-sdk.sh"
 E2E_LIB="$ROOT_DIR/scripts/e2e/e2e-lib.sh"
+DOTENV_LIB="$ROOT_DIR/scripts/e2e/load-dotenv.sh"
+ADMIN_CREDENTIAL_LIB="$ROOT_DIR/scripts/e2e/admin-credentials.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../e2e/e2e-lib.sh
 source "$E2E_LIB"
+# shellcheck source=../e2e/load-dotenv.sh
+source "$DOTENV_LIB"
+# shellcheck source=../e2e/admin-credentials.sh
+source "$ADMIN_CREDENTIAL_LIB"
 
 FAIL=0
 
@@ -24,10 +30,16 @@ fail() {
 # run cluster operations, while copying the functions here would let the test
 # drift from the behavior it is intended to protect.
 awk '
+  /^is_local_default_operator_context\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}/ { exit }
+' "$SCRIPT" >"$TMP_ROOT/auth-helpers.sh"
+
+awk '
   /^# ─── control-api admin helpers/ { capture = 1 }
   capture && /^# session_curl / { exit }
   capture { print }
-' "$SCRIPT" >"$TMP_ROOT/auth-helpers.sh"
+' "$SCRIPT" >>"$TMP_ROOT/auth-helpers.sh"
 
 # shellcheck source=/dev/null
 source "$TMP_ROOT/auth-helpers.sh"
@@ -149,6 +161,124 @@ if grep -En "kctl exec.*\\\$(E2E_ADMIN_TOKEN|[A-Z_]*ADMIN[A-Z_]*(COOKIE|TOKEN)|s
   fail 'admin session material is passed as a kubectl/node process argument'
 else
   pass 'admin session material is not passed as a kubectl/node process argument'
+fi
+
+assert_admin_resolution_contract() {
+  local main_repo="$TMP_ROOT/main-repo"
+  local worktree="$TMP_ROOT/branch-worktree"
+  local canonical_main_repo
+  local resolved
+
+  git init -q -b main "$main_repo"
+  git -C "$main_repo" config user.name 'E2E Contract Test'
+  git -C "$main_repo" config user.email 'e2e-contract@example.invalid'
+  printf '%s\n' fixture >"$main_repo/tracked.txt"
+  git -C "$main_repo" add tracked.txt
+  git -C "$main_repo" commit -q -m fixture
+  git -C "$main_repo" worktree add -q -b credential-test "$worktree"
+  canonical_main_repo="$(cd "$main_repo" && pwd -P)"
+
+  printf '%s\n' \
+    'ADMIN_PASSWORD=canonical-fixture-value' \
+    'TEST_ADMIN_PASSWORD=canonical-secondary-value' \
+    'E2E_ADMIN_PASSWORD=canonical-e2e-alias-value' \
+    >"$main_repo/.env"
+  printf '%s\n' 'ADMIN_PASSWORD=worktree-decoy-value' >"$worktree/.env"
+
+  if [[ "$(dotenv_canonical_root "$worktree")" == "$canonical_main_repo/.env" ]]; then
+    pass 'worktree resolution prefers the primary checkout .env through git-common-dir'
+  else
+    fail 'worktree resolution did not find the primary checkout .env'
+  fi
+
+  # shellcheck disable=SC2034 # consumed through intentional indirect expansion
+  E2E_ADMIN_PASSWORD='process-e2e-value'
+  # shellcheck disable=SC2034 # consumed through intentional indirect expansion
+  ADMIN_PASSWORD='process-admin-value'
+  # shellcheck disable=SC2034 # consumed through intentional indirect expansion
+  TEST_ADMIN_PASSWORD='process-test-value'
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'canonical-fixture-value' ]]; then
+    pass 'canonical .env wins over every explicit process alias'
+  else
+    fail 'canonical .env did not win over the process environment'
+  fi
+
+  printf '%s\n' 'TEST_ADMIN_PASSWORD=canonical-test-only' >"$main_repo/.env"
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'canonical-test-only' ]]; then
+    pass 'a canonical TEST_ADMIN_PASSWORD wins over an inherited E2E_ADMIN_PASSWORD'
+  else
+    fail 'canonical TEST_ADMIN_PASSWORD was shadowed by a process alias'
+  fi
+
+  rm -f "$main_repo/.env"
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'process-e2e-value' ]]; then
+    pass 'explicit aliases are used when the canonical .env has no admin value'
+  else
+    fail 'explicit alias precedence is incorrect without a canonical value'
+  fi
+
+  unset E2E_ADMIN_PASSWORD
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'process-admin-value' ]]; then
+    pass 'ADMIN_PASSWORD is retained when no higher-precedence value exists'
+  else
+    fail 'ADMIN_PASSWORD was overwritten by a lower-precedence value or fallback'
+  fi
+
+  unset ADMIN_PASSWORD TEST_ADMIN_PASSWORD ADMIN_PASS
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'fallback-value' ]]; then
+    pass 'the local fallback is used only when no configured value exists'
+  else
+    fail 'fallback resolution failed when every configured value was absent'
+  fi
+}
+
+assert_nul_credential_transport() {
+  local result
+  result="$(
+    e2e_write_nul_credentials 'fixture-admin' '007d8-fixture-value!' |
+      node --no-warnings -e '
+        const chunks = []
+        process.stdin.on("data", chunk => chunks.push(Buffer.from(chunk)))
+        process.stdin.on("end", () => {
+          const input = Buffer.concat(chunks)
+          const separator = input.indexOf(0)
+          const secondSeparator = input.indexOf(0, separator + 1)
+          const username = input.subarray(0, separator).toString("utf8")
+          const password = input.subarray(separator + 1).toString("utf8")
+          process.stdout.write(
+            separator > 0 && secondSeparator === -1 &&
+            username === "fixture-admin" && password === "007d8-fixture-value!"
+              ? "ok"
+              : "invalid"
+          )
+        })
+      '
+  )"
+  if [[ "$result" == 'ok' ]]; then
+    pass 'admin login handoff preserves exact credentials with one NUL delimiter'
+  else
+    fail 'admin login handoff corrupted the NUL-delimited credential payload'
+  fi
+}
+
+assert_admin_resolution_contract
+assert_nul_credential_transport
+
+if grep -Fq 'e2e_write_nul_credentials "$admin_username" "$admin_password"' "$SCRIPT"; then
+  pass 'Plugin Workload SDK login uses the shared NUL-safe transport helper'
+else
+  fail 'Plugin Workload SDK login bypasses the shared NUL-safe transport helper'
+fi
+
+if grep -Fq 'ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-changeme123!}"' "$ROOT_DIR/scripts/minikube/full-setup.sh"; then
+  fail 'full-setup still overwrites the canonical admin password with the fallback'
+else
+  pass 'full-setup no longer overwrites a configured admin password'
 fi
 
 if grep -Fq 'E2E_HARD_MAX_GATE_SECONDS=600' "$SCRIPT" &&

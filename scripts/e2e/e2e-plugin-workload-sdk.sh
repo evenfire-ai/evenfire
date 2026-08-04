@@ -23,17 +23,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Resolve the canonical repository environment before sourcing e2e-lib. A
 # secondary worktree normally has no .env of its own; the seeded credentials
 # and provider keys live in the primary checkout. Explicit process values are
-# intentionally preserved, then the test-specific defaults are applied below:
+# loaded for general E2E configuration. Admin credentials use the stricter
+# shared resolver below so the primary checkout remains authoritative:
 #
-#   process environment > canonical root .env > safe test defaults
+#   canonical root .env > process environment > safe local test fallback
 #
 # shellcheck source=scripts/e2e/load-dotenv.sh
 source "${SCRIPT_DIR}/load-dotenv.sh"
-dotenv_load_canonical_root "$(cd "${SCRIPT_DIR}/../.." && pwd)"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
 # shellcheck source=e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
@@ -42,6 +46,20 @@ require_safe_kube_context
 die() {
   printf '%s\n' "Plugin Workload SDK E2E error: $*" >&2
   exit 1
+}
+
+is_local_default_operator_context() {
+  local context=${1:-}
+  if [[ -z "$context" ]]; then
+    context="$(current_e2e_context || true)"
+  fi
+  case "$context" in
+    clerum-test) return 0 ;;
+    clerum-codex-* | clerum-cursor-* | clerum-detached-*)
+      is_branch_scoped_e2e_context "$context"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 RECIPE_NAME="e2e-plugin-workload-sdk"
@@ -106,8 +124,6 @@ fi
 E2E_PROMPT_FALLBACK_TARGET_REF="${E2E_PROMPT_FALLBACK_TARGET_REF:-fallback-${E2E_PROMPT_FALLBACK_PROVIDER}}"
 E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="${E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT:-}"
 E2E_ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-}"
-# Seeded by scripts/e2e/seed-e2e-data.sh (copies ADMIN_PASSWORD into test users).
-E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
 
 load_branch_profile_ports() {
   local ctx="${KUBECONTEXT:-${E2E_K8S_CONTEXT:-}}"
@@ -125,6 +141,15 @@ load_branch_profile_ports() {
   fi
 }
 load_branch_profile_ports
+# The recipe and Desktop fixture users are seeded from this same resolved
+# credential. The known fallback is local-only and is selected only when none
+# of the supported admin variables exists in the canonical .env or process.
+LOCAL_ADMIN_PASSWORD_FALLBACK=""
+if is_local_default_operator_context; then
+  LOCAL_ADMIN_PASSWORD_FALLBACK="$(printf '%s%s' 'changeme123' '!')"
+fi
+RESOLVED_ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" "${LOCAL_ADMIN_PASSWORD_FALLBACK}" || true)"
+E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${RESOLVED_ADMIN_PASSWORD}}"
 E2E_CONTROL_API_URL="${E2E_CONTROL_API_URL:-${CONTROL_API_URL:-${CONTROL_API_BASE_URL:-http://127.0.0.1:8090}}}"
 E2E_EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}}}"
 E2E_RPC_PROXY_URL="${E2E_RPC_PROXY_URL:-${RPC_PROXY_URL:-${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}}}"
@@ -449,28 +474,13 @@ control_api_pod() {
     || ready_pod_name "$CONTROL_NS" "app.kubernetes.io/name=control-api" 2>/dev/null
 }
 
-is_local_default_operator_context() {
-  local context=${1:-}
-  if [[ -z "$context" ]]; then
-    context="$(current_e2e_context || true)"
-  fi
-  case "$context" in
-    clerum-test) return 0 ;;
-    clerum-codex-* | clerum-cursor-* | clerum-detached-*)
-      is_branch_scoped_e2e_context "$context"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
 operator_admin_password() {
-  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
-  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  if [[ -n "${RESOLVED_ADMIN_PASSWORD:-}" ]]; then
+    printf '%s' "${RESOLVED_ADMIN_PASSWORD}"
+    return 0
+  fi
   is_local_default_operator_context || return 1
-  printf '%s%s' 'changeme123' '!'
-  return 0
+  e2e_resolve_admin_password "${REPO_ROOT}" "$(printf '%s%s' 'changeme123' '!')"
 }
 
 ensure_operator_session() {
@@ -485,7 +495,7 @@ ensure_operator_session() {
 
   # NUL-delimited stdin keeps both credentials out of local and remote argv.
   response="$(
-    printf '%s\0%s' "$admin_username" "$admin_password" \
+    e2e_write_nul_credentials "$admin_username" "$admin_password" \
       | kctl exec -i "$pod" -n "$CONTROL_NS" -- node -e '
     const chunks = []
     process.stdin.on("data", chunk => chunks.push(Buffer.from(chunk)))
