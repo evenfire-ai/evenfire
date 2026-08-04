@@ -43,8 +43,10 @@ describe('PublisherView', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: true, error: false })
     )
-    render(<PublisherView activeTab="entries" />)
-    expect(screen.getByText(/loading/i)).toBeInTheDocument()
+    const view = render(<PublisherView activeTab="entries" />)
+    expect(screen.getByRole('status', { name: /loading publisher/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
   })
 
   it('renders unavailable on a curator deploy (fails closed)', () => {

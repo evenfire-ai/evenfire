@@ -46,6 +46,16 @@ beforeEach(() => {
 })
 
 describe('RegistryConnectPanel', () => {
+  it('renders a skeleton while registry connection status loads', () => {
+    vi.mocked(api.getRegistryConnection).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getRegistryConnection>
+    )
+    const view = render(<RegistryConnectPanel />)
+    expect(screen.getByRole('status', { name: /loading registry connection/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('shows the request form when disconnected', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
     render(<RegistryConnectPanel />)

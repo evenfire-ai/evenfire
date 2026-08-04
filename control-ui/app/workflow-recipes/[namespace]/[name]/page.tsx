@@ -13,6 +13,7 @@ import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
 import { GrantsReadonlyPanel, RecipeStatusContent } from '@components/RecipeStatusContent'
+import { SectionLoadingSkeleton } from '@components/SectionLoadingSkeleton'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -787,7 +788,7 @@ function WorkflowRecipeDetailContent() {
           ) : (
             <div className="cu-card">
               <div className="cu-card__body">
-                <span className="cu-muted">Loading recipe…</span>
+                <SectionLoadingSkeleton label="Loading recipe permissions" rows={3} />
               </div>
             </div>
           )

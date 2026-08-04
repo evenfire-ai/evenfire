@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react'
 import { type OwnedRegistryEntry, getOwnedRegistryEntries } from '../../lib/api'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { Button } from '../ui'
@@ -58,7 +59,9 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
     void load()
   }, [load])
 
-  if (loading) return <p>Loading your published entries…</p>
+  if (loading) {
+    return <SectionLoadingSkeleton label="Loading published entries" />
+  }
   if (error) {
     return (
       <RetryBanner message="Could not load your published entries." onRetry={() => void load()} />

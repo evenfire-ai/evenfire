@@ -21,7 +21,20 @@ function AuthGateBoundary({ children }: AuthGateProps) {
     return (
       <main className="cu-app cu-app--auth">
         <div className="cu-card cu-card--auth">
-          <div className="cu-card__body">Loading...</div>
+          <div className="cu-card__body">
+            <div
+              className="profile-skeleton"
+              role="status"
+              aria-label="Loading profile session"
+              aria-busy="true"
+            >
+              <div className="profile-skeleton__row">
+                <span className="profile-skeleton__line profile-skeleton__line--medium" />
+                <span className="profile-skeleton__line" />
+                <span className="profile-skeleton__line profile-skeleton__line--short" />
+              </div>
+            </div>
+          </div>
         </div>
       </main>
     )

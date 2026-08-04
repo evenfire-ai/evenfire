@@ -15,6 +15,7 @@ import {
 import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
 import RevealApiKeyModal from './RevealApiKeyModal'
+import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -147,7 +148,9 @@ export default function RegistryApiKeysPanel() {
       />
 
       <div className="cu-card__body">
-        {view.kind === 'loading' ? <p>Loading…</p> : null}
+        {view.kind === 'loading' ? (
+          <SectionLoadingSkeleton label="Loading registry API keys" />
+        ) : null}
         {view.kind === 'not-owner' ? (
           <p className="cu-banner cu-banner--warn">
             You must be an org owner to manage API keys

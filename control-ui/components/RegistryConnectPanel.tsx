@@ -12,6 +12,7 @@ import {
 } from '../lib/api'
 import { usePublishScope } from '../lib/hooks/usePublishScope'
 import { useConfirmDialog } from './ConfirmDialog'
+import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { Button, TextInput } from './ui'
@@ -344,7 +345,9 @@ export default function RegistryConnectPanel() {
         />
 
         <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading…</p> : null}
+          {view.kind === 'loading' ? (
+            <SectionLoadingSkeleton label="Loading registry connection" rows={3} />
+          ) : null}
 
           {view.kind === 'not-self-hosted' ? (
             <p className="cu-banner">
