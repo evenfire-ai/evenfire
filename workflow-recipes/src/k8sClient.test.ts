@@ -516,6 +516,21 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(true)
   })
 
+  it('keeps reconciling a stepless SDK-only recipe through the full capability lane', () => {
+    expect(
+      workflowNeedsInfrastructureReconcile(
+        makeWorkflowRecipe({
+          spec: {
+            steps: [],
+            workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+            pluginWorkloadSdk: { promptBridge: {} },
+          },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(true)
+  })
+
   it('does NOT keep reconciling a recipe with no Plugin Workload SDK and no run', () => {
     // No pluginWorkloadSdk → no eager mcp-host → no eager-reconcile requeue needed.
     expect(
@@ -624,6 +639,17 @@ describe('workload status refresh loop helpers', () => {
       workflowNeedsWorkloadStatusRefresh(
         makeWorkloadRecipe({
           metadata: { name: 'deleting', namespace: 'sandbox-recipes', deletionTimestamp: 'now' },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(false)
+    expect(
+      workflowNeedsWorkloadStatusRefresh(
+        makeWorkloadRecipe({
+          spec: {
+            steps: [],
+            pluginWorkloadSdk: { promptBridge: {} },
+          },
           status: { phase: 'active' },
         })
       )

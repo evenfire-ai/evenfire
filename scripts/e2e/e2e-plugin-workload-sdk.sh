@@ -916,13 +916,38 @@ fi
 # NetworkPolicy: a pod in a different namespace cannot reach the SDK port.
 mcp_svc="$(kctl get svc -n "$SANDBOX_NS" -l "clerum.io/recipe=${RECIPE_NAME},clerum.io/component=workflow-mcp-host" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 if [ -n "$mcp_svc" ]; then
-  probe_out="$(kctl run "sdk-np-probe-$$" -n default --rm -i --restart=Never \
-    --image=busybox:1.36 --command --timeout=60s -- \
-    sh -c "nc -z -w5 ${mcp_svc}.${SANDBOX_NS}.svc.cluster.local 8099 && echo OPEN || echo BLOCKED" 2>/dev/null || echo BLOCKED)"
-  if printf "%s" "$probe_out" | grep -q BLOCKED; then
+  # Do not use `kubectl run --rm -i` here.  The attached stdin can remain open
+  # after the probe pod exits (notably with a branch-owned Minikube context),
+  # leaving the whole gate blocked in a command substitution.  Create the pod
+  # detached, observe its terminal phase with a hard deadline, then collect
+  # logs and delete it explicitly.  This keeps the gate fail-closed without
+  # weakening the NetworkPolicy assertion.
+  probe_name="sdk-np-probe-$$"
+  probe_deadline=$((SECONDS + 45))
+  probe_phase=""
+  probe_out=""
+  kctl delete pod "$probe_name" -n default --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if kctl run "$probe_name" -n default --restart=Never --image=busybox:1.36 \
+      --request-timeout=15s --command -- \
+      sh -c "nc -z -w5 ${mcp_svc}.${SANDBOX_NS}.svc.cluster.local 8099 && echo OPEN || echo BLOCKED" \
+      >/dev/null 2>&1; then
+    while [ "$SECONDS" -lt "$probe_deadline" ]; do
+      probe_phase="$(kctl get pod "$probe_name" -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      case "$probe_phase" in
+        Succeeded|Failed) break ;;
+      esac
+      sleep 1
+    done
+    probe_out="$(kctl logs "$probe_name" -n default --tail=20 2>/dev/null || true)"
+  else
+    probe_phase="CreateFailed"
+    probe_out=""
+  fi
+  kctl delete pod "$probe_name" -n default --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if [ "$probe_phase" = "Succeeded" ] && printf "%s" "$probe_out" | grep -q BLOCKED; then
     ok "SDK port 8099 is blocked from the 'default' namespace (NetworkPolicy enforced)"
   else
-    fail "SDK port 8099 was reachable cross-namespace — NetworkPolicy not enforcing"
+    fail "SDK cross-namespace NetworkPolicy probe failed (phase=${probe_phase:-Timeout}; output redacted)"
     exit 1
   fi
 else
