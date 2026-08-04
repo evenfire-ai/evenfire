@@ -14,11 +14,12 @@ Use this index for long-form docs.
 
 ## Get started
 
-| Doc                                           | Description                          |
-| --------------------------------------------- | ------------------------------------ |
-| [Quickstart](get-started/quickstart.md)       | Full platform on minikube in minutes |
-| [Learning path](get-started/learning-path.md) | Choose a path by role and goal       |
-| [FAQ](faq.md)                                 | Common questions and troubleshooting |
+| Doc                                                       | Description                                    |
+| --------------------------------------------------------- | ---------------------------------------------- |
+| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube in minutes           |
+| [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster |
+| [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                 |
+| [FAQ](faq.md)                                             | Common questions and troubleshooting           |
 
 ## Concepts
 
