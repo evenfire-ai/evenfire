@@ -215,7 +215,29 @@ test('profile access authorization derives from role or manageable-team access',
   assert.equal(canManageMembersForAccess(null, []), false)
 })
 
-test('profile access errors clear protected data and remain fail-closed', () => {
+test('profile access errors without prior data remain fail-closed', () => {
+  const previous = {
+    approvalTargets: [],
+    approvalTargetsError: false,
+    approvalTargetsLoading: true,
+    manageableTeams: [],
+    manageableTeamsError: false,
+    manageableTeamsLoading: true,
+  }
+
+  assert.deepEqual(profileAccessStateAfterManageableTeamsError(previous), {
+    ...previous,
+    manageableTeamsError: true,
+    manageableTeamsLoading: false,
+  })
+  assert.deepEqual(profileAccessStateAfterApprovalTargetsError(previous), {
+    ...previous,
+    approvalTargetsError: true,
+    approvalTargetsLoading: false,
+  })
+})
+
+test('profile access refresh errors preserve known access data', () => {
   const previous = {
     approvalTargets: [target('target-1')],
     approvalTargetsError: false,
@@ -227,14 +249,38 @@ test('profile access errors clear protected data and remain fail-closed', () => 
 
   assert.deepEqual(profileAccessStateAfterManageableTeamsError(previous), {
     ...previous,
-    manageableTeams: [],
     manageableTeamsError: true,
     manageableTeamsLoading: false,
   })
+  assert.equal(
+    canManageMembersForAccess(
+      'member',
+      profileAccessStateAfterManageableTeamsError(previous).manageableTeams
+    ),
+    true
+  )
   assert.deepEqual(profileAccessStateAfterApprovalTargetsError(previous), {
     ...previous,
-    approvalTargets: [],
     approvalTargetsError: true,
     approvalTargetsLoading: false,
   })
+})
+
+test('profile access user changes clear previously preserved error-state access', () => {
+  const previous = {
+    approvalTargets: [target('target-1')],
+    approvalTargetsError: false,
+    approvalTargetsLoading: false,
+    manageableTeams: [team('team-1')],
+    manageableTeamsError: false,
+    manageableTeamsLoading: false,
+  }
+  const errored = profileAccessStateAfterManageableTeamsError(previous)
+
+  assert.deepEqual(errored.manageableTeams, [team('team-1')])
+  const nextUser = profileAccessStateForUser('user-2')
+  assert.deepEqual(nextUser.manageableTeams, [])
+  assert.equal(nextUser.manageableTeamsLoading, true)
+  assert.deepEqual(nextUser.approvalTargets, [])
+  assert.equal(nextUser.approvalTargetsLoading, true)
 })

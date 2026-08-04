@@ -46,7 +46,6 @@ export function profileAccessStateAfterManageableTeamsError(
 ): ProfileAccessDataState {
   return {
     ...previous,
-    manageableTeams: [],
     manageableTeamsError: true,
     manageableTeamsLoading: false,
   }
@@ -57,7 +56,6 @@ export function profileAccessStateAfterApprovalTargetsError(
 ): ProfileAccessDataState {
   return {
     ...previous,
-    approvalTargets: [],
     approvalTargetsError: true,
     approvalTargetsLoading: false,
   }
