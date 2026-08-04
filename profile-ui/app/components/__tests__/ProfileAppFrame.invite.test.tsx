@@ -2,6 +2,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import type { AuthState } from '@components/AuthContext/types'
 import { ProfileAppFrame } from '@components/ProfileAppFrame'
 import Page from '../../page'
 
@@ -11,19 +12,31 @@ const navigationState = vi.hoisted(() => ({
   replace: vi.fn(),
 }))
 
-const authState = vi.hoisted(() => ({
-  isLoggedIn: true,
-  isLoading: false,
-  me: {
-    id: 'user-1',
-    email: 'admin@example.com',
-    name: 'Ada Admin',
-    role: 'admin',
-    profile: {
-      displayName: 'Ada Admin',
+const authState = vi.hoisted(
+  (): AuthState => ({
+    isLoggedIn: true,
+    isLoading: false,
+    me: {
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Ada Admin',
+      role: 'admin',
+      teamId: 'team-1',
+      teamName: 'Core Team',
+      profile: {
+        displayName: 'Ada Admin',
+        channels: {
+          emails: [],
+          telegramHandles: [],
+          slackUserNames: [],
+          telegramIds: [],
+          discordUserNames: [],
+          whatsappNumbers: [],
+        },
+      },
     },
-  },
-}))
+  })
+)
 
 vi.mock('next/navigation', () => ({
   usePathname: () => navigationState.pathname,
@@ -82,8 +95,18 @@ beforeEach(() => {
     email: 'admin@example.com',
     name: 'Ada Admin',
     role: 'admin',
+    teamId: 'team-1',
+    teamName: 'Core Team',
     profile: {
       displayName: 'Ada Admin',
+      channels: {
+        emails: [],
+        telegramHandles: [],
+        slackUserNames: [],
+        telegramIds: [],
+        discordUserNames: [],
+        whatsappNumbers: [],
+      },
     },
   }
 })

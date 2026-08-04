@@ -61,6 +61,7 @@ jobs:
           - stdio-bridge
           - external-rest-api
           - desktop-app
+          - profile-ui
           - mcp-servers
           - packages/workflow-runtime-core
           - packages/workflow-sdk
