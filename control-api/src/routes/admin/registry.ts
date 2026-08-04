@@ -5,6 +5,7 @@ import { isIP } from 'node:net'
 import { parse as parseYaml } from 'yaml'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { extractK8sError } from '../../http/k8sError.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
@@ -35,7 +36,6 @@ import {
 } from '../../services/registryClient.js'
 import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
 import {
-  PullSecretProvisionError,
   ensureRegistryPullSecret,
   ensureRegistryPullSecrets,
   platformWorkloadNamespaces,
@@ -47,10 +47,13 @@ import {
 import { SecretUpsertRequest } from '../../types.js'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
-  isPlatformRegistryImage,
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
+import {
+  pullSecretErrorResponse,
+  recipeReferencesPlatformImage,
+} from './registryPullSecretProvisioning.js'
 
 /** Validate a Kubernetes resource name (RFC 1123 DNS subdomain). */
 function isValidK8sName(name: string): boolean {
@@ -307,73 +310,6 @@ async function loadRegistryCredentialSchema(entry: {
   }
 }
 
-/**
- * Map an image-pull-secret provisioning failure onto an actionable HTTP response.
- *
- * The three classes are meaningfully different to an operator, and collapsing them all to
- * a bare 500 (as a generic K8s-error mapping does — `extractK8sError` cannot read
- * `RegistryProxyError.status`) makes a deploy-ordering or connect-flow problem look like a
- * control-api bug:
- *   - PullSecretProvisionError → a precondition the operator can fix (wrong namespace,
- *     registry not connected, org not yet bound); carries its own status + reason code.
- *   - RegistryProxyError       → the registry rejected us (e.g. 403 because the
- *     pull-credential endpoint has not been upgraded, or this client lacks
- *     `registry:manage-keys`); surfaced as 502 with the upstream status.
- *   - anything else            → 500.
- */
-function pullSecretErrorResponse(err: unknown): {
-  status: number
-  body: Record<string, unknown>
-} {
-  if (err instanceof PullSecretProvisionError) {
-    return {
-      status: err.status,
-      body: {
-        error: 'registry_pull_secret_provision_failed',
-        reason: err.reason,
-        detail: err.message,
-      },
-    }
-  }
-  if (err instanceof RegistryProxyError) {
-    return {
-      status: 502,
-      body: {
-        error: 'registry_pull_secret_provision_failed',
-        reason: 'registry_rejected',
-        upstreamStatus: err.status,
-        detail: `the registry rejected the image-pull credential request (${err.status}); confirm the registry supports tenant pull-credential minting and that this deployment holds registry:manage-keys`,
-      },
-    }
-  }
-  const k8sErr = extractK8sError(err)
-  return {
-    status: 500,
-    body: {
-      error: 'registry_pull_secret_provision_failed',
-      reason: 'unexpected_error',
-      detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
-    },
-  }
-}
-
-/**
- * True when any workload in a recipe spec runs an image hosted on our own registry, and
- * therefore needs the platform pull credential.
- *
- * Uses the same shared predicate WRC applies at reconcile time
- * (`isPlatformRegistryImage`), so control-api cannot decide to provision for a workload
- * WRC will not attach the secret to, or vice versa — that mismatch would surface as an
- * ImagePullBackOff with no failing request to attribute it to.
- */
-function recipeReferencesPlatformImage(recipeSpec: Record<string, unknown>): boolean {
-  const workloads = recipeSpec.workloads
-  if (!Array.isArray(workloads)) return false
-  return workloads.some(w =>
-    isPlatformRegistryImage((w as { image?: unknown } | null)?.image, config.registryUrl)
-  )
-}
-
 /** Audit log for security-sensitive operations (finding #10). */
 function auditLog(action: string, details: Record<string, unknown>): void {
   const safe: Record<string, unknown> = { timestamp: new Date().toISOString(), action, ...details }
@@ -618,34 +554,6 @@ function deriveRegistryEgressBindings(options: {
   return egressSummary.domains.flatMap(dns =>
     egressSummary.ports.map(port => ({ dns, port, protocol: 'TCP' as const }))
   )
-}
-
-/** Extract HTTP status + message from K8s client errors. */
-function extractK8sError(err: unknown): { status: number; message: string } | null {
-  if (err && typeof err === 'object') {
-    const e = err as {
-      code?: number
-      body?: string | { message?: string }
-      httpStatus?: number
-      statusCode?: number
-      message?: string
-    }
-    const status = e.code ?? e.statusCode ?? e.httpStatus
-    if (typeof status === 'number' && status >= 400 && status < 600) {
-      let msg = ''
-      if (typeof e.body === 'string') {
-        try {
-          msg = (JSON.parse(e.body) as { message?: string }).message ?? e.body
-        } catch {
-          msg = e.body
-        }
-      } else if (e.body && typeof e.body === 'object') {
-        msg = e.body.message ?? ''
-      }
-      return { status, message: msg || e.message || `K8s error ${status}` }
-    }
-  }
-  return null
 }
 
 function sleep(ms: number): Promise<void> {

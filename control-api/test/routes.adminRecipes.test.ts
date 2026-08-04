@@ -5,6 +5,7 @@ import http from 'node:http'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { createAdminRecipesRouter } from '../src/routes/admin/recipes.js'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '../src/routes/admin/registryImagePullSecret.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -1631,6 +1632,28 @@ describe.sequential('routes/admin/recipes', () => {
     await expect(gateway.getSecret('wf-example-coordinator-token', SANDBOX_NS)).rejects.toThrow()
   })
 
+  it('POST /admin/recipes/secrets — rejects the platform registry pull Secret name', async () => {
+    // This endpoint writes Opaque + WORKFLOW_SECRET_LABELS, which carry the same
+    // `clerum.io/managed-by: control-api` marker the pull-secret service reads as its own
+    // ownership. Left unreserved, a request here would relabel (or shadow) the live
+    // credential; today only K8s type immutability stands in the way.
+    // Ownership is supplied so the ONLY thing that can reject this is the reserved name.
+    const res = await request(app)
+      .post('/admin/recipes/secrets')
+      .send({
+        name: EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+        ownership: { kind: 'owner-recipe', recipeName: 'my-recipe' },
+        stringData: { token: 'not-a-pull-key' },
+      })
+      .expect(400)
+
+    expect(res.body.error).toMatch(/platform-managed/)
+
+    await expect(
+      gateway.getSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, SANDBOX_NS)
+    ).rejects.toThrow()
+  })
+
   it('POST /admin/recipes/secrets — rejects invalid keys and non-string values', async () => {
     await request(app)
       .post('/admin/recipes/secrets')
@@ -2078,6 +2101,98 @@ describe.sequential('routes/admin/recipes', () => {
       rule: 'workflowWorkloadSecretRefReserved',
       field: 'spec.workloads[0].envSecret.name',
     })
+  })
+
+  // ── The platform registry pull Secret is reserved, like the wf- prefix ────
+  //
+  // control-api writes `evenfire-registry-pull` into the platform workload namespaces and
+  // WRC injects the reference itself, after the #637 ownership filter. A recipe that names
+  // it is asking for something it will never legitimately get: a declared imagePullSecret
+  // is stripped as unowned (and re-injected anyway), while the same name in `envSecret` is
+  // an attempt to read the org's registry credential into a container's environment.
+  // Reject at the door — a declaration we silently ignore is worse than a 422.
+  const PLATFORM_PULL_SECRET_ENV_RECIPE = {
+    metadata: { name: 'pull-secret-env-recipe' },
+    spec: {
+      workloads: [
+        {
+          id: 'api',
+          type: 'deployment',
+          image: 'my-api:latest',
+          envSecret: {
+            name: EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+            keys: [{ secretKey: '.dockerconfigjson', envVar: 'DOCKER_CONFIG' }],
+          },
+        },
+      ],
+    },
+  }
+
+  const PLATFORM_PULL_SECRET_IMAGE_RECIPE = {
+    metadata: { name: 'pull-secret-image-recipe' },
+    spec: {
+      workloads: [
+        {
+          id: 'api',
+          type: 'deployment',
+          image: 'my-api:latest',
+          imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME],
+        },
+      ],
+    },
+  }
+
+  it('POST /admin/recipes/validate — rejects workload envSecret naming the platform pull Secret', async () => {
+    const res = await request(app)
+      .post('/admin/recipes/validate')
+      .send(PLATFORM_PULL_SECRET_ENV_RECIPE)
+      .expect(422)
+
+    expect(res.body.valid).toBe(false)
+    expect(res.body.errors[0]).toMatchObject({
+      rule: 'workflowWorkloadSecretRefReserved',
+      field: 'spec.workloads[0].envSecret.name',
+    })
+  })
+
+  it('POST /admin/recipes/validate — rejects imagePullSecrets naming the platform pull Secret', async () => {
+    const res = await request(app)
+      .post('/admin/recipes/validate')
+      .send(PLATFORM_PULL_SECRET_IMAGE_RECIPE)
+      .expect(422)
+
+    expect(res.body.valid).toBe(false)
+    expect(res.body.errors[0]).toMatchObject({
+      rule: 'workflowWorkloadSecretRefReserved',
+      field: 'spec.workloads[0].imagePullSecrets[0]',
+    })
+  })
+
+  it('POST /admin/recipes — refuses to persist a recipe naming the platform pull Secret', async () => {
+    const res = await request(app)
+      .post('/admin/recipes')
+      .send(PLATFORM_PULL_SECRET_IMAGE_RECIPE)
+      .expect(422)
+
+    expect(res.body.errors[0]).toMatchObject({ rule: 'workflowWorkloadSecretRefReserved' })
+    await expect(
+      gateway.getResource('workflowrecipes', 'pull-secret-image-recipe', SANDBOX_NS)
+    ).rejects.toThrow()
+  })
+
+  it('PUT /admin/recipes/:name — refuses an update naming the platform pull Secret', async () => {
+    await request(app).post('/admin/recipes').send(VALID_RECIPE).expect(201)
+
+    const res = await request(app)
+      .put('/admin/recipes/my-recipe')
+      .send({ spec: PLATFORM_PULL_SECRET_ENV_RECIPE.spec })
+      .expect(422)
+
+    expect(res.body.errors[0]).toMatchObject({ rule: 'workflowWorkloadSecretRefReserved' })
+    const stored = (await gateway.getResource('workflowrecipes', 'my-recipe', SANDBOX_NS)) as {
+      spec: { workloads: Array<{ envSecret?: unknown }> }
+    }
+    expect(stored.spec.workloads[0].envSecret).toBeUndefined()
   })
 
   it('POST /admin/recipes/validate — accepts workload envSecret when Secret and keys exist', async () => {
