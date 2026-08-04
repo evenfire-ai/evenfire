@@ -42,11 +42,15 @@ describe('reconcileRegistryPullSecret', () => {
       ])
     )
     await expect(reconcileRegistryPullSecret(gateway)).resolves.toBe(true)
-    expect(ensureRegistryPullSecrets).toHaveBeenCalledWith(gateway, [
-      'mcp-server',
-      'sandbox-recipes',
-      'sandbox-ui',
-    ])
+    // `required: []` is load-bearing, not decoration: this loop is not a caller about to
+    // persist a CRD, so it must never fail on a namespace nobody has asked for. It is what
+    // keeps a managed cluster — where control-api provisions nothing and the operator may
+    // not have populated every namespace — from reporting a failed pass on every tick.
+    expect(ensureRegistryPullSecrets).toHaveBeenCalledWith(
+      gateway,
+      ['mcp-server', 'sandbox-recipes', 'sandbox-ui'],
+      { required: [] }
+    )
   })
 
   it('does NOT throw when the cluster is not connected yet — it retries next tick', async () => {

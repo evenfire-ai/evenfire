@@ -5,6 +5,7 @@ import type { K8sGateway } from '../src/k8s.js'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '../src/routes/admin/registryImagePullSecret.js'
 import { mintOrgPullCredential, resolvePublishScope } from '../src/services/registryClient.js'
 import { isRegistryAuthActive } from '../src/services/registryConnectionDb.js'
+import { reconcileRegistryPullSecret } from '../src/services/registryPullSecretReconcileCron.js'
 import {
   PullSecretProvisionError,
   ensureRegistryPullSecret,
@@ -132,10 +133,21 @@ afterEach(() => {
   config.registryUrl = savedUrl
 })
 
+/** What a managed operator's copy looks like: correctly shaped, and NOT labelled as ours. */
+function seedOperator(mock: MockGateway, namespaces: string[], key = 'operator-key'): void {
+  for (const ns of namespaces) {
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg(HOST, key) },
+    })
+  }
+}
+
 describe('ensureRegistryPullSecret — legitimate no-ops', () => {
   it('skips (no mint) in managed mode — the operator owns the Secret', async () => {
     config.registryConnectionMode = 'managed'
-    const { gateway } = gw()
+    const { gateway, mock } = gw()
+    seedOperator(mock, [NS])
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('skipped')
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
   })
@@ -145,6 +157,125 @@ describe('ensureRegistryPullSecret — legitimate no-ops', () => {
     const { gateway } = gw()
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('skipped')
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Managed clusters: VERIFY what the operator provisioned, write nothing.
+ *
+ * Skipping the write is right — the operator owns this Secret — but it is not the same as
+ * having nothing to say. WRC still injects the `imagePullSecrets` reference into every
+ * workload whose image is ours, and recipe workloads land in all three platform
+ * namespaces, so an install into a namespace the operator has not populated persists a CRD
+ * that can only ImagePullBackOff. Presence is therefore checked read-only, and a caller
+ * that needs a namespace without a usable copy is failed BEFORE the CRD is written.
+ */
+describe('ensureRegistryPullSecrets — managed mode verifies the operator provisioned it', () => {
+  beforeEach(() => {
+    config.registryConnectionMode = 'managed'
+  })
+
+  it('passes without minting or writing when every required namespace is populated', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, ALL)
+    const getSpy = vi.spyOn(mock, 'getSecret')
+    const createSpy = vi.spyOn(mock, 'createSecret')
+    const updateSpy = vi.spyOn(mock, 'updateSecret')
+    const deleteSpy = vi.spyOn(mock, 'deleteSecret')
+
+    const res = await ensureRegistryPullSecrets(gateway, ALL)
+
+    // 'skipped' still means "provisioning was not our job", which is true on a managed
+    // cluster — but it is now an answer we checked rather than assumed.
+    expect([...res.values()]).toEqual(['skipped', 'skipped', 'skipped'])
+    for (const ns of ALL) {
+      expect(getSpy).toHaveBeenCalledWith(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns)
+    }
+    // Invariant 1 is absolute here: managed mode is read-only, all the way down.
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+    expect(updateSpy).not.toHaveBeenCalled()
+    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(dbCalls.queries).toHaveLength(0)
+  })
+
+  // The shape of a real managed cluster today: MCC provisions `mcp-server`, so transport
+  // installs pull fine, and the two sandbox namespaces recipes land in are empty. That is
+  // exactly the gap that used to surface only as an ImagePullBackOff.
+  it('fails a recipe install for the namespaces the operator never populated', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, [NS])
+
+    const err = await ensureRegistryPullSecrets(gateway, ALL).catch((e: Error) => e)
+
+    expect(err).toBeInstanceOf(PullSecretProvisionError)
+    expect(err).toMatchObject({ reason: 'operator_secret_missing', status: 409 })
+    const message = (err as Error).message
+    // Actionable means naming the namespaces that are actually missing — and only those.
+    expect(message).toContain(`"${SANDBOX}"`)
+    expect(message).toContain(`"${UI}"`)
+    expect(message).not.toContain(`"${NS}"`)
+    expect(message).toContain(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+    expect(message).toMatch(/operator/i) // whose job it is on this cluster
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  it('fails when the operator copy exists but is the wrong type (kubelet ignores it)', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, [SANDBOX, UI])
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, { type: 'Opaque', data: {} })
+
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'operator_secret_missing',
+      status: 409,
+    })
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  it('fails when the operator copy is keyed on a different registry host', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, [SANDBOX, UI])
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { [DOCKERCONFIG_KEY]: encodeDockercfg('old-registry.example.com', 'operator-key') },
+    })
+
+    const err = await ensureRegistryPullSecrets(gateway, ALL).catch((e: Error) => e)
+    expect(err).toMatchObject({ reason: 'operator_secret_missing', status: 409 })
+    // The kubelet never selects a blob with no entry for our host, so say so rather than
+    // reporting a Secret that is plainly sitting right there as "missing".
+    expect((err as Error).message).toContain(HOST)
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  // `required` scoping is what keeps this from being the blanket reject it must not be:
+  // MCC does provision `mcp-server`, so an McpServer install lands somewhere that works
+  // and must not be failed by the sandbox namespaces it never touches.
+  it('does not fail an McpServer install over a sandbox namespace it never lands in', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, [NS])
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('skipped')
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  it('does fail an McpServer install when ITS OWN namespace is the empty one', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, [SANDBOX, UI])
+    await expect(ensureRegistryPullSecret(gateway, NS)).rejects.toMatchObject({
+      reason: 'operator_secret_missing',
+      status: 409,
+    })
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  // The verification covers the operator's contract, which is defined over the platform
+  // workload namespaces. A namespace outside that set is not part of it — and failing on
+  // one would break a managed install that works today, which is the opposite of the point.
+  it('says nothing about a namespace outside the platform set', async () => {
+    const { gateway, mock } = gw()
+    seedOperator(mock, ALL)
+    const res = await ensureRegistryPullSecrets(gateway, [...ALL, 'channels'])
+    expect(res.get('channels')).toBe('skipped')
   })
 })
 
@@ -727,9 +858,31 @@ describe('ensureRegistryPullSecrets — cross-process serialization', () => {
 
   it('does not reach the lock when the pass is a legitimate no-op', async () => {
     config.registryConnectionMode = 'managed'
-    const { gateway } = gw()
+    const { gateway, mock } = gw()
+    seedOperator(mock, ALL)
     await ensureRegistryPullSecrets(gateway, ALL)
-    // Managed clusters must not touch Postgres (or anything else) on this path.
+    // Managed clusters must not touch Postgres on this path: the lock exists to serialize
+    // a mint, and the managed pass only reads.
     expect(dbCalls.queries).toHaveLength(0)
+  })
+})
+
+/**
+ * The reconcile loop against the REAL service — its own suite mocks this module out, so
+ * this is the only place the managed interaction can be observed.
+ *
+ * A managed cluster genuinely has nothing for control-api to do here, and the loop runs on
+ * a timer: it must stay a quiet no-op rather than reporting a failed pass every tick just
+ * because the operator has not populated a namespace no install has asked for yet.
+ */
+describe('reconcileRegistryPullSecret — managed cluster', () => {
+  it('stays a quiet no-op when the operator has provisioned nothing', async () => {
+    config.registryConnectionMode = 'managed'
+    const { gateway, mock } = gw()
+    const createSpy = vi.spyOn(mock, 'createSecret')
+
+    await expect(reconcileRegistryPullSecret(gateway)).resolves.toBe(true)
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
   })
 })

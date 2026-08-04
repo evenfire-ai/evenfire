@@ -1,15 +1,17 @@
 /**
- * Route-level coverage for image-pull-secret self-provisioning on the install path.
+ * Route-level coverage for the image-pull-secret hook on the install path, in BOTH
+ * connection modes — the hook behaves differently in each, and the difference is the point.
  *
- * The main `routes.registryInstall` suite runs in the default `managed` connection mode,
- * where `ensureRegistryPullSecret` short-circuits to `'skipped'` before doing anything —
- * so none of it can catch a regression in the wiring. These tests force `self-hosted`,
- * which is the only mode where the hook actually runs, and pin the properties the wiring
- * is supposed to guarantee:
+ * self-hosted: control-api provisions the Secret itself, so these pin
  *   - it provisions even when the plugin needs NO credentials (outside `credRequired`)
  *   - it provisions BEFORE the McpServer CRD that references the Secret
  *   - a provisioning failure fails the install loudly and persists NOTHING
  *   - it does not run at all for images that are not evenfire-hosted
+ *
+ * managed: control-api provisions nothing — the operator owns the Secret — but WRC injects
+ * the reference regardless, so the install VERIFIES the operator's copy is present and
+ * usable and refuses before persisting when it is not. Same guarantee, opposite mechanism:
+ * no CRD is written that references a credential no pod can resolve.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
@@ -115,6 +117,55 @@ function installBody() {
     contextRef: 'default-context',
     registryEntryName: 'forecast',
     registryEntryVersion: '1.0.0',
+  }
+}
+
+/** A recipe entry whose single workload runs `image`. */
+function recipeEntry(image: string) {
+  return {
+    id: 'r1',
+    name: 'intel-report',
+    version: '1.0.0',
+    entry_type: 'recipe',
+    description: 'Research + PDF report',
+    author: 'acme',
+    server_mode: null,
+    transport: null,
+    recipe_type: 'workflow',
+    mcp_server_meta: null,
+    recipe_meta: {
+      recipeYaml: JSON.stringify({
+        spec: {
+          description: 'Intel',
+          steps: [{ id: 'research', description: 'Research step' }],
+          workloads: [{ id: 'w1', type: 'deployment', image }],
+        },
+      }),
+      stepCount: 1,
+      hasAgent: true,
+    },
+  }
+}
+
+function recipeBody() {
+  return { registryEntryName: 'intel-report', registryEntryVersion: '1.0.0' }
+}
+
+const PLATFORM_NAMESPACES = ['mcp-server', 'sandbox-recipes', 'sandbox-ui']
+
+/** Seed the Secret a managed cluster's operator is contracted to provision. */
+function seedOperatorSecret(gw: MockGateway, namespaces: string[]): void {
+  const auth = Buffer.from('_:operator-key').toString('base64')
+  const blob = Buffer.from(
+    JSON.stringify({
+      auths: { [REGISTRY_HOST]: { username: '_', password: 'operator-key', auth } },
+    })
+  ).toString('base64')
+  for (const ns of namespaces) {
+    gw.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, ns, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { '.dockerconfigjson': blob },
+    })
   }
 }
 
@@ -227,38 +278,6 @@ describe('POST /admin/registry/install — pull-secret provisioning (self-hosted
 })
 
 describe('POST /admin/registry/install-recipe — pull-secret provisioning (self-hosted)', () => {
-  const PLATFORM_NAMESPACES = ['mcp-server', 'sandbox-recipes', 'sandbox-ui']
-
-  function recipeEntry(image: string) {
-    return {
-      id: 'r1',
-      name: 'intel-report',
-      version: '1.0.0',
-      entry_type: 'recipe',
-      description: 'Research + PDF report',
-      author: 'acme',
-      server_mode: null,
-      transport: null,
-      recipe_type: 'workflow',
-      mcp_server_meta: null,
-      recipe_meta: {
-        recipeYaml: JSON.stringify({
-          spec: {
-            description: 'Intel',
-            steps: [{ id: 'research', description: 'Research step' }],
-            workloads: [{ id: 'w1', type: 'deployment', image }],
-          },
-        }),
-        stepCount: 1,
-        hasAgent: true,
-      },
-    }
-  }
-
-  function recipeBody() {
-    return { registryEntryName: 'intel-report', registryEntryVersion: '1.0.0' }
-  }
-
   it('provisions the credential in EVERY platform namespace, minting once', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(
       recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
@@ -336,8 +355,6 @@ describe('POST /admin/registry/install-recipe — pull-secret provisioning (self
 })
 
 describe('POST /admin/registry/upgrade-recipe — pull-secret provisioning (self-hosted)', () => {
-  const PLATFORM_NAMESPACES = ['mcp-server', 'sandbox-recipes', 'sandbox-ui']
-
   /** An upgrade target whose NEW spec runs `image`. */
   function upgradeEntry(image: string) {
     return {
@@ -427,5 +444,107 @@ describe('POST /admin/registry/upgrade-recipe — pull-secret provisioning (self
     expect(res.body.error).toBe('registry_pull_secret_provision_failed')
     // The CRD must not be updated to reference a credential that does not exist.
     expect(updateSpy).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * MANAGED mode: control-api provisions nothing, so the routes verify instead.
+ *
+ * The reference is injected either way — by WRC, from the image host — so a managed
+ * cluster whose operator has not populated a namespace produces a CRD that can only
+ * ImagePullBackOff, with a 201 in the API trail. These pin the narrowing: the install is
+ * refused BEFORE anything is persisted, and only for the namespaces it actually lands in.
+ */
+describe('managed mode — installs verify the operator-owned Secret, and never mint', () => {
+  beforeEach(() => {
+    ;(config as { registryConnectionMode: string }).registryConnectionMode = 'managed'
+  })
+
+  it('installs an McpServer when the operator populated the plugin namespace', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(evenfireEntry() as never)
+    const { app, gw } = makeInstallApp()
+    // MCC provisions mcp-server today, which is why this path must keep working.
+    seedOperatorSecret(gw, [NS])
+    const createSecret = vi.spyOn(gw, 'createSecret')
+
+    await request(app).post('/admin/registry/install').send(installBody()).expect(201)
+
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    expect(createSecret).not.toHaveBeenCalled()
+    const mcp = (await gw.getResource('mcpservers', 'forecast', NS)) as {
+      spec: { imagePullSecrets?: Array<{ name: string }> }
+    }
+    expect(mcp.spec.imagePullSecrets).toEqual([{ name: EVENFIRE_REGISTRY_PULL_SECRET_NAME }])
+  })
+
+  it('refuses the McpServer install, persisting nothing, when the Secret is absent', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(evenfireEntry() as never)
+    const { app, gw } = makeInstallApp()
+
+    const res = await request(app).post('/admin/registry/install').send(installBody())
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      error: 'registry_pull_secret_provision_failed',
+      reason: 'operator_secret_missing',
+    })
+    // The whole point: fail before persisting, not at pull time.
+    await expect(gw.getResource('mcpservers', 'forecast', NS)).rejects.toBeTruthy()
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  it('installs a recipe when the operator populated every platform namespace', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
+    )
+    const { app, gw } = makeInstallApp()
+    seedOperatorSecret(gw, PLATFORM_NAMESPACES)
+    const createSecret = vi.spyOn(gw, 'createSecret')
+
+    await request(app).post('/admin/registry/install-recipe').send(recipeBody()).expect(201)
+
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    expect(createSecret).not.toHaveBeenCalled()
+  })
+
+  it('refuses the recipe install when only the mcp-server namespace is populated', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      recipeEntry(`${REGISTRY_HOST}/acme/plugin:1.0`) as never
+    )
+    const { app, gw } = makeInstallApp()
+    // The real managed shape: transport workloads pull, recipe workloads do not.
+    seedOperatorSecret(gw, [NS])
+
+    const res = await request(app).post('/admin/registry/install-recipe').send(recipeBody())
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      error: 'registry_pull_secret_provision_failed',
+      reason: 'operator_secret_missing',
+    })
+    expect(res.body.detail).toContain('sandbox-recipes')
+    const persisted = (await gw.listResource('workflowrecipes', '*')) as Array<{
+      metadata: { name: string }
+    }>
+    expect(persisted.map(r => r.metadata.name)).toEqual([])
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+
+  it('leaves an install with a NON-platform image untouched', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      evenfireEntry({
+        mcp_server_meta: { imageRef: 'ghcr.io/acme/forecast:1.2.3', port: 3000 },
+      }) as never
+    )
+    const { app, gw } = makeInstallApp()
+    // Nothing seeded anywhere: a public image needs no pull credential, so the check must
+    // not run at all. Narrowing that fails installs it has no claim on is not a narrowing.
+    const getSecret = vi.spyOn(gw, 'getSecret')
+
+    await request(app).post('/admin/registry/install').send(installBody()).expect(201)
+
+    expect(getSecret.mock.calls.some(([name]) => name === EVENFIRE_REGISTRY_PULL_SECRET_NAME)).toBe(
+      false
+    )
   })
 })

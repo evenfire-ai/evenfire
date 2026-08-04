@@ -40,7 +40,16 @@ const log = rootLogger.child({ service: 'registry_pull_secret_reconcile' })
  */
 export async function reconcileRegistryPullSecret(gateway: K8sGateway): Promise<boolean> {
   try {
-    const results = await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+    // `required: []` — this loop needs no namespace on its own behalf. Unlike an install it
+    // is not about to persist a CRD referencing one, so a namespace it cannot fill (or, on a
+    // managed cluster, one the operator has not populated) is not ITS failure to report; the
+    // install that actually lands there raises it, with the namespaces that caller needs.
+    // Without this the loop would report a failed pass on every tick of a managed cluster,
+    // where control-api legitimately has nothing to do. Conditions worth an operator's
+    // attention are already logged by the service itself, on every pass.
+    const results = await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces(), {
+      required: [],
+    })
     const changed = [...results.entries()].filter(([, r]) => r === 'created' || r === 'repaired')
     if (changed.length > 0) {
       log.info(

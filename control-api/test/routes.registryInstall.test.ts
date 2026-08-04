@@ -68,6 +68,27 @@ function makeApp(gateway?: MockGateway) {
   return app
 }
 
+/**
+ * Seed the `evenfire-registry-pull` Secret an operator provisions on a managed cluster.
+ *
+ * This file runs in the default `managed` connection mode, where control-api writes that
+ * Secret for nobody — but a platform-registry image still makes the install VERIFY that
+ * the operator's copy is present and usable, and refuse before persisting when it is not
+ * (registryPullSecretService). Without this seed those installs 409, and the suites below
+ * stop being about what they are about: which images get an imagePullSecrets reference.
+ */
+function seedOperatorPullSecret(gw: MockGateway, host: string, namespace = 'mcp-server'): void {
+  const auth = Buffer.from('_:operator-key').toString('base64')
+  gw.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, namespace, {
+    type: 'kubernetes.io/dockerconfigjson',
+    data: {
+      '.dockerconfigjson': Buffer.from(
+        JSON.stringify({ auths: { [host]: { username: '_', password: 'operator-key', auth } } })
+      ).toString('base64'),
+    },
+  })
+}
+
 function internalSiblingRecipeYaml(dns = 'db.sandbox-recipes.svc.cluster.local'): string {
   return JSON.stringify({
     spec: {
@@ -1436,6 +1457,7 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -1560,6 +1582,7 @@ describe('POST /admin/registry/install — evenfire imageRef identity (2.5)', ()
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -3199,6 +3222,7 @@ describe('POST /admin/registry/upgrade — evenfire imagePullSecrets recompute',
         ...existingSpecPatch,
       },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -3319,6 +3343,7 @@ describe('POST /admin/registry/upgrade — evenfire imageRef identity (2.5)', ()
         },
       },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 

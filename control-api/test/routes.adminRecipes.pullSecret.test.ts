@@ -248,3 +248,38 @@ describe('PUT /admin/recipes/:name — pull-secret provisioning (self-hosted)', 
     expect(stored.spec.workloads[0].image).toBe('ghcr.io/acme/plugin:1.0')
   })
 })
+
+/**
+ * Managed mode reaches the generic recipe routes too. A hand-authored recipe is
+ * indistinguishable at reconcile time from an installed one — WRC injects the reference
+ * from the image host either way — so the same verification has to gate this path, or the
+ * narrowing is only as good as the route the author happened to use.
+ */
+describe('POST /admin/recipes — managed mode verifies instead of provisioning', () => {
+  beforeEach(() => {
+    config.registryConnectionMode = 'managed'
+  })
+
+  it('refuses the recipe and persists nothing when the operator Secret is absent', async () => {
+    const gateway = new MockGateway(MCP_NS)
+    const createSecret = vi.spyOn(gateway, 'createSecret')
+
+    const res = await request(makeApp(gateway)).post('/admin/recipes').send(platformRecipe('plat'))
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      error: 'registry_pull_secret_provision_failed',
+      reason: 'operator_secret_missing',
+    })
+    await expect(gateway.getResource('workflowrecipes', 'plat', SANDBOX_NS)).rejects.toBeTruthy()
+    // Managed mode is read-only: no mint, and no Secret written on the way to the refusal.
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+    expect(createSecret).not.toHaveBeenCalled()
+  })
+
+  it('accepts a recipe with no platform-registry image, unchecked', async () => {
+    const gateway = new MockGateway(MCP_NS)
+    await request(makeApp(gateway)).post('/admin/recipes').send(foreignRecipe('ext')).expect(201)
+    expect(mintOrgPullCredential).not.toHaveBeenCalled()
+  })
+})

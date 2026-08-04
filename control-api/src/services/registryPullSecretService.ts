@@ -20,10 +20,25 @@
  * split across all three platform workload namespaces by kind (transport → mcp-server,
  * spec.ui.workloadRef → sandbox-ui, everything else → sandbox-recipes). So the Secret must
  * exist in ALL of them — `platformWorkloadNamespaces()`, the one allowlist writes are
- * confined to. On a MANAGED cluster control-api writes none of them (provisioning
- * short-circuits to 'skipped'), which makes populating all three the external operator's
- * job: a managed cluster that provisions only mcp-server leaves recipe pods in
- * ImagePullBackOff with nothing in the API trail to explain it.
+ * confined to.
+ *
+ * MANAGED clusters: VERIFY, never write. control-api provisions nothing there — the
+ * platform operator owns the Secret — but WRC still injects the reference, so a namespace
+ * the operator has not populated yields a workload that can only ImagePullBackOff, behind
+ * a 201. Managed mode therefore runs a read-only presence check over the platform
+ * namespaces (`verifyOperatorProvisioned`) and fails the caller BEFORE the CRD is
+ * persisted when one it needs has no usable copy (`operator_secret_missing`). This asserts
+ * nothing about what any operator does; it only refuses to persist a reference that cannot
+ * resolve on THIS cluster right now. The check is scoped by `required` for the same reason
+ * everything else here is: today's managed operator populates mcp-server, so McpServer
+ * installs must keep working while recipe installs — which land in all three — do not
+ * silently half-work.
+ *
+ * A recipe caller passes the whole platform set and requires all of it, which is stricter
+ * than that recipe may strictly need: control-api does not model WRC's per-workload
+ * kind→namespace split, so it cannot tell which of the three a given recipe will land in.
+ * Requiring all three is the conservative side of that gap — it refuses an install that
+ * MIGHT have pulled rather than persisting one that might not.
  *
  * Two invariants make this safe to run repeatedly:
  *   1. NEVER write a Secret we do not own. An unlabeled Secret belongs to an external
@@ -230,11 +245,19 @@ const inflight = new Map<string, Promise<EnsurePass>>()
  *              the pass knows. A blocked namespace has NO entry in `results` — nothing
  *              happened to it, and every caller that could observe the gap fails on it
  *              first.
+ * `missing`   — MANAGED mode only: a platform namespace with no usable operator-provisioned
+ *              copy (`operator_secret_missing`). Fragments ("it does not exist", "it exists
+ *              but …"), because the caller-facing sentence names every missing namespace at
+ *              once and only `ensureRegistryPullSecrets` knows which ones the caller needs.
+ *
+ * The three are mutually exclusive by mode: `unusable`/`blocked` come from the
+ * provisioning pass, `missing` from the verification pass, and a pass is one or the other.
  */
 type EnsurePass = {
   results: Map<string, EnsurePullSecretResult>
   unusable: Map<string, string>
   blocked: Map<string, string>
+  missing: Map<string, string>
 }
 
 /** The platform workload namespaces a pull credential may legitimately be written into. */
@@ -261,7 +284,9 @@ export function platformWorkloadNamespaces(): string[] {
  * Returns `'skipped'` for all targets ONLY when provisioning is legitimately not our job
  * (managed mode, or no registry configured). Every other "cannot provision" condition
  * THROWS `PullSecretProvisionError`, so a caller about to attach an imagePullSecrets
- * reference fails the install loudly instead of persisting an unresolvable one.
+ * reference fails the install loudly instead of persisting an unresolvable one. In managed
+ * mode `'skipped'` is now a VERIFIED answer rather than an assumed one: the operator's
+ * copies are read first, and a required namespace without a usable one throws too.
  */
 export async function ensureRegistryPullSecrets(
   gateway: K8sGateway,
@@ -275,7 +300,7 @@ export async function ensureRegistryPullSecrets(
     run = ensureInner(gateway, targets).finally(() => inflight.delete(dedupeKey))
     inflight.set(dedupeKey, run)
   }
-  const { results, unusable, blocked } = await run
+  const { results, unusable, blocked, missing } = await run
 
   // A recorded failure is fatal only to a caller that needs THAT namespace. A pass covers
   // the whole platform set (for the mint-once collapse), so an MCP install must not be
@@ -283,6 +308,22 @@ export async function ensureRegistryPullSecrets(
   // install, which does land there, still fails loudly. `required` defaults to every target,
   // so a caller that asks for a set is asserting it needs all of it.
   const required = opts.required ?? targets
+
+  // MANAGED mode: the operator owns the Secret, so the only thing we can do for a caller
+  // is refuse to persist a reference that cannot resolve. Report every missing namespace
+  // at once — an operator fixing one at a time would otherwise walk the whole set through
+  // three failed installs. (Order against the two loops below is not load-bearing: this
+  // map and those are populated by different passes; see EnsurePass.)
+  const absent = required.filter(ns => missing.has(ns))
+  if (absent.length > 0) {
+    const host = registryHostFromUrl(config.registryUrl)
+    const detail = absent.map(ns => `"${ns}" (${missing.get(ns)})`).join(', ')
+    throw new PullSecretProvisionError(
+      `the ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} Secret cannot serve an image pull in ${detail}. This cluster runs in "${config.registryConnectionMode}" registry mode, where the platform operator — not control-api — owns that Secret, so control-api will not create it here. Ask the operator to provision ${EVENFIRE_REGISTRY_PULL_SECRET_NAME} (type ${DOCKERCONFIG_TYPE}, with a ${DOCKERCONFIG_KEY} entry for "${host}") in the namespace(s) above, then retry. Proceeding would persist a workload referencing a credential no pod can resolve.`,
+      'operator_secret_missing',
+      409
+    )
+  }
 
   // `unusable` first, across the WHOLE required set, before any `blocked`. Both can apply
   // at once (a malformed foreign copy in one namespace, a well-shaped one blocking the mint
@@ -417,13 +458,20 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
   const out = new Map<string, EnsurePullSecretResult>()
   const unusable = new Map<string, string>()
   const blocked = new Map<string, string>()
+  const missing = new Map<string, string>()
 
   // ── Legitimate no-ops ─────────────────────────────────────────────────────
-  // Managed clusters: the operator owns this Secret; never contend with it.
+  // No registry host: nothing references it, and there is no host to check a blob
+  // against either — the pull secret is not in play at all.
   const host = registryHostFromUrl(config.registryUrl)
-  if (config.registryConnectionMode !== 'self-hosted' || !host) {
+  if (!host) {
     for (const ns of targets) out.set(ns, 'skipped')
-    return { results: out, unusable, blocked }
+    return { results: out, unusable, blocked, missing }
+  }
+  // Managed clusters: the operator owns this Secret; never contend with it — but do check
+  // that what the caller is about to reference is actually there.
+  if (config.registryConnectionMode !== 'self-hosted') {
+    return verifyOperatorProvisioned(gateway, targets, host)
   }
 
   // ── Hard preconditions: from here on we MUST provision or fail loudly ─────
@@ -461,8 +509,59 @@ async function ensureInner(gateway: K8sGateway, targets: string[]): Promise<Ensu
   // Everything from here — read, classify, mint, write — must be serialized across
   // replicas, not just within this process (see withPullSecretLock).
   return withPullSecretLock(orgName, () =>
-    ensureLocked(gateway, targets, host, orgName as string, out, unusable, blocked)
+    ensureLocked(gateway, targets, host, orgName as string, out, unusable, blocked, missing)
   )
+}
+
+/**
+ * MANAGED clusters: read-only verification that the operator's Secret is where the caller
+ * is about to point a workload at it. Mints nothing, writes nothing, takes no lock, and
+ * touches neither Postgres nor the registry — invariant 1 admits no exception here, and
+ * "the operator owns it" is precisely why we may only look.
+ *
+ * Reuses `foreignUsabilityProblem`, the same shape-only test applied to externally-owned
+ * Secrets on the self-hosted path: correct type, and a dockerconfig entry for our host. A
+ * second notion of "usable" would drift from the one the kubelet actually acts on. Ownership
+ * is deliberately NOT consulted — whoever wrote it, all that matters is whether it can serve
+ * the pull — and neither is liveness of the sealed key, which would cost a registry
+ * round-trip per install.
+ *
+ * Scoped to `platformWorkloadNamespaces()`: that set is the operator contract. A target
+ * outside it stays `'skipped'` rather than becoming a failure, because control-api has no
+ * claim about namespaces no operator ever agreed to populate, and failing there would break
+ * managed installs that work today.
+ */
+async function verifyOperatorProvisioned(
+  gateway: K8sGateway,
+  targets: string[],
+  host: string
+): Promise<EnsurePass> {
+  const out = new Map<string, EnsurePullSecretResult>()
+  const missing = new Map<string, string>()
+  const platform = new Set(platformWorkloadNamespaces())
+  for (const ns of targets) {
+    // Provisioning is genuinely not our job on this cluster, so the result stays 'skipped'
+    // whichever way the check goes; the verdict travels in `missing`.
+    out.set(ns, 'skipped')
+    if (!platform.has(ns)) continue
+    const current = await readCurrent(gateway, ns)
+    if (!current) {
+      missing.set(ns, 'it does not exist')
+      continue
+    }
+    const problem = foreignUsabilityProblem(current, host)
+    if (problem) missing.set(ns, `it exists but ${problem}`)
+  }
+  // Deliberately not logged at warn: this runs on every reconcile tick as well as every
+  // install, and on a managed cluster an unpopulated namespace is a normal state until
+  // something actually asks for it. The caller that asks gets the loud failure.
+  if (missing.size > 0) {
+    logger.debug(
+      { namespaces: [...missing.keys()] },
+      'managed cluster: no usable operator-provisioned evenfire-registry-pull Secret in these namespaces'
+    )
+  }
+  return { results: out, unusable: new Map(), blocked: new Map(), missing }
 }
 
 /**
@@ -476,7 +575,10 @@ async function ensureLocked(
   orgName: string,
   out: Map<string, EnsurePullSecretResult>,
   unusable: Map<string, string>,
-  blocked: Map<string, string>
+  blocked: Map<string, string>,
+  // Always empty on this path: a namespace with nothing in it is one we PROVISION, not one
+  // we report as missing. It rides along so both passes return the same shape.
+  missing: Map<string, string>
 ): Promise<EnsurePass> {
   // ── Read + classify every target BEFORE minting anything ──────────────────
   const states = new Map<string, TargetState>()
@@ -510,7 +612,7 @@ async function ensureLocked(
     }
     out.set(ns, 'exists-foreign')
   }
-  if (ours.length === 0) return { results: out, unusable, blocked }
+  if (ours.length === 0) return { results: out, unusable, blocked, missing }
 
   // A mint is needed when any namespace we own lacks a usable credential, OR when the
   // copies have diverged — divergence means an earlier pass wrote some namespaces and
@@ -524,7 +626,7 @@ async function ensureLocked(
 
   if (!needsMint) {
     for (const ns of ours) out.set(ns, 'exists-ours')
-    return { results: out, unusable, blocked }
+    return { results: out, unusable, blocked, missing }
   }
 
   // ── All-or-nothing: a USABLE foreign copy anywhere forbids the mint ───────
@@ -569,7 +671,7 @@ async function ensureLocked(
       { external: blocking, unfillable },
       'usable externally-owned evenfire-registry-pull Secret present; refusing to mint (the mint is org-wide and rotate-on-call, so it would revoke the external key) — installs that need the unfillable namespaces will fail'
     )
-    return { results: out, unusable, blocked }
+    return { results: out, unusable, blocked, missing }
   }
 
   if (diverged) {
@@ -610,7 +712,7 @@ async function ensureLocked(
     fingerprint: cred.fingerprint,
   })
   logger.info({ namespaces: ours, orgName }, 'registry pull secret provisioned')
-  return { results: out, unusable, blocked }
+  return { results: out, unusable, blocked, missing }
 }
 
 /** Write `cred` into one namespace, choosing create/update/recreate from its prior state. */
