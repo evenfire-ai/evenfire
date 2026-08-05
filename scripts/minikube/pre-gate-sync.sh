@@ -287,6 +287,11 @@ assert_no_legacy_prompt_bridge_grants() {
   # This check deliberately does not infer a provider, model, slot, or order;
   # migration remains an explicit operator-reviewed action.
   local legacy_count query
+  # A full image sync restarts the database deployment without waiting for the
+  # whole namespace.  Wait for the exact Postgres deployment here before
+  # kubectl exec; otherwise the deployment resolver can select a completed
+  # migration Job during the restart window and produce a false gate failure.
+  rollout_if_present control-plane control-postgres
   query="
     SELECT count(*)::int
      FROM plugin_workload_sdk_grants
@@ -406,6 +411,13 @@ if [[ "${cluster_changed}" == "true" ]]; then
       --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
     CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    # The GFS DSN authentication probe deliberately runs inside control-api so
+    # the connection material stays on stdin and never enters argv or the host.
+    # Control API was fenced only for the schema migration/writer window; the
+    # runtime roles now exist, so restore it before GFS provisioning makes that
+    # probe. The workflow reconciler remains fenced until the complete
+    # schema/credential/overlay sequence has converged.
+    restore_control_api
     # The base manifest no longer declares connection-string (provisioning-owned
     # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
     # control-api migrations (0048 creates the least-privilege gfs_controller

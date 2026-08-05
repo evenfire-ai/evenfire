@@ -143,14 +143,20 @@ else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
 
-control_api_restore_line="$(grep -nF 'restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-gfs_provision_line="$(grep -nF 'provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-if [[ -n "$control_api_restore_line" &&
+control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+control_api_probe_restore_line="$(grep -nF '    restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+gfs_provision_line="$(grep -nF '    provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+if [[ -n "$control_api_migration_line" &&
+      -n "$runtime_roles_line" &&
+      -n "$control_api_probe_restore_line" &&
       -n "$gfs_provision_line" &&
-      "$gfs_provision_line" -lt "$control_api_restore_line" ]]; then
-  pass "pre-gate sync waits for control-api migrations and gfs provisioning before writer restore"
+      "$control_api_migration_line" -lt "$runtime_roles_line" &&
+      "$runtime_roles_line" -lt "$control_api_probe_restore_line" &&
+      "$control_api_probe_restore_line" -lt "$gfs_provision_line" ]]; then
+  pass "pre-gate restores the control-api probe only after migration/roles and before gfs provisioning"
 else
-  fail "pre-gate sync can restore control-api before migrations or gfs provisioning"
+  fail "pre-gate sync can run the GFS authentication probe while control-api is fenced"
 fi
 
 if contains 'fence_control_api()' &&
@@ -213,6 +219,14 @@ if contains 'fence_workflow_reconciler()' &&
   fi
 else
   fail "pre-gate sync lacks an explicit workflow reconciliation fence"
+fi
+
+if contains 'assert_no_legacy_prompt_bridge_grants()' &&
+   contains 'rollout_if_present control-plane control-postgres' &&
+   contains '${KC} exec -n control-plane deployment/control-postgres'; then
+  pass "legacy grant inventory waits for the Ready control-postgres deployment before exec"
+else
+  fail "legacy grant inventory can race a restarting or completed control-postgres pod"
 fi
 
 exit "$FAIL"
