@@ -243,10 +243,12 @@ describe('pending sandbox UI deep-link state', () => {
     pending = deferPendingSandboxUiDeepLink(pending, 1, 10_000)
 
     expect(pending[0]?.retryCount).toBe(1)
-    expect(pending[0]?.nextRetryAt).toBe(10_000 + nextSandboxUiDeepLinkRetryDelayMs(0))
-    expect(nextSandboxUiDeepLinkRetryDelayMs(MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS + 10)).toBe(
-      15_000
-    )
+    expect(pending[0]?.nextRetryAt).toBe(11_000)
+    expect(
+      [0, 1, 2, 3, 4, MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS + 10].map(
+        nextSandboxUiDeepLinkRetryDelayMs
+      )
+    ).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 15_000])
 
     pending = failPendingSandboxUiDeepLink(pending, 1, 'native mount failed')
     expect(pending[0]?.failedMessage).toBe('native mount failed')

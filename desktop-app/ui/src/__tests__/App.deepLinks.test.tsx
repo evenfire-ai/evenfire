@@ -248,6 +248,13 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
 
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(confirmDialogHarness.props).toBeNull()
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
     currentController = makeController({ initialExperienceLoading: false })
     rerender(<App />)
 
@@ -498,7 +505,7 @@ describe('App deep-link orchestration', () => {
       announce: true,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
-      expect.stringContaining("don't have access to the linked team"),
+      "Could not open app link: You don't have access to this app in the linked team",
       'error'
     )
   })
@@ -570,6 +577,10 @@ describe('App deep-link orchestration', () => {
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('bridge unavailable'),
       'error'
+    )
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[Desktop] Could not acknowledge app deep link:',
+      expect.objectContaining({ message: 'bridge unavailable' })
     )
     consoleWarn.mockRestore()
   })

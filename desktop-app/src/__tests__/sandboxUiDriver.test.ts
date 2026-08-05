@@ -23,6 +23,7 @@ describe('applySandboxUiClientRoute', () => {
 
     expect(applied).toBe(true)
     expect(executeJavaScript).toHaveBeenCalledOnce()
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain('/tasks/task-42')
     expect(executeJavaScript.mock.calls[0]?.[0]).toContain('window.history.replaceState')
     expect(executeJavaScript.mock.calls[0]?.[0]).toContain("PopStateEvent('popstate'")
   })
