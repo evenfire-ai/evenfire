@@ -250,12 +250,12 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
 
       const counts = await dbPool.query(
         `SELECT
-            (SELECT count(*) FROM plugin_workload_sdk_spend_outcomes WHERE provider_attempt_id = $1)::int AS spend_count,
-            (SELECT count(*) FROM usage_events WHERE request_id = $1)::int AS usage_count,
-            (SELECT count(*) FROM agent_run_events WHERE source_event_id = $1)::int AS trace_count,
+            (SELECT count(*) FROM plugin_workload_sdk_spend_outcomes WHERE provider_attempt_id = $1::uuid)::int AS spend_count,
+            (SELECT count(*) FROM usage_events WHERE request_id = $1::uuid)::int AS usage_count,
+            (SELECT count(*) FROM agent_run_events WHERE source_event_id = $1::text)::int AS trace_count,
             (SELECT count(*) FROM governed_event_stream stream
                JOIN agent_run_events event ON event.event_id = stream.event_id
-              WHERE event.source_event_id = $1)::int AS stream_count`,
+              WHERE event.source_event_id = $1::text)::int AS stream_count`,
         [input.providerAttemptId]
       )
       expect(counts.rows[0]).toEqual({
