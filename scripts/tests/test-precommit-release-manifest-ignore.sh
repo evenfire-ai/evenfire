@@ -3,7 +3,7 @@ set -u
 FAIL=0
 
 # The precommit bumper must ignore external-rest-api/src/releaseManifest.ts.
-# A later task adds scripts/release/prepare-release.mjs as that file's writer;
+# scripts/release/prepare-release.mjs is that file's writer;
 # if staging it bumps external-rest-api/package.json, the manifest is stale
 # the instant it is written and --validate-only fails on every release-prep
 # PR, forever.

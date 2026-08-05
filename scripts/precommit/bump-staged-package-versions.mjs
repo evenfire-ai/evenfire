@@ -11,8 +11,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const sortedPackageRoots = [...packageRoots].sort((a, b) => b.length - a.length)
 
 // Files that live inside a package root but must never trigger its counter.
-// releaseManifest.ts declares the versions this script would bump. A later
-// task adds scripts/release/prepare-release.mjs as the writer of this file;
+// releaseManifest.ts declares the versions this script would bump.
+// scripts/release/prepare-release.mjs writes that file at release time;
 // bumping external-rest-api in reaction to that write would make the
 // manifest stale the instant it is produced. validate-release-version-bumps.mjs
 // carries the identical exemption in its ignoredFiles.

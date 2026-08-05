@@ -12,16 +12,12 @@ import process from 'node:process'
 import {
   COORDINATES,
   SEMVER_RE,
+  argValue,
   compareVersions,
   readCounterPackage,
 } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
-
-function argValue(name) {
-  const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : ''
-}
 
 const version = (argValue('--version') || '').replace(/^v/, '')
 if (!SEMVER_RE.test(version)) {
@@ -85,7 +81,14 @@ for (const coordinate of COORDINATES) {
 }
 
 if (failures.length > 0) {
-  console.error(`release ${version} has ${failures.length} disagreeing coordinate(s):`)
+  // ::error:: so this reads as an annotation once the release-cut job runs it,
+  // matching update-desktop-release-manifest.mjs and validate-release-version-bumps.mjs.
+  // prepare-release.mjs deliberately does NOT do this: it is run by a human at
+  // release time, where an annotation prefix is noise.
+  console.error(
+    `::error::release ${version} has ${failures.length} disagreeing coordinate(s); ` +
+      `run scripts/release/prepare-release.mjs --version ${version} --release-id <id> to write them`
+  )
   for (const f of failures) console.error(`  ${f}`)
   process.exit(1)
 }

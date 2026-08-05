@@ -7,14 +7,9 @@
 //        [--minimum-desktop-version 0.6.0]
 import { execFileSync } from 'node:child_process'
 import process from 'node:process'
-import { COORDINATES, SEMVER_RE, compareVersions } from './release-coordinates.mjs'
+import { COORDINATES, SEMVER_RE, argValue, compareVersions } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
-
-function argValue(name) {
-  const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : ''
-}
 
 function die(message) {
   console.error(message)

@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { SEMVER_RE, compareVersions, parseManifest } from './release-coordinates.mjs'
+import { SEMVER_RE, argValue, compareVersions, parseManifest } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
 const MANIFEST_PATH = 'external-rest-api/src/releaseManifest.ts'
@@ -10,11 +10,6 @@ const PACKAGE_PATHS = {
   externalRestApiVersion: 'external-rest-api/package.json',
   rpcProxyVersion: 'rpc-proxy/package.json',
   desktopVersion: 'desktop-app/package.json',
-}
-
-function argValue(name) {
-  const index = process.argv.indexOf(name)
-  return index >= 0 ? process.argv[index + 1] : ''
 }
 
 function readJsonFile(filePath) {

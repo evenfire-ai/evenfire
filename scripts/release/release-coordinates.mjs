@@ -16,6 +16,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+// Shared argv reader. Returns '' when the flag is absent, and undefined when
+// the flag is last with no value after it -- callers must treat both as unset.
+export function argValue(name) {
+  const index = process.argv.indexOf(name)
+  return index >= 0 ? process.argv[index + 1] : ''
+}
+
 export const SEMVER_RE = /^\d+\.\d+\.\d+$/
 
 export function compareVersions(a, b) {
