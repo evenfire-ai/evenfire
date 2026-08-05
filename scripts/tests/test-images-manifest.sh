@@ -233,61 +233,98 @@ assert_every_matrix_image_has_a_manifest_row() {
   fi
 }
 
-# build-push and merge each carry their own full copy of the 28-image list
-# (merge needs it to gate its own steps and to know which digest artifacts
-# to look for; build-push needs path/dockerfile/rooted too, which merge
-# doesn't). Nothing at the YAML level keeps the two in sync -- add an image
-# to build-push and forget merge, and the per-arch digests push while no
-# manifest list is ever created and no built-image marker is ever written
-# for it. notify-infra still dispatches (the other images' markers exist),
-# so the run is green with the new image silently unpublished: the same
-# fail-green shape as the build-push/merge needs: mismatch, one level down.
+# THREE copies of the 28-image list exist in build-publish.yml, not two:
+# build-push's `image:` matrix dimension (the array that, crossed with
+# `arch`, produces the 56 base combinations), build-push's `include:` list
+# (path/dockerfile/rooted/changed per image), and merge's own `include:`
+# list (changed per image, for its own step gating and to know which digest
+# artifacts to look for). Nothing at the YAML level keeps all three in sync.
+#
+# An island in the `image:` dimension is a DIFFERENT failure shape than an
+# island in an `include:` list, and it's the one this case used to miss: if
+# an image is in both `include:` lists but absent from the `image:`
+# dimension, its `include` entry matches no base combination (nothing to
+# merge onto), so GitHub creates a brand-new standalone combination from the
+# entry alone -- no `arch` set, `runs-on` silently falls through to
+# `ubuntu-latest`, and `platforms: linux/${{ matrix.arch }}` renders as the
+# malformed `platforms: linux/`. That fails red at runtime, but only on a
+# push that changes that specific image, and it was invisible to the harness
+# and to every push that leaves that image unchanged -- the exact blind spot
+# this case exists to close. (An island in either `include:` list is the
+# fail-green shape instead: covered before this round, kept below.)
 #
 # Same guard-and-.catch() treatment as the other workflow-parsing cases
 # above, for the same reason: an unguarded regex index here would be the
 # identical vacuous-pass trap on a structural build-publish.yml change.
-assert_merge_matrix_images_match_build_push_matrix() {
+assert_all_three_image_lists_agree() {
   local output rc
   output="$(node -e '
     import("node:fs").then(fs => {
       const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
       const wf = fs.readFileSync(wfPath, "utf8")
 
-      const buildPushMatch = wf.match(/\n  build-push:\n[\s\S]*?include:\n([\s\S]*?)\n {4}steps:/)
-      if (!buildPushMatch) {
-        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+      const buildPushJobMatch = wf.match(/\n {2}build-push:\n([\s\S]*?)\n {2}merge:\n/)
+      if (!buildPushJobMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push job body (bounded by the next "  merge:" job header) in ${wfPath}`)
         process.exit(1)
       }
-      const mergeMatch = wf.match(/\n  merge:\n[\s\S]*?include:\n([\s\S]*?)\n {4}steps:/)
+      const buildPushJob = buildPushJobMatch[1]
+
+      const imageDimMatch = buildPushJob.match(/\n {8}image:\n([\s\S]*?)\n {8}include:\n/)
+      if (!imageDimMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push job'"'"'s "image:" matrix dimension (an 8-space-indented "image:" line through the next 8-space-indented "include:") in ${wfPath}`)
+        process.exit(1)
+      }
+      const buildPushIncludeMatch = buildPushJob.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!buildPushIncludeMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push job'"'"'s include: list in ${wfPath}`)
+        process.exit(1)
+      }
+      const mergeMatch = wf.match(/\n {2}merge:\n[\s\S]*?include:\n([\s\S]*?)\n {4}steps:/)
       if (!mergeMatch) {
         console.log(`PARSE_ERROR: could not find the merge matrix section in ${wfPath}`)
         process.exit(1)
       }
 
-      const namesOf = section => [...section.matchAll(/- image:\s*(\S+)/g)].map(x => x[1])
-      const buildPushNames = namesOf(buildPushMatch[1]).sort()
-      const mergeNames = namesOf(mergeMatch[1]).sort()
+      // Plain "- value" array items (the image: dimension), distinct from
+      // "- image: value" map entries (the two include: lists) below.
+      const dimNamesOf = section => [...section.matchAll(/^[ \t]*-[ \t]+(\S+)[ \t]*$/gm)].map(x => x[1])
+      const includeNamesOf = section => [...section.matchAll(/- image:\s*(\S+)/g)].map(x => x[1])
 
-      const missingFromMerge = buildPushNames.filter(n => !mergeNames.includes(n))
-      const extraInMerge = mergeNames.filter(n => !buildPushNames.includes(n))
-      const problems = []
-      if (buildPushNames.join(",") !== mergeNames.join(",")) {
-        if (missingFromMerge.length) problems.push(`missing from merge: ${missingFromMerge.join("|")}`)
-        if (extraInMerge.length) problems.push(`extra in merge (or a duplicate): ${extraInMerge.join("|")}`)
-        if (!missingFromMerge.length && !extraInMerge.length) problems.push("same names, different multiset (a duplicate is masking a missing entry)")
+      const lists = {
+        "build-push image: dimension": dimNamesOf(imageDimMatch[1]).sort(),
+        "build-push include: list": includeNamesOf(buildPushIncludeMatch[1]).sort(),
+        "merge include: list": includeNamesOf(mergeMatch[1]).sort(),
       }
-      console.log(problems.join(";"))
+
+      const names = Object.keys(lists)
+      const problems = []
+      for (let i = 0; i < names.length; i++) {
+        for (let j = i + 1; j < names.length; j++) {
+          const a = lists[names[i]]
+          const b = lists[names[j]]
+          if (a.join(",") === b.join(",")) continue
+          const missing = a.filter(n => !b.includes(n))
+          const extra = b.filter(n => !a.includes(n))
+          const parts = []
+          if (missing.length) parts.push(`in "${names[i]}" but not "${names[j]}": ${missing.join("|")}`)
+          if (extra.length) parts.push(`in "${names[j]}" but not "${names[i]}": ${extra.join("|")}`)
+          if (!missing.length && !extra.length) parts.push(`"${names[i]}" and "${names[j]}" have the same names but a different multiset (a duplicate is masking a missing entry)`)
+          problems.push(parts.join("; "))
+        }
+      }
+      console.log(problems.join(" / "))
     }).catch(err => {
       console.log(`PARSE_ERROR: ${err.message}`)
       process.exit(1)
     })' 2>&1)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    fail "merge/build-push matrix comparison failed: $output"
+    fail "three-way image list comparison failed: $output"
   elif [ -z "$output" ]; then
-    pass "merge's matrix image list matches build-push's exactly"
+    pass "build-push's image: dimension, build-push's include: list, and merge's include: list all agree"
   else
-    fail "merge and build-push matrix image lists disagree: $output"
+    fail "the three image lists disagree: $output"
   fi
 }
 
@@ -318,7 +355,7 @@ assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_unpublished_images_are_exactly_the_known_three
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
-assert_merge_matrix_images_match_build_push_matrix
+assert_all_three_image_lists_agree
 assert_every_defined_case_is_invoked
 
 exit $FAIL
