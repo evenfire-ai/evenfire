@@ -2,10 +2,8 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconPluginSdk } from '@components/Sidebar/icons'
@@ -31,7 +29,6 @@ import {
   searchPluginWorkloadSdkInvocations,
   upsertPluginWorkloadSdkGrant,
 } from '@lib/api'
-import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
@@ -120,14 +117,13 @@ async function fetchUsersByRefs(userRefs: string[]): Promise<AdminUser[]> {
 }
 
 export default function PluginWorkloadSdkPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const [view, setView] = useState<SdkView>('grants')
 
   const [grants, setGrants] = useState<PluginWorkloadSdkGrant[]>([])
-  const [grantsLoading, setGrantsLoading] = useState(false)
+  const [grantsLoading, setGrantsLoading] = useState(true)
   const [grantsError, setGrantsError] = useState('')
   const [grantSearch, setGrantSearch] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -217,16 +213,9 @@ export default function PluginWorkloadSdkPage() {
   }, [filterRecipe, filterMethod, filterStatus])
 
   useEffect(() => {
-    if (!authState.isLoading && !authState.isLoggedIn) {
-      router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
-    }
-  }, [authState.isLoading, authState.isLoggedIn, router])
-
-  useEffect(() => {
-    if (!authState.isLoggedIn || authState.isLoading) return
     if (view === 'grants') void loadGrants()
     else void loadInvocations()
-  }, [authState.isLoggedIn, authState.isLoading, view, loadGrants, loadInvocations])
+  }, [view, loadGrants, loadInvocations])
 
   async function handleDelete(grant: PluginWorkloadSdkGrant) {
     const shouldDelete = await confirm({
@@ -256,11 +245,6 @@ export default function PluginWorkloadSdkPage() {
     setEditing(null)
     await loadGrants()
   }
-
-  if (authState.isLoading) {
-    return <LoadingScreen />
-  }
-  if (!authState.isLoggedIn) return null
 
   const normalizedGrantSearch = grantSearch.trim().toLowerCase()
   const filteredGrants = normalizedGrantSearch

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
-import type { ProfileRouteKey } from '@components/Sidebar/types'
+import type { ProfileRouteKey } from '@lib/profileAppFrame'
 
 export type ProfileShellProps = {
-  currentRoute: ProfileRouteKey
+  currentRoute?: ProfileRouteKey
   children: ReactNode
 }

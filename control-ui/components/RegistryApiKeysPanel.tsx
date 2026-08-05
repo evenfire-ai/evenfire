@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -14,6 +15,7 @@ import {
 import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
 import RevealApiKeyModal from './RevealApiKeyModal'
+import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -146,7 +148,9 @@ export default function RegistryApiKeysPanel() {
       />
 
       <div className="cu-card__body">
-        {view.kind === 'loading' ? <p>Loading…</p> : null}
+        {view.kind === 'loading' ? (
+          <SectionLoadingSkeleton label="Loading registry API keys" />
+        ) : null}
         {view.kind === 'not-owner' ? (
           <p className="cu-banner cu-banner--warn">
             You must be an org owner to manage API keys
@@ -169,7 +173,7 @@ export default function RegistryApiKeysPanel() {
             ) : (
               <>
                 API keys become available once this deployment is connected to the registry.{' '}
-                <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+                <Link href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</Link>.
               </>
             )}
           </p>

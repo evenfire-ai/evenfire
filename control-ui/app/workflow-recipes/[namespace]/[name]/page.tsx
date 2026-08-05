@@ -3,16 +3,17 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { DetailPageShell } from '@components/DetailPageShell'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
 import { GrantsReadonlyPanel, RecipeStatusContent } from '@components/RecipeStatusContent'
+import { SectionLoadingSkeleton } from '@components/SectionLoadingSkeleton'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -298,7 +299,29 @@ export const dynamic = 'force-dynamic'
 
 export default function WorkflowRecipeDetailPage() {
   return (
-    <Suspense fallback={<LoadingScreen />}>
+    <Suspense
+      fallback={
+        <BodyLoadingSkeleton
+          backLabel="Back to plugins"
+          icon={<IconWorkflow />}
+          primaryActionLabel="Run"
+          secondaryActionLabel="Actions"
+          sections={3}
+          subtitle="Plugin details and runtime status."
+          title="Plugin"
+          titleActions={
+            <>
+              <button type="button" className="cu-btn cu-btn--primary cu-btn--sm" disabled>
+                Run
+              </button>
+              <button type="button" className="cu-btn cu-btn--sm" disabled>
+                Actions
+              </button>
+            </>
+          }
+        />
+      }
+    >
       <WorkflowRecipeDetailContent />
     </Suspense>
   )
@@ -765,7 +788,7 @@ function WorkflowRecipeDetailContent() {
           ) : (
             <div className="cu-card">
               <div className="cu-card__body">
-                <span className="cu-muted">Loading recipe…</span>
+                <SectionLoadingSkeleton label="Loading recipe permissions" rows={3} />
               </div>
             </div>
           )

@@ -1,6 +1,13 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from 'react'
 import { usePathname } from 'next/navigation'
 import { CONTROL_ROUTES, isControlRouteSection } from '@constants/routes'
 import { useAuth } from './AuthContext'
@@ -13,10 +20,50 @@ interface DashboardLayoutProps {
   isDetailPage?: boolean
 }
 
+type DashboardFrameContextValue = {
+  setDetailPage: (isDetailPage: boolean) => void
+}
+
+const DashboardFrameContext = createContext<DashboardFrameContextValue | null>(null)
+
 export function DashboardLayout({ children, isDetailPage = false }: DashboardLayoutProps) {
+  const frame = useContext(DashboardFrameContext)
+
+  if (frame) {
+    return (
+      <NestedDashboardContent isDetailPage={isDetailPage} setDetailPage={frame.setDetailPage}>
+        {children}
+      </NestedDashboardContent>
+    )
+  }
+
+  return <PersistentDashboardFrame>{children}</PersistentDashboardFrame>
+}
+
+function NestedDashboardContent({
+  children,
+  isDetailPage,
+  setDetailPage,
+}: DashboardLayoutProps & DashboardFrameContextValue) {
+  useLayoutEffect(() => {
+    setDetailPage(isDetailPage)
+    return () => setDetailPage(false)
+  }, [isDetailPage, setDetailPage])
+
+  return <>{children}</>
+}
+
+function PersistentDashboardFrame({ children }: Pick<DashboardLayoutProps, 'children'>) {
   const pathname = usePathname()
   const { logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [isDetailPage, setIsDetailPage] = useState(false)
+
+  const setDetailPage = useCallback((nextIsDetailPage: boolean) => {
+    setIsDetailPage(nextIsDetailPage)
+  }, [])
+
+  const frameValue = useMemo(() => ({ setDetailPage }), [setDetailPage])
 
   const currentTab = useMemo<SidebarTab>(() => {
     if (isControlRouteSection(pathname, CONTROL_ROUTES.agents.root)) {
@@ -84,7 +131,11 @@ export function DashboardLayout({ children, isDetailPage = false }: DashboardLay
         onNavigate={() => setMenuOpen(false)}
         onLogout={handleLogout}
       />
-      <main className={isDetailPage ? 'cu-main cu-detail-layout' : 'cu-main'}>{children}</main>
+      <main className={`cu-main${isDetailPage ? ' cu-detail-layout' : ''}`}>
+        <DashboardFrameContext.Provider value={frameValue}>
+          {children}
+        </DashboardFrameContext.Provider>
+      </main>
     </div>
   )
 }
