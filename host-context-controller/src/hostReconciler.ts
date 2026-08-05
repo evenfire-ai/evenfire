@@ -44,7 +44,7 @@ import {
   resolveStatelessImagePullPolicy,
 } from './statelessDeployment'
 import { EffectiveHostLifecycle, SuspendFromHeartbeatOutcome } from './statelessLifecycle.types'
-import { StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
+import { ReflectHostOutcomeFn, StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
 import {
   CommunicationChannelCRD,
   HostCRD,
@@ -428,6 +428,12 @@ export class HostReconciler {
    */
   private resolveCurrentHost: ((name: string) => HostCRD | undefined) | null = null
   /**
+   * H2: late-bound cache reflector. Wired by McpServerWatcher next to
+   * setResolveCurrentHost; null (standalone) means lifecycle outcomes reflect
+   * only onto the caller's own object (legacy contract).
+   */
+  private reflectHostOutcome: ReflectHostOutcomeFn | null = null
+  /**
    * Snapshot the current Host watch authority + generation. Wired by
    * McpServerWatcher. Default is fail-closed (unknown) so orphan cleanup never
    * runs until the real authority getter is installed.
@@ -493,6 +499,7 @@ export class HostReconciler {
       reconcileCore: (host, revalidate) => this.reconcileCore(host, revalidate),
       prepareHostMutationAdmission: (action, host) =>
         this.prepareHostMutationAdmission(action, host),
+      reflectHostOutcome: (name, uid, apply) => this.reflectHostOutcome?.(name, uid, apply),
       onLifecycleStatusCommitted: (host, lifecycle) => {
         const occurredAt = this.now().toISOString()
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
@@ -556,6 +563,15 @@ export class HostReconciler {
    */
   setResolveCurrentHost(fn: (name: string) => HostCRD | undefined): void {
     this.resolveCurrentHost = fn
+  }
+
+  /**
+   * H2: late-bound setter for the guarded cache reflector. Wired by
+   * McpServerWatcher from its `hosts` cache (uid-guarded apply). Pattern
+   * mirrors setResolveCurrentHost.
+   */
+  setReflectHostOutcome(fn: ReflectHostOutcomeFn): void {
+    this.reflectHostOutcome = fn
   }
 
   /**

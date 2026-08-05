@@ -2075,3 +2075,89 @@ describe('HostReconciler reconcile — stateless replicas derive from FRESH stat
     }
   })
 })
+
+describe('H2: guarded cache reflection', () => {
+  it('reflects a committed lifecycle outcome onto the current cache entry without a watch event', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const entry = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'uid-1',
+      generation: 1,
+      resourceVersion: 'rv-1',
+    }
+    const hosts = new Map<string, HostCRD>([[entry.name, entry]])
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    // Exactly the k8sClient.ts wiring shape (uid-guarded apply onto the cache).
+    reconciler.setReflectHostOutcome((name, uid, apply) => {
+      const cached = hosts.get(name)
+      if (!cached || uid === undefined || cached.uid !== uid) return
+      apply(cached)
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: entry.name,
+        namespace: entry.namespace,
+        uid: 'uid-1',
+        generation: 1,
+        resourceVersion: 'fresh-rv',
+      },
+    })
+
+    await reconciler.markHostDrainingFromHeartbeat(entry, 0)
+
+    // The status write committed to the API…
+    expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('draining')
+    // …and — the H2 fix — the committed outcome is visible on the CANONICAL cache
+    // entry without waiting for a watch MODIFIED. With the resolver wired, the
+    // heartbeat core mutates the admitted clone (Shape A), so this can ONLY be
+    // true if the guarded reflector routed the outcome onto the cache entry.
+    expect(hosts.get(entry.name)?.status?.lifecycle?.state).toBe('draining')
+  })
+
+  it('never reflects a committed outcome onto a same-name recreation with a different uid', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const entry = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'uid-1',
+      generation: 1,
+      resourceVersion: 'rv-1',
+    }
+    const hosts = new Map<string, HostCRD>([[entry.name, entry]])
+    const replacement = { ...makeStatelessHost({ name: entry.name }), uid: 'uid-2' }
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    reconciler.setReflectHostOutcome((name, uid, apply) => {
+      const cached = hosts.get(name)
+      if (!cached || uid === undefined || cached.uid !== uid) return
+      apply(cached)
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: entry.name,
+        namespace: entry.namespace,
+        uid: 'uid-1',
+        generation: 1,
+        resourceVersion: 'fresh-rv',
+      },
+    })
+    // A watch DELETE+ADD recreates the entry (new uid) mid-commit.
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async () => {
+      hosts.set(entry.name, replacement)
+      return {}
+    })
+
+    await reconciler.markHostDrainingFromHeartbeat(entry, 0)
+
+    // The write committed…
+    expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('draining')
+    // …but the recreation (uid-2) was NOT corrupted by the stale reflection.
+    expect(replacement.status?.lifecycle).toBeUndefined()
+  })
+})

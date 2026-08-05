@@ -266,6 +266,20 @@ vi.mock('./hostReconciler', () => ({
     setResolveCurrentHost = vi.fn()
     setHostWatchAuthority = vi.fn()
     setHostMutationAuthority = vi.fn()
+    // H2: capture the injected uid-guarded cache reflector so Test C can invoke it.
+    _reflectHostOutcomeFn:
+      | ((name: string, uid: string | undefined, apply: (target: HostCRD) => void) => void)
+      | null = null
+    setReflectHostOutcome = vi.fn().mockImplementation(function (
+      this: {
+        _reflectHostOutcomeFn:
+          | ((name: string, uid: string | undefined, apply: (target: HostCRD) => void) => void)
+          | null
+      },
+      fn: (name: string, uid: string | undefined, apply: (target: HostCRD) => void) => void
+    ) {
+      this._reflectHostOutcomeFn = fn
+    })
     _hostMutationDependenciesFn: ((host: HostCRD) => readonly unknown[]) | null = null
     setResolveHostMutationDependencies = vi.fn().mockImplementation(function (
       this: { _hostMutationDependenciesFn: ((host: HostCRD) => readonly unknown[]) | null },
@@ -5532,6 +5546,38 @@ describe('McpServerWatcher wires CC counter into HostReconciler', () => {
 })
 
 describe('McpServerWatcher Host mutation dependency wiring', () => {
+  it('H2: wires a uid-guarded cache reflector into HostReconciler', () => {
+    const watcher = new McpServerWatcher()
+    const reflect = (
+      watcher.getHostReconciler() as unknown as {
+        _reflectHostOutcomeFn:
+          | ((name: string, uid: string | undefined, apply: (target: HostCRD) => void) => void)
+          | null
+      }
+    )._reflectHostOutcomeFn
+    if (!reflect) {
+      throw new Error('setReflectHostOutcome was never wired by the McpServerWatcher constructor')
+    }
+    const entry = {
+      name: 'h2-host',
+      namespace: 'mcp-host',
+      uid: 'uid-1',
+      spec: { host: 'h2-host', contextRef: 'c', secretRef: 's' },
+    } as unknown as HostCRD
+    ;(watcher as unknown as { hosts: Map<string, HostCRD> }).hosts.set('h2-host', entry)
+    const apply = vi.fn()
+    reflect('h2-host', 'uid-1', apply) // positive: current entry, matching uid
+    expect(apply).toHaveBeenCalledTimes(1)
+    expect(apply).toHaveBeenCalledWith(entry)
+    apply.mockClear()
+    reflect('h2-host', 'uid-2', apply) // recreation: same name, different uid → skip
+    expect(apply).not.toHaveBeenCalled()
+    reflect('h2-host', undefined, apply) // fail-closed on missing uid
+    expect(apply).not.toHaveBeenCalled()
+    reflect('absent-host', 'uid-1', apply) // absent entry → skip
+    expect(apply).not.toHaveBeenCalled()
+  })
+
   it('tracks only the selected Context, referenced SFS state, and Host-scoped channels', () => {
     const watcher = new McpServerWatcher()
     const host = {

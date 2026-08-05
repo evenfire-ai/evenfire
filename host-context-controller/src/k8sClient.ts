@@ -819,6 +819,14 @@ export class McpServerWatcher implements McpServerProvider {
     // entries a delete/newer event has since removed), and orphan cleanup
     // compares candidates with the CURRENT inventory rather than a pass snapshot.
     this.hostReconciler.setResolveCurrentHost(name => this.hosts.get(name))
+    // H2: reflect committed lifecycle outcomes onto the CURRENT cache entry —
+    // but never onto a same-name recreation. uid === undefined fails closed
+    // (production watch objects always carry uid).
+    this.hostReconciler.setReflectHostOutcome((name, uid, apply) => {
+      const cached = this.hosts.get(name)
+      if (!cached || uid === undefined || cached.uid !== uid) return
+      apply(cached)
+    })
     // Orphan cleanup requires known watch authority and a stable watch
     // generation; expose both so cleanup fail-closes while authority is unknown
     // or the watch has been retired mid-pass.

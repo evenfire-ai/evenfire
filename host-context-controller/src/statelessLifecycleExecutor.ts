@@ -42,6 +42,21 @@ const ACTIVE_COMMUNICATION_CHANNELS_REASON = 'ActiveCommunicationChannels'
  */
 const WAKE_REQUESTED_ANNOTATION = 'clerum.io/wake-requested'
 
+/**
+ * H2: reflect a committed lifecycle outcome onto the CURRENT canonical cache
+ * entry for `name` — but only if that entry still has the admitted `uid`.
+ * The receiver (McpServerWatcher) owns the lookup and the uid guard; the
+ * executor never touches the cache directly. A same-name recreation with a
+ * different uid MUST be skipped silently (the mutation already committed
+ * server-side under the old uid; corrupting the new object would be worse
+ * than staleness, which the watch/resync repairs).
+ */
+export type ReflectHostOutcomeFn = (
+  name: string,
+  uid: string | undefined,
+  apply: (target: HostCRD) => void
+) => void
+
 /** Constructor-injected seams from HostReconciler (late-bound where needed). */
 export interface StatelessLifecycleExecutorDeps {
   appsApi: k8s.AppsV1Api
@@ -80,6 +95,7 @@ export interface StatelessLifecycleExecutorDeps {
    * an authority generation change that happened while the work was waiting.
    */
   prepareHostMutationAdmission?: (action: string, host: HostCRD) => () => HostCRD
+  reflectHostOutcome?: ReflectHostOutcomeFn
   onLifecycleStatusCommitted?: (host: HostCRD, lifecycle: HostLifecycleStatus) => void
 }
 
@@ -92,6 +108,7 @@ export class StatelessLifecycleExecutor {
   private readonly isCommunicationChannelCacheSynced: () => boolean
   private readonly reconcileCore: (host: HostCRD, revalidate?: () => HostCRD) => Promise<void>
   private readonly prepareHostMutationAdmission: (action: string, host: HostCRD) => () => HostCRD
+  private readonly reflectHostOutcome: ReflectHostOutcomeFn
   private readonly onLifecycleStatusCommitted: (
     host: HostCRD,
     lifecycle: HostLifecycleStatus
@@ -143,6 +160,7 @@ export class StatelessLifecycleExecutor {
     this.reconcileCore = deps.reconcileCore
     this.prepareHostMutationAdmission =
       deps.prepareHostMutationAdmission ?? ((_action, host) => () => host)
+    this.reflectHostOutcome = deps.reflectHostOutcome ?? (() => {})
     this.onLifecycleStatusCommitted = deps.onLifecycleStatusCommitted ?? (() => {})
     StatelessLifecycleExecutor.warnSingleReplicaInvariantOnce()
   }
@@ -852,7 +870,9 @@ export class StatelessLifecycleExecutor {
     // legitimately trail either one.
     const currentAtFollowOn = revalidate?.()
     if (currentAtFollowOn) this.requireSameHostIdentity(host, currentAtFollowOn)
-    host.status = writtenStatus
+    this.reflectOutcome(host, target => {
+      target.status = writtenStatus
+    })
     const reconcileHost = await this.readFreshHost(result.fresh)
     if (!this.sameHostSpecRevision(host, reconcileHost)) {
       const error = new Error(
@@ -879,12 +899,14 @@ export class StatelessLifecycleExecutor {
     // the originally admitted instance until the watch delivers the next
     // MODIFIED event; reflect the final authoritative outcome immediately so
     // it cannot make a second decision from the pre-follow-on status.
-    host.uid = reconcileHost.uid
-    host.generation = reconcileHost.generation
-    host.resourceVersion = reconcileHost.resourceVersion
-    host.annotations = reconcileHost.annotations
-    host.spec = reconcileHost.spec
-    host.status = reconcileHost.status
+    this.reflectOutcome(host, target => {
+      target.uid = reconcileHost.uid
+      target.generation = reconcileHost.generation
+      target.resourceVersion = reconcileHost.resourceVersion
+      target.annotations = reconcileHost.annotations
+      target.spec = reconcileHost.spec
+      target.status = reconcileHost.status
+    })
     // The wake fast-path / drained-pre-scale guard inside reconcile() may
     // have flipped the host back to active (a wake raced the suspension) —
     // in that case no scale-down happened, so no phase/metric is emitted.
@@ -977,7 +999,10 @@ export class StatelessLifecycleExecutor {
     if ('skipped' in result || writtenLifecycle === undefined) {
       return
     }
-    host.status = { ...(host.status ?? {}), lifecycle: writtenLifecycle }
+    const reflectedStatus = { ...(host.status ?? {}), lifecycle: writtenLifecycle }
+    this.reflectOutcome(host, target => {
+      target.status = reflectedStatus
+    })
     this.lastWrittenLifecycleStatus.delete(host.name)
   }
 
@@ -1079,7 +1104,9 @@ export class StatelessLifecycleExecutor {
     if ('skipped' in result || writtenStatus === undefined) {
       return
     }
-    host.status = writtenStatus
+    this.reflectOutcome(host, target => {
+      target.status = writtenStatus
+    })
     this.lastWrittenLifecycleStatus.delete(host.name)
     console.log(
       `[HostReconciler] Marked stateless Host "${host.name}" draining — control-api now answers {drain:true} from Host.status`
@@ -1151,7 +1178,9 @@ export class StatelessLifecycleExecutor {
       )
       return
     }
-    host.status = writtenStatus
+    this.reflectOutcome(host, target => {
+      target.status = writtenStatus
+    })
     this.lastWrittenLifecycleStatus.delete(host.name)
     console.log(
       `[StatelessLifecycle] host=${host.name} cancel-drain: activity evidence while draining — reverting status to active`
@@ -1267,8 +1296,10 @@ export class StatelessLifecycleExecutor {
       // Reflect the fresh truth on the in-memory object so the heavy
       // reconcile body derives replicas from the current durable state
       // instead of the stale event payload.
-      host.annotations = initialFresh.annotations
-      host.status = initialFresh.status
+      this.reflectOutcome(host, target => {
+        target.annotations = initialFresh.annotations
+        target.status = initialFresh.status
+      })
       return false
     }
 
@@ -1327,8 +1358,10 @@ export class StatelessLifecycleExecutor {
         initialFresh
       )
       if ('skipped' in result || writtenLifecycle === undefined) {
-        host.annotations = latestFresh.annotations
-        host.status = latestFresh.status
+        this.reflectOutcome(host, target => {
+          target.annotations = latestFresh.annotations
+          target.status = latestFresh.status
+        })
         return false
       }
     } catch (err) {
@@ -1347,8 +1380,11 @@ export class StatelessLifecycleExecutor {
     // (assessLifecycle reads host.status) derives replicas from the woken
     // state instead of re-suspending from the stale event payload. The base
     // is the FRESH status the write committed over, never the cached spread.
-    host.annotations = latestFresh.annotations
-    host.status = { ...(latestFresh.status ?? {}), lifecycle: writtenLifecycle }
+    const reflectedStatus = { ...(latestFresh.status ?? {}), lifecycle: writtenLifecycle }
+    this.reflectOutcome(host, target => {
+      target.annotations = latestFresh.annotations
+      target.status = reflectedStatus
+    })
     console.log(
       `[StatelessWake] host=${host.name} generation=${writtenLifecycle.wakeHandledGeneration} phase=status_flipped ts=${this.now().getTime()}`
     )
@@ -1635,6 +1671,27 @@ export class StatelessLifecycleExecutor {
    * identity fence. Production watch snapshots always carry UID; if only one
    * side carries it, fail closed rather than guessing.
    */
+  /**
+   * H2: apply a committed outcome to BOTH visible surfaces:
+   *  1. the local working object (`host`) — with a resolver wired this is the
+   *     admitted CLONE (serializeHeartbeatMutation), so this keeps same-pass
+   *     logic (assessLifecycle, drained-pre-scale guard, follow-on reconcile)
+   *     reading the outcome exactly as before; standalone callers (no resolver)
+   *     get the legacy caller-visible reflection unchanged;
+   *  2. the CURRENT cache entry, via the uid-guarded reflector (no-op unless
+   *     McpServerWatcher wired it).
+   * `host.uid` is the admitted identity (admission proved requested.uid ===
+   * current.uid; readFreshHost re-proves it), so passing it after mutate() ran
+   * is equivalent to passing it before.
+   *
+   * `mutate` closures MUST only ASSIGN precomputed values — never derive from
+   * `target` — so both surfaces receive the identical outcome.
+   */
+  private reflectOutcome(host: HostCRD, mutate: (target: HostCRD) => void): void {
+    mutate(host)
+    this.reflectHostOutcome(host.name, host.uid, mutate)
+  }
+
   private requireSameHostIdentity(expected: HostCRD, current: HostCRD): void {
     if (expected.uid === undefined && current.uid === undefined) return
     if (expected.uid === undefined || current.uid === undefined || expected.uid !== current.uid) {
@@ -1745,8 +1802,10 @@ export class StatelessLifecycleExecutor {
         // A wake is pending in the fresh read — run the wake transition
         // instead of the scale-down. Reflect the fresh wake generation on the
         // in-memory object so downstream writes preserve it.
-        host.annotations = fresh.annotations
-        host.status = fresh.status
+        this.reflectOutcome(host, target => {
+          target.annotations = fresh.annotations
+          target.status = fresh.status
+        })
         return {
           effective: { stateless: true, state: 'active' },
           lifecycle: { state: 'active', wakeHandledGeneration: freshWakeRequested },
@@ -1772,8 +1831,10 @@ export class StatelessLifecycleExecutor {
     // Reflect fresh onto the in-memory host (mirroring the wake fast-path's
     // epoch guard) so every downstream write derives from the current
     // server-side truth instead of the stale event payload.
-    host.annotations = fresh.annotations
-    host.status = fresh.status
+    this.reflectOutcome(host, target => {
+      target.annotations = fresh.annotations
+      target.status = fresh.status
+    })
     const freshReason = fresh.status?.lifecycle?.reason
     const preservedReason = isHeartbeatManagedLifecycleReason(freshReason) ? freshReason : undefined
     return {
