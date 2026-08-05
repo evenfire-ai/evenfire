@@ -16,7 +16,10 @@ import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
-import { configurePluginWorkloadSdkBootstrapIdentity } from '../pluginWorkloadSdk/bootstrapIdentity'
+import {
+  configurePluginWorkloadSdkBootstrapIdentity,
+  resolvePluginWorkloadSdkBootstrapCapabilityFamily,
+} from '../pluginWorkloadSdk/bootstrapIdentity'
 import type {
   PluginWorkloadSdkBootstrapProof,
   PluginWorkloadSdkClientNotificationsBootstrapProof,
@@ -377,6 +380,9 @@ export class WorkflowService {
     req?: PluginWorkloadSdkBootstrapRequest
   ): Promise<ConfigureResponse> {
     return configurePluginWorkloadSdkBootstrapIdentity(req, {
+      capabilityFamily: resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+        config.pluginWorkloadSdkCapabilities
+      ),
       ...(this.onPluginWorkloadSdkBootstrapConfigured
         ? { onConfigured: this.onPluginWorkloadSdkBootstrapConfigured }
         : {}),

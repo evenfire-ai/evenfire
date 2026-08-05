@@ -1,4 +1,5 @@
 import { isRunnableLlmModelId } from '@clerum/llm-providers'
+import type { PluginWorkloadSdkCapability } from '../config'
 import { isLlmProvider } from '../llm/registryCore'
 import type { LlmProvider } from '../llm/registryCore'
 import type { ConfigureResponse, PluginWorkloadSdkBootstrapRequest } from '../workflow/types'
@@ -8,9 +9,31 @@ import type {
 } from './promptBridge/controlApiClient'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
+  /**
+   * Capability projection derived from the pod configuration. The bootstrap
+   * request may echo this family for protocol compatibility, but it must not
+   * choose which verification branch runs.
+   */
+  capabilityFamily: PluginWorkloadSdkBootstrapCapabilityFamily
   onConfigured?: (context: { provider: LlmProvider; defaultModel: string }) => void
   verify?: (provider: string, model: string) => Promise<PluginWorkloadSdkBootstrapProof | null>
   verifyClientNotifications?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>
+}
+
+export type PluginWorkloadSdkBootstrapCapabilityFamily = 'promptBridge' | 'clientNotifications'
+
+/**
+ * Resolve the one bootstrap proof WRC is allowed to request from the
+ * capability projection mounted into this mcp-host. A mixed recipe bootstraps
+ * through promptBridge, whose proof also carries the notification policy
+ * proof; a notification-only recipe remains provider-free.
+ */
+export function resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+  capabilities: readonly PluginWorkloadSdkCapability[]
+): PluginWorkloadSdkBootstrapCapabilityFamily {
+  return capabilities.includes('clientNotifications') && !capabilities.includes('promptBridge')
+    ? 'clientNotifications'
+    : 'promptBridge'
 }
 
 /**
@@ -22,7 +45,17 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   req: PluginWorkloadSdkBootstrapRequest | undefined,
   deps: PluginWorkloadSdkBootstrapIdentityDeps
 ): Promise<ConfigureResponse> {
-  if (req?.capabilityFamily === 'clientNotifications') {
+  const capabilityFamily = deps.capabilityFamily
+  if (req?.capabilityFamily !== undefined && req.capabilityFamily !== capabilityFamily) {
+    return {
+      configured: false,
+      ready: false,
+      contractVersion: 2,
+      capabilityFamily,
+      message: 'Plugin Workload SDK bootstrap capability family does not match the host projection',
+    }
+  }
+  if (capabilityFamily === 'clientNotifications') {
     const proof = deps.verifyClientNotifications ? await deps.verifyClientNotifications() : null
     if (!proof) {
       return {

@@ -75,7 +75,10 @@ import {
 } from './mcp/authoritativeFleet'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
-import { configurePluginWorkloadSdkBootstrapIdentity } from './pluginWorkloadSdk/bootstrapIdentity'
+import {
+  configurePluginWorkloadSdkBootstrapIdentity,
+  resolvePluginWorkloadSdkBootstrapCapabilityFamily,
+} from './pluginWorkloadSdk/bootstrapIdentity'
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
@@ -2785,6 +2788,9 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
     port: config.serverPort,
     configure: request =>
       configurePluginWorkloadSdkBootstrapIdentity(request, {
+        capabilityFamily: resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+          config.pluginWorkloadSdkCapabilities
+        ),
         onConfigured: context => {
           bootstrapContext = context
         },
