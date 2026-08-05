@@ -6,11 +6,26 @@ import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
 import type { GfsDelegationPanelProps } from './delegation.types'
 
 /**
+ * Managed (`1st:`) agents are server-capped to read/write
+ * (`managed_agent_permission_forbidden`) — when the selection contains a host,
+ * the dropdown never offers more, and any incompatible held bits are stripped.
+ */
+const HOST_PERMISSION_BITS = ['read', 'write'] as const
+
+const HOST_SUBJECT_KEY_PREFIX = 'host:'
+
+/**
  * P4-S07 — Desktop gfs delegation panel (renderer). A folder owner delegates
  * Layer-2/3 grants within its subtree. Presentational + affordance-driven: it
  * only SHOWS controls the caller can exercise (computed by delegationAffordances
  * in the main process and passed in). Enforcement is ALWAYS server-side
  * (control-api/gfsc) — hiding a control is usability, never the security boundary.
+ *
+ * Subjects are unified — people, teams, and the caller's own agents appear in a
+ * single picker, mirroring Control UI. A bulk grant is atomic (all or none), so
+ * when a host is part of the selection the whole grant is capped to the host
+ * permission set (read/write) and stripped of anything else. Hosts cannot be
+ * share recipients, so Create share is disabled while a host is selected.
  *
  * Composes the shared Common primitives through the GFS picker controls per the
  * desktop-app/ui frontend rules — no raw inputs/buttons.
@@ -21,6 +36,7 @@ export function GfsDelegationPanel({
   subjectOptions,
   subjectOptionsLoading = false,
   subjectOptionsError = null,
+  isDirectory,
   onGrant,
   onCreateShare,
 }: GfsDelegationPanelProps) {
@@ -28,6 +44,7 @@ export function GfsDelegationPanel({
   const [bits, setBits] = useState<string[]>(() =>
     affordances.grantableBits.includes('read') ? ['read'] : affordances.grantableBits.slice(0, 1)
   )
+  const [inherit, setInherit] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -39,6 +56,27 @@ export function GfsDelegationPanel({
         <span>You do not have delegation rights on this folder.</span>
       </div>
     )
+  }
+
+  const grantableBits = affordances.grantableBits
+  const hasHost = subjectKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
+  // Hosts cap the WHOLE bulk grant to read/write (the server enforces this per
+  // host subject; the bulk request is atomic, so the cap applies to all). Also
+  // keep the cap within the bits the caller actually holds.
+  const visiblePermissionBits = hasHost
+    ? HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
+    : grantableBits
+
+  function changeSubjects(nextKeys: string[]) {
+    setSubjectKeys(nextKeys)
+    const nextHasHost = nextKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
+    if (!nextHasHost) return
+    // Drop any bit a host subject cannot receive so the bulk grant stays valid.
+    const allowed: string[] = HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
+    setBits(current => {
+      const filtered = current.filter(bit => allowed.includes(bit))
+      return filtered.length === current.length ? current : filtered
+    })
   }
 
   async function run(action: () => Promise<void>) {
@@ -58,43 +96,61 @@ export function GfsDelegationPanel({
     }
   }
 
+  const canCreateShare = Boolean(onCreateShare) && affordances.canCreateShare && !hasHost
+
   return (
     <div className="da-gfs-delegation">
       <div className="da-gfs-delegation__composer">
         <GfsSubjectPicker
           disabled={busy}
           loading={subjectOptionsLoading}
-          onChange={setSubjectKeys}
+          onChange={changeSubjects}
           options={subjectOptions}
           value={subjectKeys}
         />
         <GfsPermissionDropdown
           disabled={busy}
           onChange={setBits}
-          permissions={affordances.grantableBits}
+          permissions={visiblePermissionBits}
           value={bits}
         />
       </div>
+      {hasHost ? (
+        <p className="da-gfs-delegation__hint muted">
+          Agent selections are limited to read and write. Incompatible permissions were removed.
+        </p>
+      ) : null}
+      {isDirectory ? (
+        <label className="da-gfs-delegation__inherit">
+          <input
+            checked={inherit}
+            disabled={busy}
+            onChange={event => setInherit(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Include contents of this folder</span>
+        </label>
+      ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
       <div className="da-gfs-delegation__actions">
         <Button
           type="button"
           loading={busy}
           disabled={busy || subjectKeys.length === 0 || bits.length === 0}
-          onClick={() => run(() => onGrant(subjectKeys, bits))}
+          onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
         >
           Grant access
         </Button>
-        {affordances.canCreateShare && onCreateShare && (
+        {onCreateShare && affordances.canCreateShare ? (
           <Button
             type="button"
             variant="outline"
-            disabled={busy || subjectKeys.length === 0}
+            disabled={busy || hasHost || subjectKeys.length === 0}
             onClick={() => run(() => onCreateShare(subjectKeys))}
           >
             Create share
           </Button>
-        )}
+        ) : null}
       </div>
       {error !== null && <StatusBanner tone="error" text={error} />}
     </div>

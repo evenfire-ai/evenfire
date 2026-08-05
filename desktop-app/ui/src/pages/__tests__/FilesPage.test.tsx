@@ -710,7 +710,7 @@ describe('FilesPage', () => {
 
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people or teams' })
+    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
     await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
     fireEvent.focus(subjectPicker)
     const userLabel = await screen.findByText('Test Two')
@@ -758,8 +758,10 @@ describe('FilesPage', () => {
     await openManageDialog('Team folder')
 
     await waitFor(() => expect(listMine).toHaveBeenCalledTimes(1))
-    expect(await screen.findByRole('button', { name: 'chatllm' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'pending-agent' })).toBeNull()
+    const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    fireEvent.focus(picker)
+    expect(await screen.findByRole('option', { name: /chatllm/ })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: /pending-agent/ })).toBeNull()
     expect(
       screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     ).toHaveProperty('checked', true)
@@ -806,14 +808,16 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    fireEvent.click(await screen.findByRole('button', { name: 'chatllm' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant agent access' }))
+    const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    fireEvent.focus(picker)
+    fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
     )
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
-    expect(pushToast).toHaveBeenCalledWith('Access granted to 1 agent', 'success')
+    expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
   it('refetches the grants list after a successful user or team grant', async () => {
@@ -868,14 +872,14 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people or teams' })
+    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
-    await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read']))
+    await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read'], true))
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
@@ -941,14 +945,14 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people or teams' })
+    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'])
+      expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'], true)
     )
     expect(grant).toHaveBeenCalledTimes(1)
     // The panel maps the verdict; no partial-success toast, no list-after-write.
