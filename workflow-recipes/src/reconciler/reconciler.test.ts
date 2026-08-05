@@ -3,6 +3,7 @@ import * as k8s from '@kubernetes/client-node'
 import { loadAll } from 'js-yaml'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
 import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
@@ -4438,6 +4439,57 @@ describe('WorkflowRecipeReconciler', () => {
       db_name: 'clerum',
       db_mode: 'readonly',
     })
+  })
+
+  it('DENIES and tears down a workload that declares the reserved platform pull secret (Issue #637)', async () => {
+    // The orchestrator-level counterpart to the builder tests in platformPullSecret.test.ts.
+    // The platform credential is injected, never declared: control-api labels it
+    // `managed-by=control-api` only, which is *unlabeled* to the #637 ownership model. So a
+    // recipe that names it in imagePullSecrets does NOT get "the declared copy stripped and
+    // ours injected" — the whole WORKLOAD is denied here, in the reconciler, and torn down
+    // instead of rendered. This is the authoritative gate; the builders only normalize.
+    mockCoreApi.readNamespacedSecret.mockImplementation((args: { name: string }) =>
+      args.name === EVENFIRE_REGISTRY_PULL_SECRET_NAME
+        ? Promise.resolve({
+            metadata: {
+              resourceVersion: '1',
+              // Exactly what registryPullSecretService writes — provenance only, no
+              // owner-recipe/shared label (labelling it `shared` would open the envSecret
+              // exfiltration path, so it must stay denied).
+              labels: { 'clerum.io/managed-by': 'control-api' },
+            },
+            type: 'kubernetes.io/dockerconfigjson',
+            data: { '.dockerconfigjson': 'eA==' },
+          })
+        : Promise.resolve({ metadata: { resourceVersion: '1' } })
+    )
+
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [
+          {
+            id: 'app',
+            type: 'deployment',
+            image: 'registry.evenfire.ai/acme/plugin:1.0',
+            port: 8080,
+            imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME],
+          },
+        ],
+      },
+    })
+
+    const r = await reconciler.reconcile(recipe)
+
+    const cond = (r.secretOwnershipConditions ?? []).find(
+      c => c.type === 'EnvSecretOwnershipDenied'
+    )
+    expect(cond?.status).toBe('True')
+    expect(cond?.message).toContain(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+    expect(r.workloadStatuses[0]).toMatchObject({ id: 'app', phase: 'failed', ready: false })
+
+    // Not rendered — and any prior instance torn down (revocation, not a silent strip).
+    expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalled()
   })
 
   it('surfaces EnvSecretOwnershipDenied from the WORKFLOW build path (Issue #637)', async () => {

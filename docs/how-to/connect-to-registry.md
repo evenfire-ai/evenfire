@@ -61,6 +61,39 @@ Once connected, browsing the public catalog, publishing, and image push/pull all
 work using the credential stored when the connection completed. No further setup
 is needed for those.
 
+> **In-cluster image pulls.** When you install a private plugin or recipe whose image
+> lives on the evenfire registry, control-api (in self-hosted mode) automatically
+> provisions the in-cluster `evenfire-registry-pull` Secret in every platform workload
+> namespace — `mcp-server`, `sandbox-recipes` and `sandbox-ui` — so the pods can pull
+> the image. You do not create that Secret by hand. It is minted from your
+> connection's own registry identity.
+>
+> **If you pre-provision it yourself, do all three namespaces.** control-api never
+> writes a Secret it does not own (one without the `clerum.io/managed-by: control-api`
+> label), and the registry's pull credential is **per-organization and rotate-on-call**:
+> minting a key for one namespace revokes the key in every other copy, including yours.
+> So the moment control-api finds a **working** externally-provided copy in any of the
+> three namespaces, it stops minting entirely rather than silently invalidating your
+> credential. Installs that need a namespace you left empty then fail with
+> `foreign_secret_would_be_revoked`, naming both namespaces. Provide the Secret in all
+> three namespaces, or delete your copies and let control-api manage all three — a
+> half-external setup is not supported.
+>
+> A **malformed** external copy is treated differently. One with the wrong `type`, or a
+> `.dockerconfigjson` that carries no usable credential for your registry host, can never
+> serve a pull, so it does not hold control-api back from minting for the other
+> namespaces. "No usable credential" covers two cases: no entry for the host at all, and
+> an entry that is present but empty. `{"auths":{"registry.evenfire.ai":{}}}` parses fine
+> and matches the host, yet the kubelet finds nothing to send and pulls anonymously. An
+> entry has to carry at least one non-empty `auth`, `password`, `identitytoken` or
+> `registrytoken`. A malformed copy does fail any install that lands a workload in _its
+> own_ namespace, with `foreign_secret_unusable`. Fix that Secret in place, or delete it
+> and let control-api manage that namespace.
+>
+> This is a shape check, not a validity check. A well-formed copy is accepted even if its
+> key has since been revoked at the registry. Proving otherwise would cost a registry
+> round trip on every install.
+
 **Creating and managing API keys** (`efrk_` org keys, used for CI and other
 programmatic publishing) needs registry authentication active. In self-hosted,
 connecting is sufficient: authentication turns on automatically the moment

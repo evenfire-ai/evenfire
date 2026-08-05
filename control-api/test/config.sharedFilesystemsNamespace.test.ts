@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * SharedFileSystem CRDs live with the Hosts that mount their PVCs (the v1
- * invariant: "always in the mcp-host namespace"). On a per-tenant MCC cluster
+ * invariant: "always in the mcp-host namespace"). On a per-tenant managed cluster
  * the Hosts namespace is `mcp-host-<slug>`, set via CONTROL_API_HOSTS_NAMESPACE.
  *
  * The SharedFilesystems admin route must therefore resolve to the SAME
