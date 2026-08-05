@@ -408,9 +408,25 @@ test.describe('Plugin Workload SDK — operator journey (installed plugin → gr
       await page.getByPlaceholder('Search by name or email…').fill(USER_EMAIL)
       const userOption = page.getByRole('option').filter({ hasText: USER_EMAIL })
       await expect(userOption.first()).toBeVisible({ timeout: 10_000 })
+      const targetOption = userOption.first()
+      const targetLabel = await targetOption.getAttribute('aria-label')
+      expect(targetLabel, `recipient option has no accessible label for ${USER_EMAIL}`).toBeTruthy()
+
+      // SelectionDropdown can reopen with previously selected users. Remove
+      // every other visible chip first; clicking an already-selected target
+      // would toggle it off and silently authorize the wrong recipient.
+      const selectedUsers = page.locator('[aria-label="Selected users"]')
+      const selectedChips = selectedUsers.getByRole('button', { name: /^Remove / })
+      for (const chip of await selectedChips.all()) {
+        const chipLabel = await chip.getAttribute('aria-label')
+        if (chipLabel !== `Remove ${targetLabel}`) await chip.click()
+      }
+      if ((await targetOption.getAttribute('aria-selected')) !== 'true') {
+        await targetOption.click()
+      }
+      await expect(targetOption).toHaveAttribute('aria-selected', 'true')
       if (EVIDENCE_DIR)
         await page.screenshot({ path: `${EVIDENCE_DIR}/operator-1-pick-user-by-email.png` })
-      await userOption.first().click()
       await usersDropdown.click() // collapse the menu before saving
       await page.getByRole('button', { name: 'Save grant' }).click()
 
