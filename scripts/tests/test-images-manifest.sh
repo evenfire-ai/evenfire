@@ -105,13 +105,31 @@ assert_unpublished_images_are_exactly_the_known_three() {
 # sides. Neither reads the substance of what was transcribed: path,
 # dockerfile, and rooted feed Task 3's generated build matrix directly, so a
 # wrong path or a dropped `rooted` breaks the real build silently here.
+#
+# The section/name regexes below are guarded and the promise chain has an
+# explicit .catch(): an earlier version indexed `wf.match(...)[1]` directly,
+# so a structural change to build-publish.yml (e.g. `include:` renamed) made
+# the match return null, `null[1]` threw inside the unguarded .then(), the
+# stderr redirect swallowed the unhandled-rejection warning, and empty stdout
+# read as "no mismatches" -- a silent 8/8-green pass against a workflow whose
+# matrix section was never parsed at all. That is the exact failure class
+# assert_every_defined_case_is_invoked's -P grep bug was in this file to
+# eliminate; keep stderr visible (2>&1, not 2>/dev/null) here so a genuine
+# crash still surfaces in the fail message rather than just flipping the
+# exit code.
 assert_matrix_fields_match_manifest() {
-  local mismatches
-  mismatches="$(node -e '
+  local output rc
+  output="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
       const fs = await import("node:fs")
-      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
-      const section = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)[1]
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section (a line "include:" through the next 4-space-indented "steps:") in ${wfPath}`)
+        process.exit(1)
+      }
+      const section = sectionMatch[1]
       const blocks = section.split(/\n(?=\s*- image:)/)
       const matrixMap = {}
       for (const block of blocks) {
@@ -131,11 +149,17 @@ assert_matrix_fields_match_manifest() {
         if (!!i.rooted !== mm.rooted) bad.push(`${i.name}:rooted`)
       }
       console.log(bad.join(","))
-    })' 2>/dev/null)"
-  if [ -z "$mismatches" ]; then
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "matrix section parse failed: $output"
+  elif [ -z "$output" ]; then
     pass "manifest path/dockerfile/rooted match the build matrix for every matrix image"
   else
-    fail "manifest disagrees with the build matrix: $mismatches"
+    fail "manifest disagrees with the build matrix: $output"
   fi
 }
 
@@ -143,21 +167,37 @@ assert_matrix_fields_match_manifest() {
 # manifest -> matrix. Nothing checked the other direction, so deleting a
 # manifest row entirely (e.g. clerum-workflow-base) stayed invisible as long
 # as >= 28 rows remained. This closes that gap.
+#
+# Same guard-and-.catch() treatment as assert_matrix_fields_match_manifest
+# above, for the same reason: an unguarded `wf.match(...)[1]` here is the
+# identical vacuous-pass trap on a structural build-publish.yml change.
 assert_every_matrix_image_has_a_manifest_row() {
-  local missing
-  missing="$(node -e '
+  local output rc
+  output="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
       const fs = await import("node:fs")
-      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
-      const section = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)[1]
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section (a line "include:" through the next 4-space-indented "steps:") in ${wfPath}`)
+        process.exit(1)
+      }
+      const section = sectionMatch[1]
       const names = [...section.matchAll(/- image:\s*(\S+)/g)].map(x => x[1])
       const known = new Set(m.IMAGES.map(i => i.name))
       console.log(names.filter(n => !known.has(n)).join(","))
-    })' 2>/dev/null)"
-  if [ -z "$missing" ]; then
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "matrix section parse failed: $output"
+  elif [ -z "$output" ]; then
     pass "every build-matrix image has a manifest row"
   else
-    fail "build-matrix images with no manifest row: $missing"
+    fail "build-matrix images with no manifest row: $output"
   fi
 }
 
