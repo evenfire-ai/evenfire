@@ -10,6 +10,12 @@ The optional `path` is an SPA pathname. The desktop first loads the recipe's con
 server route, then applies `path` with the browser history API after the app is ready. A shared link
 must not depend on the server serving that nested pathname directly.
 
+Safe route pathnames are normalized to one canonical logical representation. Percent-encoded
+equivalents may collapse to that representation, so the contract provides semantic, idempotent
+share/open/share round trips rather than byte-for-byte preservation of the original encoded input.
+Traversal segments, encoded separators, query and fragment data, and control characters remain
+rejected.
+
 Queries and fragments are intentionally excluded because they can contain OAuth codes, access
 tokens, or other ephemeral browser state. Apps that need durable shared state should encode a
 non-sensitive identifier in the pathname and fetch the corresponding data after opening.
