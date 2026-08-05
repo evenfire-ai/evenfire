@@ -78,11 +78,15 @@ describe.each([
   it('grows, caps scrolling, and shrinks its text viewport without covering it with actions', () => {
     const { container, rerender } = render(<ComposerPanel inline={inline} />)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    const shell = container.querySelector('.composer-input-shell')
     const viewport = container.querySelector('.composer-textarea-viewport')
     const toolbar = container.querySelector('.composer-input-actions')
 
+    expect(shell).toBeTruthy()
     expect(viewport).toBeTruthy()
     expect(toolbar).toBeTruthy()
+    expect(shell?.contains(viewport)).toBe(true)
+    expect(shell?.contains(toolbar)).toBe(true)
     expect(viewport?.contains(toolbar)).toBe(false)
 
     setScrollHeight(textarea, 96)

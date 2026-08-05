@@ -6796,6 +6796,17 @@ h3 {
   position: relative;
   display: grid;
   gap: var(--space-1-5);
+  overflow: hidden;
+  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.composer-input-shell:focus-within {
+  border-color: rgba(var(--focus-rgb), 0.76);
+  box-shadow:
+    0 0 0 1px rgba(var(--focus-rgb), 0.56),
+    0 0 0 3px rgba(var(--focus-rgb), 0.22);
 }
 
 .composer-input-shell--drag-active textarea {
@@ -6807,7 +6818,16 @@ h3 {
   display: block;
   width: 100%;
   max-height: 240px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   overflow-y: hidden;
+}
+
+.composer-input-shell textarea:focus {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .composer-drop-overlay {
