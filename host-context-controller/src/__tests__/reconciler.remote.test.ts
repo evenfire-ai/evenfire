@@ -87,6 +87,7 @@ function buildReconciler(
   customApi: MockCustomApi
 ): McpServerReconciler {
   return new McpServerReconciler({} as k8s.KubeConfig, {
+    assumeInventoryAuthorityWhenUnconfigured: true,
     appsApi: asAppsApi(appsApi),
     coreApi: asCoreApi(coreApi),
     customApi: asCustomApi(customApi),

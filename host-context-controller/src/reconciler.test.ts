@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import {
   asAppsApi,
@@ -76,6 +76,7 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -284,6 +285,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -481,6 +483,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -938,6 +941,7 @@ describe('restart-safe discovery status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -1101,6 +1105,7 @@ describe('ownership-safe fail-closed cleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -1215,6 +1220,7 @@ describe('full reconciliation inventory authority', () => {
       Object.assign(new Error('not found'), { code: 404 })
     )
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -1685,6 +1691,7 @@ describe('updateStatusConditions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -1745,5 +1752,55 @@ describe('updateStatusConditions', () => {
     expect(types).toContain('SecretResolved')
     expect(types).toContain('NetworkReady')
     expect(types).toContain('DeploymentReady')
+  })
+})
+
+describe('unconfigured inventory authority fails closed (G1)', () => {
+  const appsApi = createMockAppsApi()
+  const coreApi = createMockCoreApi()
+  const customApi = createMockCustomApi()
+  let errorSpy: ReturnType<typeof vi.spyOn>
+
+  // Deliberately NO assumeInventoryAuthorityWhenUnconfigured and NO
+  // setInventoryAuthority/setResolveCurrentServer wiring: the fence must deny.
+  function makeUnwiredReconciler(): McpServerReconciler {
+    return new McpServerReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(customApi),
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    errorSpy.mockRestore()
+  })
+
+  it('T-G1a: reconcile() denies (no Deployment) and warns once when authority is unwired', async () => {
+    const reconciler = makeUnwiredReconciler()
+    await reconciler.reconcile(makeServer({ name: 'g1-mcp', managed: true }))
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('fail closed'))
+  })
+
+  it('T-G1b: fullReconcile() denies when authority is unwired', async () => {
+    const reconciler = makeUnwiredReconciler()
+    await reconciler.fullReconcile([makeServer({ name: 'g1-mcp', managed: true })])
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('T-G1c: the explicit opt-in restores assume-current', async () => {
+    const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(customApi),
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    await reconciler.reconcile(makeServer({ name: 'g1-mcp', managed: true }))
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 })

@@ -119,6 +119,7 @@ describe('connector credentials revision (issue #223)', () => {
       data: { 'api-key': stored('old-key') },
     })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -220,6 +221,7 @@ describe('generation-aware rollout readiness (issue #223)', () => {
     vi.clearAllMocks()
     coreApi.readNamespacedSecret.mockResolvedValue({ data: { 'api-key': stored('old-key') } })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -322,6 +324,7 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     vi.useFakeTimers()
     coreApi.readNamespacedSecret.mockResolvedValue({ data: { 'api-key': stored('old-key') } })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -580,6 +583,7 @@ describe('poll-window fence survives a superseding reconcile (F1, watch-recovery
     currentServer = makeServer()
     coreApi.readNamespacedSecret.mockResolvedValue({ data: { 'api-key': stored('old-key') } })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),

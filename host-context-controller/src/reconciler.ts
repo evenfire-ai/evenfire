@@ -74,6 +74,14 @@ type McpServerReconcilerDeps = {
   coreApi?: k8s.CoreV1Api
   customApi?: k8s.CustomObjectsApi
   networkingApi?: k8s.NetworkingV1Api
+  /**
+   * TEST-ONLY escape hatch. When the inventory-authority fence is not wired
+   * (setInventoryAuthority / setResolveCurrentServer never called), mutation
+   * fences fail CLOSED by default. Unit tests that exercise the reconciler
+   * without a watcher opt in to the legacy assume-current behavior here.
+   * Production construction (k8sClient) must never set this.
+   */
+  assumeInventoryAuthorityWhenUnconfigured?: boolean
 }
 
 export type McpServerInventoryAuthoritySnapshot = {
@@ -251,6 +259,10 @@ export class McpServerReconciler {
   })
   private inventoryAuthorityConfigured = false
   private resolveCurrentServer?: (name: string) => McpServerCRD | undefined
+  /** See McpServerReconcilerDeps: test-only opt-in to assume-current when the
+   * inventory-authority fence is unwired. Production leaves it false. */
+  private readonly assumeInventoryAuthorityWhenUnconfigured: boolean
+  private warnedUnconfiguredAuthority = false
 
   /** Tracks the deployment status of each managed McpServer. */
   private readonly statusMap: Map<string, McpServerStatus> = new Map()
@@ -290,6 +302,8 @@ export class McpServerReconciler {
     this.networkingApi =
       deps?.networkingApi ??
       (typeof kc.makeApiClient === 'function' ? kc.makeApiClient(k8s.NetworkingV1Api) : undefined)
+    this.assumeInventoryAuthorityWhenUnconfigured =
+      deps?.assumeInventoryAuthorityWhenUnconfigured ?? false
   }
 
   /**
@@ -310,6 +324,24 @@ export class McpServerReconciler {
    */
   setResolveCurrentServer(fn: (name: string) => McpServerCRD | undefined): void {
     this.resolveCurrentServer = fn
+  }
+
+  /**
+   * Verdict for a mutation fence evaluated while the inventory authority is NOT
+   * wired. Fail closed (deny) unless a test explicitly opted in; deny loudly
+   * once, because an unconfigured fence in a running controller is a
+   * construction bug, never a runtime condition.
+   */
+  private currentWhenUnconfigured(): boolean {
+    if (this.assumeInventoryAuthorityWhenUnconfigured) return true
+    if (!this.warnedUnconfiguredAuthority) {
+      this.warnedUnconfiguredAuthority = true
+      console.error(
+        '[Reconciler] inventory authority not configured — mutation fences fail closed. ' +
+          'Wire setInventoryAuthority() and setResolveCurrentServer() before reconciling.'
+      )
+    }
+    return false
   }
 
   // ─── Status ────────────────────────────────────────────────────────
@@ -2042,7 +2074,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const callerIsCurrent = options.isCurrent ?? (() => true)
     const isCurrent = () => {
       if (!callerIsCurrent()) return false
-      if (!this.inventoryAuthorityConfigured) return true
+      if (!this.inventoryAuthorityConfigured) return this.currentWhenUnconfigured()
       if (!this.authorityMatches(capturedAuthority)) return false
       const current = this.resolveCurrentServer?.(server.name)
       return current !== undefined && sameMcpServerDesiredRevision(server, current)
@@ -2481,13 +2513,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // ahead of that safety policy.
         if (!current || !sameMcpServerDesiredRevision(server, current)) return
         const isCurrent = () => {
-          if (this.inventoryAuthorityConfigured && !this.authorityMatches(capturedAuthority)) {
+          if (!this.inventoryAuthorityConfigured) {
+            if (!this.currentWhenUnconfigured()) return false
+          } else if (!this.authorityMatches(capturedAuthority)) {
             return false
           }
           const latest = this.resolveCurrentServer?.(current.name)
           return latest
             ? sameMcpServerDesiredRevision(current, latest)
-            : this.resolveCurrentServer === undefined
+            : this.resolveCurrentServer === undefined && this.currentWhenUnconfigured()
         }
         await this.reconcile(current, { isCurrent })
       })
