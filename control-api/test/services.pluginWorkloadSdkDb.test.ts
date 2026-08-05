@@ -6,6 +6,7 @@ import {
   failStaleInvocations,
   finalizePluginWorkloadSdkRevocation,
   getPluginWorkloadSdkLegacyGrantInventory,
+  hasUsableClientNotificationRecipients,
   hashPromptTargetPolicy,
   markPluginWorkloadSdkProviderAttemptStatus,
   redeemPluginWorkloadSdkCredentialTicketJti,
@@ -45,11 +46,23 @@ function maxPlaceholder(sql: string): number {
 
 function mockUpsertGrantQueries(row: Record<string, unknown>): void {
   // recipe advisory lock → family row → recipe kill-switch guard → upsert.
-  vi.mocked(pool.query)
-    .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    .mockResolvedValueOnce({ rows: [row], rowCount: 1 } as never)
+  const responses = [
+    { rows: [], rowCount: 0 },
+    { rows: [], rowCount: 0 },
+    { rows: [], rowCount: 0 },
+  ] as Array<{ rows: unknown[]; rowCount: number }>
+  if (row.capability_family === 'clientNotifications') {
+    responses.push({ rows: [{ id: '11111111-1111-4111-8111-111111111111' }], rowCount: 1 })
+  }
+  responses.push({ rows: [row], rowCount: 1 })
+  if (row.capability_family === 'clientNotifications') {
+    // Permission-event materialization resolves newly added control-plane
+    // users after the upsert has returned its row.
+    responses.push({ rows: [{ id: '11111111-1111-4111-8111-111111111111' }], rowCount: 1 })
+  }
+  for (const response of responses) {
+    vi.mocked(pool.query).mockResolvedValueOnce(response as never)
+  }
 }
 
 describe('consumePeriodQuota — SQL bind parameter contract', () => {
@@ -287,6 +300,8 @@ describe('legacy promptBridge inventory', () => {
           provider: null,
           prompt_targets: [],
           default_target_ref: null,
+          policy_reviewed_at: null,
+          policy_reviewed_by: null,
         },
         {
           id: 'grant-active',
@@ -304,6 +319,8 @@ describe('legacy promptBridge inventory', () => {
             },
           ],
           default_target_ref: 'primary-openai',
+          policy_reviewed_at: '2026-08-05T00:00:00.000Z',
+          policy_reviewed_by: 'operator-1',
         },
       ],
       rowCount: 2,
@@ -507,6 +524,7 @@ describe('upsertGrant — provider column (R1)', () => {
       ...grantRow,
       capability_family: 'clientNotifications',
       provider: null,
+      allowed_user_refs: ['11111111-1111-4111-8111-111111111111'],
     })
     const grant = await upsertGrant(
       {
@@ -514,6 +532,7 @@ describe('upsertGrant — provider column (R1)', () => {
         recipeName: 'sdk-recipe',
         capabilityFamily: 'clientNotifications',
         allowedCallers: ['api'],
+        allowedUserRefs: ['11111111-1111-4111-8111-111111111111'],
       },
       'operator-1'
     )
@@ -646,6 +665,47 @@ describe('resolveRecipientProfiles', () => {
     } as never)
     const result = await resolveRecipientProfiles([U1])
     expect(result).toEqual([])
+  })
+})
+
+describe('hasUsableClientNotificationRecipients', () => {
+  const U1 = '11111111-1111-4111-8111-111111111111'
+
+  it('accepts an existing user with a deliverable email address', async () => {
+    const db = { query: vi.fn().mockResolvedValue({ rows: [{ id: U1 }], rowCount: 1 }) }
+    await expect(
+      hasUsableClientNotificationRecipients({ allowedUserRefs: [U1], allowedTargetRefs: [] }, db)
+    ).resolves.toBe(true)
+    expect(db.query).toHaveBeenCalledTimes(1)
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('email IS NOT NULL')
+  })
+
+  it('accepts a verified non-disabled medium target when no user is selected', async () => {
+    const db = { query: vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }], rowCount: 1 }) }
+    await expect(
+      hasUsableClientNotificationRecipients(
+        { allowedUserRefs: [], allowedTargetRefs: ['telegram-user-1'] },
+        db
+      )
+    ).resolves.toBe(true)
+    expect(db.query).toHaveBeenCalledTimes(1)
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('FROM workflow_approval_medium_accounts')
+  })
+
+  it('rejects deleted users and disabled/unknown targets instead of treating a non-empty list as ready', async () => {
+    const db = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 }),
+    }
+    await expect(
+      hasUsableClientNotificationRecipients(
+        { allowedUserRefs: [U1], allowedTargetRefs: ['unknown-target'] },
+        db
+      )
+    ).resolves.toBe(false)
+    expect(db.query).toHaveBeenCalledTimes(2)
   })
 })
 

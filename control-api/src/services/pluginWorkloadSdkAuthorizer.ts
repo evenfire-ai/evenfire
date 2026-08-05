@@ -13,7 +13,9 @@ import {
   findGrant,
   getInvocationById,
   getPluginWorkloadSdkAttemptReceipt,
+  hasUsableClientNotificationRecipients,
   hashPromptTargetPolicy,
+  isClientNotificationsPolicyReady,
   markPluginWorkloadSdkProviderAttemptStatus,
   registerPluginWorkloadSdkCredentialTicketJti,
   reservePluginWorkloadSdkProviderAttempt,
@@ -293,7 +295,11 @@ async function authorizePromptBridgeInner(
     return deny('capability_not_declared', 'recipe has no promptBridge grant')
   }
 
-  if (grant.policyState !== 'active' || grant.policyRevision < 1) {
+  if (
+    grant.policyState !== 'active' ||
+    grant.policyRevision < 1 ||
+    grant.policyReviewProvenancePresent === false
+  ) {
     return deny(
       'provider_policy_denied',
       'promptBridge grant requires an explicit operator-reviewed target policy'
@@ -577,7 +583,13 @@ export async function reissuePromptBridgeCredentialTicket(
     'promptBridge'
   )
   const callerError = grant ? checkCaller(grant, invocation.callerRef) : null
-  if (!grant || grant.policyState !== 'active' || grant.policyRevision < 1 || callerError) {
+  if (
+    !grant ||
+    grant.policyState !== 'active' ||
+    grant.policyRevision < 1 ||
+    grant.policyReviewProvenancePresent === false ||
+    callerError
+  ) {
     return deny(
       'provider_policy_denied',
       'promptBridge policy no longer authorizes this invocation'
@@ -708,6 +720,15 @@ async function authorizeClientNotificationInner(
   const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'clientNotifications')
   if (!grant) {
     return deny('capability_not_declared', 'recipe has no clientNotifications grant')
+  }
+  if (
+    !isClientNotificationsPolicyReady(grant) ||
+    !(await hasUsableClientNotificationRecipients(grant))
+  ) {
+    return deny(
+      'provider_policy_denied',
+      'clientNotifications policy is not active or has no authorized recipient'
+    )
   }
 
   const callerError = checkCaller(grant, callerRef)
@@ -867,6 +888,15 @@ async function authorizeListRecipientsInner(
   const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'clientNotifications')
   if (!grant) {
     return deny('capability_not_declared', 'recipe has no clientNotifications grant')
+  }
+  if (
+    !isClientNotificationsPolicyReady(grant) ||
+    !(await hasUsableClientNotificationRecipients(grant))
+  ) {
+    return deny(
+      'provider_policy_denied',
+      'clientNotifications policy is not active or has no authorized recipient'
+    )
   }
 
   const callerError = checkCaller(grant, callerRef)

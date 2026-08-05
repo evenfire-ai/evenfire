@@ -228,7 +228,7 @@ describe('PromptBridgeHandler', () => {
       content: 'summary text',
       usage: { inputTokens: 10, outputTokens: 5 },
       finishReason: 'complete',
-      providerAttemptAcknowledged: false,
+      providerAttemptAcknowledgement: 'failed',
     })
     const onUsage = vi.fn()
     const { handler } = makeDeps({ complete, report, onUsage })

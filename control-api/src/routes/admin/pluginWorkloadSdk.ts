@@ -22,6 +22,7 @@ import {
   deleteGrant,
   getPluginWorkloadSdkLegacyGrantInventory,
   getQuotaCounters,
+  hasUsableClientNotificationRecipients,
   listGrants,
   listInvocations,
   upsertGrant,
@@ -323,6 +324,26 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
         res
           .status(400)
           .json({ error: 'allowedEventTypes must be non-empty for clientNotifications grants' })
+        return
+      }
+      if (
+        capabilityFamily === 'clientNotifications' &&
+        allowedTargetRefs.length + allowedUserRefs.length === 0
+      ) {
+        res.status(400).json({
+          error:
+            'clientNotifications grants require at least one allowedTargetRefs or allowedUserRefs entry',
+        })
+        return
+      }
+      if (
+        capabilityFamily === 'clientNotifications' &&
+        !(await hasUsableClientNotificationRecipients({ allowedTargetRefs, allowedUserRefs }))
+      ) {
+        res.status(400).json({
+          error:
+            'clientNotifications grants require at least one existing user or verified notification target',
+        })
         return
       }
       const promptTargets =

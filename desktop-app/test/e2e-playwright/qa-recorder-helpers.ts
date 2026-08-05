@@ -91,6 +91,16 @@ function configuredValue(candidates: Array<string | undefined>): string | undefi
 }
 
 export function desktopCredentials(): { email: string; password: string } {
+  const password = configuredValue([
+    process.env.E2E_DESKTOP_PASSWORD,
+    process.env.E2E_TEST_PASSWORD,
+    process.env.ADMIN_PASSWORD,
+  ])
+  if (!password && process.env.EVENFIRE_ENV_FILE_PRESENT === '1') {
+    throw new Error(
+      'Desktop QA password is missing from the canonical repository .env (or the explicitly selected lane env file). Refusing to use changeme123! when an env file exists.'
+    )
+  }
   return {
     // The canonical repository .env is loaded by playwright.config.ts before
     // this helper is imported. Keep explicit process/root-env values first;
@@ -98,12 +108,7 @@ export function desktopCredentials(): { email: string; password: string } {
     email:
       configuredValue([process.env.E2E_DEV_LOGIN_EMAIL, process.env.TEST_USER_EMAIL]) ||
       DEFAULT_DESKTOP_EMAIL,
-    password:
-      configuredValue([
-        process.env.E2E_DESKTOP_PASSWORD,
-        process.env.E2E_TEST_PASSWORD,
-        process.env.ADMIN_PASSWORD,
-      ]) || DEFAULT_DESKTOP_PASSWORD,
+    password: password || DEFAULT_DESKTOP_PASSWORD,
   }
 }
 

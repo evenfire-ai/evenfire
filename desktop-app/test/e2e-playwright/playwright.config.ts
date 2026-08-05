@@ -63,7 +63,10 @@ function canonicalAdminPassword(contents: string): string | undefined {
 /** Load a dotenv-style file without a check-then-read race. */
 function loadEnvFile(envPath: string): void {
   const contents = readOptionalFile(envPath)
-  if (contents !== null) loadEnvContents(contents)
+  if (contents !== null) {
+    process.env.EVENFIRE_ENV_FILE_PRESENT = '1'
+    loadEnvContents(contents)
+  }
 }
 
 /**
@@ -77,6 +80,7 @@ function loadCanonicalRootEnv(): void {
   const loadCanonicalFile = (envPath: string): void => {
     const contents = readOptionalFile(envPath)
     if (contents === null) return
+    process.env.EVENFIRE_ENV_FILE_PRESENT = '1'
     loadEnvContents(contents, new Set(ADMIN_ENV_KEYS))
     const password = canonicalAdminPassword(contents)
     if (password) {
@@ -134,6 +138,7 @@ loadCanonicalRootEnv()
 // from the canonical root env. Do not read a second root-level `.env.e2e`: that
 // file belongs to another lane and previously masked desktop-app/.env.e2e.
 loadEnvFile(path.resolve(__dirname, '../../.env.e2e'))
+if (!process.env.EVENFIRE_ENV_FILE_PRESENT) process.env.EVENFIRE_ENV_FILE_PRESENT = '0'
 
 export default defineConfig({
   testDir: '.',

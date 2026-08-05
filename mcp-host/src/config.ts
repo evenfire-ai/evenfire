@@ -6,6 +6,33 @@ import { NativeToolConfig } from './core/interfaces'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
+/** Route families projected by WRC into a recipe-bound mcp-host. */
+export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
+export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
+
+/**
+ * Parse the WRC capability projection without silently accepting typos. An
+ * empty/missing value is intentionally an empty set so the SDK activation gate
+ * fails closed rather than exposing a broader route surface than the recipe.
+ */
+export function parsePluginWorkloadSdkCapabilities(
+  raw: string | undefined
+): PluginWorkloadSdkCapability[] {
+  if (!raw?.trim()) return []
+  const declared = raw
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+  const known = new Set<string>(PLUGIN_WORKLOAD_SDK_CAPABILITIES)
+  const unknown = declared.filter(value => !known.has(value))
+  if (unknown.length > 0) {
+    throw new Error(
+      `PLUGIN_WORKLOAD_SDK_CAPABILITIES contains unsupported value(s): ${unknown.join(', ')}`
+    )
+  }
+  return PLUGIN_WORKLOAD_SDK_CAPABILITIES.filter(capability => declared.includes(capability))
+}
+
 export interface Config {
   // Dev mode - if true, reads config from env vars instead of K8s
   devMode: boolean
@@ -219,6 +246,8 @@ export interface Config {
   // (flag + runtime JWT recipeNamespace + downward-API pod namespace, all
   // fail-closed — see pluginWorkloadSdk/server/sdkServer.ts).
   pluginWorkloadSdkEnabled: boolean
+  /** Exact capability families declared by WRC for this recipe-bound host. */
+  pluginWorkloadSdkCapabilities: PluginWorkloadSdkCapability[]
   pluginWorkloadSdkRuntimeMode: 'workflow' | 'sdk-only'
   pluginWorkloadSdkPort: number
   /** Pod namespace via Kubernetes downward API (defense-in-depth). */
@@ -791,6 +820,9 @@ export const config: Config = {
 
   // Plugin Workload SDK (plan §3.5 config table)
   pluginWorkloadSdkEnabled: getEnvBool('PLUGIN_WORKLOAD_SDK_ENABLED', false),
+  pluginWorkloadSdkCapabilities: parsePluginWorkloadSdkCapabilities(
+    getEnv('PLUGIN_WORKLOAD_SDK_CAPABILITIES', '')
+  ),
   // Workflow is the backwards-compatible SDK mode for workflow/standalone
   // processes; WRC explicitly sets sdk-only on the stepless adapter.
   pluginWorkloadSdkRuntimeMode: configuredRuntimeKind === 'sdk-only' ? 'sdk-only' : 'workflow',

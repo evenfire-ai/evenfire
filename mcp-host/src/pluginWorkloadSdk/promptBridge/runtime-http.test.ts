@@ -195,9 +195,16 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
   const server = new PluginWorkloadSdkServer({
     port: 0,
     recipeName: 'runtime-http',
+    capabilities: ['promptBridge'],
     workloadTokens: new Map([[TOKEN, CALLER_REF]]),
     promptBridgeHandler,
     clientNotificationsHandler: clientNotificationsHandler as never,
+    readiness: () => ({ ready: true }),
+    getRuntimeBinding: () => ({
+      hostRef: 'sandbox-recipes/runtime-http',
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'runtime-http',
+    }),
   })
 
   return {

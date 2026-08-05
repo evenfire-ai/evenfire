@@ -49,11 +49,13 @@ describe('getCredentialSlotOptions (spec R4.5.6)', () => {
       'claude-api-key-fb1',
       'openai-api-key',
       'openai-api-key-fb1',
+      'claude-project',
     ])
     expect(opts).toEqual(['claude-api-key', 'claude-api-key-fb1', 'claude-api-key-fb2'])
     // Another provider's keys never leak in.
     expect(opts).not.toContain('openai-api-key')
     expect(opts).not.toContain('openai-api-key-fb1')
+    expect(opts).not.toContain('claude-project')
   })
 })
 
@@ -71,6 +73,7 @@ describe('getPromptBridgeCredentialSlotOptions', () => {
       getPromptBridgeCredentialSlotOptions('claude', [
         'claude-api-key',
         'claude-api-key-fb1',
+        'claude-project',
         'vertex-service-account-json-fb1',
       ])
     ).toEqual(['claude-api-key', 'claude-api-key-fb1'])

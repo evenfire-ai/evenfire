@@ -305,6 +305,22 @@ describe('OpenAI token limit parameter compatibility', () => {
     expect(callArgs.max_tokens).toBe(8)
     expect(callArgs).not.toHaveProperty('max_completion_tokens')
   })
+
+  it('uses max_completion_tokens for GPT-5 tool calls', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini')
+
+    await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'Use the tool' }],
+      [{ name: 'search', description: 'Search docs', parameters: {} }],
+      { max_tokens: 8 }
+    )
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    expect(callArgs.max_completion_tokens).toBe(8)
+    expect(callArgs).not.toHaveProperty('max_tokens')
+  })
 })
 
 describe('OpenAI token usage mapping', () => {

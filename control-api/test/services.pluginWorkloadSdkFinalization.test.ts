@@ -168,6 +168,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       },
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 }
     )
 
@@ -316,6 +317,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         credential_slot: inputBase.target.credentialSlot,
         status: 'complete',
       },
+      { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 }

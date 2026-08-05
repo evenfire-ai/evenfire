@@ -31,6 +31,7 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     countRecentInvocations: vi.fn(),
     getInvocationById: vi.fn(),
     getPluginWorkloadSdkAttemptReceipt: vi.fn(),
+    hasUsableClientNotificationRecipients: vi.fn(),
     reservePluginWorkloadSdkProviderAttempt: vi.fn(),
     markPluginWorkloadSdkProviderAttemptStatus: vi.fn(),
     registerPluginWorkloadSdkCredentialTicketJti: vi.fn(),
@@ -141,11 +142,13 @@ beforeEach(() => {
   vi.mocked(sdkDb.countRecentInvocations).mockReset()
   vi.mocked(sdkDb.getInvocationById).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.reservePluginWorkloadSdkProviderAttempt).mockReset()
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
   vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockResolvedValue(true)
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
     invocationId: 'inv-1',
@@ -226,6 +229,13 @@ describe('authorizePromptBridge', () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(
       grant({ promptTargets: [], defaultTargetRef: null, policyRevision: 0 })
     )
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when an active promptBridge grant lacks review provenance', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ policyReviewProvenancePresent: false }))
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
@@ -920,6 +930,7 @@ describe('authorizeListRecipients', () => {
     grant({
       capabilityFamily: 'clientNotifications',
       allowedEventTypes: ['lead.followup.due'],
+      allowedUserRefs: ['11111111-1111-4111-8111-111111111111'],
       ...overrides,
     })
 
@@ -951,4 +962,18 @@ describe('authorizeListRecipients', () => {
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
     expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
   })
+
+  it.each(['revoking', 'disabled'] as const)(
+    'denies recipient listing while policy is %s',
+    async policyState => {
+      vi.mocked(sdkDb.findGrant).mockResolvedValue(
+        notificationGrant({
+          policyState,
+          allowedUserRefs: ['11111111-1111-4111-8111-111111111111'],
+        })
+      )
+      const result = await authorizeListRecipients({ claims: claims(), callerRef: 'api' })
+      expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    }
+  )
 })

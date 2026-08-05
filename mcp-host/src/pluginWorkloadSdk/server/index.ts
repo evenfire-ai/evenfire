@@ -10,7 +10,11 @@ import { PluginWorkloadSdkControlApiClient } from '../promptBridge/controlApiCli
 import { PluginWorkloadSdkCredentialBrokerClient } from '../promptBridge/credentialBrokerClient'
 import { PromptBridgeHandler } from '../promptBridge/handler'
 import { LlmBridge } from '../promptBridge/llmBridge'
-import { PluginWorkloadSdkServer, shouldStartPluginWorkloadSdk } from './sdkServer'
+import {
+  PluginWorkloadSdkServer,
+  checkLiveRuntimeBinding,
+  shouldStartPluginWorkloadSdk,
+} from './sdkServer'
 import {
   loadWorkloadTokenRegistryFromDir,
   loadWorkloadTokenRegistryFromPair,
@@ -243,6 +247,7 @@ export function maybeCreatePluginWorkloadSdkServer(
 ): PluginWorkloadSdkServer | null {
   const gate = shouldStartPluginWorkloadSdk({
     pluginWorkloadSdkEnabled: config.pluginWorkloadSdkEnabled,
+    pluginWorkloadSdkCapabilities: config.pluginWorkloadSdkCapabilities,
     mcpHostRuntimeAccessToken: runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '',
     podNamespace: config.podNamespace ?? '',
     pluginWorkloadSdkCredentialBrokerUrl: config.pluginWorkloadSdkCredentialBrokerUrl,
@@ -311,85 +316,117 @@ export function maybeCreatePluginWorkloadSdkServer(
   })
   recordCircuitBreakerState('control-api', false)
 
-  const credentialBroker = new PluginWorkloadSdkCredentialBrokerClient({
-    baseUrl: config.pluginWorkloadSdkCredentialBrokerUrl,
-    recipeNamespace: binding.recipeNamespace,
-    recipeName: binding.recipeName,
-    getAccessToken: () => runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '',
-  })
-  const llmBridge = new LlmBridge(credentialBroker, {
-    maxResponseBytes: config.pluginWorkloadSdkMaxLlmResponseBytes,
-    createBreaker: target =>
-      new CircuitBreaker({
-        onStateChange: open => recordCircuitBreakerState(`llm-provider:${target.targetRef}`, open),
-      }),
-  })
+  const capabilities = new Set(config.pluginWorkloadSdkCapabilities)
+  let promptBridgeHandler: PromptBridgeHandler | undefined
+  if (capabilities.has('promptBridge')) {
+    // The provider broker is a promptBridge dependency only. A notification-
+    // only recipe must be able to start without CLERUM_WRC_URL or any LLM
+    // client, while promptBridge remains fail-closed when the broker is absent.
+    if (!config.pluginWorkloadSdkCredentialBrokerUrl.trim()) {
+      console.error(
+        '[PluginWorkloadSdk] SDK server NOT started: CLERUM_WRC_URL is required for promptBridge'
+      )
+      return null
+    }
+    const credentialBroker = new PluginWorkloadSdkCredentialBrokerClient({
+      baseUrl: config.pluginWorkloadSdkCredentialBrokerUrl,
+      recipeNamespace: binding.recipeNamespace,
+      recipeName: binding.recipeName,
+      getAccessToken: () => runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '',
+    })
+    const llmBridge = new LlmBridge(credentialBroker, {
+      maxResponseBytes: config.pluginWorkloadSdkMaxLlmResponseBytes,
+      createBreaker: target =>
+        new CircuitBreaker({
+          onStateChange: open =>
+            recordCircuitBreakerState(`llm-provider:${target.targetRef}`, open),
+        }),
+    })
 
-  const usageReporter = opts.usageReporter ?? null
-  const promptBridgeHandler = new PromptBridgeHandler({
-    controlApiClient,
-    llmBridge,
-    recipeNamespace: binding.recipeNamespace,
-    recipeName: binding.recipeName,
-    promptTimeoutMs: config.pluginWorkloadSdkPromptTimeoutSeconds * 1000,
-    getBootstrapTarget: opts.getLlmContext
-      ? () => {
-          const context = opts.getLlmContext?.()
-          if (!context) return null
-          return { provider: context.provider, model: context.defaultModel }
-        }
-      : undefined,
-    finalizePromptBridge:
-      config.pluginWorkloadSdkRuntimeMode === 'sdk-only'
-        ? input =>
-            controlApiClient.finalizePromptBridge({
-              recipeNamespace: binding.recipeNamespace,
-              recipeName: binding.recipeName,
-              ...input,
-            })
+    const usageReporter = opts.usageReporter ?? null
+    promptBridgeHandler = new PromptBridgeHandler({
+      controlApiClient,
+      llmBridge,
+      recipeNamespace: binding.recipeNamespace,
+      recipeName: binding.recipeName,
+      promptTimeoutMs: config.pluginWorkloadSdkPromptTimeoutSeconds * 1000,
+      getBootstrapTarget: opts.getLlmContext
+        ? () => {
+            const context = opts.getLlmContext?.()
+            if (!context) return null
+            return { provider: context.provider, model: context.defaultModel }
+          }
         : undefined,
-    onUsage: usage => {
-      if (!usageReporter) return
-      const event = buildPromptBridgeUsageEvent({
-        binding: {
-          hostRef: runtimeAuth?.hostRef ?? binding.hostRef,
-          recipeNamespace: binding.recipeNamespace,
-          recipeName: binding.recipeName,
-        },
-        provider: usage.provider,
-        model: usage.model,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        callerRef: usage.callerRef,
-        promptBridgeMetadata: {
-          targetRef: usage.servedTarget.targetRef,
-          credentialSlot: usage.servedTarget.credentialSlot,
-          fallbackUsed: usage.fallbackUsed,
-          attemptCount: usage.attemptCount,
-          attemptGeneration: usage.attemptGeneration,
-          providerAttemptId: usage.providerAttemptId,
-          providerAttemptIndex: usage.providerAttemptIndex,
-        },
-        runtimeMode: config.pluginWorkloadSdkRuntimeMode === 'sdk-only' ? 'sdk-only' : 'workflow',
-        invocationId: usage.invocationId,
-        metadata: { ...usage.metadata, llmSecretName: usage.llmSecretName },
-      })
-      if (event) usageReporter.enqueue(event)
-    },
-  })
+      finalizePromptBridge:
+        config.pluginWorkloadSdkRuntimeMode === 'sdk-only'
+          ? input =>
+              controlApiClient.finalizePromptBridge({
+                recipeNamespace: binding.recipeNamespace,
+                recipeName: binding.recipeName,
+                ...input,
+              })
+          : undefined,
+      onUsage: usage => {
+        if (!usageReporter) return
+        const event = buildPromptBridgeUsageEvent({
+          binding: {
+            hostRef: runtimeAuth?.hostRef ?? binding.hostRef,
+            recipeNamespace: binding.recipeNamespace,
+            recipeName: binding.recipeName,
+          },
+          provider: usage.provider,
+          model: usage.model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          callerRef: usage.callerRef,
+          promptBridgeMetadata: {
+            targetRef: usage.servedTarget.targetRef,
+            credentialSlot: usage.servedTarget.credentialSlot,
+            fallbackUsed: usage.fallbackUsed,
+            attemptCount: usage.attemptCount,
+            attemptGeneration: usage.attemptGeneration,
+            providerAttemptId: usage.providerAttemptId,
+            providerAttemptIndex: usage.providerAttemptIndex,
+          },
+          runtimeMode: config.pluginWorkloadSdkRuntimeMode === 'sdk-only' ? 'sdk-only' : 'workflow',
+          invocationId: usage.invocationId,
+          metadata: { ...usage.metadata, llmSecretName: usage.llmSecretName },
+        })
+        if (event) usageReporter.enqueue(event)
+      },
+    })
+  }
 
-  const clientNotificationsHandler = new ClientNotificationsHandler({
-    controlApiClient,
-    recipeNamespace: binding.recipeNamespace,
-    recipeName: binding.recipeName,
-  })
+  const clientNotificationsHandler = capabilities.has('clientNotifications')
+    ? new ClientNotificationsHandler({
+        controlApiClient,
+        recipeNamespace: binding.recipeNamespace,
+        recipeName: binding.recipeName,
+      })
+    : undefined
+
+  const getRuntimeBinding = () =>
+    getJwtRuntimeBinding(runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '')
+  const readiness = () => {
+    const liveBinding = getRuntimeBinding()
+    const reason = liveBinding
+      ? checkLiveRuntimeBinding(liveBinding, binding.recipeName)
+      : 'runtime token has no decodable recipe binding'
+    if (reason) return { ready: false, reason }
+    if (capabilities.has('promptBridge') && !opts.getLlmContext?.()) {
+      return { ready: false, reason: 'promptBridge provider identity has not been brokered' }
+    }
+    return { ready: true }
+  }
 
   return new PluginWorkloadSdkServer({
     port: config.pluginWorkloadSdkPort,
     recipeName: binding.recipeName,
+    capabilities: config.pluginWorkloadSdkCapabilities,
     workloadTokens,
     promptBridgeHandler,
     clientNotificationsHandler,
+    readiness,
     maxConnections: config.pluginWorkloadSdkMaxConnections,
     maxRequestsPerMinutePerWorkload: config.pluginWorkloadSdkMaxRpmPerWorkload,
     maxConcurrentPerWorkload: config.pluginWorkloadSdkMaxConnectionsPerWorkload,
@@ -397,7 +434,6 @@ export function maybeCreatePluginWorkloadSdkServer(
     // Re-validate the rotating runtime token on every request: the boot-time
     // gate is one-shot, but refreshed tokens could in theory carry a drifted
     // binding. Fail closed instead of trusting the boot decision forever.
-    getRuntimeBinding: () =>
-      getJwtRuntimeBinding(runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? ''),
+    getRuntimeBinding,
   })
 }

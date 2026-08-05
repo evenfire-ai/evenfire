@@ -143,14 +143,25 @@ else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
 
-control_api_rollout_line="$(grep -nF 'rollout_if_present control-plane control-api' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+control_api_restore_line="$(grep -nF 'restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 gfs_provision_line="$(grep -nF 'provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-if [[ -n "$control_api_rollout_line" &&
+if [[ -n "$control_api_restore_line" &&
       -n "$gfs_provision_line" &&
-      "$control_api_rollout_line" -lt "$gfs_provision_line" ]]; then
-  pass "pre-gate sync waits for control-api migrations before gfs provisioning"
+      "$gfs_provision_line" -lt "$control_api_restore_line" ]]; then
+  pass "pre-gate sync waits for control-api migrations and gfs provisioning before writer restore"
 else
-  fail "pre-gate sync can provision gfs before control-api migrations"
+  fail "pre-gate sync can restore control-api before migrations or gfs provisioning"
+fi
+
+if contains 'fence_control_api()' &&
+   contains 'restore_control_api()' &&
+   contains 'fence_workflow_reconciler' &&
+   contains 'fence_control_api' &&
+   contains 'trap restore_pre_gate_writers EXIT' &&
+   grep -Fq 'type: Recreate' deploy/base/control-plane/control-api.yaml; then
+  pass "pre-gate and Deployment enforce a no-overlap Control API writer window"
+else
+  fail "Control API writer overlap is not fail-closed during migration/rollout"
 fi
 
 if grep -Fq 'MINIKUBE_MULTI_NODE=true' "$REGISTRY_SCRIPT" &&
@@ -184,6 +195,24 @@ if contains "deployment/control-postgres -- \\" &&
   pass "legacy grant inventory keeps the kubectl exec command intact"
 else
   fail "legacy grant inventory can execute psql on the host instead of PostgreSQL"
+fi
+
+if contains 'fence_workflow_reconciler()' &&
+   contains 'restore_workflow_reconciler()' &&
+   contains 'trap restore_pre_gate_writers EXIT' &&
+   contains 'fence_workflow_reconciler' &&
+   contains 'run-control-api-db-migration.sh' &&
+   contains 'make minikube-deploy-all'; then
+  fence_line="$(grep -n 'fence_workflow_reconciler$' "$SCRIPT" | tail -1 | cut -d: -f1)"
+  migration_line="$(grep -n 'run-control-api-db-migration.sh' "$SCRIPT" | head -1 | cut -d: -f1)"
+  overlay_line="$(grep -n 'make minikube-deploy-all' "$SCRIPT" | head -1 | cut -d: -f1)"
+  if [[ "$fence_line" -lt "$migration_line" && "$migration_line" -lt "$overlay_line" ]]; then
+    pass "pre-gate fences workflow reconciliation before schema-first migration"
+  else
+    fail "pre-gate rollout order can expose consumers before schema migration"
+  fi
+else
+  fail "pre-gate sync lacks an explicit workflow reconciliation fence"
 fi
 
 exit "$FAIL"

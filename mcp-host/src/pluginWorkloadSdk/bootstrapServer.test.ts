@@ -68,8 +68,16 @@ describe('PluginWorkloadSdkBootstrapServer', () => {
   it('exposes readiness and projects bootstrap input to public identity only', async () => {
     const { baseUrl, configure } = await start()
     const health = await fetch(`${baseUrl}/v1/runtime/health`)
-    expect(health.status).toBe(200)
-    await expect(health.json()).resolves.toMatchObject({ mode: 'sdk-only', ready: true })
+    expect(health.status).toBe(503)
+    await expect(health.json()).resolves.toMatchObject({ mode: 'sdk-only', ready: false })
+
+    const bootstrapReady = await fetch(`${baseUrl}/v1/runtime/bootstrap-ready`)
+    expect(bootstrapReady.status).toBe(200)
+    await expect(bootstrapReady.json()).resolves.toMatchObject({
+      status: 'bootstrap_ready',
+      mode: 'sdk-only',
+      identityReady: false,
+    })
 
     const response = await fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
       method: 'POST',
@@ -82,6 +90,17 @@ describe('PluginWorkloadSdkBootstrapServer', () => {
     })
     expect(response.status).toBe(200)
     expect(configure).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
+    const ready = await fetch(`${baseUrl}/v1/runtime/health`)
+    expect(ready.status).toBe(200)
+    await expect(ready.json()).resolves.toMatchObject({ mode: 'sdk-only', ready: true })
+
+    const bootstrapReadyAfterConfigure = await fetch(`${baseUrl}/v1/runtime/bootstrap-ready`)
+    expect(bootstrapReadyAfterConfigure.status).toBe(200)
+    await expect(bootstrapReadyAfterConfigure.json()).resolves.toMatchObject({
+      status: 'bootstrap_ready',
+      mode: 'sdk-only',
+      identityReady: true,
+    })
   })
 
   it('requires a configure-scoped WRC token bound to the Pod recipe', async () => {

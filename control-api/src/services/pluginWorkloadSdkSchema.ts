@@ -32,6 +32,11 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
       policy_revision INTEGER NOT NULL DEFAULT 1,
       policy_state TEXT NOT NULL DEFAULT 'active'
         CHECK (policy_state IN ('active', 'legacy_unreviewed', 'revoking', 'disabled')),
+      -- A routable policy must carry durable proof that an operator explicitly
+      -- reviewed and saved the ordered contract. Shape alone is never
+      -- provenance: rows without this pair remain fail-closed.
+      policy_reviewed_at TIMESTAMPTZ NULL,
+      policy_reviewed_by TEXT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (recipe_namespace, recipe_name, capability_family)
@@ -349,51 +354,40 @@ export async function addPluginWorkloadSdkAttemptLedgerColumns(db: DbClient): Pr
 }
 
 /**
- * Repairs databases that recorded the original 0078 migration before the
- * non-degrading predicate shipped. The ordered target policy is retained and
- * explicitly re-activated at revision 1; malformed rows remain
- * legacy_unreviewed. The operation is idempotent and never touches
- * clientNotifications or a policy already fenced as revoking/disabled.
+ * Migration 0086 is intentionally a no-op for policy authority. A complete
+ * JSON shape is not provenance of an operator decision, so a legacy row must
+ * never be reactivated automatically. The forward provenance migration below
+ * fences rows on clusters that already ran the original unsafe implementation.
  */
 export async function repairPluginWorkloadSdkLegacyGrantPolicies(db: DbClient): Promise<void> {
+  // Keep the migration registered so already-applied version history remains
+  // monotonic. No UPDATE is intentionally executed here.
+  void db
+}
+
+/**
+ * Adds explicit operator-review provenance and re-fences every promptBridge
+ * row that lacks it. This is forward-only and safe for clusters where 0086
+ * already auto-reactivated a structurally complete legacy row: the row is
+ * quarantined again and must be explicitly saved through the admin API.
+ */
+export async function addPluginWorkloadSdkPolicyReviewProvenance(db: DbClient): Promise<void> {
   await db.query(`
+    ALTER TABLE plugin_workload_sdk_grants
+      ADD COLUMN IF NOT EXISTS policy_reviewed_at TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS policy_reviewed_by TEXT NULL;
+
     UPDATE plugin_workload_sdk_grants
-       SET policy_state = 'active',
-           policy_revision = 1,
+       SET policy_state = 'legacy_unreviewed',
+           policy_revision = 0,
            updated_at = now()
      WHERE capability_family = 'promptBridge'
-       AND policy_state = 'legacy_unreviewed'
-       AND policy_revision = 0
-       AND provider IS NOT NULL
-       AND btrim(provider) <> ''
-       AND default_target_ref IS NOT NULL
-       AND btrim(default_target_ref) <> ''
-       AND CASE WHEN jsonb_typeof(prompt_targets) = 'array'
-                THEN jsonb_array_length(prompt_targets) > 0 ELSE false END
-       AND CASE WHEN jsonb_typeof(allowed_callers) = 'array'
-                THEN jsonb_array_length(allowed_callers) > 0 ELSE false END
-       AND (prompt_targets -> 0 ->> 'targetRef') = default_target_ref
-       AND (prompt_targets -> 0 ->> 'provider') = provider
-       AND NOT EXISTS (
-         SELECT 1
-           FROM jsonb_array_elements(
-             CASE WHEN jsonb_typeof(prompt_targets) = 'array'
-                  THEN prompt_targets ELSE '[]'::jsonb END
-           ) AS target
-          WHERE jsonb_typeof(target) <> 'object'
-             OR btrim(COALESCE(target ->> 'targetRef', '')) = ''
-             OR btrim(COALESCE(target ->> 'provider', '')) = ''
-             OR btrim(COALESCE(target ->> 'model', '')) = ''
-             OR btrim(COALESCE(target ->> 'credentialSlot', '')) = ''
-       )
-       AND (
-         SELECT COUNT(DISTINCT target ->> 'targetRef')
-           FROM jsonb_array_elements(
-             CASE WHEN jsonb_typeof(prompt_targets) = 'array'
-                  THEN prompt_targets ELSE '[]'::jsonb END
-           ) AS target
-       ) = CASE WHEN jsonb_typeof(prompt_targets) = 'array'
-                THEN jsonb_array_length(prompt_targets) ELSE 0 END;
+       AND policy_state = 'active'
+       AND policy_reviewed_at IS NULL;
+
+    CREATE INDEX IF NOT EXISTS plugin_workload_sdk_grants_review_provenance_idx
+      ON plugin_workload_sdk_grants (policy_reviewed_at)
+      WHERE capability_family = 'promptBridge' AND policy_reviewed_at IS NULL;
   `)
 }
 

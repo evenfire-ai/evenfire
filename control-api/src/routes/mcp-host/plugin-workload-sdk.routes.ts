@@ -31,7 +31,9 @@ import {
   getInvocationById,
   getPluginWorkloadSdkAttemptReceipt,
   getPluginWorkloadSdkProviderAttempt,
+  hasUsableClientNotificationRecipients,
   hashPromptTargetPolicy,
+  isClientNotificationsPolicyReady,
   listInvocations,
   markPluginWorkloadSdkProviderAttemptStatus,
   redeemPluginWorkloadSdkCredentialTicketJti,
@@ -704,15 +706,15 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         grant &&
         grant.policyState === 'active' &&
         grant.policyRevision >= 1 &&
+        grant.policyReviewProvenancePresent !== false &&
         grant.promptTargets.length > 0 &&
         grant.defaultTargetRef !== null &&
         grant.promptTargets[0]?.targetRef === grant.defaultTargetRef
       )
       const clientNotificationsReady = Boolean(
         clientNotificationsGrant &&
-        clientNotificationsGrant.policyState === 'active' &&
-        clientNotificationsGrant.allowedCallers.length > 0 &&
-        clientNotificationsGrant.allowedEventTypes.length > 0
+        isClientNotificationsPolicyReady(clientNotificationsGrant) &&
+        (await hasUsableClientNotificationRecipients(clientNotificationsGrant))
       )
       const primaryTarget = grant?.promptTargets[0] ?? null
       res.status(200).json({

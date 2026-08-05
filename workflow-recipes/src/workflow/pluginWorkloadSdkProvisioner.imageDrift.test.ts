@@ -57,6 +57,9 @@ function makeProvisioner(
     ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
     applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
     ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
+    modelConfigHandler: {
+      configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({ status: 503 }),
+    },
     createIfNotExists: vi.fn().mockResolvedValue(true),
     safeDelete: vi.fn().mockResolvedValue(undefined),
   } as unknown as PluginWorkloadSdkProvisionerDeps
@@ -67,7 +70,10 @@ function makeProvisioner(
 
 // spec.agent resolves to a complete agent so ensureEagerSdkMcpHost does not
 // bail out before reaching the image-drift branch.
-const SPEC = { agent: { provider: 'openai', model: 'gpt-4' } } as unknown as WorkflowRecipeSpec
+const SPEC = {
+  agent: { provider: 'openai', model: 'gpt-4' },
+  pluginWorkloadSdk: { promptBridge: {} },
+} as unknown as WorkflowRecipeSpec
 const RUNTIME = {} as unknown as WorkflowRuntimePlan
 const TEST_CONFIG = {
   coordinatorImage: 'registry.example/coordinator:current',
@@ -105,7 +111,7 @@ function desiredRuntimeContractHash(): string {
     undefined,
     {
       mountWorkflowOutput: false,
-      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: ['promptBridge'],
       pluginWorkloadSdkRuntimeMode: 'sdk-only',
     }
   )
@@ -239,6 +245,9 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       coreApi,
       config: TEST_CONFIG,
       tokenFactory: {},
+      modelConfigHandler: {
+        configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({ status: 503 }),
+      },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
       applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
@@ -303,6 +312,9 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
         pluginWorkloadSdkEnabled: true,
       },
       tokenFactory: {},
+      modelConfigHandler: {
+        configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({ status: 503 }),
+      },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
       applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
@@ -417,7 +429,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
         undefined,
         {
           mountWorkflowOutput: false,
-          pluginWorkloadSdkEnabled: true,
+          pluginWorkloadSdkCapabilities: ['promptBridge'],
           pluginWorkloadSdkRuntimeMode: 'sdk-only',
         }
       )

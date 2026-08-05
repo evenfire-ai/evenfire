@@ -35,6 +35,7 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     getInvocationById: vi.fn(),
     getPluginWorkloadSdkAttemptReceipt: vi.fn(),
     getPluginWorkloadSdkProviderAttempt: vi.fn(),
+    hasUsableClientNotificationRecipients: vi.fn(),
     findGrant: vi.fn(),
     listInvocations: vi.fn(),
     redeemPluginWorkloadSdkCredentialTicketJti: vi.fn(),
@@ -123,6 +124,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.getInvocationById).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.findGrant).mockReset()
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
@@ -132,6 +134,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue(null)
   vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockResolvedValue(null)
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockResolvedValue(true)
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockResolvedValue(true)
   vi.mocked(authorizer.authorizePromptBridge).mockResolvedValue({
     ok: true,

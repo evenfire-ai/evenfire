@@ -587,9 +587,10 @@ export function providerSupportsFallbackCredentialSlot(provider: LlmProvider): b
 // Dropdown options for a fallback entry's `credentialSlot` (spec R4.5.6): the
 // provider's canonical registry slots first, then any EXTRA keys already present
 // in the LLM Secret that belong to this provider (e.g. `claude-api-key-fb1`).
-// Extra keys are matched by the `<provider>-` prefix or a registry slot prefix
-// (the suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
-// another provider. The empty option ('') means "use the provider's normal slot".
+// Extra keys are matched only by a canonical registry slot prefix (the
+// suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
+// another provider. A provider-name prefix alone (for example
+// `openai-project`) is not a credential slot and must not be offered.
 // Providers that can't express a single-key slot (Bedrock/Vertex) offer NOTHING —
 // their fallbacks reuse the primary credentials (mirrors the backend gate).
 export function getCredentialSlotOptions(
@@ -598,7 +599,7 @@ export function getCredentialSlotOptions(
 ): string[] {
   if (!providerSupportsFallbackCredentialSlot(provider)) return []
   const registrySlots = PROVIDER_CREDENTIAL_SLOTS[provider].map(slot => slot.dataKey)
-  const prefixes = [...registrySlots, `${provider}-`]
+  const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
     .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
@@ -622,7 +623,7 @@ export function getPromptBridgeCredentialSlotOptions(
   if (registrySlots.length === 0) return []
   if (slots.length !== 1 || slots[0].multiline === true) return registrySlots
 
-  const prefixes = [...registrySlots, `${provider}-`]
+  const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
     .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
@@ -648,7 +649,7 @@ export function providerForDataKey(dataKey: string): LlmProvider | null {
     if (group.slots.some(slot => slot.dataKey === dataKey)) return group.provider
   }
   for (const group of LLM_CREDENTIAL_GROUPS) {
-    const prefixes = [...group.slots.map(slot => slot.dataKey), `${group.provider}-`]
+    const prefixes = group.slots.map(slot => slot.dataKey)
     if (prefixes.some(prefix => dataKey.startsWith(prefix))) return group.provider
   }
   return null

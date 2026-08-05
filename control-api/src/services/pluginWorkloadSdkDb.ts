@@ -161,10 +161,76 @@ export interface PluginWorkloadSdkGrant {
   defaultTargetRef: string | null
   policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
   policyRevision: number
+  /** Durable proof that an operator explicitly saved the current policy. */
+  policyReviewProvenancePresent?: boolean
   /** Kill-switch epoch. Non-null while a recipe is revoking or disabled. */
   revocationId: string | null
   createdAt: string
   updatedAt: string
+}
+
+/**
+ * Single readiness predicate for the provider-free notification capability.
+ * An active grant without a usable recipient allowlist cannot deliver a
+ * notification, so it must never be advertised as validated or admitted by
+ * the authorizer.
+ */
+export function isClientNotificationsPolicyReady(
+  grant: Pick<
+    PluginWorkloadSdkGrant,
+    'policyState' | 'allowedCallers' | 'allowedEventTypes' | 'allowedTargetRefs' | 'allowedUserRefs'
+  >
+): boolean {
+  return (
+    grant.policyState === 'active' &&
+    grant.allowedCallers.length > 0 &&
+    grant.allowedEventTypes.length > 0 &&
+    grant.allowedTargetRefs.length + grant.allowedUserRefs.length > 0
+  )
+}
+
+const CONTROL_PLANE_USER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Resolve the destination half of the notification contract against the same
+ * tables used by delivery. A non-empty JSON allowlist is not sufficient:
+ * deleted users and disabled medium identities must not make a recipe appear
+ * validated when every send would remain queued or be dropped. A transaction
+ * client may be supplied so an admin upsert and its readiness check share one
+ * database boundary.
+ */
+export async function hasUsableClientNotificationRecipients(
+  grant: Pick<PluginWorkloadSdkGrant, 'allowedTargetRefs' | 'allowedUserRefs'>,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<boolean> {
+  const userRefs = grant.allowedUserRefs.filter(ref => CONTROL_PLANE_USER_UUID_RE.test(ref))
+  if (userRefs.length > 0) {
+    const users = await db.query(
+      `SELECT id
+         FROM users
+        WHERE id = ANY($1::uuid[])
+          AND email IS NOT NULL
+          AND btrim(email) <> ''
+        LIMIT 1`,
+      [userRefs]
+    )
+    if (users.rows.length > 0) return true
+  }
+
+  const targetRefs = grant.allowedTargetRefs.filter(ref => ref.trim().length > 0)
+  if (targetRefs.length === 0) return false
+
+  // Opaque targetRef delivery is backed by verified, non-disabled medium
+  // identities; arbitrary strings are intentionally not treated as usable.
+  const mediumAccounts = await db.query(
+    `SELECT 1
+       FROM workflow_approval_medium_accounts
+      WHERE provider_user_id = ANY($1::text[])
+        AND disabled_at IS NULL
+      LIMIT 1`,
+    [targetRefs]
+  )
+  return mediumAccounts.rows.length > 0
 }
 
 export interface PluginWorkloadSdkInvocationRecord {
@@ -298,6 +364,10 @@ function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
       typeof row.policy_revision === 'number' && Number.isInteger(row.policy_revision)
         ? row.policy_revision
         : 0,
+    policyReviewProvenancePresent:
+      row.policy_reviewed_at != null &&
+      typeof row.policy_reviewed_by === 'string' &&
+      row.policy_reviewed_by.trim().length > 0,
     revocationId: row.revocation_id == null ? null : String(row.revocation_id),
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
@@ -430,12 +500,27 @@ export async function upsertGrant(
     const previousUserRefs = Array.isArray(previousRow?.allowed_user_refs)
       ? previousRow.allowed_user_refs.map(String)
       : []
+    if (
+      params.capabilityFamily === 'clientNotifications' &&
+      !(await hasUsableClientNotificationRecipients(
+        {
+          allowedTargetRefs: params.allowedTargetRefs ?? [],
+          allowedUserRefs: params.allowedUserRefs ?? [],
+        },
+        db
+      ))
+    ) {
+      throw new Error(
+        'clientNotifications policy requires at least one existing user or verified notification target'
+      )
+    }
     const result = await db.query(
       `INSERT INTO plugin_workload_sdk_grants
          (recipe_namespace, recipe_name, capability_family, provider, allowed_models,
          allowed_event_types, allowed_target_refs, allowed_user_refs, allowed_callers,
-         quota_limits, model_policies, prompt_targets, default_target_ref)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13)
+         quota_limits, model_policies, prompt_targets, default_target_ref,
+         policy_reviewed_at, policy_reviewed_by)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13, now(), $14)
        ON CONFLICT (recipe_namespace, recipe_name, capability_family)
        DO UPDATE SET
          provider = EXCLUDED.provider,
@@ -462,6 +547,8 @@ export async function upsertGrant(
            ELSE NULL
          END,
          policy_revision = plugin_workload_sdk_grants.policy_revision + 1,
+         policy_reviewed_at = now(),
+         policy_reviewed_by = EXCLUDED.policy_reviewed_by,
          updated_at = now()
        RETURNING *`,
       [
@@ -478,6 +565,7 @@ export async function upsertGrant(
         JSON.stringify(params.modelPolicies ?? {}),
         JSON.stringify(params.promptTargets ?? []),
         params.defaultTargetRef ?? null,
+        operatorSub,
       ]
     )
     const grant = mapGrantRow(result.rows[0] as Record<string, unknown>)
@@ -565,6 +653,7 @@ export interface PluginWorkloadSdkLegacyGrantInventoryItem {
   policyState: string
   policyRevision: number
   providerPresent: boolean
+  policyReviewProvenancePresent: boolean
   promptTargetsCount: number
   defaultTargetRefPresent: boolean
   reasons: string[]
@@ -593,7 +682,8 @@ export async function getPluginWorkloadSdkLegacyGrantInventory(filter?: {
   }
   const result = await pool.query(
     `SELECT id, recipe_namespace, recipe_name, policy_state, policy_revision,
-            provider, prompt_targets, default_target_ref
+            provider, prompt_targets, default_target_ref, policy_reviewed_at,
+            policy_reviewed_by
        FROM plugin_workload_sdk_grants
       WHERE ${clauses.join(' AND ')}
       ORDER BY recipe_namespace, recipe_name`,
@@ -609,10 +699,15 @@ export async function getPluginWorkloadSdkLegacyGrantInventory(filter?: {
         ? row.policy_revision
         : Number(row.policy_revision ?? 0)
     const providerPresent = typeof row.provider === 'string' && row.provider.trim().length > 0
+    const policyReviewProvenancePresent =
+      row.policy_reviewed_at != null &&
+      typeof row.policy_reviewed_by === 'string' &&
+      row.policy_reviewed_by.trim().length > 0
     const defaultTargetRefPresent =
       typeof row.default_target_ref === 'string' && row.default_target_ref.trim().length > 0
     const reasons: string[] = []
     if (policyState === 'legacy_unreviewed') reasons.push('legacy_policy_state')
+    if (!policyReviewProvenancePresent) reasons.push('missing_operator_review_provenance')
     if (!providerPresent) reasons.push('missing_provider')
     if (rawTargets.length !== targets.length) reasons.push('invalid_prompt_targets')
     if (targets.length === 0) reasons.push('empty_prompt_targets')
@@ -632,6 +727,7 @@ export async function getPluginWorkloadSdkLegacyGrantInventory(filter?: {
         policyState,
         policyRevision: Number.isFinite(policyRevision) ? policyRevision : 0,
         providerPresent,
+        policyReviewProvenancePresent,
         promptTargetsCount: targets.length,
         defaultTargetRefPresent,
         reasons,
@@ -1768,10 +1864,22 @@ export async function reviveFailedInvocation(input: {
  * Returns the number of rows transitioned.
  */
 export async function failStaleInvocations(olderThanSeconds: number): Promise<number> {
+  return withTransaction(db => failStaleInvocationsInTransaction(olderThanSeconds, db))
+}
+
+/**
+ * Transaction-scoped stale recovery primitive. Keeping the transaction
+ * injectable makes the row-lock/ledger race testable against a real database
+ * and lets callers that already own a control-plane transaction preserve the
+ * same atomic fencing boundary as the scheduled sweeper.
+ */
+export async function failStaleInvocationsInTransaction(
+  olderThanSeconds: number,
+  db: DbClient
+): Promise<number> {
   const timeoutSeconds = Math.max(1, Math.floor(olderThanSeconds))
-  return withTransaction(async db => {
-    const result = await db.query(
-      `UPDATE plugin_workload_sdk_invocations
+  const result = await db.query(
+    `UPDATE plugin_workload_sdk_invocations
        SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
          WHERE status = 'in_progress'
          AND (
@@ -1782,62 +1890,61 @@ export async function failStaleInvocations(olderThanSeconds: number): Promise<nu
            )
          )
        RETURNING id, attempt_generation`,
-      [timeoutSeconds]
-    )
-    for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
-      const physicalAttempts = await db.query(
-        `SELECT id, recipe_namespace, recipe_name, attempt_generation,
+    [timeoutSeconds]
+  )
+  for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
+    const physicalAttempts = await db.query(
+      `SELECT id, recipe_namespace, recipe_name, attempt_generation,
                 attempt_index, target_ref, provider, model, credential_slot
            FROM plugin_workload_sdk_provider_attempts
           WHERE invocation_id = $1
             AND attempt_generation = $2
             AND status IN ('reserved', 'in_progress', 'complete', 'failed')
           FOR UPDATE`,
-        [row.id, row.attempt_generation]
-      )
-      for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
-        // The host has disappeared, so no current JWT can prove a host_ref.
-        // Persist an unattributed unknown outcome instead of inventing one
-        // from recipe names; the physical-attempt PK makes this idempotent.
-        await db.query(
-          `INSERT INTO plugin_workload_sdk_spend_outcomes
+      [row.id, row.attempt_generation]
+    )
+    for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
+      // The host has disappeared, so no current JWT can prove a host_ref.
+      // Persist an unattributed unknown outcome instead of inventing one
+      // from recipe names; the physical-attempt PK makes this idempotent.
+      await db.query(
+        `INSERT INTO plugin_workload_sdk_spend_outcomes
              (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
               attempt_generation, attempt_index, target_ref, host_ref, provider, model,
               credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'unknown',
                    'stale_lease', NULL, NULL, NULL)
            ON CONFLICT (provider_attempt_id) DO NOTHING`,
-          [
-            String(attempt.id),
-            row.id,
-            String(attempt.recipe_namespace),
-            String(attempt.recipe_name),
-            Number(attempt.attempt_generation),
-            Number(attempt.attempt_index),
-            String(attempt.target_ref),
-            String(attempt.provider),
-            String(attempt.model),
-            String(attempt.credential_slot),
-          ]
-        )
-      }
-      await db.query(
-        `UPDATE plugin_workload_sdk_invocation_attempts
+        [
+          String(attempt.id),
+          row.id,
+          String(attempt.recipe_namespace),
+          String(attempt.recipe_name),
+          Number(attempt.attempt_generation),
+          Number(attempt.attempt_index),
+          String(attempt.target_ref),
+          String(attempt.provider),
+          String(attempt.model),
+          String(attempt.credential_slot),
+        ]
+      )
+    }
+    await db.query(
+      `UPDATE plugin_workload_sdk_invocation_attempts
             SET status = 'provider_unavailable', lease_expires_at = NULL, completed_at = now()
           WHERE invocation_id = $1 AND attempt_generation = $2`,
-        [row.id, row.attempt_generation]
-      )
-      await db.query(
-        `UPDATE plugin_workload_sdk_provider_attempts
+      [row.id, row.attempt_generation]
+    )
+    await db.query(
+      `UPDATE plugin_workload_sdk_provider_attempts
             SET status = 'provider_unavailable', lease_expires_at = NULL, completed_at = now()
           WHERE invocation_id = $1
             AND attempt_generation = $2
             AND status IN ('reserved', 'in_progress')`,
-        [row.id, row.attempt_generation]
-      )
-    }
-    return result.rowCount ?? 0
-  })
+      [row.id, row.attempt_generation]
+    )
+  }
+  return result.rowCount ?? 0
 }
 
 export interface ListInvocationsFilter {

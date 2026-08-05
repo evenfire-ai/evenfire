@@ -412,12 +412,16 @@ export async function finalizePromptBridgeInTransaction(
       WHERE id = $1 AND attempt_generation = $3`,
     [input.invocationId, expectedStatus, input.attemptGeneration]
   )
-  await db.query(
+  const spendOutcomeInsert = await db.query(
     `INSERT INTO plugin_workload_sdk_spend_outcomes
        (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
         attempt_generation, attempt_index, target_ref, host_ref, provider, model,
         credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+     ON CONFLICT (provider_attempt_id) DO NOTHING
+     RETURNING provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
+               attempt_generation, attempt_index, target_ref, host_ref, provider,
+               model, credential_slot, outcome, input_tokens, output_tokens`,
     [
       input.providerAttemptId,
       input.invocationId,
@@ -437,6 +441,30 @@ export async function finalizePromptBridgeInTransaction(
       input.status === 'complete' ? input.providerAttemptId : null,
     ]
   )
+
+  // The stale-lease sweeper can win the physical-attempt race between our
+  // initial ledger lookup and this insert. Treat an identical existing outcome
+  // as an idempotent replay and surface a stable conflict for incompatible
+  // accounting, never a raw unique_violation/500.
+  if ((spendOutcomeInsert.rowCount ?? spendOutcomeInsert.rows.length) === 0) {
+    const raced = await db.query(
+      `SELECT provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
+              attempt_generation, attempt_index, target_ref, host_ref, provider,
+              model, credential_slot, outcome, input_tokens, output_tokens
+         FROM plugin_workload_sdk_spend_outcomes
+        WHERE provider_attempt_id = $1`,
+      [input.providerAttemptId]
+    )
+    const existingOutcome = raced.rows[0] as SpendOutcomeRow | undefined
+    if (!existingOutcome) {
+      throw new PromptBridgeFinalizationError(
+        'conflict',
+        'provider attempt outcome was concurrently finalized but is not readable',
+        409
+      )
+    }
+    return mapExistingOutcome(existingOutcome, input)
+  }
 
   return {
     invocationId: input.invocationId,

@@ -10,6 +10,7 @@ import {
   addPluginWorkloadSdkAttemptLedgerColumns,
   addPluginWorkloadSdkJitCredentialTicketColumns,
   addPluginWorkloadSdkNotExecutedSpendOutcome,
+  addPluginWorkloadSdkPolicyReviewProvenance,
   addPluginWorkloadSdkPromptTargetPolicyColumns,
   addPluginWorkloadSdkProtocolAndRevocation,
   addPluginWorkloadSdkProviderAttemptLedger,
@@ -5133,6 +5134,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0087_plugin_workload_sdk_not_executed_spend_outcome',
     apply: addPluginWorkloadSdkNotExecutedSpendOutcome,
+  },
+  {
+    version: '0088_plugin_workload_sdk_policy_review_provenance',
+    apply: addPluginWorkloadSdkPolicyReviewProvenance,
   },
 ]
 

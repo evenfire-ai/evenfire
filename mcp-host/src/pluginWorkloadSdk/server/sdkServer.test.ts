@@ -111,6 +111,7 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     it(c.name, () => {
       const result = shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: c.enabled,
+        pluginWorkloadSdkCapabilities: c.enabled ? ['promptBridge'] : [],
         mcpHostRuntimeAccessToken: c.token,
         podNamespace: c.podNamespace,
         pluginWorkloadSdkCredentialBrokerUrl: c.enabled ? BROKER_URL : '',
@@ -124,6 +125,7 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: false,
+        pluginWorkloadSdkCapabilities: [],
         mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
         podNamespace: 'sandbox-recipes',
         pluginWorkloadSdkCredentialBrokerUrl: '',
@@ -132,6 +134,7 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
         mcpHostRuntimeAccessToken: HOST_NS_TOKEN,
         podNamespace: 'sandbox-recipes',
         pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
@@ -140,11 +143,47 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
         mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
         podNamespace: '',
         pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
       }).reason
     ).toContain('(empty)')
+  })
+
+  it('fails closed when WRC did not declare a capability family', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: [],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
+    })
+    expect(result.start).toBe(false)
+    expect(result.reason).toContain('PLUGIN_WORKLOAD_SDK_CAPABILITIES')
+  })
+
+  it('starts a notification-only host without a promptBridge broker URL', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: ['clientNotifications'],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: '',
+    })
+    expect(result).toEqual({ start: true, reason: 'all three gate conditions satisfied' })
+  })
+
+  it('requires the broker only when promptBridge is declared', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: ['promptBridge'],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: '',
+    })
+    expect(result.start).toBe(false)
+    expect(result.reason).toContain('CLERUM_WRC_URL')
   })
 })
 

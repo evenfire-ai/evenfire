@@ -29,6 +29,7 @@ export interface PluginWorkloadSdkBootstrapServerOptions {
 export class PluginWorkloadSdkBootstrapServer {
   private readonly app = express()
   private readonly rateLimitBuckets = new Map<string, { windowStart: number; count: number }>()
+  private identityReady = false
   private server: http.Server | null = null
 
   constructor(private readonly opts: PluginWorkloadSdkBootstrapServerOptions) {
@@ -48,7 +49,25 @@ export class PluginWorkloadSdkBootstrapServer {
     )
     this.app.use(express.json({ limit: '16kb' }))
     this.app.get('/v1/runtime/health', (_req, res) => {
-      res.status(200).json({ status: 'healthy', mode: 'sdk-only', ready: true })
+      const ready = this.identityReady
+      res.status(ready ? 200 : 503).json({
+        status: ready ? 'healthy' : 'not_ready',
+        mode: 'sdk-only',
+        ready,
+      })
+    })
+    // Kubernetes must be able to mark the Pod reachable before WRC can POST
+    // the identity bootstrap. This probe proves that the bootstrap listener is
+    // bound, not that the provider/policy identity has already been installed.
+    // WRC uses the Ready transition to discover the Service endpoint and then
+    // performs the authenticated bootstrap; `/health` remains the operational
+    // post-bootstrap readiness signal for callers and diagnostics.
+    this.app.get('/v1/runtime/bootstrap-ready', (_req, res) => {
+      res.status(200).json({
+        status: 'bootstrap_ready',
+        mode: 'sdk-only',
+        identityReady: this.identityReady,
+      })
     })
     this.app.get('/v1/runtime/live', (_req, res) => {
       res.status(200).json({ status: 'alive', mode: 'sdk-only' })
@@ -69,8 +88,10 @@ export class PluginWorkloadSdkBootstrapServer {
         }
         try {
           const result = await this.opts.configure(request)
+          this.identityReady = result.configured === true && result.ready !== false
           res.status(result.configured ? 200 : result.ready === false ? 503 : 400).json(result)
         } catch {
+          this.identityReady = false
           res.status(503).json({
             configured: false,
             ready: false,

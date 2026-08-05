@@ -56,6 +56,8 @@ export function GrantsView({
   deletingId,
   userMap,
   legacyInventory,
+  legacyInventoryLoading,
+  legacyInventoryError,
   onEdit,
   onDelete,
 }: {
@@ -65,6 +67,8 @@ export function GrantsView({
   deletingId: string | null
   userMap: Map<string, string>
   legacyInventory: PluginWorkloadSdkLegacyGrantInventory | null
+  legacyInventoryLoading: boolean
+  legacyInventoryError: string
   onEdit: (grant: PluginWorkloadSdkGrant) => void
   onDelete: (grant: PluginWorkloadSdkGrant) => void
 }) {
@@ -72,6 +76,23 @@ export function GrantsView({
     return (
       <div className="cu-card__body">
         <div className="cu-banner cu-banner--error">{error}</div>
+      </div>
+    )
+  }
+  if (legacyInventoryError) {
+    return (
+      <div className="cu-card__body">
+        <div className="cu-banner cu-banner--error">
+          SDK migration inventory is unavailable. Grant activation is blocked until it can be
+          verified: {legacyInventoryError}
+        </div>
+      </div>
+    )
+  }
+  if (legacyInventoryLoading) {
+    return (
+      <div className="cu-card__body">
+        <div className="cu-empty">Loading SDK migration inventory…</div>
       </div>
     )
   }

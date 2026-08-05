@@ -20,7 +20,11 @@ import {
   pluginWorkloadSdkTokenSecretKey,
   resolvePluginWorkloadSdkAllowedCallers,
 } from './pluginWorkloadSdkTokens'
-import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
+import {
+  buildMcpHostPod,
+  declaredPluginWorkloadSdkCapabilities,
+  pluginWorkloadSdkRuntimeContractHash,
+} from './podFactory'
 import {
   PLUGIN_WORKLOAD_SDK_LEGACY_TOKEN_DATA_KEY,
   buildMcpHostUrl,
@@ -173,9 +177,11 @@ export class PluginWorkloadSdkProvisioner {
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
+    const capabilities = declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
+    const requiresPromptBridge = capabilities.includes('promptBridge')
     const mcpHostAgent = resolveEagerSdkMcpHostAgent(spec)
 
-    if (!mcpHostAgent && spec.pluginWorkloadSdk?.promptBridge) {
+    if (!mcpHostAgent && requiresPromptBridge) {
       log.warn(
         'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
           'declare spec.agent with provider+model to bind the eager mcp-host'
@@ -210,7 +216,7 @@ export class PluginWorkloadSdkProvisioner {
       effectiveWorkflowContextRefForSpec(recipeName, spec),
       {
         mountWorkflowOutput: false,
-        pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkCapabilities: capabilities,
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
       }
     )
@@ -282,20 +288,32 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     const readiness = await this.readinessForEagerSdkMcpHost(recipeName)
-    const promptBridge = spec.pluginWorkloadSdk?.promptBridge !== undefined
-    const clientNotifications = spec.pluginWorkloadSdk?.clientNotifications !== undefined
+    const promptBridge = capabilities.includes('promptBridge')
+    const clientNotifications = capabilities.includes('clientNotifications')
     if (!promptBridge && !clientNotifications) {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
-    if (!this.deps.modelConfigHandler) {
+    const modelConfigHandler = this.deps.modelConfigHandler
+    if (requiresPromptBridge && !modelConfigHandler) {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
-      return 'failed'
+      return 'provider_unavailable'
     }
     if (readiness.status !== 'ready') {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
+
+    // A provider-free notification host can expose its route once the
+    // namespace-bound runtime is Ready; there is no LLM identity to broker.
+    // Production normally supplies the modelConfigHandler for a policy proof,
+    // but absence must not turn a valid notification-only recipe into a fake
+    // provider failure.
+    if (!requiresPromptBridge && !modelConfigHandler) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+      return readiness.status
+    }
+    if (!modelConfigHandler) return 'provider_unavailable'
 
     if (!readiness.uid) {
       log.warn(
@@ -315,13 +333,13 @@ export class PluginWorkloadSdkProvisioner {
       const mcpHostEndpoint = buildMcpHostUrl(recipeName, this.deps.config.sandboxNamespace)
       const result =
         capabilityFamily === 'promptBridge'
-          ? await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+          ? await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               mcpHostAgent!.provider,
               mcpHostAgent!.model,
               mcpHostEndpoint,
               wrcConfigureToken
             )
-          : await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+          : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               undefined,
               undefined,
               mcpHostEndpoint,

@@ -83,6 +83,7 @@ import {
   buildWorkflowOutputAnchorPodName,
   buildWorkflowOutputPreparePod,
   buildWorkflowOutputPreparePodName,
+  declaredPluginWorkloadSdkCapabilities,
   workflowOutputLabelValue,
 } from './podFactory'
 import {
@@ -1430,10 +1431,13 @@ export class WorkflowReconciler {
           const pluginWorkloadSdkDeclared =
             spec.pluginWorkloadSdk?.promptBridge !== undefined ||
             spec.pluginWorkloadSdk?.clientNotifications !== undefined
+          const promptBridgeDeclared = spec.pluginWorkloadSdk?.promptBridge !== undefined
           const eagerReady =
             (eagerStatus === 'ready' || eagerPolicyPending) &&
-            (!pluginWorkloadSdkDeclared || eagerBootstrapProof !== undefined)
-          if (eagerStatus === 'ready' && pluginWorkloadSdkDeclared && !eagerBootstrapProof) {
+            (!pluginWorkloadSdkDeclared ||
+              !promptBridgeDeclared ||
+              eagerBootstrapProof !== undefined)
+          if (eagerStatus === 'ready' && promptBridgeDeclared && !eagerBootstrapProof) {
             return withWorkflowConditions({
               phase: 'deploying',
               message: `Plugin Workload SDK bootstrap policy proof pending (${classification})`,
@@ -1936,8 +1940,9 @@ export class WorkflowReconciler {
             gfsScopes: coordinatorGfsScopes,
             mountWorkflowOutput: runtime.pods.mcpHost!.mountWorkflowOutput,
             workflowOutputScope: runtime.pods.mcpHost!.workflowOutputScope,
-            pluginWorkloadSdkEnabled:
-              this.deps.config.pluginWorkloadSdkEnabled && Boolean(spec.pluginWorkloadSdk),
+            pluginWorkloadSdkCapabilities: this.deps.config.pluginWorkloadSdkEnabled
+              ? declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
+              : [],
           }
         )
         await this.createIfNotExists(

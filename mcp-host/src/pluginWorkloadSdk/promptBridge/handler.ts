@@ -350,13 +350,17 @@ export class PromptBridgeHandler {
               status: input.status,
             }),
         },
-        deferSuccessfulAttemptAcknowledgement: Boolean(this.deps.finalizePromptBridge),
+        acknowledgementMode: this.deps.finalizePromptBridge
+          ? 'atomic_terminal_finalization'
+          : 'per_attempt',
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
       })
 
-      const providerAttemptAcknowledged = completion.providerAttemptAcknowledged !== false
+      const providerAttemptAcknowledgement =
+        completion.providerAttemptAcknowledgement ?? 'confirmed'
+      const providerAttemptAcknowledged = providerAttemptAcknowledgement === 'confirmed'
       const providerAttemptId = completion.providerAttemptId
       const providerAttemptIndex = completion.providerAttemptIndex
       if (
@@ -387,9 +391,10 @@ export class PromptBridgeHandler {
             providerAttemptId,
             providerAttemptIndex,
             status: 'complete',
-            reason: providerAttemptAcknowledged
-              ? 'provider_completed'
-              : 'provider_completion_acknowledgement_recovered',
+            reason:
+              providerAttemptAcknowledgement === 'failed'
+                ? 'provider_completion_acknowledgement_failed'
+                : 'provider_completed',
             target: completion.servedTarget,
             usage: {
               llmSecretName: completion.llmSecretName,
@@ -403,6 +408,22 @@ export class PromptBridgeHandler {
         } catch {
           // Returning provider content before durable finalization would hide
           // a possible spend. Surface an explicit unknown outcome instead.
+          try {
+            await this.deps.controlApiClient.reportProviderAttemptStatus({
+              invocationId: authorized.invocationId,
+              recipeNamespace: this.deps.recipeNamespace,
+              recipeName: this.deps.recipeName,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId,
+              providerAttemptIndex,
+              status: 'provider_unavailable',
+            })
+          } catch {
+            // The finalizer remains the source of truth. This best-effort
+            // physical close only prevents a failed finalizer from leaving a
+            // receipt open until the lease sweeper.
+            console.warn('[PluginWorkloadSdk] provider attempt recovery failed')
+          }
           throw new PluginWorkloadError(
             'provider_unavailable',
             'provider result could not be durably finalized; retry with a new idempotency key after investigation',

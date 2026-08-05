@@ -115,8 +115,6 @@ function wireWindowVisibility(win: BrowserWindow): void {
   win.on('hide', emit)
   win.on('minimize', emit)
   win.on('restore', emit)
-  win.on('focus', emit)
-  win.on('blur', emit)
 }
 
 /**

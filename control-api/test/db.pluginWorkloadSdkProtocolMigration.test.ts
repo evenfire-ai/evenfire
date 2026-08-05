@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
   addPluginWorkloadSdkNotExecutedSpendOutcome,
+  addPluginWorkloadSdkPolicyReviewProvenance,
   addPluginWorkloadSdkProtocolAndRevocation,
   addPluginWorkloadSdkRuntimeAccess,
   repairPluginWorkloadSdkLegacyGrantPolicies,
@@ -49,18 +50,26 @@ describe('plugin workload SDK protocol migration', () => {
     expect(migrationSql).toContain("policy_state = 'active'")
   })
 
-  it('provides an idempotent forward repair for valid policies already marked legacy', async () => {
+  it('keeps the legacy policy repair migration fail-closed', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
 
     await repairPluginWorkloadSdkLegacyGrantPolicies({ query } as never)
 
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('adds durable review provenance and re-fences ambiguous active rows', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+
+    await addPluginWorkloadSdkPolicyReviewProvenance({ query } as never)
+
     const migrationSql = String(query.mock.calls[0]?.[0])
-    expect(migrationSql).toContain("SET policy_state = 'active'")
-    expect(migrationSql).toContain('policy_revision = 1')
-    expect(migrationSql).toContain("policy_state = 'legacy_unreviewed'")
+    expect(migrationSql).toContain('policy_reviewed_at TIMESTAMPTZ NULL')
+    expect(migrationSql).toContain('policy_reviewed_by TEXT NULL')
+    expect(migrationSql).toContain("SET policy_state = 'legacy_unreviewed'")
+    expect(migrationSql).toContain('policy_reviewed_at IS NULL')
     expect(migrationSql).toContain('policy_revision = 0')
-    expect(migrationSql).toContain("capability_family = 'promptBridge'")
-    expect(migrationSql).not.toContain('clientNotifications')
+    expect(migrationSql).not.toContain("SET policy_state = 'active'")
   })
 
   it('keeps no-execution receipts distinct from unknown provider spend', async () => {

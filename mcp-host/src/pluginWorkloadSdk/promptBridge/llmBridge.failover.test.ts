@@ -206,7 +206,7 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     await expect(
       bridge.complete({
         ...request,
-        deferSuccessfulAttemptAcknowledgement: true,
+        acknowledgementMode: 'atomic_terminal_finalization',
         credentialTicketIssuer,
         providerAttemptReporter,
       })
@@ -216,6 +216,43 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       providerAttempt: { providerAttemptId: 'attempt-primary' },
     })
     expect(providerAttemptReporter.report).toHaveBeenCalledTimes(2)
+  })
+
+  it('defers only the successful terminal ACK in atomic finalization mode', async () => {
+    const provider = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge } = makeBridge({ [primary.model]: provider })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+    const credentialTicketIssuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: 'fresh-primary',
+        providerAttemptId: 'attempt-primary',
+        providerAttemptIndex: 1,
+      })),
+    }
+
+    const atomic = await bridge.complete({
+      ...request,
+      targets: [{ target: primary }],
+      acknowledgementMode: 'atomic_terminal_finalization',
+      credentialTicketIssuer,
+      providerAttemptReporter,
+    })
+    expect(atomic.providerAttemptAcknowledgement).toBe('owned_by_finalizer')
+    expect(providerAttemptReporter.report).not.toHaveBeenCalled()
+
+    const perAttempt = await bridge.complete({
+      ...request,
+      targets: [{ target: primary }],
+      acknowledgementMode: 'per_attempt',
+      credentialTicketIssuer,
+      providerAttemptReporter,
+    })
+    expect(perAttempt.providerAttemptAcknowledgement).toBe('confirmed')
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'attempt-primary',
+      providerAttemptIndex: 1,
+      status: 'complete',
+    })
   })
 
   it('reissues a fresh target-bound ticket immediately before each credential resolution', async () => {
@@ -455,7 +492,7 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       servedTarget: primary,
       content: OK.content,
       usage: { inputTokens: 3, outputTokens: 4 },
-      providerAttemptAcknowledged: false,
+      providerAttemptAcknowledgement: 'failed',
     })
     expect(provider.completeSingleTurn).toHaveBeenCalledOnce()
     expect(providerAttemptReporter.report).toHaveBeenCalledWith({

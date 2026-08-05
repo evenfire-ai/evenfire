@@ -69,7 +69,11 @@ export interface LlmBridgeRequest {
   credentialTicketIssuer: PromptBridgeCredentialTicketIssuer
   providerAttemptReporter?: PromptBridgeProviderAttemptReporter
   /** SDK-only lane finalizes a successful physical attempt atomically in the handler. */
-  deferSuccessfulAttemptAcknowledgement?: boolean
+  /**
+   * Physical-attempt acknowledgement ownership. SDK-only finalization owns
+   * the served terminal receipt; workflow mode reports each attempt here.
+   */
+  acknowledgementMode?: 'per_attempt' | 'atomic_terminal_finalization'
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
   temperature?: number
@@ -85,8 +89,12 @@ export interface LlmBridgeResult {
   llmSecretName: string
   providerAttemptId?: string
   providerAttemptIndex?: number
-  /** False means the provider result is real but its terminal receipt is not. */
-  providerAttemptAcknowledged?: boolean
+  /**
+   * Explicit physical-receipt ownership. `owned_by_finalizer` is a successful
+   * SDK-only path, not a missing acknowledgement; `failed` means the receipt
+   * transport failed after provider execution and must be fenced unknown.
+   */
+  providerAttemptAcknowledgement?: 'confirmed' | 'owned_by_finalizer' | 'failed'
   content: string
   usage: { inputTokens: number; outputTokens: number }
   finishReason: 'complete' | 'length' | 'content_filter'
@@ -366,18 +374,20 @@ export class LlmBridge {
         // rejects the Secret read; close it before surfacing the terminal
         // credential/configuration failure to the caller.
         if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
-          // `deferSuccessfulAttemptAcknowledgement` applies only to the
-          // successful SDK-only terminal ACK. A ticket has already reserved a
-          // physical attempt, so every pre-provider credential/configuration
-          // failure must close that attempt as `failed`, regardless of the
-          // logical finalizer mode. Otherwise the logical invocation closes
-          // while the physical ledger remains reserved/in_progress forever.
+          // A ticket has already reserved a physical attempt, so every
+          // pre-provider credential/configuration failure must close that
+          // attempt as `failed`, regardless of the logical finalizer mode.
+          // Otherwise the logical invocation closes while the physical ledger
+          // remains reserved/in_progress forever.
           await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
             providerAttemptId: ticket.providerAttemptId,
             providerAttemptIndex: ticket.providerAttemptIndex,
             status: 'failed',
           })
         }
+        // Preserve the reserved receipt in every mode. Atomic SDK-only
+        // finalization owns the logical/spend outcome, so dropping this
+        // context would close only the physical row and lose `not_executed`.
         if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
           throw withProviderAttemptContext(error, {
             providerAttemptId: ticket.providerAttemptId,
@@ -396,9 +406,14 @@ export class LlmBridge {
           { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
           breaker
         )
-        let providerAttemptAcknowledged = true
-        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
-          providerAttemptAcknowledged = await reportProviderAttemptBestEffort(
+        let providerAttemptAcknowledgement: 'confirmed' | 'owned_by_finalizer' | 'failed' =
+          'confirmed'
+        if (
+          request.acknowledgementMode !== 'atomic_terminal_finalization' &&
+          ticket.providerAttemptId &&
+          ticket.providerAttemptIndex !== undefined
+        ) {
+          const acknowledged = await reportProviderAttemptBestEffort(
             request.providerAttemptReporter,
             {
               providerAttemptId: ticket.providerAttemptId,
@@ -406,6 +421,12 @@ export class LlmBridge {
               status: 'complete',
             }
           )
+          providerAttemptAcknowledgement = acknowledged ? 'confirmed' : 'failed'
+        } else if (request.acknowledgementMode === 'atomic_terminal_finalization') {
+          // The handler's atomic finalizer is the sole owner of the served
+          // terminal receipt. Reporting `complete` here would double-close
+          // the same physical attempt and can double-apply usage.
+          providerAttemptAcknowledgement = 'owned_by_finalizer'
         }
         return {
           ...completion,
@@ -417,15 +438,16 @@ export class LlmBridge {
           ...(ticket.providerAttemptIndex !== undefined
             ? { providerAttemptIndex: ticket.providerAttemptIndex }
             : {}),
-          providerAttemptAcknowledged,
+          providerAttemptAcknowledgement,
         }
       } catch (error) {
         const providerMayHaveExecuted =
           (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
           (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
-        let providerAttemptAcknowledged = true
+        let providerAttemptAcknowledgement: 'confirmed' | 'owned_by_finalizer' | 'failed' =
+          'confirmed'
         if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
-          providerAttemptAcknowledged = await reportProviderAttemptBestEffort(
+          const acknowledged = await reportProviderAttemptBestEffort(
             request.providerAttemptReporter,
             {
               providerAttemptId: ticket.providerAttemptId,
@@ -436,6 +458,7 @@ export class LlmBridge {
                   : 'failed',
             }
           )
+          providerAttemptAcknowledgement = acknowledged ? 'confirmed' : 'failed'
         }
         const providerAttemptContext =
           ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
@@ -448,7 +471,7 @@ export class LlmBridge {
                 llmSecretName: credential.llmSecretName,
               }
             : undefined
-        if (!providerAttemptAcknowledged) {
+        if (providerAttemptAcknowledgement === 'failed') {
           // Once execution may have started, a failed receipt is not a safe
           // failover signal. Closing the logical invocation as terminal
           // provider_unavailable prevents the same idempotency key from

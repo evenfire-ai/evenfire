@@ -40,6 +40,7 @@ import {
   getProviderLabel,
   normalizeProvider,
 } from '@lib/llm'
+import { shouldApplyRecipePrefill } from '@lib/pluginWorkloadSdkPrefill'
 import { GrantsView, InvocationsView } from './Views'
 
 type SdkView = 'grants' | 'invocations'
@@ -129,6 +130,8 @@ export default function PluginWorkloadSdkPage() {
   const [legacyInventory, setLegacyInventory] = useState<Awaited<
     ReturnType<typeof getPluginWorkloadSdkLegacyInventory>
   > | null>(null)
+  const [legacyInventoryLoading, setLegacyInventoryLoading] = useState(true)
+  const [legacyInventoryError, setLegacyInventoryError] = useState('')
   const [grantSearch, setGrantSearch] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editing, setEditing] = useState<PluginWorkloadSdkGrant | 'new' | null>(null)
@@ -181,22 +184,46 @@ export default function PluginWorkloadSdkPage() {
   const loadGrants = useCallback(async () => {
     setGrantsLoading(true)
     setGrantsError('')
+    setLegacyInventoryLoading(true)
+    setLegacyInventoryError('')
     try {
       const r = await listPluginWorkloadSdkGrants()
       const items = (r.items || []) as PluginWorkloadSdkGrant[]
       setGrants(items)
-      void getPluginWorkloadSdkLegacyInventory()
-        .then(setLegacyInventory)
-        .catch(() => setLegacyInventory(null))
+      try {
+        const inventory = await getPluginWorkloadSdkLegacyInventory()
+        setLegacyInventory(inventory)
+      } catch (e) {
+        setLegacyInventory(null)
+        setLegacyInventoryError(
+          isSilentApiError(e)
+            ? 'SDK migration inventory could not be verified; refresh after signing in again.'
+            : e instanceof Error
+              ? e.message
+              : 'Failed to load SDK migration inventory'
+        )
+      } finally {
+        setLegacyInventoryLoading(false)
+      }
       const userRefs = items.flatMap(grant => grant.allowedUserRefs)
       void fetchUsersByRefs(userRefs)
         .then(mergeLoadedUsers)
         .catch(() => undefined)
     } catch (e) {
-      if (isSilentApiError(e)) return
-      setGrantsError(e instanceof Error ? e.message : 'Failed to load grants')
+      setGrantsError(
+        isSilentApiError(e)
+          ? 'SDK grants could not be verified; refresh after signing in again.'
+          : e instanceof Error
+            ? e.message
+            : 'Failed to load grants'
+      )
+      setLegacyInventoryLoading(false)
     } finally {
       setGrantsLoading(false)
+      // Inventory is a safety prerequisite independent of the grants request;
+      // never leave the page in an apparently loading-but-editable state when
+      // the inventory request failed or the grants request short-circuited.
+      setLegacyInventoryLoading(false)
     }
   }, [mergeLoadedUsers])
 
@@ -284,7 +311,12 @@ export default function PluginWorkloadSdkPage() {
                     onChange={setGrantSearch}
                     placeholder="Search grants"
                     ariaLabel="Search grants"
-                    disabled={grantsInitialLoad}
+                    disabled={
+                      grantsInitialLoad ||
+                      legacyInventoryLoading ||
+                      Boolean(legacyInventoryError) ||
+                      Boolean(grantsError)
+                    }
                   />
                   <Button
                     type="button"
@@ -312,7 +344,12 @@ export default function PluginWorkloadSdkPage() {
                     variant="primary"
                     size="sm"
                     onClick={() => setEditing('new')}
-                    disabled={grantsInitialLoad}
+                    disabled={
+                      grantsInitialLoad ||
+                      legacyInventoryLoading ||
+                      Boolean(legacyInventoryError) ||
+                      Boolean(grantsError)
+                    }
                   >
                     New grant
                   </Button>
@@ -344,6 +381,8 @@ export default function PluginWorkloadSdkPage() {
             deletingId={deletingId}
             userMap={userMap}
             legacyInventory={legacyInventory}
+            legacyInventoryLoading={legacyInventoryLoading}
+            legacyInventoryError={legacyInventoryError}
             onEdit={setEditing}
             onDelete={handleDelete}
           />
@@ -524,7 +563,14 @@ function GrantFormModal({
       // A later recipe selection invalidates this response. Once the operator
       // edits the picker, preserve that explicit decision instead of applying
       // a stale/default access grant over it.
-      if (requestId !== recipePrefillRequest.current || allowedUserRefsEdited.current) return
+      if (
+        !shouldApplyRecipePrefill(
+          requestId,
+          recipePrefillRequest.current,
+          allowedUserRefsEdited.current
+        )
+      )
+        return
       setAllowedUserRefs((res.items ?? []).map(u => u.id))
     } catch {
       // Best-effort: leave users empty if the access grant can't be read.

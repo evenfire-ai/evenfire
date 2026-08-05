@@ -29,6 +29,7 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     deleteGrant: vi.fn(),
     getQuotaCounters: vi.fn(),
     getPluginWorkloadSdkLegacyGrantInventory: vi.fn(),
+    hasUsableClientNotificationRecipients: vi.fn(),
     listInvocations: vi.fn(),
   }
 })
@@ -70,7 +71,9 @@ beforeEach(() => {
   vi.mocked(sdkDb.deleteGrant).mockReset()
   vi.mocked(sdkDb.getQuotaCounters).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockResolvedValue(true)
   vi.mocked(checkAndIncrement).mockReset()
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
@@ -402,12 +405,28 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         capabilityFamily: 'clientNotifications',
         allowedEventTypes: ['lead.followup.due'],
         allowedCallers: ['api'],
+        allowedUserRefs: ['11111111-1111-4111-8111-111111111111'],
       })
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ capabilityFamily: 'clientNotifications', provider: undefined }),
       '11111111-1111-4111-8111-111111111111'
     )
+  })
+
+  it('rejects clientNotifications grants without an authorized destination', async () => {
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        capabilityFamily: 'clientNotifications',
+        allowedEventTypes: ['lead.followup.due'],
+        allowedCallers: ['api'],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('allowedTargetRefs or allowedUserRefs')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
   it('rejects empty allowedCallers', async () => {

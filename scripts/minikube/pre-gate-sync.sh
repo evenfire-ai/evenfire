@@ -52,6 +52,86 @@ source "${SCRIPT_DIR}/pre-gate-runtime.sh"
 # shellcheck source=scripts/minikube/pre-gate-incremental.sh
 source "${SCRIPT_DIR}/pre-gate-incremental.sh"
 
+# A database/schema migration must not race the eager workflow reconciler. Keep
+# the existing replica count so a failed gate restores the branch-owned
+# control-plane shape instead of silently leaving reconciliation disabled.
+WRC_FENCED=false
+WRC_REPLICAS=1
+CONTROL_API_FENCED=false
+CONTROL_API_REPLICAS=1
+
+fence_workflow_reconciler() {
+  if ! ${KC} get deployment/workflow-recipes -n control-plane >/dev/null 2>&1; then
+    log "Workflow reconciler is not present; no rollout fence is required"
+    return 0
+  fi
+  WRC_REPLICAS="$(${KC} get deployment/workflow-recipes -n control-plane -o jsonpath='{.spec.replicas}')"
+  WRC_REPLICAS="${WRC_REPLICAS:-1}"
+  log "Fencing workflow reconciler at ${WRC_REPLICAS} replica(s) before schema migration"
+  WRC_FENCED=true
+  ${KC} scale deployment/workflow-recipes -n control-plane --replicas=0 >/dev/null
+  ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=60s >/dev/null
+}
+
+restore_workflow_reconciler() {
+  if [[ "${WRC_FENCED}" != "true" ]]; then
+    return 0
+  fi
+  set +e
+  log "Restoring workflow reconciler to ${WRC_REPLICAS} replica(s)"
+  ${KC} scale deployment/workflow-recipes -n control-plane --replicas="${WRC_REPLICAS}" >/dev/null
+  ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=120s >/dev/null
+  local restore_rc=$?
+  set -e
+  if [[ "${restore_rc}" -ne 0 ]]; then
+    log "WARNING: workflow reconciler did not become Ready during pre-gate cleanup"
+  fi
+  WRC_FENCED=false
+}
+
+fence_control_api() {
+  if ! ${KC} get deployment/control-api -n control-plane >/dev/null 2>&1; then
+    log "Control API is not present; no writer fence is required"
+    return 0
+  fi
+  CONTROL_API_REPLICAS="$(${KC} get deployment/control-api -n control-plane -o jsonpath='{.spec.replicas}')"
+  CONTROL_API_REPLICAS="${CONTROL_API_REPLICAS:-1}"
+  if [[ ! "${CONTROL_API_REPLICAS}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: unable to determine control-api replica count; refusing schema-first sync"
+    return 1
+  fi
+  log "Fencing Control API writers at ${CONTROL_API_REPLICAS} replica(s) before schema migration"
+  CONTROL_API_FENCED=true
+  ${KC} scale deployment/control-api -n control-plane --replicas=0 >/dev/null
+  ${KC} rollout status deployment/control-api -n control-plane --timeout=60s >/dev/null
+}
+
+restore_control_api() {
+  if [[ "${CONTROL_API_FENCED}" != "true" ]]; then
+    return 0
+  fi
+  set +e
+  log "Restoring Control API to ${CONTROL_API_REPLICAS} replica(s)"
+  ${KC} scale deployment/control-api -n control-plane --replicas="${CONTROL_API_REPLICAS}" >/dev/null
+  ${KC} rollout status deployment/control-api -n control-plane --timeout=120s >/dev/null
+  local restore_rc=$?
+  set -e
+  if [[ "${restore_rc}" -ne 0 ]]; then
+    log "WARNING: Control API did not become Ready during pre-gate cleanup"
+  fi
+  CONTROL_API_FENCED=false
+}
+
+restore_pre_gate_writers() {
+  # Restore Control API first so it can serve the final readiness checks; WRC
+  # remains last because it is the consumer that must stay stopped until every
+  # migration, writer restart, and legacy-policy gate has completed.
+  restore_control_api
+  restore_workflow_reconciler
+}
+
+trap restore_pre_gate_writers EXIT
+
 fingerprint_dir() {
   local dir="$1"
 
@@ -312,8 +392,31 @@ if [[ "${cluster_changed}" == "true" ]]; then
     fi
   fi
 
+  if incremental_requires_database_reconcile; then
+    fence_workflow_reconciler
+    fence_control_api
+  fi
+
   incremental_build_images
 
+  if incremental_requires_database_reconcile; then
+    rollout_if_present control-plane control-postgres
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+      --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    # The base manifest no longer declares connection-string (provisioning-owned
+    # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
+    # control-api migrations (0048 creates the least-privilege gfs_controller
+    # role) for fresh profiles and to converge any stale credential before the
+    # rest of the gate observes service readiness.
+    provision_gfs_serving
+  fi
+
+  # Schema/control-plane first: only after migrations, runtime roles, and
+  # inventory gates have converged may the new consumer workloads be applied or
+  # restarted. The workflow reconciler is fenced above for this window.
   if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
         "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
     (
@@ -326,21 +429,11 @@ if [[ "${cluster_changed}" == "true" ]]; then
     )
   fi
 
-  if incremental_requires_database_reconcile; then
-    rollout_if_present control-plane control-postgres
-    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-      --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
-    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-    rollout_if_present control-plane control-api
-    # The base manifest no longer declares connection-string (provisioning-owned
-    # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
-    # control-api migrations (0048 creates the least-privilege gfs_controller
-    # role) for fresh profiles and to converge any stale credential before the
-    # rest of the gate observes service readiness.
-    provision_gfs_serving
-  fi
+  # The schema-first window is over: all desired manifests/images are now in
+  # place, so restore the old replica count only after the old writer was fully
+  # stopped and migrations completed. Recreate strategy on the Deployment makes
+  # ordinary image/config rollouts obey the same no-overlap contract.
+  restore_control_api
 
   # Release invariant: every path that can restart/serve mcp-host proves that
   # no legacy grant is routable, not only the migration path.

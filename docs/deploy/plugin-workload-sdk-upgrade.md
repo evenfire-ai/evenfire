@@ -14,18 +14,23 @@ not run beside the new policy/ledger contract.
    report.
 3. Apply the compatible CRDs and deploy the new Control API migration image.
 4. Stop old SDK writers before allowing the new Control API to accept writes.
-5. Run the migrations, including the forward-only legacy policy repair. The
-   repair preserves a complete ordered policy and leaves malformed or legacy
-   rows in `legacy_unreviewed`.
+   `pre-gate-sync` fences both `workflow-recipes` and `control-api` at zero
+   replicas, and the Control API Deployment uses `strategy: Recreate`; this is
+   an enforced no-overlap invariant, not a runbook-only coordination hint.
+5. Run the migrations, including the no-op legacy repair and the forward-only
+   policy-review-provenance migration. A complete-looking JSON row is not
+   provenance: every active promptBridge row without a durable operator review
+   is re-fenced as `legacy_unreviewed` and remains unusable.
 6. Start the new Control API and verify the read-only
    `/api/v1/admin/plugin-workload-sdk/legacy-inventory` endpoint. A recipe can
-   be enabled only when its inventory is `activationReady=true`.
+   be enabled only when its inventory is `activationReady=true` and every
+   declared policy has review provenance.
 7. Deploy the matching gateway, Control UI, WRC, and mcp-host images. The
    capabilities probe must report readiness independently for promptBridge and
    clientNotifications.
 8. Have an operator review every `legacy_unreviewed` row in Control UI and
    explicitly save its ordered targets. The UI never activates a legacy row on
-   page load.
+   page load, and no migration infers provider, model, slot, default, or order.
 9. Enable the feature for a canary recipe, reconcile it, and verify:
    - the eager host is Ready with a stable pod UID;
    - every declared family has an active grant;
@@ -50,7 +55,11 @@ Use the branch-owned profile and generated random ports, then run:
 make minikube-pre-gate-sync GATE=plugin-workload-sdk-review
 ```
 
-The pre-gate fails when a `legacy_unreviewed` promptBridge policy remains. It
-does not fail merely because an operator intentionally disabled or revoked a
-grant; those states are fenced at authorization time and are reported by the
-inventory for operational review.
+The pre-gate fences the workflow reconciler and Control API before database
+migration, restores their prior replica counts on success or failure, and
+restores the Control API only after the schema-first deployment has converged.
+It fails when a
+`legacy_unreviewed` promptBridge policy remains. It does not fail merely
+because an operator intentionally disabled or revoked a grant; those states
+are fenced at authorization time and are reported by the inventory for
+operational review.
