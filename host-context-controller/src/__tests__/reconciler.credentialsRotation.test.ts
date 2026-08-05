@@ -548,3 +548,110 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     expect(writes.some(w => w.reason === 'RolloutIncomplete')).toBe(false)
   })
 })
+
+describe('poll-window fence survives a superseding reconcile (F1, watch-recovery race)', () => {
+  const appsApi = createMockAppsApi()
+  const coreApi = createMockCoreApi()
+  const customApi = createMockCustomApi()
+  let reconciler: McpServerReconciler
+  // The inventory-authority generation IS mcpWatchGeneration in production
+  // (k8sClient wiring): a routine McpServer watch recovery bumps it.
+  let authorityGeneration: number
+  let currentServer: McpServerCRD
+
+  // A rollout mid-flight (total 2 vs updated 1) that never converges on its own.
+  const midRollout = {
+    metadata: { generation: 2, labels: {} },
+    spec: { replicas: 1 },
+    status: {
+      observedGeneration: 2,
+      replicas: 2,
+      updatedReplicas: 1,
+      readyReplicas: 1,
+      availableReplicas: 1,
+      unavailableReplicas: 0,
+    },
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    authorityGeneration = 1
+    currentServer = makeServer()
+    coreApi.readNamespacedSecret.mockResolvedValue({ data: { 'api-key': stored('old-key') } })
+    reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(customApi),
+    })
+    reconciler.setInventoryAuthority(() => ({ known: true, generation: authorityGeneration }))
+    reconciler.setResolveCurrentServer(name => (name === 'linear' ? currentServer : undefined))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('rebinds the fence so a converged rollout is recorded after a watch-generation bump (T1)', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(midRollout)
+    // R1 arms the window under authority generation 1 (timer pending).
+    await reconciler.reconcile(makeServer())
+    // A routine McpServer watch recovery bumps the inventory-authority generation.
+    authorityGeneration = 2
+    // R2, current under generation 2, finds R1's pending window and rebinds it.
+    await reconciler.reconcile(makeServer())
+    // The rollout converges before the (single) pending tick fires.
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+
+    // Without the rebind, R1's tick evaluates its stale generation-1 fence,
+    // self-deletes, and DeploymentReady=True is never written.
+    expect(deploymentReadyWrites(customApi).at(-1)?.status).toBe('True')
+    expect(
+      (reconciler as unknown as { readinessPolls: Map<string, unknown> }).readinessPolls.size
+    ).toBe(0)
+  })
+
+  it('control: without the generation bump the rollout converges the same way (T2)', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(midRollout)
+    await reconciler.reconcile(makeServer())
+    await reconciler.reconcile(makeServer()) // no bump
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(deploymentReadyWrites(customApi).at(-1)?.status).toBe('True')
+  })
+
+  it('rebind does NOT reset the attempt budget across the bump (E2 guard, T3)', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(midRollout) // never converges
+    await reconciler.reconcile(makeServer())
+    await vi.advanceTimersByTimeAsync(2 * 5000) // 2 attempts consumed
+    authorityGeneration = 2
+    await reconciler.reconcile(makeServer()) // rebind — must NOT reset attempts
+    await vi.advanceTimersByTimeAsync(21 * 5000) // 2 + 21 = 23 attempts, still short of 24
+
+    expect(deploymentReadyWrites(customApi).some(w => w.reason === 'RolloutIncomplete')).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000) // the 24th tick
+    expect(deploymentReadyWrites(customApi).some(w => w.reason === 'RolloutIncomplete')).toBe(true)
+  })
+
+  it('does NOT adopt a same-name recreate — a new uid gets a fresh window (T4)', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(midRollout)
+    await reconciler.reconcile(makeServer())
+    const polls = (reconciler as unknown as { readinessPolls: Map<string, { attempts: number }> })
+      .readinessPolls
+    const firstWindow = polls.get('linear')
+    await vi.advanceTimersByTimeAsync(12 * 5000)
+
+    // Same name, NEW uid: identity retirement (beginStatusTracking), not a
+    // rebind, must own this — a rebind adopting the recreate would carry the
+    // old window's spent budget.
+    const recreated = { ...makeServer(), uid: 'uid-linear-9999' }
+    currentServer = recreated
+    await reconciler.reconcile(recreated)
+
+    const secondWindow = polls.get('linear')
+    expect(secondWindow).not.toBe(firstWindow)
+    expect(secondWindow?.attempts).toBe(0)
+  })
+})

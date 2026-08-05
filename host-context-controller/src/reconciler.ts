@@ -203,6 +203,35 @@ interface ReadinessPollState {
    * WaitingForReplicas by the very reconcile the terminal write triggers.
    */
   detail: string
+  /**
+   * Mutation fence and CRD object of the LATEST reconcile that owns this
+   * window. pollReadiness() REBINDS both on every call that finds the window
+   * live: a superseding reconcile (e.g. the fullReconcile after a routine
+   * McpServer watch recovery bumps the inventory-authority generation) becomes
+   * the window's owner, so the next tick evaluates the CURRENT fence instead of
+   * the arming reconcile's stale closure. Without the rebind the stale fence
+   * self-terminates the window with no re-arm and — status-only MODIFIED events
+   * being suppressed, with no periodic McpServer resync — DeploymentReady=False
+   * sticks forever for a healthy rollout (the #223 rotation-timeout symptom,
+   * reintroduced under a routine reconnect).
+   *
+   * Two ORTHOGONAL supersession guards protect this window; do not assume one
+   * covers the other (that assumption is exactly how the F1 race was born):
+   *   - Identity retirement: beginStatusTracking()/clearStatus() retire the
+   *     window on any CRD uid or CRD-generation change (spec edit, recreate),
+   *     so a surviving window always has the caller's status identity — a
+   *     rebind can never adopt a recreate or a superseded desired revision.
+   *   - In-tick generation reset + recheckRequested: a credential rotation
+   *     bumps neither CRD uid nor CRD generation (it changes the Deployment's
+   *     metadata.generation only), so identity retirement does NOT fire; the
+   *     rotation is instead guarded by the tick's live Deployment read (a new
+   *     generation resets attempts/exhausted) and by recheckRequested deferring
+   *     a mid-flight tick's terminal verdict past the rotation's write.
+   * A rebind never touches the budget fields (generation/attempts/exhausted/
+   * detail) above.
+   */
+  isCurrent: () => boolean
+  server: McpServerCRD
 }
 
 export class McpServerReconciler {
@@ -469,9 +498,16 @@ export class McpServerReconciler {
 
     const previous = this.readinessPolls.get(name)
     if (previous !== undefined && (previous.timer !== undefined || previous.ticking)) {
-      // A window is already running for this server — leave it alone
-      // (re-arming would reset the attempt budget: the E2 status-update-loop).
-      // But if its tick is executing RIGHT NOW, the tick's Deployment read may
+      // A window is already running for this server — leave its TIMER and
+      // BUDGET alone (re-arming would reset the attempt budget: the E2
+      // status-update-loop). But this caller is now the window's owner: rebind
+      // the mutation fence (and the same-identity server object) so the next
+      // tick evaluates the CURRENT fence instead of the arming reconcile's
+      // stale closure, which would otherwise self-terminate the window with no
+      // re-arm after a routine watch-generation bump.
+      previous.isCurrent = isCurrent
+      previous.server = server
+      // If its tick is executing RIGHT NOW, the tick's Deployment read may
       // predate the Deployment write that triggered THIS call (a new
       // generation), so a silent no-op could let the tick end the window on
       // stale data. Record that a re-check is owed; the tick honors it before
@@ -494,6 +530,8 @@ export class McpServerReconciler {
       attempts: 0,
       exhausted: previous?.exhausted ?? false,
       detail: previous?.detail ?? '',
+      isCurrent,
+      server,
     }
     this.readinessPolls.set(name, state)
 
@@ -507,13 +545,13 @@ export class McpServerReconciler {
       // inventory-authority change) must not keep observing — or writing
       // status — on behalf of a stale desired state. End the window quietly;
       // the current reconcile arms its own window after its Deployment write.
-      if (!isCurrent()) {
+      if (!state.isCurrent()) {
         state.ticking = false
         if (this.readinessPolls.get(name) === state) this.readinessPolls.delete(name)
         return
       }
       const rollout = await this.readDeploymentRollout(name, namespace)
-      if (!isCurrent() || !this.statusIdentityMatches(server)) {
+      if (!state.isCurrent() || !this.statusIdentityMatches(state.server)) {
         state.ticking = false
         if (this.readinessPolls.get(name) === state) this.readinessPolls.delete(name)
         return
@@ -566,19 +604,19 @@ export class McpServerReconciler {
         // always false, so this is the ONLY place a converged rollout is ever
         // recorded — without it every successful credential rotation would sit
         // at DeploymentReady=False forever and the UI would report a timeout.
-        await this.updateStatusConditions(server, true, undefined, isCurrent)
+        await this.updateStatusConditions(state.server, true, undefined, state.isCurrent)
         // Readiness is decoupled from fleet convergence: the poll also
         // upgrades the persisted, generation-matched Ready condition so a
         // controller restart can trust the recorded readiness (see getStatus).
         await this.writeStatusCondition(
-          server,
+          state.server,
           {
             type: 'Ready',
             status: 'True',
             reason: 'ReconcileSuccess',
             message: 'Deployment created',
           },
-          isCurrent
+          state.isCurrent
         )
         return
       }
@@ -599,7 +637,7 @@ export class McpServerReconciler {
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
-        await this.updateStatusConditions(server, false, rollout.detail, isCurrent)
+        await this.updateStatusConditions(state.server, false, rollout.detail, state.isCurrent)
         return
       }
 
