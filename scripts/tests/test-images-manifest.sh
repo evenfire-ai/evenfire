@@ -41,6 +41,12 @@ assert_every_published_image_has_a_build_matrix_entry() {
   fi
 }
 
+# ALL_IMAGES's base array covers most locally-built refs, but two images are
+# only added via conditional `ALL_IMAGES+=(...)` appends (mcp-host-desktop,
+# playwright-mcp-server) gated behind env flags that default off. Those refs
+# must resolve through localRef() too, or a broken local_name/local_tag on
+# either image goes unnoticed (this is exactly the field the brief flags as
+# a gotcha for playwright-server).
 assert_every_local_image_maps_to_exactly_one_row() {
   local unmapped
   unmapped="$(node -e '
@@ -48,14 +54,16 @@ assert_every_local_image_maps_to_exactly_one_row() {
       const fs = await import("node:fs")
       const sh = fs.readFileSync("'"$REPO_ROOT"'/scripts/minikube/build-images.sh", "utf8")
       const block = sh.match(/ALL_IMAGES=\(([\s\S]*?)\n\)/)
-      const refs = [...block[1].matchAll(/"([^"]+)"/g)].map(x => x[1])
+      const baseRefs = [...block[1].matchAll(/"([^"]+)"/g)].map(x => x[1])
+      const appendRefs = [...sh.matchAll(/ALL_IMAGES\+=\("([^"]+)"\)/g)].map(x => x[1])
+      const refs = [...baseRefs, ...appendRefs]
       const known = new Set(m.IMAGES.map(i => m.localRef(i)))
       console.log(refs.filter(r => !known.has(r)).join(","))
     })' 2>/dev/null)"
   if [ -z "$unmapped" ]; then
-    pass "every ALL_IMAGES entry maps to exactly one manifest row"
+    pass "every build-images.sh ref, including conditional appends, maps to exactly one manifest row"
   else
-    fail "ALL_IMAGES entries with no manifest row: $unmapped"
+    fail "build-images.sh refs with no manifest row: $unmapped"
   fi
 }
 
@@ -93,18 +101,83 @@ assert_unpublished_images_are_exactly_the_known_three() {
   fi
 }
 
-assert_every_defined_case_is_invoked() {
-  local defined called missing
-  defined="$(grep -cE '^assert_[a-z_]+\(\) \{' "$REPO_ROOT/scripts/tests/test-images-manifest.sh")"
-  called="$(grep -cE '^assert_[a-z_]+$' "$REPO_ROOT/scripts/tests/test-images-manifest.sh")"
-  missing=""
-  while read -r fn; do
-    grep -qE "^${fn}$" "$REPO_ROOT/scripts/tests/test-images-manifest.sh" || missing="$missing $fn"
-  done < <(grep -oE '^assert_[a-z_]+(?=\(\) \{)' -P "$REPO_ROOT/scripts/tests/test-images-manifest.sh")
-  if [ -z "$missing" ]; then
-    pass "every defined assert_ case is invoked ($defined defined, $called invoked)"
+# The two previous cases only check that a name/ref exists somewhere on both
+# sides. Neither reads the substance of what was transcribed: path,
+# dockerfile, and rooted feed Task 3's generated build matrix directly, so a
+# wrong path or a dropped `rooted` breaks the real build silently here.
+assert_matrix_fields_match_manifest() {
+  local mismatches
+  mismatches="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
+      const section = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)[1]
+      const blocks = section.split(/\n(?=\s*- image:)/)
+      const matrixMap = {}
+      for (const block of blocks) {
+        const name = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!name) continue
+        const path = block.match(/\n\s*path:\s*(\S+)/)?.[1]
+        const dockerfile = block.match(/\n\s*dockerfile:\s*(\S+)/)?.[1]
+        const rooted = /\n\s*rooted:\s*true/.test(block)
+        matrixMap[name] = { path, dockerfile, rooted }
+      }
+      const bad = []
+      for (const i of m.IMAGES) {
+        const mm = matrixMap[i.name]
+        if (!mm) continue
+        if ((i.path ?? "") !== (mm.path ?? "")) bad.push(`${i.name}:path`)
+        if ((i.dockerfile ?? "") !== (mm.dockerfile ?? "")) bad.push(`${i.name}:dockerfile`)
+        if (!!i.rooted !== mm.rooted) bad.push(`${i.name}:rooted`)
+      }
+      console.log(bad.join(","))
+    })' 2>/dev/null)"
+  if [ -z "$mismatches" ]; then
+    pass "manifest path/dockerfile/rooted match the build matrix for every matrix image"
   else
-    fail "defined but never invoked:$missing"
+    fail "manifest disagrees with the build matrix: $mismatches"
+  fi
+}
+
+# assert_every_published_image_has_a_build_matrix_entry only checks
+# manifest -> matrix. Nothing checked the other direction, so deleting a
+# manifest row entirely (e.g. clerum-workflow-base) stayed invisible as long
+# as >= 28 rows remained. This closes that gap.
+assert_every_matrix_image_has_a_manifest_row() {
+  local missing
+  missing="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
+      const section = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)[1]
+      const names = [...section.matchAll(/- image:\s*(\S+)/g)].map(x => x[1])
+      const known = new Set(m.IMAGES.map(i => i.name))
+      console.log(names.filter(n => !known.has(n)).join(","))
+    })' 2>/dev/null)"
+  if [ -z "$missing" ]; then
+    pass "every build-matrix image has a manifest row"
+  else
+    fail "build-matrix images with no manifest row: $missing"
+  fi
+}
+
+# Portable across BSD grep (macOS, rejects -P) and GNU grep (conflicting
+# matchers with -E -P together): sort both lists and diff with comm instead of
+# depending on a PCRE lookahead inside a single grep invocation. The old
+# `grep -oE '...' -P` form errored on both greps, so the process substitution
+# fed `while read` nothing, `missing` stayed empty, and this case could never
+# fail -- verified by commenting out an invocation and seeing it still print
+# PASS while under-reporting its own invoked count.
+assert_every_defined_case_is_invoked() {
+  local self defined invoked missing
+  self="$REPO_ROOT/scripts/tests/test-images-manifest.sh"
+  defined="$(grep -oE '^assert_[a-z_]+\(\) \{' "$self" | sed -E 's/\(\) \{$//' | sort -u)"
+  invoked="$(grep -oE '^assert_[a-z_]+$' "$self" | sort -u)"
+  missing="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$invoked"))"
+  if [ -z "$missing" ]; then
+    pass "every defined assert_ case is invoked in the call block"
+  else
+    fail "defined but never invoked: $(printf '%s ' $missing)"
   fi
 }
 
@@ -113,6 +186,8 @@ assert_every_published_image_has_a_build_matrix_entry
 assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_unpublished_images_are_exactly_the_known_three
+assert_matrix_fields_match_manifest
+assert_every_matrix_image_has_a_manifest_row
 assert_every_defined_case_is_invoked
 
 exit $FAIL
