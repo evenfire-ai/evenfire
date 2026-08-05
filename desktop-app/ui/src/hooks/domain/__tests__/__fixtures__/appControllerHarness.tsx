@@ -51,9 +51,9 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve }
 }
 
-function createSessionState(authenticated: boolean) {
+function createSessionState(authenticated: boolean, me = HARNESS_ME) {
   return authenticated
-    ? { authenticated: true, me: HARNESS_ME }
+    ? { authenticated: true, me }
     : { authenticated: false, me: null }
 }
 
@@ -70,6 +70,13 @@ function createCatalog(agentNames: string[]) {
     contextIds: [],
     userContextIds: [],
     teamContextIds: [],
+  }
+}
+
+function createHealth() {
+  return {
+    externalRestApi: { ok: true },
+    rpcProxy: { ok: true },
   }
 }
 
@@ -93,6 +100,10 @@ export interface AppControllerClerumOptions {
    * test observe the window between login and workspace hydration.
    */
   delayAuthenticatedLoad?: boolean
+  /** Hold the dependency-health probe open until `resolveHealth()` runs. */
+  delayHealth?: boolean
+  /** Make the dependency-health probe reject with this value. */
+  healthError?: unknown
   /** Make `auth.passwordLogin` reject with this instead of signing in. */
   passwordLoginError?: unknown
   /** Payload for `auth.getDesktopReleaseStatus`. */
@@ -102,12 +113,16 @@ export interface AppControllerClerumOptions {
 }
 
 export interface AppControllerClerumHandle {
+  getDependenciesHealth: Fn
   getSessionState: Fn
   passwordLogin: Fn
   getDesktopReleaseStatus: Fn
   teamDirectory: Fn
+  switchTeam: Fn
   refreshCatalog: Fn
   listPending: Fn
+  /** Settles a dependency-health probe held by `delayHealth`. */
+  resolveHealth: () => void
   /** Settles whatever `delayAuthenticatedLoad` is holding open. */
   resolveAuthenticatedLoad: () => void
 }
@@ -126,6 +141,7 @@ export function extendMockClerumForAppController(
   const bridge = clerum as unknown as Record<string, unknown>
 
   let authenticated = options.startAuthenticated ?? true
+  let sessionMe = { ...HARNESS_ME }
   const teamDirectoryPayload = options.teamDirectory ?? {
     items: [],
     currentTeamId: HARNESS_ME.teamId,
@@ -133,13 +149,18 @@ export function extendMockClerumForAppController(
   const teamDirectoryDeferred = createDeferred<typeof teamDirectoryPayload>()
   const catalogDeferred = createDeferred<ReturnType<typeof createCatalog>>()
   const approvalsDeferred = createDeferred<unknown[]>()
+  const healthDeferred = createDeferred<ReturnType<typeof createHealth>>()
   const held = () => Boolean(options.delayAuthenticatedLoad) && authenticated
 
-  const getSessionState = vi.fn(async () => createSessionState(authenticated))
+  const getDependenciesHealth = vi.fn(async () => {
+    if (options.healthError) throw options.healthError
+    return options.delayHealth ? healthDeferred.promise : createHealth()
+  })
+  const getSessionState = vi.fn(async () => createSessionState(authenticated, sessionMe))
   const passwordLogin = vi.fn(async () => {
     if (options.passwordLoginError) throw options.passwordLoginError
     authenticated = true
-    return createSessionState(true)
+    return createSessionState(true, sessionMe)
   })
   const getDesktopReleaseStatus = vi.fn(
     async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS
@@ -147,6 +168,14 @@ export function extendMockClerumForAppController(
   const teamDirectory = vi.fn(async () =>
     held() ? teamDirectoryDeferred.promise : teamDirectoryPayload
   )
+  const switchTeam = vi.fn(async (teamId: string) => {
+    sessionMe = {
+      ...sessionMe,
+      teamId,
+      teamName: teamId === HARNESS_ME.teamId ? HARNESS_ME.teamName : teamId,
+    }
+    return createSessionState(true, sessionMe)
+  })
   const refreshCatalog = vi.fn(async () =>
     held() ? catalogDeferred.promise : createCatalog(agentNames)
   )
@@ -161,10 +190,7 @@ export function extendMockClerumForAppController(
 
   Object.assign(bridge, {
     auth: {
-      getDependenciesHealth: vi.fn(async () => ({
-        externalRestApi: { ok: true },
-        rpcProxy: { ok: true },
-      })),
+      getDependenciesHealth,
       getSessionState,
       getRuntimeConfigState: vi.fn(async () => ({
         activeProfileId: null,
@@ -185,7 +211,7 @@ export function extendMockClerumForAppController(
       members: vi.fn(async () => []),
       directory: teamDirectory,
       initialDirectory: teamDirectory,
-      switch: vi.fn(async () => createSessionState(true)),
+      switch: switchTeam,
     },
     access: {
       refreshCatalog,
@@ -246,12 +272,17 @@ export function extendMockClerumForAppController(
   })
 
   return {
+    getDependenciesHealth,
     getSessionState,
     passwordLogin,
     getDesktopReleaseStatus,
     teamDirectory,
+    switchTeam,
     refreshCatalog,
     listPending,
+    resolveHealth() {
+      healthDeferred.resolve(createHealth())
+    },
     resolveAuthenticatedLoad() {
       teamDirectoryDeferred.resolve(teamDirectoryPayload)
       catalogDeferred.resolve(createCatalog(agentNames))
