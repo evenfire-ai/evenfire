@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
+  type InfrastructureCostScopeCatalog,
   getGovernedTraceEvents,
   getInfrastructureCostScopes,
   getInfrastructureTraceCosts,
   isTraceCostsUnavailable,
-  type InfrastructureCostScopeCatalog,
 } from '@lib/governedTrace'
 import { GovernedTraceSurface } from '../GovernedTraceSurface'
 

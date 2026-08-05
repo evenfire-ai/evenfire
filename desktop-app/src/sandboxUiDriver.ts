@@ -1,10 +1,12 @@
-import { BrowserWindow, WebContentsView, session } from 'electron'
+import { BrowserWindow, WebContentsView, screen, session } from 'electron'
 import path from 'node:path'
 import { getActiveEnvKey } from './config.js'
+import { extractSandboxUiViewRoute, normalizeSandboxUiRoute } from './sandboxUiDeepLinks.js'
 import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
   applySandboxUiNavigationPolicies,
   applySandboxUiPartitionPolicies,
+  isSandboxUiNavigationWithinPrefix as isNavigationWithinPrefix,
 } from './sandboxUiPartitionPolicies.js'
 
 /**
@@ -35,6 +37,7 @@ import {
  */
 
 export const SANDBOX_UI_COOKIE_NAME = 'clerum_sandbox_ui_session'
+const CLIENT_ROUTE_HANDOFF_TIMEOUT_MS = 30_000
 
 export type SandboxUiBounds = {
   x: number
@@ -53,8 +56,6 @@ function toViewBounds(
   // to the renderer while the screen's scaleFactor stays at 2.0).
   // WebContentsView.setBounds expects points, so multiply by dpr/scaleFactor
   // — a no-op when they match (the common 1× / 2× case).
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { screen } = require('electron') as typeof import('electron')
   const sf = screen.getDisplayMatching(parentWindow.getBounds()).scaleFactor
   const dpr = bounds.dpr ?? sf
   if (Math.abs(dpr - sf) < 0.01) {
@@ -77,6 +78,7 @@ export type MountSandboxUiArgs = {
   defaultPath?: string
   parentWindow: BrowserWindow
   bounds: SandboxUiBounds
+  routePath?: string
   onClosed?: () => void
   /**
    * Spec §9.9 — recipe-author Connect button affordance. Fired when the
@@ -91,12 +93,18 @@ type ActiveView = {
   view: WebContentsView
   recipeNs: string
   recipeName: string
+  defaultPath: string
   partition: string
   parentWindow: BrowserWindow
   rpcProxyOrigin: string
+  cleanupClientRouteHandoff?: () => void
+  cleanupParentClosed?: () => void
 }
 
 let active: ActiveView | null = null
+let mountGeneration = 0
+
+export const isSandboxUiNavigationWithinPrefix = isNavigationWithinPrefix
 
 export function getActiveSandboxUi(): {
   recipeNs: string
@@ -111,6 +119,40 @@ export function getActiveSandboxUi(): {
     appRef: `${active.recipeNs}/${active.recipeName}`,
     webContentsId: active.view.webContents.id,
   }
+}
+
+export function getActiveSandboxUiLocation(): {
+  recipeNs: string
+  recipeName: string
+  path?: string
+} | null {
+  if (!active) return null
+  if (active.view.webContents.isDestroyed()) return null
+  const path = resolveSandboxUiSharePath({
+    currentUrl: active.view.webContents.getURL(),
+    rpcProxyOrigin: active.rpcProxyOrigin,
+    recipeNs: active.recipeNs,
+    recipeName: active.recipeName,
+    defaultPath: active.defaultPath,
+  })
+  return {
+    recipeNs: active.recipeNs,
+    recipeName: active.recipeName,
+    ...(path ? { path } : {}),
+  }
+}
+
+export function resolveSandboxUiSharePath(input: {
+  currentUrl: string
+  rpcProxyOrigin: string
+  recipeNs: string
+  recipeName: string
+  defaultPath: string
+}): string | undefined {
+  if (!input.currentUrl.trim()) return undefined
+  const currentPath = extractSandboxUiViewRoute(input)
+  if (currentPath === null) throw new Error('Cannot read the current app route')
+  return currentPath === sharedPathForDefaultPath(input.defaultPath) ? undefined : currentPath
 }
 
 export function partitionFor(envKey: string, recipeNs: string, recipeName: string): string {
@@ -205,6 +247,13 @@ async function writeSandboxUiCookie(args: {
  */
 export async function installSandboxUiCookie(setCookie: string | string[]): Promise<void> {
   if (!active) return
+  const expectedPath =
+    `/api/v1/sandbox-ui/${encodeURIComponent(active.recipeNs)}/` +
+    `${encodeURIComponent(active.recipeName)}/`
+  const cookiePath = extractSandboxUiPath(setCookie, active.recipeNs, active.recipeName)
+  if (cookiePath !== expectedPath) {
+    throw new Error(`sandbox-ui refresh cookie path ${cookiePath} does not match the active recipe`)
+  }
   await writeSandboxUiCookie({
     rpcProxyOrigin: active.rpcProxyOrigin,
     recipeNs: active.recipeNs,
@@ -219,6 +268,8 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
   const current = active
   active = null
   try {
+    current.cleanupClientRouteHandoff?.()
+    current.cleanupParentClosed?.()
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -242,6 +293,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     defaultPath,
     parentWindow,
     bounds,
+    routePath,
     onClosed,
   } = args
 
@@ -252,16 +304,24 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     throw new Error('recipeNs and recipeName are required')
   }
 
+  // Publish intent before the first await. A newer mount or unmount invalidates
+  // this operation while cookie installation is in flight, preventing an older
+  // request from attaching a view after the user has moved on.
+  const generation = ++mountGeneration
+
   // Tear down any existing view before mounting (one-at-a-time embed). The
   // per-recipe partition is left in place so storage survives a re-mount
   // within the ACL window.
   await teardownActive('replaced')
+  if (generation !== mountGeneration) return
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
+  const viewPath = resolveSandboxUiDefaultPath(defaultPath)
+  const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view/`
+    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view`
 
   // Install the session cookie BEFORE creating the view so the very first
   // navigation request carries it. The proxy enforces the recipe binding
@@ -274,6 +334,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     setCookie,
     partition,
   })
+  if (generation !== mountGeneration) return
+  if (parentWindow.isDestroyed()) {
+    throw new Error('parent window is destroyed')
+  }
 
   // Apply default-deny permission + download policy on the partition's
   // Session before the view is constructed so the very first navigation
@@ -323,14 +387,19 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     onClosed?.()
   }
   parentWindow.once('closed', onParentClosed)
+  const cleanupParentClosed = (): void => {
+    parentWindow.removeListener('closed', onParentClosed)
+  }
 
   active = {
     view,
     recipeNs,
     recipeName,
+    defaultPath: viewPath,
     partition,
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
+    cleanupParentClosed,
   }
 
   parentWindow.contentView.addChildView(view)
@@ -347,10 +416,78 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     console.warn('[SandboxUI] touchSandboxUiPartition failed:', err)
   })
 
-  const viewPath = defaultPath && defaultPath.startsWith('/') ? defaultPath : '/'
   const url =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`
+  if (clientRoutePath && clientRoutePath !== viewPath) {
+    const clientRouteUrl =
+      `${proxyOriginUrl}/api/v1/sandbox-ui/` +
+      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
+    let lastNavigation = { url: '', status: 0 }
+    let handoffFinished = false
+    let handoffTimeout: NodeJS.Timeout | null = null
+    const cleanupClientRouteHandoff = () => {
+      if (handoffFinished) return
+      handoffFinished = true
+      if (handoffTimeout) clearTimeout(handoffTimeout)
+      view.webContents.removeListener('did-navigate', onDidNavigate)
+      view.webContents.removeListener('did-finish-load', onDidFinishLoad)
+    }
+    const onDidNavigate = (
+      _event: Electron.Event,
+      navigatedUrl: string,
+      httpResponseCode: number
+    ) => {
+      lastNavigation = { url: navigatedUrl, status: httpResponseCode }
+    }
+    const onDidFinishLoad = () => {
+      if (!active || active.view !== view || view.webContents.isDestroyed()) {
+        cleanupClientRouteHandoff()
+        return
+      }
+      if (
+        !canApplySandboxUiClientRoute({
+          allowedNavigationPrefix,
+          currentUrl: view.webContents.getURL(),
+          navigatedUrl: lastNavigation.url,
+          httpResponseCode: lastNavigation.status,
+        })
+      ) {
+        if (
+          lastNavigation.status >= 200 &&
+          lastNavigation.status < 400 &&
+          !isSandboxUiNavigationWithinPrefix(view.webContents.getURL(), allowedNavigationPrefix)
+        ) {
+          console.warn(
+            '[SandboxUI] client route handoff abandoned after navigation left the app prefix:',
+            view.webContents.getURL()
+          )
+          cleanupClientRouteHandoff()
+        }
+        return
+      }
+      void applySandboxUiClientRoute(view.webContents, clientRouteUrl)
+        .then(applied => {
+          if (!applied) {
+            console.warn('[SandboxUI] client route handoff did not update the app URL')
+          }
+          cleanupClientRouteHandoff()
+        })
+        .catch(err => {
+          console.warn('[SandboxUI] client route handoff failed:', err)
+          cleanupClientRouteHandoff()
+        })
+    }
+    view.webContents.on('did-navigate', onDidNavigate)
+    view.webContents.on('did-finish-load', onDidFinishLoad)
+    handoffTimeout = setTimeout(() => {
+      console.warn('[SandboxUI] client route handoff timed out before the app became ready')
+      cleanupClientRouteHandoff()
+    }, CLIENT_ROUTE_HANDOFF_TIMEOUT_MS)
+    if (active && active.view === view) {
+      active.cleanupClientRouteHandoff = cleanupClientRouteHandoff
+    }
+  }
   // Drop the HTTP cache on every open so a stale entry from a prior
   // broken pod can't keep painting after the recipe is healthy. The
   // partition is persistent (cookies, IndexedDB, localStorage all
@@ -370,12 +507,91 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   void view.webContents.loadURL(url)
 }
 
+export async function applySandboxUiClientRoute(
+  webContents: Pick<WebContentsView['webContents'], 'executeJavaScript' | 'isDestroyed'>,
+  targetUrl: string
+): Promise<boolean> {
+  if (webContents.isDestroyed()) return false
+  const serializedTarget = JSON.stringify(targetUrl)
+  return Boolean(
+    await webContents.executeJavaScript(`(() => {
+      const targetUrl = new URL(${serializedTarget}).href;
+      const previousUrl = window.location.href;
+      if (new URL(previousUrl).href === targetUrl) return true;
+      window.history.replaceState(window.history.state, '', targetUrl);
+      window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+      return new URL(window.location.href).href === targetUrl;
+    })()`)
+  )
+}
+
+export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
+  const rawDefaultPath = String(defaultPath || '').trim()
+  if (!rawDefaultPath) return '/'
+  const normalized = normalizeSandboxUiDefaultPath(rawDefaultPath)
+  if (normalized) return normalized
+  console.warn('[SandboxUI] Invalid recipe defaultPath; falling back to "/":', rawDefaultPath)
+  return '/'
+}
+
+const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
+
+function pathHasDotSegment(pathname: string): boolean {
+  return pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))
+}
+
+function sharedPathForDefaultPath(defaultPath: string): string {
+  const firstQueryIndex = defaultPath.indexOf('?')
+  const firstHashIndex = defaultPath.indexOf('#')
+  const firstMetaIndex = [firstQueryIndex, firstHashIndex]
+    .filter(index => index !== -1)
+    .sort((a, b) => a - b)[0]
+  return firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex) || '/'
+}
+
+function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
+  const routePath = String(rawPath || '').trim()
+  if (!routePath) return '/'
+  if (
+    routePath.length > 4096 ||
+    !routePath.startsWith('/') ||
+    routePath.startsWith('//') ||
+    routePath.includes('\\') ||
+    /[\u0000-\u001f\u007f\s]/.test(routePath)
+  ) {
+    return null
+  }
+  const firstHashIndex = routePath.indexOf('#')
+  const serverPath = sharedPathForDefaultPath(routePath)
+  if (pathHasDotSegment(serverPath)) return null
+  if (firstHashIndex !== -1) {
+    const hashRoute = routePath.slice(firstHashIndex + 1).split('?')[0] || ''
+    if (hashRoute.startsWith('/') && pathHasDotSegment(hashRoute)) return null
+  }
+  return routePath
+}
+
+export function canApplySandboxUiClientRoute(input: {
+  allowedNavigationPrefix: string
+  currentUrl: string
+  navigatedUrl: string
+  httpResponseCode: number
+}): boolean {
+  return (
+    isSandboxUiNavigationWithinPrefix(input.currentUrl, input.allowedNavigationPrefix) &&
+    isSandboxUiNavigationWithinPrefix(input.navigatedUrl, input.allowedNavigationPrefix) &&
+    input.httpResponseCode >= 200 &&
+    input.httpResponseCode < 400
+  )
+}
+
 /**
  * Unmount the active view (no-op if nothing is mounted). Called on user
  * "Close" / navigate-away. Leaves the per-recipe partition intact so a
  * re-mount within the ACL window is fast.
  */
 export async function unmountSandboxUiView(): Promise<void> {
+  mountGeneration += 1
   await teardownActive('closed')
 }
 

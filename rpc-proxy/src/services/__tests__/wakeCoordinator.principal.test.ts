@@ -91,7 +91,11 @@ afterEach(() => {
 describe('wakeCoordinationKey', () => {
   it('excludes jti/exp/role/scopes and is stable across token rotation for one principal', () => {
     const a = makeClaims({ jti: 'j1', expMs: Date.now() + 1_000_000, scopes: ['host:wake:write'] })
-    const b = makeClaims({ jti: 'j2', expMs: Date.now() + 9_000_000, scopes: ['host:session:read'] })
+    const b = makeClaims({
+      jti: 'j2',
+      expMs: Date.now() + 9_000_000,
+      scopes: ['host:session:read'],
+    })
     expect(wakeCoordinationKey(a, 'chatllm')).toBe(wakeCoordinationKey(b, 'chatllm'))
   })
 
