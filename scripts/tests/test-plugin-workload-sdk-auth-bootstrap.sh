@@ -281,6 +281,14 @@ else
   pass 'full-setup no longer overwrites a configured admin password'
 fi
 
+GENERATOR="$ROOT_DIR/scripts/minikube/generate-keys.sh"
+if grep -Fq 'hashSync(process.env.ADMIN_PASSWORD, 12)' "$GENERATOR" &&
+   grep -Fq "ADMIN_HASH='\$2b\$12\$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'" "$GENERATOR"; then
+  pass 'admin bootstrap hash follows ADMIN_PASSWORD and keeps the fallback only for an absent value'
+else
+  fail 'admin bootstrap hash can still ignore the configured ADMIN_PASSWORD'
+fi
+
 if grep -Fq 'E2E_HARD_MAX_GATE_SECONDS=600' "$SCRIPT" &&
    grep -Fq 'E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-600}"' "$SCRIPT" &&
    grep -Fq 'E2E_HARD_MAX_PHASE_WAIT_SECONDS=180' "$SCRIPT" &&
