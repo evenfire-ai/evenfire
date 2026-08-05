@@ -3,7 +3,6 @@
 import React, { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { LlmPriceTable } from '@components/LlmPriceTable'
 import { useToast } from '@components/Toast'
@@ -21,14 +20,13 @@ import {
 import { getProviderDisplayLabel } from '@lib/llm'
 
 export default function LlmPricesPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const [prices, setPrices] = useState<LlmModelPrice[]>([])
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   // Cost budgets still pinning a price whose delete was rejected with 409.
   const [deleteBlockedBudgets, setDeleteBlockedBudgets] = useState<BudgetRef[] | null>(null)
@@ -95,10 +93,8 @@ export default function LlmPricesPage() {
   }
 
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadAll()
-    }
-  }, [authState.isLoggedIn, authState.isLoading])
+    void loadAll()
+  }, [])
 
   return (
     <>

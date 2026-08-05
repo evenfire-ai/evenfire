@@ -173,7 +173,19 @@ finalize_credentials_after_overlay() {
   fi
 
   log "Waiting for the post-overlay HCC rollout"
-  kctl -n control-plane rollout status deployment/host-context-controller --timeout=480s
+  # HCC serves 503 on /ready until its initial fleet reconciliation completes, so
+  # time-to-Ready scales with the McpServer/Context fleet. clerum-dev (108 McpServers,
+  # 22 Contexts) took 651s on 2026-08-05; clerum-prod (7/6) is far quicker.
+  #
+  # This number is only half the budget. `kubectl rollout status` aborts as soon as the
+  # Deployment controller sets Progressing=False/ProgressDeadlineExceeded, so it can never
+  # outlast progressDeadlineSeconds on the Deployment — and that clock starts earlier, when
+  # apply-inter-service-tokens.sh `rollout restart`s HCC several steps before this one.
+  # Keep this UNDER (progressDeadlineSeconds - that head start) or it silently does nothing:
+  # at 480s against the unset-hence-600s default it never once bound. The manifest now sets
+  # progressDeadlineSeconds: 1200; scripts/tests/test-provision-gfs-runtime.sh pins the
+  # relationship so the two cannot drift apart again.
+  kctl -n control-plane rollout status deployment/host-context-controller --timeout=900s
   wait_for_gfsc_secret_references
 
   log "Finalizing staged GFS credentials after the overlay"

@@ -3,6 +3,9 @@ const path = require('path')
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    globalNotFound: true,
+  },
   // Keep Turbopack rooted at the monorepo so it can resolve the linked
   // @clerum packages without guessing from whichever lockfile it finds first.
   turbopack: {

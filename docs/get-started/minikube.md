@@ -13,6 +13,11 @@ Docker Desktop with **≥10 GB RAM / 6 CPUs** · `minikube` v1.30+ · `kubectl` 
 `python3` · Node.js 24+ · `git` · `make` · `ruby` (renders the control-api DB
 migration overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu).
 
+Run `make prereqs` (alias `make doctor`) to check every one of these at once —
+it prints the exact install command per platform for anything missing, and
+flags a `.env` without `ADMIN_PASSWORD` or an LLM key. `make minikube-setup`
+runs it automatically first (bypass with `SKIP_PREREQS=true`).
+
 ## Bring the platform up
 
 ```bash

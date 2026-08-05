@@ -78,7 +78,11 @@ function makeApp() {
   return app
 }
 
-function mockFetchResponse(status: number, body: string, headers?: Record<string, string>): Response {
+function mockFetchResponse(
+  status: number,
+  body: string,
+  headers?: Record<string, string>
+): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -103,7 +107,10 @@ const originalFetch = globalThis.fetch
 beforeEach(() => {
   vi.clearAllMocks()
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
-  controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+  controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+    kind: 'active',
+    wakeGeneration: null,
+  })
 })
 
 afterEach(() => {
@@ -117,7 +124,9 @@ describe('§11.4 wake coverage — GET /rpc/hosts/:hostRef/models', () => {
       .fn()
       .mockRejectedValueOnce(hostDownError())
       .mockResolvedValueOnce(
-        mockFetchResponse(200, JSON.stringify({ models: [] }), { 'content-type': 'application/json' })
+        mockFetchResponse(200, JSON.stringify({ models: [] }), {
+          'content-type': 'application/json',
+        })
       )
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
@@ -190,13 +199,11 @@ describe('§11.4 wake coverage — context-breakdown honors the draining fence',
 
   it('a plain upstream 404 is NOT treated as a wake trigger (passes through)', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue(claims(['host:session:read', 'host:wake:write']))
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(
-        mockFetchResponse(404, JSON.stringify({ error: 'session not found' }), {
-          'content-type': 'application/json',
-        })
-      ) as unknown as typeof fetch
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockFetchResponse(404, JSON.stringify({ error: 'session not found' }), {
+        'content-type': 'application/json',
+      })
+    ) as unknown as typeof fetch
 
     const res = await request(makeApp())
       .get('/rpc/hosts/chatllm/sessions/chatllm/missing/context-breakdown')
@@ -327,9 +334,7 @@ describe('§11.4 wake coverage — approvals deny', () => {
 // wake-capable token never touches the wake plane when the host is up.
 describe('§13.4 row 3 — task result forwards normally on an active host', () => {
   it('an active host forwards the task result and never touches the wake plane', async () => {
-    authTokenMock.verifyRpcToken.mockReturnValue(
-      claims(['host:message:invoke', 'host:wake:write'])
-    )
+    authTokenMock.verifyRpcToken.mockReturnValue(claims(['host:message:invoke', 'host:wake:write']))
     serviceMock.forwardTaskResultFromHost.mockResolvedValue({
       status: 'completed',
       response: 'done',

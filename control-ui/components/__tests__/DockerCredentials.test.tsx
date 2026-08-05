@@ -39,6 +39,16 @@ const key = {
 }
 
 describe('DockerCredentialsPanel', () => {
+  it('renders a skeleton while credentials load', () => {
+    vi.mocked(api.listRegistryApiKeys).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>
+    )
+    const view = render(<DockerCredentialsPanel orgScope="acme" />)
+    expect(screen.getByRole('status', { name: /loading push credentials/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('lists existing keys', async () => {
     vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [key] })
     render(<DockerCredentialsPanel orgScope="acme" />)

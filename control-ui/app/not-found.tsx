@@ -2,10 +2,10 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 
-export default function NotFound() {
+export function ControlNotFoundContent() {
   return (
-    <main className="cu-app cu-app--auth cu-not-found">
-      <section className="cu-card cu-not-found__card" aria-labelledby="cu-not-found-title">
+    <section className="cu-not-found" aria-labelledby="cu-not-found-title">
+      <div className="cu-card cu-not-found__card">
         <div className="cu-card__body cu-not-found__body">
           <Image
             className="cu-not-found__brand-mark"
@@ -27,7 +27,11 @@ export default function NotFound() {
             Back to Control UI
           </Link>
         </div>
-      </section>
-    </main>
+      </div>
+    </section>
   )
+}
+
+export default function NotFound() {
+  return <ControlNotFoundContent />
 }

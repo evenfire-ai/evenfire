@@ -8,6 +8,7 @@ export const projectRoots = [
   'mcp-host',
   'mcp-proxy',
   'mcp-servers',
+  'packages/desktop-app-links',
   'packages/workflow-sdk',
   'profile-ui',
   'rpc-proxy',

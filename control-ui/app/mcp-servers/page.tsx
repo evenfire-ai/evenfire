@@ -2,9 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { useAuth } from '../../components/AuthContext'
 import { useConfirmDialog } from '../../components/ConfirmDialog'
 import { DashboardLayout } from '../../components/DashboardLayout'
 import { McpServerTable } from '../../components/McpServerTable'
@@ -26,7 +24,6 @@ import {
   updateContext,
 } from '../../lib/api'
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
-import { buildControlUiLoginPath, getCurrentControlUiPath } from '../../lib/authRedirect'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
   return resource.metadata?.name || 'unknown'
@@ -118,10 +115,9 @@ async function loadContextAccess(
 }
 
 export default function McpServersPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { showToast } = useToast()
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [mcpServers, setMcpServers] = useState<McpServerResource[]>([])
   const [contexts, setContexts] = useState<ContextResource[]>([])
@@ -374,24 +370,8 @@ export default function McpServersPage() {
   }
 
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadAll()
-    }
-  }, [authState.isLoggedIn, authState.isLoading])
-
-  useEffect(() => {
-    if (!authState.isLoading && !authState.isLoggedIn) {
-      router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
-    }
-  }, [authState.isLoading, authState.isLoggedIn, router])
-
-  if (authState.isLoading) {
-    return <LoadingScreen />
-  }
-
-  if (!authState.isLoggedIn) {
-    return null
-  }
+    void loadAll()
+  }, [])
 
   return (
     <DashboardLayout>

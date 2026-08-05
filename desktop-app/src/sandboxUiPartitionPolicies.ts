@@ -36,6 +36,28 @@ export type EmbedNavigationOutcome =
   /** non-http(s) scheme or empty URL — drop silently. */
   | { kind: 'drop' }
 
+function pathWithoutTrailingSlash(pathname: string): string {
+  return pathname.replace(/\/+$/, '') || '/'
+}
+
+export function isSandboxUiNavigationWithinPrefix(
+  navigationUrl: string,
+  allowedNavigationPrefix: string
+): boolean {
+  try {
+    const navigation = new URL(navigationUrl)
+    const allowed = new URL(allowedNavigationPrefix)
+    const allowedPath = pathWithoutTrailingSlash(allowed.pathname)
+    const navigationPath = pathWithoutTrailingSlash(navigation.pathname)
+    return (
+      navigation.origin === allowed.origin &&
+      (navigationPath === allowedPath || navigation.pathname.startsWith(`${allowedPath}/`))
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * Classify a candidate navigation URL against the recipe's allowed
  * `view/*` prefix. Pure function — no Electron coupling, easy to test.
@@ -45,11 +67,15 @@ export function classifyEmbedNavigation(
   allowedPrefix: string
 ): EmbedNavigationOutcome {
   if (!rawUrl) return { kind: 'drop' }
-  if (rawUrl.startsWith(allowedPrefix)) return { kind: 'allow' }
+  if (isSandboxUiNavigationWithinPrefix(rawUrl, allowedPrefix)) return { kind: 'allow' }
   if (rawUrl.startsWith('clerum:')) {
     const parsed = parseClerumOauthAuthorize(rawUrl)
     return parsed
-      ? { kind: 'oauth_authorize', oauthClientId: parsed.oauthClientId, background: parsed.background }
+      ? {
+          kind: 'oauth_authorize',
+          oauthClientId: parsed.oauthClientId,
+          background: parsed.background,
+        }
       : { kind: 'drop' }
   }
   if (rawUrl.startsWith('https://') || rawUrl.startsWith('http://')) {
