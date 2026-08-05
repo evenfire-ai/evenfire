@@ -532,6 +532,20 @@ export function App() {
     [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
   )
 
+  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+    async (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      launchContext: PendingSandboxUiDeepLinkLaunch,
+      tone: 'info' | 'error' = 'error'
+    ) => {
+      if (deferSandboxUiDeepLink(pending, message, tone)) {
+        await restoreSandboxUiDeepLinkTeam(launchContext)
+      }
+    },
+    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
+  )
+
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
     if (!activeSandboxUiApp) return
     await window.clerum.sandboxUi.close()
@@ -650,16 +664,14 @@ export function App() {
                 switchedTeam,
                 conversationOrigin: pending.conversationOrigin,
               }
-              const exhaustedRetryBudget = deferSandboxUiDeepLink(
+              await deferSandboxUiDeepLinkUntilTerminal(
                 pending,
                 `Could not switch to the linked team yet: ${errorMessage(
                   error
                 )}. This link will retry shortly.`,
+                launchContext,
                 'info'
               )
-              if (exhaustedRetryBudget) {
-                await restoreSandboxUiDeepLinkTeam(launchContext)
-              }
               return
             }
             throw error
@@ -684,14 +696,12 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
           }
-          const exhaustedRetryBudget = deferSandboxUiDeepLink(
+          await deferSandboxUiDeepLinkUntilTerminal(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
+            launchContext,
             'info'
           )
-          if (exhaustedRetryBudget) {
-            await restoreSandboxUiDeepLinkTeam(launchContext)
-          }
           return
         }
         const requestId = launchSandboxUiApp(
@@ -737,7 +747,7 @@ export function App() {
     bootSplashLoading,
     closeActiveSandboxUiEmbedForHandoff,
     clearSandboxUiDeepLinkProcessing,
-    deferSandboxUiDeepLink,
+    deferSandboxUiDeepLinkUntilTerminal,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
@@ -783,14 +793,16 @@ export function App() {
         await acknowledgeSandboxUiDeepLink(launch.linkId)
         return
       }
-      await restoreSandboxUiDeepLinkTeam(launch)
-      deferSandboxUiDeepLink(pending, result.message || 'The native app view did not mount')
+      await deferSandboxUiDeepLinkUntilTerminal(
+        pending,
+        result.message || 'The native app view did not mount',
+        launch
+      )
     },
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLink,
-      restoreSandboxUiDeepLinkTeam,
+      deferSandboxUiDeepLinkUntilTerminal,
     ]
   )
 
