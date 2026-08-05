@@ -1,7 +1,16 @@
 name: ARM runner probe
 # TEMPORARY. Proves ubuntu-24.04-arm is available to this repo before
 # build-publish.yml is restructured to depend on it. Deleted in the same task.
-on: workflow_dispatch
+#
+# workflow_dispatch is kept for parity with the brief, but GitHub will not
+# let it be invoked via API/CLI until this file exists on the default
+# branch (main). Since this probe never merges to main, a push trigger
+# scoped to this branch is added so pushing the commit fires the run.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/image-publishing
 
 jobs:
   probe:
