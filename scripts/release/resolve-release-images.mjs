@@ -7,7 +7,7 @@
 // Prints the digest to promote on success; exits non-zero with a named reason
 // otherwise.
 //
-// Why the revision label and not git history: builds are change-detected, so
+// Why the revision annotation and not git history: builds are change-detected, so
 // each image's newest sha- tag sits at a different commit, and the tagged
 // commit on main is a dev->main merge that was never built. Computing "the last
 // commit touching this image's source paths" lands on feature-branch merge
@@ -73,8 +73,10 @@ try {
 
 if (!revision) {
   die(
-    `${image}@${digest} carries no org.opencontainers.image.revision label, so there is no way ` +
-      `to tell what it was built from. Re-publish via a build_all run before releasing.`
+    `${image}@${digest} carries no org.opencontainers.image.revision annotation, so there is no way ` +
+      `to tell what it was built from. This usually means it is not a multi-arch index produced by ` +
+      `build-publish.yml's merge step (a lone single-platform push has no index to annotate) or it ` +
+      `predates that step recording one -- re-publish via a build_all run so the merge step writes it.`
   )
 }
 
@@ -83,7 +85,9 @@ try {
 } catch {
   die(
     `${image}: the published image was built from ${revision}, which is not an ancestor of the ` +
-      `release commit ${tagSha}. That image is not in this release.`
+      `release commit ${tagSha} -- that image predates this release. :latest tracks dev, so re-running ` +
+      `build-publish would only move it further forward, not fix this. Merge dev into main so ` +
+      `${tagSha} descends from ${revision}, then cut the release tag again.`
   )
 }
 

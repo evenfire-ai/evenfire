@@ -92,7 +92,7 @@ assert_a_source_change_after_the_revision_is_rejected() {
   rm -rf "$d"
 }
 
-assert_a_missing_revision_label_fails_loudly() {
+assert_a_missing_revision_annotation_fails_loudly() {
   local d; d="$(mktemp -d)"; make_repo "$d"
   mkdir -p "$d/bin"
   cat > "$d/bin/crane" <<'STUB'
@@ -107,10 +107,14 @@ STUB
   local out
   out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
         --image control-api --source-paths 'unrelated/**' --tag-sha HEAD 2>&1 )" && rc=0 || rc=1
-  if [ "$rc" -ne 0 ] && grep -qi "revision label" <<< "$out"; then
-    pass "a missing revision label fails loudly rather than promoting blind"
+  # "annotation", not "label": the value lives on the OCI index's own
+  # annotations now, and the resolver's message was corrected to match --
+  # this assertion would have masked that wording bug had it kept checking
+  # for the old "revision label" phrase.
+  if [ "$rc" -ne 0 ] && grep -qi "revision annotation" <<< "$out"; then
+    pass "a missing revision annotation fails loudly rather than promoting blind"
   else
-    fail "expected a named failure about the revision label; got rc=$rc out='$out'"
+    fail "expected a named failure about the revision annotation; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -119,14 +123,31 @@ assert_the_digest_is_resolved_once_and_reused() {
   local d; d="$(mktemp -d)"; make_repo "$d"
   local old; old="$( cd "$d" && git rev-parse HEAD~1 )"
   mkdir -p "$d/bin"
-  # Emit a DIFFERENT digest on each call. If the script resolves :latest more
-  # than once, the digest it verified is not the digest it would promote --
-  # a time-of-check-to-time-of-use bug, because :latest moves on every dev push.
+  # Two independent counters. `digest-calls` (as before) proves each `crane
+  # digest` call returns a fresh value, so a repeated call would be caught by
+  # `sha256:call1` no longer being what gets printed. `latest-refs` is the
+  # broader net: it fires on ANY crane subcommand whose arguments reference
+  # `:latest`, not only `digest`. A stub that only counted `digest` calls
+  # cannot see the resolver re-reading the moving tag through a DIFFERENT
+  # subcommand (e.g. `crane manifest .../image:latest` in place of
+  # `.../image@$digest`) -- proven by mutating the resolver's manifest read
+  # to do exactly that: with only the digest-only counter, nothing reddened.
   cat > "$d/bin/crane" <<STUB
 #!/usr/bin/env bash
-COUNT_FILE="$d/digest-calls"
+DIGEST_COUNT_FILE="$d/digest-calls"
+LATEST_COUNT_FILE="$d/latest-refs"
+if printf '%s ' "\$@" | grep -q ':latest'; then
+  n=\$(( \$(cat "\$LATEST_COUNT_FILE" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$LATEST_COUNT_FILE"
+  if [ "\$n" -gt 1 ]; then
+    echo "crane stub: :latest referenced more than once (args: \$*)" >&2
+    exit 1
+  fi
+fi
 case "\$1" in
-  digest)   n=\$(( \$(cat "\$COUNT_FILE" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$COUNT_FILE"; echo "sha256:call\$n" ;;
+  digest)
+    n=\$(( \$(cat "\$DIGEST_COUNT_FILE" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$DIGEST_COUNT_FILE"
+    echo "sha256:call\$n"
+    ;;
   manifest) echo '{"annotations":{"org.opencontainers.image.revision":"$old"}}' ;;
   *) exit 1 ;;
 esac
@@ -134,11 +155,12 @@ STUB
   chmod +x "$d/bin/crane"
   local out; out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
         --image control-api --source-paths 'unrelated/**' --tag-sha HEAD 2>&1 )"
-  local calls; calls="$(cat "$d/digest-calls" 2>/dev/null || echo 0)"
-  if [ "$calls" = "1" ] && grep -q "sha256:call1" <<< "$out"; then
+  local digest_calls; digest_calls="$(cat "$d/digest-calls" 2>/dev/null || echo 0)"
+  local latest_refs; latest_refs="$(cat "$d/latest-refs" 2>/dev/null || echo 0)"
+  if [ "$digest_calls" = "1" ] && [ "$latest_refs" = "1" ] && grep -q "sha256:call1" <<< "$out"; then
     pass "the moving :latest tag is resolved to a digest exactly once"
   else
-    fail "crane digest called $calls time(s), output '$out'"
+    fail "crane digest called $digest_calls time(s), :latest referenced $latest_refs time(s), output '$out'"
   fi
   rm -rf "$d"
 }
@@ -164,7 +186,7 @@ assert_every_defined_case_is_invoked() {
 assert_a_revision_that_is_an_ancestor_resolves
 assert_a_non_ancestor_revision_is_rejected
 assert_a_source_change_after_the_revision_is_rejected
-assert_a_missing_revision_label_fails_loudly
+assert_a_missing_revision_annotation_fails_loudly
 assert_the_digest_is_resolved_once_and_reused
 assert_every_defined_case_is_invoked
 
