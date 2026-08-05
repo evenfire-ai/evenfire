@@ -23,9 +23,14 @@ assert_manifest_parses_and_is_nonempty() {
   fi
 }
 
+# No unguarded regex index here (wf.includes() can't throw on a content
+# mismatch), but a readFileSync failure (workflow file moved/renamed) would
+# still throw inside the unguarded .then() and vacuously pass under the same
+# 2>/dev/null + empty-output-means-pass shape as the other cases. Same
+# .catch()-and-exit-code treatment, no restructuring needed.
 assert_every_published_image_has_a_build_matrix_entry() {
-  local missing
-  missing="$(node -e '
+  local output rc
+  output="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
       const fs = await import("node:fs")
       const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
@@ -33,11 +38,17 @@ assert_every_published_image_has_a_build_matrix_entry() {
         .filter(i => !wf.includes(`- image: ${i.name}\n`))
         .map(i => i.name)
       console.log(gaps.join(","))
-    })' 2>/dev/null)"
-  if [ -z "$missing" ]; then
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "build-matrix read failed: $output"
+  elif [ -z "$output" ]; then
     pass "every published image has a build-matrix entry"
   else
-    fail "published but absent from the build matrix: $missing"
+    fail "published but absent from the build matrix: $output"
   fi
 }
 
@@ -47,23 +58,44 @@ assert_every_published_image_has_a_build_matrix_entry() {
 # must resolve through localRef() too, or a broken local_name/local_tag on
 # either image goes unnoticed (this is exactly the field the brief flags as
 # a gotcha for playwright-server).
+#
+# This is the only coverage for local_name/local_tag, and until now it had
+# the exact same unguarded-index bug fixed in assert_matrix_fields_match_
+# manifest and assert_every_matrix_image_has_a_manifest_row:
+# sh.match(/ALL_IMAGES=\(.../) followed by block[1] with no null check. A
+# rename of the ALL_IMAGES array made the match return null, null[1] threw
+# inside the unguarded .then(), 2>/dev/null swallowed it, and empty stdout
+# read as pass -- silently losing the only local_name/local_tag coverage the
+# manifest has. Same fix as the other two: guard the match, .catch() the
+# chain, surface stderr, check the exit code before checking emptiness.
 assert_every_local_image_maps_to_exactly_one_row() {
-  local unmapped
-  unmapped="$(node -e '
+  local output rc
+  output="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
       const fs = await import("node:fs")
-      const sh = fs.readFileSync("'"$REPO_ROOT"'/scripts/minikube/build-images.sh", "utf8")
+      const shPath = "'"$REPO_ROOT"'/scripts/minikube/build-images.sh"
+      const sh = fs.readFileSync(shPath, "utf8")
       const block = sh.match(/ALL_IMAGES=\(([\s\S]*?)\n\)/)
+      if (!block) {
+        console.log(`PARSE_ERROR: could not find the ALL_IMAGES=(...) array in ${shPath}`)
+        process.exit(1)
+      }
       const baseRefs = [...block[1].matchAll(/"([^"]+)"/g)].map(x => x[1])
       const appendRefs = [...sh.matchAll(/ALL_IMAGES\+=\("([^"]+)"\)/g)].map(x => x[1])
       const refs = [...baseRefs, ...appendRefs]
       const known = new Set(m.IMAGES.map(i => m.localRef(i)))
       console.log(refs.filter(r => !known.has(r)).join(","))
-    })' 2>/dev/null)"
-  if [ -z "$unmapped" ]; then
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "ALL_IMAGES parse failed: $output"
+  elif [ -z "$output" ]; then
     pass "every build-images.sh ref, including conditional appends, maps to exactly one manifest row"
   else
-    fail "build-images.sh refs with no manifest row: $unmapped"
+    fail "build-images.sh refs with no manifest row: $output"
   fi
 }
 
