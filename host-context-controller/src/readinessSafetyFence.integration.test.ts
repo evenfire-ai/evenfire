@@ -322,7 +322,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     expect(await readyStatus(server)).toBe(200)
   })
 
-  it('does not let a scoped delta certify readiness while the last authoritative pass left the inventory uncertified', async () => {
+  it('short-circuits a scoped delta at the certificate source while the last authoritative pass left the inventory uncertified', async () => {
     const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
     const w = watcher as unknown as Record<string, any>
 
@@ -401,10 +401,104 @@ describe('readiness withdrawal on a real lost delete fence', () => {
         spec: { contextId: 'alpha', mcpServers: [] },
       })
 
-      // The delta declined to certify: it warned, it recorded no certificate
-      // (the revocation counters were not advanced to the delta's bumped
-      // revision), and readiness stays withdrawn even after every counter is
-      // realigned so the fence is the only remaining gate.
+      // M1: the fence was lost before this delta, so
+      // currentNetworkPolicySafetyCertificate() returns null at the capture and no
+      // delta certificate is ever minted — the delta short-circuits at the source
+      // and never reaches the per-delta certification branch. No warn is emitted;
+      // nothing is recorded; readiness stays withdrawn via the independent
+      // readiness fence even after every counter is realigned.
+      expect(
+        warnSpy.mock.calls.some(call => String(call[0]).includes('Not certifying the scoped delta'))
+      ).toBe(false)
+      expect(w.networkPolicyRevocationContextRevision).not.toBe(w.contextDesiredRevision)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
+      alignRevocationCounters(watcher)
+      expect(await readyStatus(server)).toBe(503)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('declines to certify a scoped delta whose certificate outlived a fence lost mid-flight, and warns', async () => {
+    // Coverage preservation for the per-delta fence check (k8sClient.ts :3801):
+    // the delta certificate is minted while the fence is still certified, then a
+    // CONCURRENT authoritative pass loses its delete fence mid-flight. M1's
+    // source short-circuit cannot catch this — only the per-delta check can. This
+    // test is green with AND without M1; it guards the TOCTOU window, not M1.
+    const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
+    const w = watcher as unknown as Record<string, any>
+
+    await w.startContextWatch('ctx-rv-2')
+    const contextWatchCall = mocks.watch.mock.calls.find(([path]) =>
+      String(path).endsWith('/namespaces/mcp-server/contexts')
+    )
+    if (!contextWatchCall) throw new Error('Context watch was never registered')
+    const fireContextEvent = contextWatchCall[2] as (type: string, apiObj: unknown) => Promise<void>
+
+    const priorContext = {
+      name: 'alpha',
+      namespace: 'mcp-server',
+      uid: 'ctx-alpha-uid',
+      generation: 1,
+      spec: { contextId: 'alpha', mcpServers: [] },
+    }
+    w.contexts.set('alpha', priorContext)
+    alignRevocationCounters(watcher)
+
+    // Baseline clean authoritative pass: certified, gate open.
+    mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+    await reconciler.fullReconcile([priorContext], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: () => {},
+    })
+    alignRevocationCounters(watcher)
+    expect(await readyStatus(server)).toBe(200)
+
+    // The delta certificate is captured now, while the fence is still certified.
+    // The FIRST scoped LIST the delta issues runs a concurrent authoritative pass
+    // that loses its own delete fence — degrading the fence AFTER the delta minted
+    // its certificate but BEFORE the delta reaches its certification branch.
+    let fenceBrokenMidFlight = false
+    mocks.listNamespacedNetworkPolicy.mockImplementation(
+      async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+        const selector = labelSelector ?? ''
+        const scoped =
+          selector.includes(`${CONTEXT_LABEL}=`) || selector.includes('external-egress')
+        if (scoped && !fenceBrokenMidFlight) {
+          fenceBrokenMidFlight = true
+          mocks.deleteNamespacedNetworkPolicy.mockRejectedValue(
+            Object.assign(new Error('the object has been modified'), { code: 409 })
+          )
+          await reconciler
+            .fullReconcile([priorContext], [], {
+              ensureDefaults: false,
+              contextInventoryAuthoritative: () => true,
+              serverInventoryAuthoritative: () => true,
+              onAuthoritativeRevocationComplete: () => {},
+            })
+            .then(
+              () => {
+                throw new Error('interleaved authoritative pass should have lost its fence')
+              },
+              () => {}
+            )
+        }
+        return { items: namespace === 'mcp-server' && !scoped ? [stalePolicy] : [] }
+      }
+    )
+    const warnSpy = vi.spyOn(console, 'warn')
+    try {
+      await fireContextEvent('MODIFIED', {
+        metadata: { name: 'alpha', namespace: 'mcp-server', uid: 'ctx-alpha-uid', generation: 2 },
+        spec: { contextId: 'alpha', mcpServers: [] },
+      })
+
+      // The interleave actually ran (no vacuous pass) and the per-delta check
+      // withheld certification: it warned, recorded nothing, readiness stays 503.
+      expect(fenceBrokenMidFlight).toBe(true)
       expect(
         warnSpy.mock.calls.some(call => String(call[0]).includes('Not certifying the scoped delta'))
       ).toBe(true)

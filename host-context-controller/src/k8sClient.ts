@@ -2584,6 +2584,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.stopped ||
       !this.contextCacheSynced ||
       !this.mcpServerCacheSynced ||
+      !this.netPolReconciler.hasCertifiedSafetyInventory() ||
       this.networkPolicyRevocationContextGeneration !== this.contextWatchGeneration ||
       this.networkPolicyRevocationServerGeneration !== this.mcpWatchGeneration ||
       this.networkPolicyRevocationContextRevision !== this.contextDesiredRevision ||

@@ -3834,6 +3834,32 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('does not start runtime fleet convergence while the safety inventory is uncertified', async () => {
+    // M1: with the revocation counters aligned, the ONLY thing that can null the
+    // certificate is the lost safety fence. Fence lost -> cert null -> the fleet
+    // lane must not run; fence restored -> it runs exactly once.
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 4
+    ;(watcher as any).mcpWatchGeneration = 7
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    try {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+      await (watcher as any).runInitialMcpServerConvergence()
+      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+      await (watcher as any).runInitialMcpServerConvergence()
+      expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
+    } finally {
+      // vi.clearAllMocks() clears calls, not implementations — restore explicitly
+      // or every later test would re-gate on a stale false.
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+      await watcher.stop()
+    }
+  })
+
   it('invalidates readiness when either desired policy revision advances', async () => {
     const watcher = new McpServerWatcher()
     ;(watcher as any).hostCacheSynced = true
