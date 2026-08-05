@@ -10,9 +10,11 @@ name: Build & Publish
 # build_all=true rebuilds the whole matrix (use this for the first publish, or
 # to repopulate ghcr).
 #
-# mcp-host and channel-reader are built multi-arch (amd64 + arm64) so
-# Apple-Silicon users can pull-and-run. The rest are amd64-only (they deploy
-# to amd64 GKE).
+# Every image is built multi-arch (amd64 + arm64). Each arch is built
+# natively — no QEMU — as its own `build-push` matrix leg on a
+# runner that matches (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64),
+# pushed by digest, then the `merge` job combines the two digests into one
+# manifest list per image and pushes the sha-<7> and latest tags.
 
 on:
   push:
@@ -29,9 +31,11 @@ on:
         type: boolean
         default: false
 
-# Least-privilege default: only build-push needs to write packages. detect (runs
-# the third-party paths-filter action) and notify-infra get read-only, so a
-# compromised action in those jobs cannot push images to ghcr.
+# Least-privilege default: only build-push and merge need to write packages
+# (build-push pushes per-arch digests, merge pushes the combined manifest
+# list). detect (runs the third-party paths-filter action) and notify-infra
+# get read-only, so a compromised action in those jobs cannot push images to
+# ghcr.
 permissions:
   contents: read
 
@@ -44,8 +48,9 @@ jobs:
     name: Detect changed images
     runs-on: ubuntu-latest
     # Publishing targets ghcr.io/evenfire-ai/*, which forks cannot write to.
-    # Guarding the entry job cascades: build-push needs detect, notify-infra
-    # needs build-push, so a fork skips the whole workflow cleanly.
+    # Guarding the entry job cascades: build-push needs detect, merge needs
+    # build-push, notify-infra needs merge, so a fork skips the whole
+    # workflow cleanly.
     if: github.repository == 'evenfire-ai/evenfire'
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}
@@ -160,8 +165,8 @@ jobs:
               - 'webhook-proxy/**'
 
   build-push:
-    name: Build & push (${{ matrix.image }})
-    runs-on: ubuntu-latest
+    name: Build & push (${{ matrix.image }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     needs: detect
     permissions:
       contents: read
@@ -172,10 +177,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Crossed against every `include` entry below (none of them set
+        # `arch`), so each of the 28 images gets one amd64 leg and one arm64
+        # leg — 56 combinations total, each on a runner native to its arch.
+        arch: [amd64, arm64]
         include:
           - image: channel-reader
             path: channel-reader
-            platforms: linux/amd64,linux/arm64
             changed: ${{ needs.detect.outputs.channel-reader }}
           - image: workflow-approval-request-reader
             path: workflow-approval-request-reader
@@ -198,7 +206,6 @@ jobs:
           - image: mcp-host
             path: mcp-host
             rooted: true
-            platforms: linux/amd64,linux/arm64
             changed: ${{ needs.detect.outputs.mcp-host }}
           - image: mcp-host-slim
             path: mcp-host
@@ -280,10 +287,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
 
-      - name: Set up QEMU
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-
+      # No QEMU: each leg now builds only its own native arch (amd64 on
+      # ubuntu-latest, arm64 on ubuntu-24.04-arm), so there is nothing to
+      # emulate. This is the whole point of the split.
       - name: Set up Docker Buildx
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -295,11 +301,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute short SHA
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        id: shortsha
-        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build context and Dockerfile
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -320,19 +321,180 @@ jobs:
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and push
+      - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
-          platforms: ${{ matrix.platforms || 'linux/amd64' }}
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:sha-${{ steps.shortsha.outputs.sha }}
-            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:latest
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          platforms: linux/${{ matrix.arch }}
+          # Attestations are disabled per-leg: imagetools builds the final index
+          # from two platform digests, and an index-of-indexes is not valid, so
+          # provenance cannot survive the merge as-is. Re-add later with a
+          # dedicated attest step on the merged index if supply-chain metadata
+          # is wanted back.
+          provenance: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          # Per-arch scope. Both legs previously wrote the same scope and thrashed.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }},mode=max
+
+      # Digests cross to the merge job via per-arch artifacts, the same
+      # upload/download-artifact pattern the built-image markers use (see the
+      # merge job below — that's also where the marker itself now lives: it
+      # means "this image is real", which is only true once the manifest list
+      # exists, not merely once one arch's digest has landed).
+      - name: Record built-image digest
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        run: |
+          mkdir -p /tmp/digests
+          echo -n "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.image }}-${{ matrix.arch }}"
+
+      - name: Upload digest artifact
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.image }}-${{ matrix.arch }}
+          retention-days: 1
+          if-no-files-found: warn
+
+  # Combines the two per-arch digests from build-push into one multi-platform
+  # manifest list per image, and pushes the sha-<7> and latest tags. This is
+  # also where the built-image marker now lives (moved from build-push): the
+  # marker means "this image is real", which is only true once the manifest
+  # list exists — a lone amd64 or arm64 digest is not a publishable image.
+  merge:
+    name: Merge manifest (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: [detect, build-push]
+    permissions:
+      contents: read
+      packages: write
+    # Gate at step level, same as build-push and for the same reason (the
+    # `matrix` context is unavailable in a job-level `if`). This is a
+    # deliberate choice, not an oversight: it preserves today's exact
+    # behavior on an all-unchanged push. Every leg's steps skip, but the job
+    # itself still runs and succeeds, so notify-infra (needs: merge) still
+    # runs too and takes its own "no images built" no-op branch — exactly
+    # what happens today when build-push is all-unchanged. Gating `merge` at
+    # the job level instead would make an all-unchanged push SKIP the job
+    # outright, which cascades to skip notify-infra as well (a job's default
+    # `if` is implicitly `&& success()`, and a skipped need does not satisfy
+    # that) instead of letting it run and no-op. Both are legitimate designs;
+    # this one was picked to change as little observable behavior as
+    # possible in this refactor.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: channel-reader
+            changed: ${{ needs.detect.outputs.channel-reader }}
+          - image: workflow-approval-request-reader
+            changed: ${{ needs.detect.outputs.workflow-approval-request-reader }}
+          - image: control-api
+            changed: ${{ needs.detect.outputs.control-api }}
+          - image: control-ui
+            changed: ${{ needs.detect.outputs.control-ui }}
+          - image: external-rest-api
+            changed: ${{ needs.detect.outputs.external-rest-api }}
+          - image: host-context-controller
+            changed: ${{ needs.detect.outputs.host-context-controller }}
+          - image: mcp-host
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-slim
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-full
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-desktop
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-proxy
+            changed: ${{ needs.detect.outputs.mcp-proxy }}
+          - image: gfs-controller
+            changed: ${{ needs.detect.outputs.gfs-controller }}
+          - image: nginx-egress-proxy
+            changed: ${{ needs.detect.outputs.nginx-egress-proxy }}
+          - image: profile-ui
+            changed: ${{ needs.detect.outputs.profile-ui }}
+          - image: rpc-proxy
+            changed: ${{ needs.detect.outputs.rpc-proxy }}
+          - image: workflow-recipes
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: workflow-coordinator
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: workflow-snippet-runner
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: clerum-workflow-base
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: stdio-bridge
+            changed: ${{ needs.detect.outputs.stdio-bridge }}
+          - image: workspace-files-controller
+            changed: ${{ needs.detect.outputs.workspace-files-controller }}
+          - image: airtable-mcp-server
+            changed: ${{ needs.detect.outputs.airtable-mcp-server }}
+          - image: playwright-server
+            changed: ${{ needs.detect.outputs.playwright-server }}
+          - image: web-search-mcp
+            changed: ${{ needs.detect.outputs.web-search-mcp }}
+          - image: mock-mcp-server
+            changed: ${{ needs.detect.outputs.mock-mcp-server }}
+          - image: mock-stdio-mcp-server
+            changed: ${{ needs.detect.outputs.mock-stdio-mcp-server }}
+          - image: webhook-gateway
+            changed: ${{ needs.detect.outputs.webhook-gateway }}
+          - image: webhook-proxy
+            changed: ${{ needs.detect.outputs.webhook-proxy }}
+    steps:
+      - name: Set up Docker Buildx
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to ghcr.io
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Exact artifact names, not a `digest-${{ matrix.image }}-*` glob:
+      # several image names share a prefix (mcp-host, mcp-host-slim,
+      # mcp-host-full, mcp-host-desktop), and a wildcard suffix on the image
+      # name would also match the sibling images' digest artifacts.
+      - name: Download amd64 digest
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: digest-${{ matrix.image }}-amd64
+          path: /tmp/digests
+
+      - name: Download arm64 digest
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: digest-${{ matrix.image }}-arm64
+          path: /tmp/digests
+
+      - name: Compute short SHA
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        id: shortsha
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the manifest list
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        run: |
+          set -euo pipefail
+          IMG="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}"
+          AMD64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-amd64")"
+          ARM64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-arm64")"
+          docker buildx imagetools create \
+            -t "$IMG:sha-${{ steps.shortsha.outputs.sha }}" \
+            -t "$IMG:latest" \
+            "$IMG@$AMD64_DIGEST" \
+            "$IMG@$ARM64_DIGEST"
 
       # Record that this image was actually (re)built + pushed at this sha, so
       # notify-infra can tell the infra repo EXACTLY which images to mirror/pin
@@ -357,7 +519,14 @@ jobs:
   notify-infra:
     name: Dispatch images-published
     runs-on: ubuntu-latest
-    needs: build-push
+    # Must be `merge`, not `build-push`: the built-image markers live in the
+    # merge job now (a manifest list, not a lone per-arch digest, is what
+    # makes an image real). If this pointed at build-push, it would become a
+    # sibling of merge instead of a dependent, download zero markers, and
+    # take the "no images built" no-op branch below on every push that
+    # actually built something — failing GREEN with no ghcr mirror and no
+    # clerum-dev apply.
+    needs: merge
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_all }}
     steps:
       - name: Collect built-image markers
