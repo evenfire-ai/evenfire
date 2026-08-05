@@ -350,36 +350,83 @@ function imageReferenceOf(image: string): string {
   return lastColon > lastSlash ? withoutHost.slice(lastColon + 1) : 'latest'
 }
 
+const REGISTRY_ACCEPT =
+  'application/vnd.oci.image.manifest.v1+json, ' +
+  'application/vnd.docker.distribution.manifest.v2+json, ' +
+  'application/vnd.oci.image.index.v1+json, ' +
+  'application/vnd.docker.distribution.manifest.list.v2+json'
+
+// The public host sits behind a UA filter that 403s some default agents; a 403 from the
+// edge would be indistinguishable from a 403 from the registry's own authorization.
+const REGISTRY_UA = 'curl/8.7.1'
+
+/** What an unauthenticated client can do with a repository. */
+type AnonymousPullOutcome = 'public' | 'denied' | 'unreachable'
+
 /**
- * Ask the registry for a manifest with NO credentials.
+ * Can a client with NO credentials actually pull this manifest?
  *
- * This is the privacy proof the suite was missing. Everything else here shows that a pull
- * SUCCEEDED with the injected Secret; none of it shows the pull would have FAILED without
- * one — and a public image on our own host satisfies every one of those assertions. A 401/403
- * here is the registry itself stating the repository is not anonymously readable.
+ * THIS MUST DO THE FULL TOKEN DANCE, and that is the entire point of the function.
+ * A bare `GET /v2/<repo>/manifests/<ref>` against a token-auth registry returns 401 for
+ * PUBLIC repositories too — the 401 is the auth *challenge*, not a refusal. An earlier
+ * version of this check asserted on that bare status and was therefore vacuous: it passed
+ * whether the fixture was private or world-readable, which is precisely the failure it was
+ * written to rule out. (Confirmed the hard way: six `@evenfire` images were flipped from
+ * private to public and the bare check still reported 401 for all of them.)
  *
- * Returns the HTTP status, or null if the request could not be made at all (which must not
- * be read as "private" — the caller distinguishes the two).
+ * So: follow the `WWW-Authenticate` challenge, ask the realm for a token WITHOUT
+ * credentials, and retry. Only a 200 on that retry proves the repository is anonymously
+ * pullable. The challenge is parsed rather than hardcoded so this works against any
+ * OCI-conformant registry, not just ours.
+ *
+ * `unreachable` is deliberately distinct from `denied` — a network failure must never be
+ * read as proof of privacy.
  */
-async function anonymousManifestStatus(
+async function anonymousPullOutcome(
   repository: string,
   reference: string
-): Promise<number | null> {
+): Promise<AnonymousPullOutcome> {
+  const manifestUrl = `https://${registryHost}/v2/${repository}/manifests/${reference}`
+  const headers = { Accept: REGISTRY_ACCEPT, 'User-Agent': REGISTRY_UA }
   try {
-    const res = await fetch(`https://${registryHost}/v2/${repository}/manifests/${reference}`, {
+    const first = await fetch(manifestUrl, {
       method: 'GET',
-      headers: {
-        Accept:
-          'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json',
-        // The public host sits behind a UA filter that 403s some default agents; a 403 from
-        // the edge would be indistinguishable from a 403 from the registry's authz.
-        'User-Agent': 'curl/8.7.1',
-      },
+      headers,
       signal: AbortSignal.timeout(20_000),
     })
-    return res.status
+    // No challenge at all: the registry served it unauthenticated.
+    if (first.status === 200) return 'public'
+    if (first.status === 403) return 'denied'
+    if (first.status !== 401) return 'unreachable'
+
+    const challenge = first.headers.get('www-authenticate') ?? ''
+    const realm = /realm="([^"]+)"/.exec(challenge)?.[1]
+    if (!realm) return 'unreachable'
+    const service = /service="([^"]+)"/.exec(challenge)?.[1] ?? ''
+    const scope = /scope="([^"]+)"/.exec(challenge)?.[1] ?? `repository:${repository}:pull`
+
+    // Anonymous token request — no Authorization header, deliberately.
+    const tokenRes = await fetch(
+      `${realm}?service=${encodeURIComponent(service)}&scope=${encodeURIComponent(scope)}`,
+      { method: 'GET', headers: { 'User-Agent': REGISTRY_UA }, signal: AbortSignal.timeout(20_000) }
+    )
+    // A realm that refuses to issue an anonymous token has already answered the question.
+    if (tokenRes.status === 401 || tokenRes.status === 403) return 'denied'
+    if (!tokenRes.ok) return 'unreachable'
+    const token = ((await tokenRes.json()) as { token?: string })?.token
+    // Some realms issue a token carrying no access rather than refusing outright.
+    if (!token) return 'denied'
+
+    const second = await fetch(manifestUrl, {
+      method: 'GET',
+      headers: { ...headers, Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (second.status === 200) return 'public'
+    if (second.status === 401 || second.status === 403) return 'denied'
+    return 'unreachable'
   } catch {
-    return null
+    return 'unreachable'
   }
 }
 
@@ -831,8 +878,12 @@ describe('registry pull secret — WRC materialization onto a recipe workload', 
  *
  * Two independent proofs, because each covers the other's blind spot:
  *
- *  1. The registry refuses an anonymous manifest read (401/403). That is the registry itself
- *     stating the repository is not world-readable, independent of anything on the node.
+ *  1. An unauthenticated client cannot PULL the manifest — established by following the
+ *     `WWW-Authenticate` challenge and asking the realm for a token with no credentials
+ *     (`anonymousPullOutcome`). Read that function before touching this: on a token-auth
+ *     registry a bare manifest GET returns 401 for public repositories too, so asserting on
+ *     the unauthenticated status alone proves nothing. This is the registry stating the
+ *     repository is not world-readable, independent of anything on the node.
  *  2. A Pod running the same image with NO `imagePullSecrets` cannot start. That is the
  *     kubelet demonstrating the credential is load-bearing on this exact cluster — which a
  *     registry-level check alone cannot show (node-level ambient credentials, a mirror, or a
@@ -843,22 +894,22 @@ describe('registry pull secret — WRC materialization onto a recipe workload', 
 describe('registry pull secret — negative control: the pull requires the credential', () => {
   const NEG_POD = `e2e-pullsecret-negctl-${RUN_ID}`
 
-  it('the registry refuses an anonymous manifest read for the fixture', async () => {
+  it('an unauthenticated client cannot pull the fixture manifest', async () => {
     if (!ready()) return
 
-    const status = await anonymousManifestStatus(
+    const outcome = await anonymousPullOutcome(
       imageRepositoryOf(mcpImage),
       imageReferenceOf(mcpImage)
     )
-    if (status === null) {
+    if (outcome === 'unreachable') {
       unprovable(`could not reach ${registryHost} anonymously to prove the fixture is private`)
       return
     }
     expect(
-      [401, 403],
-      `${mcpImage} is anonymously readable (HTTP ${status}) — it is NOT a private fixture, so ` +
-        'every "the credential worked" assertion in this suite would pass without the credential'
-    ).toContain(status)
+      outcome,
+      `${mcpImage} is anonymously pullable — it is NOT a private fixture, so every "the ` +
+        'credential worked" assertion in this suite would pass without the credential'
+    ).toBe('denied')
   }, 60_000)
 
   it('a Pod without imagePullSecrets cannot pull the private image', async () => {
@@ -1117,21 +1168,21 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
   })
 
   // Closes the loop on the negative control. That block proved the TAG is not anonymously
-  // readable; this proves it of the exact digest the kubelet actually pulled, so a tag
+  // pullable; this proves it of the exact digest the kubelet actually pulled, so a tag
   // repointed to a public image mid-run cannot slip between the two.
-  it('the exact digest that was pulled is itself not anonymously readable', async () => {
+  it('the exact digest that was pulled is itself not anonymously pullable', async () => {
     if (!mcpInstalled || !pulledDigest) return
 
-    const status = await anonymousManifestStatus(imageRepositoryOf(mcpImage), pulledDigest)
-    if (status === null) {
+    const outcome = await anonymousPullOutcome(imageRepositoryOf(mcpImage), pulledDigest)
+    if (outcome === 'unreachable') {
       unprovable(`could not reach ${registryHost} anonymously to re-prove the pulled digest`)
       return
     }
     expect(
-      [401, 403],
-      `the digest actually pulled (${pulledDigest}) is anonymously readable (HTTP ${status}) — ` +
+      outcome,
+      `the digest actually pulled (${pulledDigest}) is anonymously pullable — ` +
         'the credential was not required for this content'
-    ).toContain(status)
+    ).toBe('denied')
   }, 60_000)
 })
 
