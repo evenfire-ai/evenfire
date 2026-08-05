@@ -153,7 +153,7 @@ export function createAdminAuthRouter(): Router {
       const passwordHash = await bcrypt.hash(password, 12)
       // Only a literal false opts out (fail-safe toward the human first-run
       // flow, where one credential for Control UI + desktop is the feature).
-      // MCC-driven installs send false: the desktop password then comes only
+      // Managed installs send false: the desktop password then comes only
       // from the directory invitation email.
       const seedDesktopPassword = req.body?.seedDesktopPassword !== false
       const created = await setupInitialAdminCredentials(
@@ -586,7 +586,7 @@ export function createAdminAuthRouter(): Router {
           role: admin.role,
         },
         // The recipe-secret namespaces this control-api enforces (see
-        // WORKFLOW_RECIPE_SECRET_NAMESPACES in the recipes route). In an MCC
+        // WORKFLOW_RECIPE_SECRET_NAMESPACES in the recipes route). In a managed
         // per-tenant deployment these are suffixed (sandbox-recipes-<slug> /
         // mcp-server-<slug>); control-ui needs them to write recipe-secret VALUES
         // to the correct namespace at CREATE time (the recipe namespace does not

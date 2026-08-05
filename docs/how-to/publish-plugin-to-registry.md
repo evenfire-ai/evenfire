@@ -184,6 +184,25 @@ So your images install cleanly into your own clusters. Sharing one with another
 organization currently needs Evenfire to issue the grant. Plan around that
 before you build a distribution story on top of a self-hosted push.
 
+**Private is the normal case, and you do not ship credentials for it.** Because
+your images stay private to your org, every install of your entry is an
+authenticated pull. You do not put a pull Secret in the recipe, and you do not
+ask installers to create one. On the first install that needs it, the installing
+deployment mints its own pull credential from its own registry identity and
+attaches it to the workloads. Your entry stays credential-free and portable
+across the clusters your org runs.
+
+Two rules follow for anything you publish:
+
+- **Never declare `evenfire-registry-pull` in a workload's `imagePullSecrets`.**
+  The name is reserved. An entry that declares it is rejected at install with
+  `422 workflowWorkloadSecretRefReserved`. The platform attaches the reference
+  after the filter that would otherwise strip a recipe-declared Secret name.
+- **`imagePullSecrets` is still yours to use for a third-party registry.** If a
+  workload pulls from GHCR or Docker Hub, name your own Secret there as before.
+  The automatic credential covers images on the evenfire registry only, matched
+  by image host.
+
 ## 3. Publish — `POST /api/v1/entries`
 
 ## Step 2 — Write your recipe

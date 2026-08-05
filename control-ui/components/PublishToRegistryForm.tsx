@@ -1,12 +1,13 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useState } from 'react'
 import type { ReactNode } from 'react'
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getPublishScope, publishToRegistry } from '../lib/api'
-import type { PublishScope } from '../lib/api'
+import { publishToRegistry } from '../lib/api'
 import { egressStatusToRegistrySummary } from '../lib/egressModel'
 import type { EgressEditorStatus, EgressSummary } from '../lib/egressModel'
+import { usePublishScope } from '../lib/hooks/usePublishScope'
 import { isValidK8sName } from '../lib/k8sValidation'
 import { CreateFlowPanel } from './CreateFlowPanel'
 import { CreateStepFlow } from './CreateStepFlow'
@@ -120,22 +121,7 @@ export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Pro
   // Resolved publish target (org scope vs curated catalog). Informational only:
   // control-api applies the scope to the name server-side, so we don't touch the
   // bare `name` input or the payload — we only surface where the entry will land.
-  const [publishScope, setPublishScope] = useState<PublishScope | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    getPublishScope()
-      .then(scope => {
-        if (!cancelled) setPublishScope(scope)
-      })
-      .catch(() => {
-        // Soft-fail: if the target can't be resolved we just omit the indicator
-        // rather than blocking the publish flow.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { scope: publishScope } = usePublishScope()
 
   const nameValid = isValidK8sName(name)
   const metadataValid =
@@ -587,7 +573,7 @@ export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Pro
                   </p>
                   <p className="cu-field__hint">
                     Need a key to publish from CI or a script?{' '}
-                    <a href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</a>
+                    <Link href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</Link>
                   </p>
                 </div>
               ))}

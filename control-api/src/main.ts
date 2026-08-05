@@ -19,6 +19,10 @@ import {
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
 import { startRateLimiterCleanup, stopRateLimiterCleanup } from './services/rateLimiterService.js'
 import {
+  reconcileRegistryPullSecret,
+  startRegistryPullSecretReconcileCron,
+} from './services/registryPullSecretReconcileCron.js'
+import {
   startWorkflowApprovalTraceProjector,
   stopWorkflowApprovalTraceProjector,
 } from './services/tracing/workflowApprovalTraceProjector.js'
@@ -87,6 +91,13 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  // Assert the platform image-pull credential up front and then on a timer. WRC injects
+  // the reference for ANY WorkflowRecipe, including ones created by `kubectl apply` or the
+  // `deploy_recipe` tool that control-api never sees — so provisioning cannot only happen
+  // on our own install routes. Non-fatal: an unconnected cluster logs and retries.
+  void reconcileRegistryPullSecret(gateway)
+  startRegistryPullSecretReconcileCron(gateway, config.registryPullSecretReconcileIntervalMs)
 
   if (config.workflowRunsArchiveCronEnabled) {
     startWorkflowRunsArchiveCron({

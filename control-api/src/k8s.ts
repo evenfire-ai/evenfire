@@ -8,7 +8,12 @@ import {
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
-import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
+import {
+  ClerumResourceType,
+  HostOverview,
+  SecretPreconditions,
+  SecretUpsertRequest,
+} from './types.js'
 
 /**
  * Namespaces where exec operations are permitted.
@@ -394,8 +399,12 @@ export class K8sGateway {
     return this.secrets.createSecret(req)
   }
 
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.updateSecret(req)
+  /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
+  async updateSecret(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.updateSecret(req, precondition)
   }
 
   async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
@@ -406,8 +415,13 @@ export class K8sGateway {
     return this.secrets.removeSecretKey(req)
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
-    return this.secrets.deleteSecret(name, namespace)
+  /** `precondition` binds the delete to a specific object; see `SecretPreconditions`. */
+  async deleteSecret(
+    name: string,
+    namespace?: string,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.deleteSecret(name, namespace, precondition)
   }
 
   async getHostOverview(hostName: string, namespace?: string): Promise<HostOverview> {
@@ -494,7 +508,7 @@ export class K8sGateway {
    * "reconcile applied" vs "kubelet is happy" gap).
    *
    * Listed per-namespace, NOT via listPodForAllNamespaces: a cluster-wide
-   * list needs cluster-scoped RBAC that MCC shared tenants do not (and must
+   * list needs cluster-scoped RBAC that managed shared tenants do not (and must
    * not) grant, and the recipe label carries no tenant scoping — an
    * all-namespaces list on a shared cluster would return other tenants'
    * pods for a same-named recipe.

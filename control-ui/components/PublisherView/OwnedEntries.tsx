@@ -12,6 +12,7 @@ import {
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { type RowAction, RowActionsMenu } from '../RowActionsMenu'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { useToast } from '../Toast'
@@ -195,7 +196,9 @@ export function OwnedEntries({
     )
   }
 
-  if (loading) return <p>Loading your published entries…</p>
+  if (loading) {
+    return <SectionLoadingSkeleton label="Loading published entries" />
+  }
   if (error) {
     return (
       <RetryBanner message="Could not load your published entries." onRetry={() => void load()} />

@@ -11,6 +11,7 @@ import {
   revokeRegistryApiKey,
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { useToast } from '../Toast'
@@ -186,7 +187,9 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
         </>
       ) : null}
 
-      {view.kind === 'loading' ? <p>Loading…</p> : null}
+      {view.kind === 'loading' ? (
+        <SectionLoadingSkeleton label="Loading push credentials" rows={3} />
+      ) : null}
       {view.kind === 'not-owner' ? (
         <p className="cu-banner cu-banner--warn">
           You must be an org owner to manage push credentials

@@ -161,6 +161,75 @@ describe('SecretService — invalid Secret keys never reach the apiserver', () =
   })
 })
 
+/**
+ * The preconditions are only worth anything if they reach the apiserver in the shape it
+ * enforces. Every other test of this feature asserts that the CALLER passes a precondition;
+ * these assert that passing one changes the actual request. Get the translation wrong —
+ * resourceVersion on the wrong field, delete preconditions omitted — and the whole
+ * ownership-bound write silently degrades to last-writer-wins with every test still green.
+ */
+describe('SecretService — ownership-bound mutations', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'test-ns')
+  })
+
+  it('sends the CALLER’s resourceVersion on a replace, without re-reading', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      metadata: { resourceVersion: '999' },
+      type: 'Opaque',
+      data: {},
+    })
+
+    await svc.updateSecret(
+      { name: 's', namespace: 'ns', type: 'Opaque', data: { k: 'dg==' } },
+      { resourceVersion: '42', uid: 'uid-1' }
+    )
+
+    // The re-read is the bug, not an optimization: it would replace the stale version we
+    // are trying to detect with the current one, and the write would win regardless.
+    expect(coreApi.readNamespacedSecret).not.toHaveBeenCalled()
+    const body = coreApi.replaceNamespacedSecret.mock.calls[0][0].body
+    expect(body.metadata.resourceVersion).toBe('42')
+    expect(body.metadata.uid).toBe('uid-1')
+  })
+
+  it('keeps last-writer-wins when no precondition is given', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      metadata: { resourceVersion: '999' },
+      type: 'Opaque',
+      data: {},
+    })
+
+    await svc.updateSecret({ name: 's', namespace: 'ns', data: { k: 'dg==' } })
+
+    // Unchanged for the admin /secrets routes and token rotation, which are single-owner
+    // writers and want the current version.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+    const body = coreApi.replaceNamespacedSecret.mock.calls[0][0].body
+    expect(body.metadata.resourceVersion).toBe('999')
+    expect(body.metadata.uid).toBeUndefined()
+  })
+
+  it('sends delete preconditions so the apiserver refuses to delete a replacement', async () => {
+    await svc.deleteSecret('s', 'ns', { uid: 'uid-1', resourceVersion: '42' })
+
+    const req = coreApi.deleteNamespacedSecret.mock.calls[0][0]
+    expect(req.body.preconditions).toEqual({ uid: 'uid-1', resourceVersion: '42' })
+  })
+
+  it('sends no delete body at all when no precondition is given', async () => {
+    await svc.deleteSecret('s', 'ns')
+
+    // An empty `preconditions: {}` is not the same as none — keep the historical request
+    // shape for callers that never opted in.
+    expect(coreApi.deleteNamespacedSecret.mock.calls[0][0].body).toBeUndefined()
+  })
+})
+
 describe('invalidSecretDataKeyReason — the shared rule', () => {
   it('accepts every legitimate key', () => {
     for (const key of VALID_KEYS) {

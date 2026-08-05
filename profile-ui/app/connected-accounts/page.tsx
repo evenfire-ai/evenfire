@@ -3,13 +3,14 @@
 import { useEffect, useState } from 'react'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
+import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { useToast } from '@components/Toast'
 import { isSilentApiError } from '@lib/api'
 import {
+  type ConnectedAccount,
   listConnectedAccounts,
   revokeConnectedAccount,
-  type ConnectedAccount,
 } from '@lib/connectedAccounts'
 
 type LoadState = 'loading' | 'ready' | 'error'
@@ -60,7 +61,12 @@ function ConnectedAccountsContent() {
           </div>
         </header>
 
-        {state === 'loading' && <div className="message message--plain">Loading...</div>}
+        {state === 'loading' ? (
+          <ProfileBodySkeleton
+            label="Loading connected accounts"
+            sections={[{ title: 'Connected accounts', rows: 3 }]}
+          />
+        ) : null}
         {state === 'error' && (
           <div className="message message--error">Could not load connected accounts.</div>
         )}

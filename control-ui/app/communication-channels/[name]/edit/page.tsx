@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { ChannelCredentialsPanel } from '@components/ChannelCredentialsPanel'
 import { CommunicationChannelAccessSelector } from '@components/CommunicationChannelAccessSelector'
 import { CommunicationChannelConversationsTable } from '@components/CommunicationChannelConversations'
@@ -232,7 +233,11 @@ export default function EditCommunicationChannelPage() {
           }
         >
           {loading ? (
-            <div className="cu-create-content">Loading communication channel...</div>
+            <FormSectionsSkeleton
+              label="Communication channel"
+              primaryActionLabel="Save channel"
+              sections={3}
+            />
           ) : loadError ? (
             <div className="cu-create-content">
               <div className="cu-banner cu-banner--error" role="alert">

@@ -13,6 +13,8 @@ export function CreateFlowSkeleton({
   className,
   iconKey,
   onBack = () => {},
+  primaryActionLabel = 'Continue',
+  secondaryActionLabel = 'Cancel',
   stepFlowClassName,
   steps,
   subtitle,
@@ -36,6 +38,7 @@ export function CreateFlowSkeleton({
         className={cn('cu-agent-create-wizard cu-agent-create-skeleton', stepFlowClassName)}
         aria-label={`${title} loading`}
         aria-busy="true"
+        role="status"
       >
         <aside className="cu-agent-step-rail" aria-hidden="true">
           {steps.map((label, index) => (
@@ -71,8 +74,12 @@ export function CreateFlowSkeleton({
             </div>
           </div>
           <div className="cu-agent-create-skeleton__actions">
-            <span className="cu-skeleton cu-agent-create-skeleton__button" />
-            <span className="cu-skeleton cu-agent-create-skeleton__button" />
+            <button type="button" className="cu-btn cu-btn--ghost" disabled>
+              {secondaryActionLabel}
+            </button>
+            <button type="button" className="cu-btn cu-btn--primary" disabled>
+              {primaryActionLabel}
+            </button>
           </div>
         </section>
       </div>
