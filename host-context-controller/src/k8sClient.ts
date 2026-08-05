@@ -2349,11 +2349,39 @@ export class McpServerWatcher implements McpServerProvider {
     // Discovery and policy caches become authoritative only when each complete
     // LIST snapshot is paired with a watch continuing from its opaque collection
     // resourceVersion. Full fleet convergence happens later in the background.
-    const initialServerSnapshot = await listMcpServerSnapshot()
-    await this.restartMcpServerWatch(initialServerSnapshot)
+    // A transient LIST/WATCH failure on either inventory must not kill the
+    // retry that restart*Watch already armed (it sets *CacheSynced=false before
+    // it can throw). Mirror the Host lane below: log, keep the flag false, and
+    // schedule in-process recovery. The HTTP server stays live, dynamic
+    // readiness stays 503, and recovery promotes readiness only after a fresh
+    // LIST is paired with its continuing WATCH.
+    try {
+      const initialServerSnapshot = await listMcpServerSnapshot()
+      await this.restartMcpServerWatch(initialServerSnapshot)
+    } catch (error) {
+      this.mcpServerCacheSynced = false
+      console.error(
+        '[K8s] Initial McpServer inventory is unavailable; HCC remains unready while in-process recovery continues:',
+        error
+      )
+    }
+    if (!this.mcpServerCacheSynced) {
+      this.scheduleMcpServerCacheRecovery()
+    }
 
-    const initialContextSnapshot = await listContextSnapshot()
-    await this.restartContextWatch(initialContextSnapshot)
+    try {
+      const initialContextSnapshot = await listContextSnapshot()
+      await this.restartContextWatch(initialContextSnapshot)
+    } catch (error) {
+      this.contextCacheSynced = false
+      console.error(
+        '[K8s] Initial Context inventory is unavailable; HCC remains unready while in-process recovery continues:',
+        error
+      )
+    }
+    if (!this.contextCacheSynced) {
+      this.scheduleContextCacheRecovery()
+    }
 
     // Host templates resolve Context SharedFileSystem references from this
     // cache. Inventory is therefore a fixed startup boundary, not part of the

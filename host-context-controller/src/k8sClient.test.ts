@@ -640,6 +640,148 @@ describe('McpServerWatcher startup', () => {
     }
   )
 
+  it.each(['LIST', 'WATCH'] as const)(
+    'stays live and recovers readiness after a transient McpServer %s bootstrap failure',
+    async failureBoundary => {
+      vi.useFakeTimers()
+      let mcpServerListAttempts = 0
+      let mcpServerWatchAttempts = 0
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === 'mcpservers') {
+            mcpServerListAttempts += 1
+            if (failureBoundary === 'LIST' && mcpServerListAttempts === 1) {
+              throw new Error('mcpserver discovery temporarily unavailable')
+            }
+            return { metadata: { resourceVersion: 'mcpserver-recovery-rv' }, items: [] }
+          }
+          if (plural === 'hosts') {
+            return { metadata: { resourceVersion: 'host-rv' }, items: [] }
+          }
+          if (plural === 'communicationchannels') {
+            return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+          }
+          return { items: [] }
+        }
+      )
+      mocks.watch.mockImplementation(async path => {
+        if (path.endsWith('/mcpservers')) {
+          mcpServerWatchAttempts += 1
+          if (failureBoundary === 'WATCH' && mcpServerWatchAttempts === 1) {
+            throw new Error('mcpserver watch temporarily unavailable')
+          }
+        }
+        return { abort: vi.fn() }
+      })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      // The McpServer lane runs for real (LIST + WATCH) so its bootstrap
+      // failure and recovery exercise production code. Context stays
+      // authoritative so readiness can be promoted once the lane recovers.
+      stubAuthoritativeInventoryWatch(watcher, 'Context')
+      vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+      vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+      const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+        watcher.isReadinessInventoryAuthoritative()
+      )
+      await server.start()
+
+      try {
+        await expect(watcher.start()).resolves.toBeUndefined()
+        server.setReady(true)
+
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+        expect((watcher as any).mcpServerCacheRecoveryTimer).not.toBeNull()
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await vi.waitFor(() => expect(watcher.isReadinessInventoryAuthoritative()).toBe(true))
+        await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalled())
+
+        expect(mcpServerListAttempts).toBe(2)
+        expect(mcpServerWatchAttempts).toBe(failureBoundary === 'LIST' ? 1 : 2)
+        expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+      } finally {
+        await server.stop()
+        await watcher.stop()
+        errorSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
+    }
+  )
+
+  it.each(['LIST', 'WATCH'] as const)(
+    'stays live and recovers readiness after a transient Context %s bootstrap failure',
+    async failureBoundary => {
+      vi.useFakeTimers()
+      let contextListAttempts = 0
+      let contextWatchAttempts = 0
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === 'contexts') {
+            contextListAttempts += 1
+            if (failureBoundary === 'LIST' && contextListAttempts === 1) {
+              throw new Error('context discovery temporarily unavailable')
+            }
+            return { metadata: { resourceVersion: 'context-recovery-rv' }, items: [] }
+          }
+          if (plural === 'hosts') {
+            return { metadata: { resourceVersion: 'host-rv' }, items: [] }
+          }
+          if (plural === 'communicationchannels') {
+            return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+          }
+          return { items: [] }
+        }
+      )
+      mocks.watch.mockImplementation(async path => {
+        if (path.endsWith('/contexts')) {
+          contextWatchAttempts += 1
+          if (failureBoundary === 'WATCH' && contextWatchAttempts === 1) {
+            throw new Error('context watch temporarily unavailable')
+          }
+        }
+        return { abort: vi.fn() }
+      })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      // The Context lane runs for real (LIST + WATCH) so its bootstrap
+      // failure and recovery exercise production code. McpServer stays
+      // authoritative so readiness can be promoted once the lane recovers.
+      stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+      vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+      vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+      const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+        watcher.isReadinessInventoryAuthoritative()
+      )
+      await server.start()
+
+      try {
+        await expect(watcher.start()).resolves.toBeUndefined()
+        server.setReady(true)
+
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+        expect((watcher as any).contextCacheRecoveryTimer).not.toBeNull()
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await vi.waitFor(() => expect(watcher.isReadinessInventoryAuthoritative()).toBe(true))
+        await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalled())
+
+        expect(contextListAttempts).toBe(2)
+        expect(contextWatchAttempts).toBe(failureBoundary === 'LIST' ? 1 : 2)
+        expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+      } finally {
+        await server.stop()
+        await watcher.stop()
+        errorSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
+    }
+  )
+
   it('cancels a pending Host bootstrap recovery when the watcher stops', async () => {
     vi.useFakeTimers()
     let hostListAttempts = 0
@@ -881,11 +1023,11 @@ describe('McpServerWatcher startup', () => {
   )
 
   it.each([
-    ['McpServer', 'mcpservers'],
-    ['Context', 'contexts'],
+    ['McpServer', 'mcpservers', 'mcpServerCacheRecoveryTimer'],
+    ['Context', 'contexts', 'contextCacheRecoveryTimer'],
   ] as const)(
-    'rejects safe bootstrap when the %s inventory LIST is unavailable',
-    async (_kind, failingPlural) => {
+    'stays live and arms in-process recovery when the %s inventory LIST is unavailable',
+    async (kind, failingPlural, recoveryTimerField) => {
       mocks.listNamespacedCustomObject.mockImplementation(
         async ({ plural }: { plural: string }) => {
           if (plural === failingPlural) throw new Error(`${plural} inventory unavailable`)
@@ -895,22 +1037,35 @@ describe('McpServerWatcher startup', () => {
           return { items: [] }
         }
       )
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
 
-      await expect(watcher.start()).rejects.toThrow(`${failingPlural} inventory unavailable`)
+      try {
+        await expect(watcher.start()).resolves.toBeUndefined()
 
-      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
-      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-      await watcher.stop()
+        expect(errorSpy).toHaveBeenCalledWith(
+          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+          expect.objectContaining({ message: `${failingPlural} inventory unavailable` })
+        )
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        expect((watcher as any)[recoveryTimerField]).not.toBeNull()
+        expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+        expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      } finally {
+        await watcher.stop()
+        errorSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
     }
   )
 
   it.each([
-    ['McpServer', 'mcpservers'],
-    ['Context', 'contexts'],
+    ['McpServer', 'mcpservers', 'mcpServerCacheRecoveryTimer'],
+    ['Context', 'contexts', 'contextCacheRecoveryTimer'],
   ] as const)(
-    'rejects safe bootstrap when the %s collection resourceVersion is missing',
-    async (kind, missingPlural) => {
+    'stays live and arms in-process recovery when the %s collection resourceVersion is missing',
+    async (kind, missingPlural, recoveryTimerField) => {
       mocks.listNamespacedCustomObject.mockImplementation(
         async ({ plural }: { plural: string }) => {
           if (plural === missingPlural) return { metadata: {}, items: [] }
@@ -920,13 +1075,26 @@ describe('McpServerWatcher startup', () => {
           return { items: [] }
         }
       )
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
 
-      await expect(watcher.start()).rejects.toThrow(`${kind} snapshot missing resourceVersion`)
+      try {
+        await expect(watcher.start()).resolves.toBeUndefined()
 
-      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
-      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-      await watcher.stop()
+        expect(errorSpy).toHaveBeenCalledWith(
+          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+          expect.objectContaining({ message: `${kind} snapshot missing resourceVersion` })
+        )
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        expect((watcher as any)[recoveryTimerField]).not.toBeNull()
+        expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+        expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      } finally {
+        await watcher.stop()
+        errorSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
     }
   )
 
@@ -4106,6 +4274,8 @@ describe('McpServerWatcher startup', () => {
   ] as const)(
     'keeps safe bootstrap authority-gated when the %s watch cannot be established',
     async (_kind, method) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
       if (method === 'startMcpServerWatch') {
         vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
@@ -4118,11 +4288,21 @@ describe('McpServerWatcher startup', () => {
         stubAuthoritativeInventoryWatch(watcher, 'Context')
       }
       vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+      const recoveryTimerField =
+        method === 'startMcpServerWatch'
+          ? 'mcpServerCacheRecoveryTimer'
+          : 'contextCacheRecoveryTimer'
 
-      await expect(watcher.start()).rejects.toThrow(`${method} unavailable`)
-      expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
-      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-      await watcher.stop()
+      try {
+        await expect(watcher.start()).resolves.toBeUndefined()
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        expect((watcher as any)[recoveryTimerField]).not.toBeNull()
+        expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      } finally {
+        await watcher.stop()
+        errorSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
     }
   )
 
