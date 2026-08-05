@@ -22,23 +22,13 @@ import { EgressEditor } from '../EgressEditor'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
-const STEPS = ['Connector', 'Runtime', 'Network', 'Secrets'] as const
+const STEPS = ['Connector', 'Secrets'] as const
 
 const STEP_DETAILS = [
   {
     description: 'Name, image, and context',
     title: 'Connector identity',
     subtitle: 'Register the connector name, image, and Context allowlist target.',
-  },
-  {
-    description: 'Transport and process',
-    title: 'Runtime settings',
-    subtitle: 'Configure transport, managed deployment behavior, and command overrides.',
-  },
-  {
-    description: 'External access rules',
-    title: 'Network egress',
-    subtitle: 'Declare any outbound network access this connector requires.',
   },
   {
     description: 'Environment and credentials',
@@ -104,7 +94,8 @@ export function CreateMcpServerForm({
   const nameValid = MCP_SERVER_NAME_PATTERN.test(name) && name.length <= 63
   const egressValid = !egressStatus || egressStatus.errors.length === 0
   const canSubmit = Boolean(name && image && contextRef) && nameValid && egressValid && !submitting
-  const canContinue = step === 0 ? Boolean(name && image && contextRef && nameValid) : egressValid
+  const canContinue =
+    step === 0 ? Boolean(name && image && contextRef && nameValid) && egressValid : egressValid
   const contextOptions = useMemo(
     () => contexts.map(context => ({ value: context.name, label: context.name })),
     [contexts]
@@ -142,7 +133,6 @@ export function CreateMcpServerForm({
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    if (targetStep === 1) return Boolean(name && image && contextRef && nameValid)
     return Boolean(name && image && contextRef && nameValid && egressValid)
   }
 
@@ -372,7 +362,7 @@ export function CreateMcpServerForm({
       <form onSubmit={handleSubmit}>
         <CreateStepFlow
           ariaLabel="Create connector steps"
-          className="cu-create-step-flow--4"
+          className="cu-create-step-flow--2"
           currentStep={step}
           onStepChange={setStep}
           canSelectStep={canSelectStep}
@@ -448,101 +438,107 @@ export function CreateMcpServerForm({
                   value={description}
                 />
               </Field>
+
+              <details className="cu-advanced-details">
+                <summary>Advanced options</summary>
+                <p className="cu-advanced-details__hint">
+                  Runtime, container overrides, and network egress. The defaults work for most
+                  connectors.
+                </p>
+                <div className="cu-form-stack cu-agent-form-stack">
+                  <div className="cu-form-grid cu-form-grid--2">
+                    <Field label="Transport Type">
+                      <SelectInput
+                        onChange={event => setTransportType(event.target.value as TransportType)}
+                        disabled={submitting}
+                        value={transportType}
+                      >
+                        {TRANSPORT_TYPES.map(option => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </SelectInput>
+                    </Field>
+
+                    {transportType !== 'stdio' ? (
+                      <Field description="Port the connector listens on." label="Port">
+                        <TextInput
+                          narrow
+                          onChange={event => setPort(parseInt(event.target.value, 10) || 3000)}
+                          type="number"
+                          disabled={submitting}
+                          value={port}
+                        />
+                      </Field>
+                    ) : null}
+                  </div>
+
+                  <Field
+                    description={
+                      <>
+                        <strong>Managed:</strong> Evenfire creates the Deployment, Service, and
+                        NetworkPolicies. <strong>Not managed:</strong> you deploy the pod yourself
+                        and Evenfire only registers it for discovery.
+                      </>
+                    }
+                    label="Managed"
+                  >
+                    <SelectInput
+                      onChange={event => setManaged(event.target.value === 'true')}
+                      disabled={submitting}
+                      value={managed ? 'true' : 'false'}
+                    >
+                      <option value="true">
+                        Yes — Evenfire creates and manages the Deployment, Service, and
+                        NetworkPolicies
+                      </option>
+                      <option value="false">
+                        No — I will deploy the pod myself (discovery only)
+                      </option>
+                    </SelectInput>
+                  </Field>
+
+                  <FormSection
+                    description="Optional container entrypoint and command overrides."
+                    title="Container Overrides"
+                  >
+                    <Field
+                      description='Comma-separated values, for example "node, server.js".'
+                      label="Command"
+                    >
+                      <TextInput
+                        monospace
+                        onChange={event => setCommand(event.target.value)}
+                        placeholder="node, server.js"
+                        disabled={submitting}
+                        value={command}
+                      />
+                    </Field>
+
+                    <Field
+                      description='Comma-separated values, for example "--port, 3000, --headless".'
+                      label="Args"
+                    >
+                      <TextInput
+                        monospace
+                        onChange={event => setArgs(event.target.value)}
+                        placeholder="--port, 3000, --headless"
+                        disabled={submitting}
+                        value={args}
+                      />
+                    </Field>
+                  </FormSection>
+
+                  <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
+                    <EgressEditor allowCidr onChange={handleEgressChange} />
+                  </div>
+                </div>
+              </details>
             </div>
           ) : null}
 
           {step === 1 ? (
-            <div className="cu-form-stack cu-agent-form-stack">
-              <div className="cu-form-grid cu-form-grid--2">
-                <Field label="Transport Type">
-                  <SelectInput
-                    onChange={event => setTransportType(event.target.value as TransportType)}
-                    disabled={submitting}
-                    value={transportType}
-                  >
-                    {TRANSPORT_TYPES.map(option => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </SelectInput>
-                </Field>
-
-                {transportType !== 'stdio' ? (
-                  <Field description="Port the connector listens on." label="Port">
-                    <TextInput
-                      narrow
-                      onChange={event => setPort(parseInt(event.target.value, 10) || 3000)}
-                      type="number"
-                      disabled={submitting}
-                      value={port}
-                    />
-                  </Field>
-                ) : null}
-              </div>
-
-              <Field
-                description={
-                  <>
-                    <strong>Managed:</strong> Evenfire creates the Deployment, Service, and
-                    NetworkPolicies. <strong>Not managed:</strong> you deploy the pod yourself and
-                    Evenfire only registers it for discovery.
-                  </>
-                }
-                label="Managed"
-              >
-                <SelectInput
-                  onChange={event => setManaged(event.target.value === 'true')}
-                  disabled={submitting}
-                  value={managed ? 'true' : 'false'}
-                >
-                  <option value="true">
-                    Yes — Evenfire creates and manages the Deployment, Service, and NetworkPolicies
-                  </option>
-                  <option value="false">No — I will deploy the pod myself (discovery only)</option>
-                </SelectInput>
-              </Field>
-
-              <FormSection
-                description="Optional container entrypoint and command overrides."
-                title="Container Overrides"
-              >
-                <Field
-                  description='Comma-separated values, for example "node, server.js".'
-                  label="Command"
-                >
-                  <TextInput
-                    monospace
-                    onChange={event => setCommand(event.target.value)}
-                    placeholder="node, server.js"
-                    disabled={submitting}
-                    value={command}
-                  />
-                </Field>
-
-                <Field
-                  description='Comma-separated values, for example "--port, 3000, --headless".'
-                  label="Args"
-                >
-                  <TextInput
-                    monospace
-                    onChange={event => setArgs(event.target.value)}
-                    placeholder="--port, 3000, --headless"
-                    disabled={submitting}
-                    value={args}
-                  />
-                </Field>
-              </FormSection>
-            </div>
-          ) : null}
-
-          {step === 2 ? (
-            <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
-              <EgressEditor allowCidr onChange={handleEgressChange} />
-            </div>
-          ) : null}
-
-          {step === 3 ? (
             <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
               <FormSection
                 description="Additional environment variables injected into the container."

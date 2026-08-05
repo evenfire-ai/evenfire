@@ -3,16 +3,40 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServer, updateMcpServer } from '@lib/api'
-import type { EgressBinding, McpServerResource } from '@lib/api'
+import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
 import type { EgressEditorStatus } from '@lib/egressModel'
+
+/**
+ * Narrows `server.spec.envSecret` (typed as `unknown` on the generic
+ * `AnyRecord` spec) into the shape UpdateConnectorCredentials needs. A
+ * malformed or partial envSecret (missing name, keys not an array, or no
+ * usable key mappings) is treated the same as "no envSecret" — there is
+ * nothing safely rotatable through this form either way.
+ */
+function resolveEnvSecret(spec: Record<string, unknown> | undefined): EnvSecret | undefined {
+  const raw = spec?.envSecret
+  if (!raw || typeof raw !== 'object') return undefined
+  const candidate = raw as { name?: unknown; keys?: unknown }
+  if (typeof candidate.name !== 'string' || !Array.isArray(candidate.keys)) return undefined
+  const keys = candidate.keys.filter(
+    (k): k is EnvSecretKeyMapping =>
+      Boolean(k) &&
+      typeof (k as EnvSecretKeyMapping).secretKey === 'string' &&
+      typeof (k as EnvSecretKeyMapping).envVar === 'string'
+  )
+  if (keys.length === 0) return undefined
+  return { name: candidate.name, keys }
+}
 
 export default function EditMcpServerPage() {
   const router = useRouter()
@@ -101,9 +125,12 @@ export default function EditMcpServerPage() {
           }
         >
           {loading ? (
-            <div className="cu-connector-edit-form">
-              <div className="cu-create-content">Loading connector...</div>
-            </div>
+            <FormSectionsSkeleton
+              className="cu-connector-edit-form"
+              label="Connector"
+              primaryActionLabel="Save egress"
+              sections={3}
+            />
           ) : loadError ? (
             <div className="cu-connector-edit-form">
               <div className="cu-banner cu-banner--error" role="alert">
@@ -111,8 +138,8 @@ export default function EditMcpServerPage() {
               </div>
             </div>
           ) : server ? (
-            <form className="cu-connector-edit-form" onSubmit={handleSave}>
-              <div className="cu-create-content cu-connector-edit-content">
+            <div className="cu-connector-edit-form">
+              <form className="cu-create-content cu-connector-edit-content" onSubmit={handleSave}>
                 <div className="cu-connector-edit-meta">
                   <div>
                     <strong>Image:</strong>{' '}
@@ -158,8 +185,13 @@ export default function EditMcpServerPage() {
                     {saving ? 'Saving...' : 'Save egress'}
                   </button>
                 </div>
-              </div>
-            </form>
+              </form>
+
+              <UpdateConnectorCredentials
+                serverName={name}
+                envSecret={resolveEnvSecret(server.spec as Record<string, unknown> | undefined)}
+              />
+            </div>
           ) : null}
         </CreateFlowPanel>
       </DashboardLayout>

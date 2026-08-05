@@ -4,11 +4,17 @@ const os = require('node:os')
 const path = require('node:path')
 const { FusesPlugin } = require('@electron-forge/plugin-fuses')
 const { FuseV1Options, FuseVersion } = require('@electron/fuses')
+const {
+  CLERUM_OAUTH_PROTOCOL,
+  SANDBOX_UI_DEEP_LINK_PROTOCOL,
+} = require('@clerum/desktop-app-links')
 
 const desktopLicense = require('./package.json').license
 const defaultAppleBundleId = 'ai.evenfire.desktop'
 const assetsDirectory = path.resolve(__dirname, 'assets')
 const adaptiveIconDocument = path.join(assetsDirectory, 'adaptive-icon.icon')
+const evenfireProtocol = SANDBOX_UI_DEEP_LINK_PROTOCOL.replace(/:$/, '')
+const clerumProtocol = CLERUM_OAUTH_PROTOCOL.replace(/:$/, '')
 
 function compileMacAdaptiveIcon(buildPath, _electronVersion, platform, _arch, callback) {
   if (platform !== 'darwin') {
@@ -136,6 +142,10 @@ const osxNotarize = resolveOsxNotarizeConfig()
 module.exports = {
   packagerConfig: {
     asar: true,
+    // npm installs internal file: dependencies as symlinks. Copy their contents
+    // into the staging app so ASAR never contains links to the monorepo outside
+    // desktop-app (which Electron correctly rejects as an escaping symlink).
+    derefSymlinks: true,
     executableName: 'Evenfire',
     name: 'Evenfire',
     icon: './assets/icon',
@@ -144,6 +154,16 @@ module.exports = {
     afterCopyExtraResources: [compileMacAdaptiveIcon],
     appBundleId: process.env.APPLE_BUNDLE_ID || defaultAppleBundleId,
     appCategoryType: 'public.app-category.productivity',
+    protocols: [
+      {
+        name: 'Evenfire',
+        schemes: [evenfireProtocol],
+      },
+      {
+        name: 'Clerum OAuth callback',
+        schemes: [clerumProtocol],
+      },
+    ],
     ...(osxSign ? { osxSign } : {}),
     ...(osxNotarize ? { osxNotarize } : {}),
   },
@@ -191,6 +211,7 @@ module.exports = {
           bin: 'Evenfire',
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
+          mimeType: [`x-scheme-handler/${evenfireProtocol}`, `x-scheme-handler/${clerumProtocol}`],
         },
       },
     },
@@ -206,6 +227,7 @@ module.exports = {
           license: desktopLicense,
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
+          mimeType: [`x-scheme-handler/${evenfireProtocol}`, `x-scheme-handler/${clerumProtocol}`],
         },
       },
     },

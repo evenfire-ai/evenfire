@@ -16,7 +16,12 @@ named `chatllm` you can message immediately.
 - **kubectl**
 - **python3** (used by the JWT key sync)
 - **Node.js 24+** (service builds; desktop app)
-- One LLM API key: OpenAI, Anthropic Claude, Z.AI, or Alibaba Bailian
+- **git**, **make**, and **ruby** (ruby renders the control-api DB migration
+  overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu)
+- One LLM API key from any of the 21 supported providers (e.g. OpenAI,
+  Anthropic Claude, Google Gemini, Groq, Mistral, Z.AI, Alibaba Bailian) —
+  optional for setup (it boots with placeholders), but the agent can't call a
+  model without one. Full list: [../deploy/llm-providers.md](../deploy/llm-providers.md)
 
 ## 1. Configure
 

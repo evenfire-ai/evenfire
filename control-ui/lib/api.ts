@@ -792,9 +792,26 @@ export type HostResource = {
     conditions?: HostStatusCondition[]
   }
 }
+/**
+ * Condition entry on `status.conditions[]` of the McpServer CRD, as written by
+ * the HCC reconciler (host-context-controller/src/reconciler.ts). `status` is
+ * the K8s-standard string tri-state, not a boolean. `lastTransitionTime` only
+ * advances when `status` itself changes (writeStatusCondition) — the UI relies
+ * on that to tell "this rollout" apart from a stale prior condition (issue #223,
+ * Fase 3 requisito 6).
+ */
+export type McpServerCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason: string
+  message: string
+  lastTransitionTime: string
+}
+
 export type McpServerResource = {
   metadata?: Metadata
   spec?: AnyRecord
+  status?: { conditions?: McpServerCondition[] }
 }
 export type ContextUser = {
   id: string
@@ -1317,6 +1334,29 @@ export async function deleteMcpSecret(name: string) {
   }>
 }
 
+/**
+ * Rotates one or more keys on an EXISTING MCP Server Secret (issue #223).
+ * `data` carries only the keys the operator wants to rotate — every other key
+ * already on the Secret survives untouched (server-side merge-patch). The
+ * response is names-only: `keys` lists the resulting key names (never
+ * values), and `affectedConnectors` names every McpServer whose
+ * `spec.envSecret.name` matches this Secret, so the UI can tell the operator
+ * exactly what is about to restart. Saving does NOT restart anything itself —
+ * the HCC's SecretInformer reacts to the Secret change and rolls the affected
+ * Deployments; the caller must poll getMcpServer() for DeploymentReady to know
+ * whether the rollout actually landed (see control-ui/components/UpdateConnectorCredentials).
+ */
+export async function updateMcpSecret(name: string, data: Record<string, string>) {
+  return apiSend('PUT', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`, {
+    data,
+  }) as Promise<{
+    name: string
+    namespace: string
+    keys: string[]
+    affectedConnectors: string[]
+  }>
+}
+
 export type RecipeSecretOwnership =
   | { kind: 'shared' }
   | { kind: 'owner-recipe'; recipeName: string }
@@ -1606,9 +1646,10 @@ export async function deleteLlmModel(id: string) {
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
 // Discovery pulls the public models.dev catalog into `llm_allowed_models` as
 // `source='discovery', enabled=false`. The operator reviews and enables from a
-// fresh catalog. These wrappers drive the /llm-models/discovery review surface;
-// enable/disable/delete of the discovered rows reuse the existing update/delete
-// routes above (no dedicated discovery mutation endpoint).
+// fresh catalog. These wrappers drive the Discovery Review section on the
+// unified /llm-models surface; enable/disable/delete of discovered rows reuse
+// the existing update/delete routes above (no dedicated discovery mutation
+// endpoint).
 
 // `live` = fetched from the upstream catalog; `vendored` = served from the
 // bundled snapshot fallback (upstream unreachable).
@@ -2879,7 +2920,7 @@ export type GrantedToMeItem = {
 // tests, so normalize defensively here — accept camelCase OR snake_case — and
 // hand components one canonical camelCase shape. This keeps the mocked→live
 // transition safe regardless of which the registry emits, and avoids silent
-// empty lists (ShareAccessPanel filters on pluginName) or "@undefined" rows.
+// empty lists (GrantAccessModal filters on pluginName) or "@undefined" rows.
 type RawOrgGrant = {
   id?: string
   pluginName?: string
@@ -3373,6 +3414,21 @@ export async function createRegistryApiKey(
 }
 export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
+}
+
+// ─── Org container images (real repos + tags from the registry) ────────────
+export type OrgImage = {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
+export async function listOrgImages(): Promise<{ org: string; images: OrgImage[] }> {
+  const raw = (await registryCodedRequest('GET', '/api/v1/admin/registry/images')) as {
+    org?: string
+    images?: OrgImage[]
+  }
+  return { org: raw?.org ?? '', images: raw?.images ?? [] }
 }
 
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────

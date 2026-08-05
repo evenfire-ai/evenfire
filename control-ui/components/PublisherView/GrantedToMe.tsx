@@ -1,8 +1,10 @@
 'use client'
 
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { RetryBanner } from './RetryBanner'
@@ -33,13 +35,15 @@ export function GrantedToMe({
   grants: GrantedToMeItem[]
   reload: () => void
 }) {
-  if (status === 'loading') return <p>Loading…</p>
+  if (status === 'loading') {
+    return <SectionLoadingSkeleton label="Loading shared plugins" rows={3} />
+  }
   if (status === 'unavailable') {
     return (
       <p className="cu-banner cu-banner--warn">
         Plugins shared with your org appear in your{' '}
-        <a href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</a> and can be installed from
-        there.
+        <Link href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</Link> and can be installed
+        from there.
       </p>
     )
   }

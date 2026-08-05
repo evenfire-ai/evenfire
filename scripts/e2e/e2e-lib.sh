@@ -843,11 +843,14 @@ print_results() {
   echo ""
   echo -e "${BOLD}Total: ${e2e_total}  |  ${GREEN}Pass: ${e2e_pass}${NC}  |  ${RED}Fail: ${e2e_fail}${NC}"
   echo ""
-  # Zero tests executed is never success: a gate whose fixture never
-  # materialized (missing Host, aborted setup, empty filter) reaches here with
-  # e2e_total == 0 and, checking only e2e_fail, would print "All tests passed!"
-  # over an empty result set. Assert something actually ran before green.
-  if [ "$e2e_total" -eq 0 ]; then
+  # A run that executed ZERO tests is a failure, not a pass. "Nothing failed"
+  # and "everything passed" are different claims, and only the second one earns
+  # a green gate. Without this guard a fixture that dies before the first
+  # assertion — a missing namespace, an image that never pulled, a filter that
+  # matched nothing — prints "All tests passed!" and exits 0 over an empty
+  # result set. Every e2e gate in this repo shares this function, so the
+  # fail-open was underwriting all of them at once.
+  if [ "${e2e_total}" -eq 0 ]; then
     echo -e "${RED}${BOLD}FAIL: zero tests executed — the harness never reached a real assertion${NC}" >&2
     return 1
   fi

@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
@@ -895,7 +896,7 @@ export default function ContextDetailsPage() {
                       {sharedFileSystemsDraft.map(ref => (
                         <tr key={`${ref.name}@${ref.mountPath}`}>
                           <td>
-                            <a
+                            <Link
                               className="cu-link"
                               href={CONTROL_ROUTES.agentFiles.detail(ref.name)}
                               style={{
@@ -906,7 +907,7 @@ export default function ContextDetailsPage() {
                             >
                               <IconFolder />
                               {ref.name}
-                            </a>
+                            </Link>
                           </td>
                           <td>
                             <code style={{ fontSize: '0.85rem' }}>{ref.mountPath}</code>

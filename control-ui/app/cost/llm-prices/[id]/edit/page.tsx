@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -97,9 +98,12 @@ export default function EditLlmPricePage() {
           }
         >
           {loading ? (
-            <div className="cu-px-form">
-              <div className="cu-create-content">Loading price...</div>
-            </div>
+            <FormSectionsSkeleton
+              className="cu-px-form"
+              label="LLM price"
+              primaryActionLabel="Save price"
+              sections={2}
+            />
           ) : loadError ? (
             <div className="cu-px-form">
               <div className="cu-banner cu-banner--error" role="alert">

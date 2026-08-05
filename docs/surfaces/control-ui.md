@@ -111,23 +111,23 @@ caveat to the heading: the `GlobalFileSystem` CRD itself is applied out of band
 (kustomize), and the Global File System screen only manages the brokered gfs
 resources and grants inside it — it never writes that CR.
 
-| Sidebar label      | Route                                                                                  | CRD / control-api resource       |
-| ------------------ | -------------------------------------------------------------------------------------- | -------------------------------- |
-| Agent Files        | `/agent-files`                                                                         | `SharedFileSystem`               |
-| Agent Outputs      | `/agent-outputs/recipe-artifacts`                                                      | outputs (non-CRD)                |
-| Agents             | `/agents`                                                                              | `Host`                           |
-| Connectors         | `/connectors`                                                                          | `McpServer`                      |
-| Contexts           | `/contexts`                                                                            | `Context`                        |
-| Cost & Usage       | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | cost (non-CRD)                   |
-| External Channels  | `/external-channels`                                                                   | `CommunicationChannel`           |
-| Global File System | `/global-file-system`                                                                  | gfs resources & grants (non-CRD) |
-| LLM Models         | `/llm-models`, `/llm-models/discovery`                                                 | model allowlist (non-CRD)        |
-| Marketplace        | `/marketplace/connectors`                                                              | registry (non-CRD)               |
-| Plugins            | `/plugins`                                                                             | `WorkflowRecipe`                 |
-| Publisher          | `/publisher`                                                                           | publisher (non-CRD)              |
-| Secrets            | `/secrets/llm`                                                                         | secrets (non-CRD)                |
-| Settings           | `/settings/ui`                                                                         | settings (non-CRD)               |
-| Users & Teams      | `/users-and-teams/users`                                                               | users/teams (non-CRD)            |
+| Sidebar label      | Route                                                                                  | CRD / control-api resource                            |
+| ------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Agent Files        | `/agent-files`                                                                         | `SharedFileSystem`                                    |
+| Agent Outputs      | `/agent-outputs/recipe-artifacts`                                                      | outputs (non-CRD)                                     |
+| Agents             | `/agents`                                                                              | `Host`                                                |
+| Connectors         | `/connectors`                                                                          | `McpServer`                                           |
+| Contexts           | `/contexts`                                                                            | `Context`                                             |
+| Cost & Usage       | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | cost (non-CRD)                                        |
+| External Channels  | `/external-channels`                                                                   | `CommunicationChannel`                                |
+| Global File System | `/global-file-system`                                                                  | gfs resources & grants (non-CRD)                      |
+| LLM Models         | `/llm-models`, `/llm-models/discovery`                                                 | tabbed model allowlist and discovery review (non-CRD) |
+| Marketplace        | `/marketplace/connectors`                                                              | registry (non-CRD)                                    |
+| Plugins            | `/plugins`                                                                             | `WorkflowRecipe`                                      |
+| Publisher          | `/publisher`                                                                           | publisher (non-CRD)                                   |
+| Secrets            | `/secrets/llm`                                                                         | secrets (non-CRD)                                     |
+| Settings           | `/settings/ui`                                                                         | settings (non-CRD)                                    |
+| Users & Teams      | `/users-and-teams/users`                                                               | users/teams (non-CRD)                                 |
 
 Secret **values are write-only from the UI**: the Secrets screen lets an
 admin create or replace a value, but never displays one back.

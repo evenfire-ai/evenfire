@@ -39,8 +39,8 @@
  *   4. E2E_KUBECONTEXT (or CONTEXT) — an allowed kubectl context (clerum-test /
  *      clerum-codex-* / gke_<project>_<zone>_<cluster>). Passed to every kubectl call.
  */
-import { execFileSync } from 'node:child_process'
 import { type Page, expect, test } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 
 const BASE_UI = process.env.CONTROL_UI_URL || 'http://localhost:3000'
 const ADMIN_USER = process.env.ADMIN_USER || 'admin'
@@ -132,7 +132,8 @@ test.describe('operator sees the stateless × CommunicationChannel hard-rejectio
   test.beforeAll(() => {
     // Fail loud on missing prerequisites rather than skipping silently.
     if (!HOST) throw new Error('E2E_STATELESS_HOST must name a dedicated stateless Host.')
-    if (!KUBECONTEXT) throw new Error('E2E_KUBECONTEXT (or CONTEXT) must be set to an allowed context.')
+    if (!KUBECONTEXT)
+      throw new Error('E2E_KUBECONTEXT (or CONTEXT) must be set to an allowed context.')
     const host = getHostJson()
     // Guard: the target must actually be a stateless Host, or the whole scenario is invalid.
     const statelessRaw = kubectl([
@@ -173,7 +174,9 @@ test.describe('operator sees the stateless × CommunicationChannel hard-rejectio
           'HCC did not hard-reject the stateless Host after the CommunicationChannel was applied ' +
           '(requires the Addendum-6 executor fix deployed).',
       })
-      .toMatch(/"effectiveMode":"stateful".*"rejected":true|"rejected":true.*"effectiveMode":"stateful"/)
+      .toMatch(
+        /"effectiveMode":"stateful".*"rejected":true|"rejected":true.*"effectiveMode":"stateful"/
+      )
 
     const rejectionMessage = getHostJson().rejectionMessage
     expect(rejectionMessage, 'StatelessEnableRejected condition must carry a message').toBeTruthy()
@@ -199,9 +202,9 @@ test.describe('operator sees the stateless × CommunicationChannel hard-rejectio
     // (1) the warning banner container carries the reason verbatim
     await expect(rejectionBanner).toContainText(rejectionMessage as string, { timeout: 20_000 })
     // (2) the lifecycle chip is a second visibility surface — assert it deliberately
-    await expect(
-      page.locator('.cu-chip', { hasText: rejectionMessage as string })
-    ).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('.cu-chip', { hasText: rejectionMessage as string })).toBeVisible({
+      timeout: 20_000,
+    })
 
     // Disassociation recovery: remove the channel; HCC clears the rejection.
     // Strict delete (not the best-effort cleanup helper) so a real failure here

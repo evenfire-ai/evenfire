@@ -55,9 +55,12 @@ describe('host-context-controller Deployment strategy', () => {
     // rollout is healed operationally (kubectl rollout undo), never by K8s.
     // This deadline just flips Progressing=False / fails `kubectl rollout
     // status` deterministically for observers without their own --timeout. It
-    // must exceed the worst legitimate startup — imagePullPolicy: Always pull +
-    // startupProbe budget (3s*40=120s) + the initial safety-inventory pass — so
-    // a slow pull never trips a false ProgressDeadlineExceeded.
-    expect(deployment?.spec?.progressDeadlineSeconds).toBe(300)
+    // must exceed the worst legitimate startup, which — until #205 fully
+    // decouples readiness from fleet convergence — scales with the McpServer/
+    // Context fleet: origin/dev observed 651s on clerum-dev (108 McpServers /
+    // 22 Contexts) on 2026-08-05, so 1200s (900s wait + 300s head-start) is the
+    // merged mitigation. Comes back down once readiness no longer waits on the
+    // fleet.
+    expect(deployment?.spec?.progressDeadlineSeconds).toBe(1200)
   })
 })

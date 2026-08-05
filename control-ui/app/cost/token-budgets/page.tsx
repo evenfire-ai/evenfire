@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { TokenBudgetTable } from '@components/TokenBudgetTable'
@@ -19,14 +18,13 @@ import {
 import type { BudgetScopeLookups } from '@lib/budgets'
 
 export default function TokenBudgetsPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const [budgets, setBudgets] = useState<TokenBudget[]>([])
   const [lookups, setLookups] = useState<BudgetScopeLookups>({})
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
@@ -105,10 +103,8 @@ export default function TokenBudgetsPage() {
   }
 
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadAll()
-    }
-  }, [authState.isLoggedIn, authState.isLoading])
+    void loadAll()
+  }, [])
 
   return (
     <>

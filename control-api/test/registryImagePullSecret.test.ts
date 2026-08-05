@@ -7,7 +7,7 @@ import {
 } from '../src/routes/admin/registryImagePullSecret.js'
 
 describe('EVENFIRE_REGISTRY_PULL_SECRET_NAME', () => {
-  it('is the exact secret name MCC provisions', () => {
+  it('is the frozen pull-secret name', () => {
     expect(EVENFIRE_REGISTRY_PULL_SECRET_NAME).toBe('evenfire-registry-pull')
   })
 })

@@ -6,17 +6,6 @@
 
 declare global {
   const __DESKTOP_APP_VERSION__: string
-
-  interface SandboxUiApp {
-    appRef: string
-    title?: string
-    description?: string
-    icon?: string
-    defaultPath: string
-    ready: boolean
-    phase: string | null
-    updatedAt: string | null
-  }
 }
 
 /**

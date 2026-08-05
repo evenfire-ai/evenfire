@@ -1,6 +1,16 @@
 ---
-# Minikube: workflow-recipes points at the local evenfire-registry deploy.
-# Auth is disabled in minikube — no registry-client-credentials Secret needed.
+# Minikube: registry auth off for workflow-recipes.
+#
+# CLERUM_REGISTRY_URL is deliberately NOT here. The base Deployment projects it from the
+# one key that defines it (`control-api-config.CLERUM_REGISTRY_URL`), and this overlay
+# supplies that key's value in configmaps/control-api-config.yaml — so WRC and control-api
+# read the same URL by construction. Re-declaring the env var here would only add a second
+# place to keep in sync; point the ConfigMap at a different registry (e.g. your own
+# in-cluster deploy) and WRC follows automatically. See the comment on that env entry in
+# deploy/base/control-plane/workflow-recipes.yaml for why divergence is risk R3.
+#
+# Auth stays disabled here: WRC's catalog client has no machine credentials wired, and
+# with auth off it reads anonymously instead of throwing.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,7 +22,5 @@ spec:
       containers:
         - name: workflow-recipes
           env:
-            - name: CLERUM_REGISTRY_URL
-              value: "http://registry-api.registry.svc.cluster.local:8085"
             - name: CLERUM_REGISTRY_AUTH_ENABLED
               value: "false"

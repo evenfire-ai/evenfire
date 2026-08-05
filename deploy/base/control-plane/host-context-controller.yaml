@@ -28,10 +28,19 @@ spec:
   # writer invariant forbids any overlap-based auto-recovery. This deadline is
   # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
   # fails `kubectl rollout status` for callers without their own --timeout; it
-  # does not roll back. 300s > worst legitimate startup (imagePullPolicy: Always
-  # pull + startupProbe budget 3s*40=120s + initial safety-inventory pass), so a
-  # slow pull never trips a false positive.
-  progressDeadlineSeconds: 300
+  # does not roll back.
+  #
+  # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
+  # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
+  # fleet — clerum-dev took 651s at 108 McpServers / 22 Contexts. The unset default
+  # (600s) governed the deploy because `kubectl rollout status` aborts the instant
+  # the deadline is exceeded, and the clock starts at apply-inter-service-tokens.sh's
+  # `rollout restart`, so the wait inherits only the remaining budget (600-160=440s
+  # vs a 480s timeout on 2026-08-05: #202's timeout never bound, deploy failed 50s
+  # short). 1200s covers the 900s wait plus a 300s head-start. Mitigation, not the
+  # fix — #205 decouples readiness from fleet convergence, after which this should
+  # come back down.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: host-context-controller
