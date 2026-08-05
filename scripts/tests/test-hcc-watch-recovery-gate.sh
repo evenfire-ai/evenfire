@@ -549,11 +549,12 @@ fi
 
 # Completeness fence: every static single-quoted *_MARKER defined in the e2e
 # gates MUST be inventoried above as a consumer_marker, so a NEW marker cannot be
-# born outside the drift fence (the pinned count only catches removals). Scoped
-# to single-quoted literals — a dynamic id like C_MARKER="refusal-c-${RUN_ID}"
-# (double-quoted, a per-run test id, not a cross-file HCC log marker) is not the
-# class this fence covers and is excluded by the quote style, not a hard-coded
-# allow-list.
+# born outside the drift fence (the pinned count only catches removals). The scan
+# covers both the gates themselves and the _lib/ helpers they source — a marker
+# born in a sourced helper is the same escape class. Scoped to single-quoted
+# literals — a dynamic id like C_MARKER="refusal-c-${RUN_ID}" (double-quoted, a
+# per-run test id, not a cross-file HCC log marker) is not the class this fence
+# covers and is excluded by the quote style, not a hard-coded allow-list.
 marker_is_inventoried() {
   local needle="$1" i
   for ((i = 1; i < ${#marker_bindings[@]}; i += 4)); do
@@ -567,7 +568,8 @@ while IFS= read -r marker_def; do
   marker_is_inventoried "$marker_def" ||
     uninventoried_markers+="  ${marker_def}"$'\n'
 done < <(
-  grep -rhoE "^[[:space:]]*(readonly[[:space:]]+)?[A-Z_]+_MARKER='[^']*'" "${SCRIPT_DIR}"/*.sh |
+  grep -rhoE "^[[:space:]]*(readonly[[:space:]]+)?[A-Z_]+_MARKER='[^']*'" \
+    "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/_lib/*.sh |
     sed -E "s/^[[:space:]]*(readonly[[:space:]]+)?//"
 )
 if [ -z "$uninventoried_markers" ]; then
