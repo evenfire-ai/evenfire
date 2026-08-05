@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -417,6 +417,11 @@ function GrantFormModal({
   const [allowedCallers, setAllowedCallers] = useState((grant?.allowedCallers ?? []).join(', '))
   const [users, setUsers] = useState<AdminUser[]>([])
   const [userSearch, setUserSearch] = useState('')
+  // Recipe prefill resolves the access grant asynchronously. Keep that
+  // response from overwriting an operator's explicit recipient choice when
+  // the request finishes after the user has opened the picker.
+  const recipePrefillRequest = useRef(0)
+  const allowedUserRefsEdited = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -488,6 +493,8 @@ function GrantFormModal({
   // users from the recipe's access grant — so the operator configures access
   // once and the notify allowlist defaults to it (narrowable, security kept).
   async function applyRecipePrefill(key: string) {
+    const requestId = ++recipePrefillRequest.current
+    allowedUserRefsEdited.current = false
     setRecipeKey(key)
     const info = sdkRecipes.find(r => `${r.namespace}/${r.name}` === key)
     if (!info) return
@@ -506,10 +513,19 @@ function GrantFormModal({
     setCredentialSlot('')
     try {
       const res = await listWorkflowGrants(info.namespace, info.name)
+      // A later recipe selection invalidates this response. Once the operator
+      // edits the picker, preserve that explicit decision instead of applying
+      // a stale/default access grant over it.
+      if (requestId !== recipePrefillRequest.current || allowedUserRefsEdited.current) return
       setAllowedUserRefs((res.items ?? []).map(u => u.id))
     } catch {
       // Best-effort: leave users empty if the access grant can't be read.
     }
+  }
+
+  function handleAllowedUserRefsChange(next: string[]) {
+    allowedUserRefsEdited.current = true
+    setAllowedUserRefs(next)
   }
 
   const eventTypesList = parseList(allowedEventTypes)
@@ -908,7 +924,7 @@ function GrantFormModal({
                   <SelectionDropdown
                     id="sdk-userrefs"
                     value={allowedUserRefs}
-                    onChange={setAllowedUserRefs}
+                    onChange={handleAllowedUserRefsChange}
                     onSearchQueryChange={setUserSearch}
                     options={userOptions}
                     placeholder="Select users…"

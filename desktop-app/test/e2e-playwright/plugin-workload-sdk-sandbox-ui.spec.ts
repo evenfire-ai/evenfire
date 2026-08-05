@@ -9,6 +9,7 @@ import {
   finalizeRecording,
   launchDesktopApp,
   login,
+  openSettings,
   requireRecorderConfirm,
 } from './qa-recorder-helpers'
 import {
@@ -467,6 +468,26 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     app = launched.app
     page = launched.page
     await login(page, credentials)
+
+    await test.step('configure in-app notifications through visible Desktop settings', async () => {
+      await openSettings(page!)
+      await page!.getByRole('tab', { name: 'Notifications', exact: true }).click()
+      const inAppSection = page!.locator('form').filter({
+        has: page!.getByRole('heading', { name: 'In App Notifications', exact: true }),
+      })
+      const always = inAppSection.locator('input[type="radio"][value="always"]')
+      await expect(always).toBeVisible()
+      if (!(await always.isChecked())) {
+        await always.check()
+      }
+      const save = inAppSection.getByRole('button', { name: 'Save changes', exact: true })
+      if (await save.isVisible()) {
+        await save.click()
+        await expect(
+          page!.getByText('In app notification settings saved.', { exact: true })
+        ).toBeVisible()
+      }
+    })
 
     await page.getByTestId('nav-sandbox-ui').click()
     await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
