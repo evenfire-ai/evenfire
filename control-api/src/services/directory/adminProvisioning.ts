@@ -92,7 +92,7 @@ export async function provisionAdminDesktopWorkspace(input: {
   agentNames: string[]
   contextIds: string[]
   /** When false, skip writing users.password_hash — the desktop password then
-   *  comes only from the invitation flow (MCC-driven installs). Defaults to
+   *  comes only from the invitation flow (managed installs). Defaults to
    *  true: the Control-UI human first-run keeps one credential for both apps. */
   seedPassword?: boolean
 }): Promise<void> {

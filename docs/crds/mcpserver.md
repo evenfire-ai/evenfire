@@ -119,6 +119,29 @@ An McpServer with `spec.remote` must declare at least one `egressBinding`.
 | `spec.imagePullSecrets` | object[] | no | Image pull secrets for the container. |
 | `spec.imagePullSecrets[].name` | string | no | Name of the image pull Secret. |
 
+HCC copies `spec.imagePullSecrets` verbatim onto the generated Deployment and re-validates
+nothing, so whatever writes this field owns the decision.
+
+**Object references here, `string[]` on WorkflowRecipe — intentional.** A `WorkflowRecipe`
+workload declares `imagePullSecrets` as plain Secret **names**
+(`docs/crds/workflowrecipe.md` §3.4.2). When WRC delegates a transport workload to an
+McpServer it applies the Issue-#637 ownership filter to those names and then **normalizes
+them into the `{ name }` object form** this CRD (and Kubernetes `PodSpec`) requires. That is
+a documented format conversion at the contract boundary, **not** a desynchronization
+between the two CRDs — neither schema should be changed to match the other.
+
+**The platform registry credential is injected, not declared.** For an image hosted on the
+configured platform registry, the writer (Control API for direct installs, WRC for
+recipe-delegated servers) appends `evenfire-registry-pull` itself, after the ownership
+filter. It is provisioned by Control API and is deliberately unlabeled to the #637 model, so
+a recipe that names it is denied rather than honored. See
+`docs/architecture/registry-pull-secret-self-provisioning.md`.
+
+**`spec.envSecret` is a separate mechanism and must never carry registry credentials.**
+`envSecret` projects Secret values into the container's **environment**; `imagePullSecrets`
+is consumed by the **kubelet** and never reaches the container. A registry credential routed
+through `envSecret` is readable by the workload process itself.
+
 ### Security Context
 
 | Field | Type | Required | Description |

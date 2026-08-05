@@ -25,6 +25,8 @@ export const PROFILE_ROUTES = {
   desktopSetup: '/desktop-setup',
   forgotPassword: (query?: ProfileRouteQuery) => withQuery('/forgot-password', query),
   invitation: (token: string) => `/invitations/${segment(token)}`,
+  openDesktopApp: (recipeNs: string, recipeName: string) =>
+    `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
   members: {
     root: '/members',
     invite: '/members/invite',

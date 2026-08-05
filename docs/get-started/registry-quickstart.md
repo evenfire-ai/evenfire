@@ -121,6 +121,42 @@ pods they orchestrate:
 kubectl -n sandbox-recipes get workflowrecipes
 ```
 
+### Private images pull themselves
+
+If the connector or plugin you installed runs a **private** image on the evenfire
+registry, you do not create a pull Secret and you do not put credentials in the
+entry. On the first install that needs one, control-api mints a pull credential
+from your connection's own registry identity and writes it as a Secret named
+`evenfire-registry-pull` into all three platform workload namespaces:
+
+```bash
+kubectl get secret -A -l clerum.io/managed-by=control-api
+# NAMESPACE         NAME                     TYPE                             DATA
+# mcp-server        evenfire-registry-pull   kubernetes.io/dockerconfigjson   1
+# sandbox-recipes   evenfire-registry-pull   kubernetes.io/dockerconfigjson   1
+# sandbox-ui        evenfire-registry-pull   kubernetes.io/dockerconfigjson   1
+```
+
+Then the reference is attached for you. control-api writes it onto the `McpServer`
+for connectors, and workflow-recipes injects it into the rendered pod template for
+recipe workloads. Recipes never name it themselves. `evenfire-registry-pull` is a
+reserved name: declare it in a recipe's `imagePullSecrets` and the install is
+rejected, and the admin Secrets API refuses to create, modify or delete it.
+
+Two things follow from this that are worth knowing up front:
+
+- **It is one credential per organization, rotated on each mint.** All three copies
+  always hold the same key. That is why control-api writes all three together
+  rather than one namespace at a time.
+- **It repairs itself.** control-api re-checks the Secret at startup and every 10
+  minutes (`REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS`), so a copy that was
+  deleted or emptied comes back without an install to trigger it.
+
+If you would rather provision the Secret yourself, read the pre-provisioning rules
+in [Connect to the registry](../how-to/connect-to-registry.md#api-keys-for-programmatic-publishing)
+first. A half-external setup, where you supply some namespaces and leave others to
+control-api, is not supported.
+
 ## 5. Mint an org API key
 
 The Control UI publishes using the credential stored at connect time, so
@@ -219,22 +255,26 @@ Field-by-field reference and the update/delete routes are in
 
 ## Troubleshooting
 
-| Symptom                                               | Cause and fix                                                                                                                                                                                  |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                                                                         |
-| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                                                                  |
-| `org_name_taken` on registration                      | Another deployment holds that organization name. Pick a different one and register again. Nothing was saved.                                                                                   |
-| `org_blocklisted` on registration                     | The name is reserved. Pick a different one.                                                                                                                                                    |
-| Connect panel stuck at **Finishing the connection**   | The inline redeem did not land. Press **Finish connecting**; it needs no token. Reach for **Start over** only when the panel says the credentials were issued but never stored.                |
-| `deployment_suspended`                                | Evenfire suspended the deployment. Contact support. Do **not** press Start over: a suspension is reversible, a destroyed keypair is not.                                                       |
-| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                                                              |
-| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                                                               |
-| `invalid reference format` from `docker`              | The `@` scope prefix is in the image path. It belongs in the entry name only: push to `registry.evenfire.ai/<org>/<name>`, not `/@<org>/<name>`.                                               |
-| `docker push` denied, credential is good              | Three quiet causes, likeliest first: a malformed repo path (the scope is dropped, not rejected), a key without `registry:publish`, or the self-hosted quota (10 repos / 2 GiB / 200 versions). |
-| `403 selfhosted_public_disabled`                      | An open-registration org cannot make an image repo public. Images stay private to your org; cross-org sharing needs a grant Evenfire issues.                                                   |
-| `422` naming the `imageRef`                           | The image repo path does not equal the entry name. `@acme/db-tools` needs `registry.evenfire.ai/acme/db-tools`. Checked at publish and install, since a mismatch denies the pull.              |
-| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works.                                           |
-| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                                                                     |
+| Symptom                                               | Cause and fix                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                                                                                                                                                                                                             |
+| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                                                                                                                                                                                                      |
+| `org_name_taken` on registration                      | Another deployment holds that organization name. Pick a different one and register again. Nothing was saved.                                                                                                                                                                                                                       |
+| `org_blocklisted` on registration                     | The name is reserved. Pick a different one.                                                                                                                                                                                                                                                                                        |
+| Connect panel stuck at **Finishing the connection**   | The inline redeem did not land. Press **Finish connecting**; it needs no token. Reach for **Start over** only when the panel says the credentials were issued but never stored.                                                                                                                                                    |
+| `deployment_suspended`                                | Evenfire suspended the deployment. Contact support. Do **not** press Start over: a suspension is reversible, a destroyed keypair is not.                                                                                                                                                                                           |
+| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                                                                                                                                                                                                  |
+| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                                                                                                                                                                                                   |
+| `invalid reference format` from `docker`              | The `@` scope prefix is in the image path. It belongs in the entry name only: push to `registry.evenfire.ai/<org>/<name>`, not `/@<org>/<name>`.                                                                                                                                                                                   |
+| `docker push` denied, credential is good              | Three quiet causes, likeliest first: a malformed repo path (the scope is dropped, not rejected), a key without `registry:publish`, or the self-hosted quota (10 repos / 2 GiB / 200 versions).                                                                                                                                     |
+| `403 selfhosted_public_disabled`                      | An open-registration org cannot make an image repo public. Images stay private to your org; cross-org sharing needs a grant Evenfire issues.                                                                                                                                                                                       |
+| `422` naming the `imageRef`                           | The image repo path does not equal the entry name. `@acme/db-tools` needs `registry.evenfire.ai/acme/db-tools`. Checked at publish and install, since a mismatch denies the pull.                                                                                                                                                  |
+| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works.                                                                                                                                                                               |
+| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                                                                                                                                                                                                         |
+| `409 foreign_secret_would_be_revoked` on install      | You pre-provisioned `evenfire-registry-pull` in some platform namespaces but not all three. The pull key is one per org and rotate-on-call, so control-api will not mint and revoke your copy. Supply all three namespaces, or delete yours and let control-api manage them.                                                       |
+| `409 foreign_secret_unusable` on install              | An `evenfire-registry-pull` Secret you own sits in the namespace this install targets, and it cannot serve a pull: wrong `type`, or a `.dockerconfigjson` with no entry for your registry host or an entry carrying no credential. Fix it in place or delete it. Nothing was created; the install fails before the CRD is written. |
+| `422 workflowWorkloadSecretRefReserved` on install    | The recipe declares `evenfire-registry-pull` in `imagePullSecrets`. Remove it. The platform attaches the reference itself, after the ownership filter that would otherwise strip a declared name.                                                                                                                                  |
+| `ImagePullBackOff` on a private evenfire image        | Check the pod actually got the reference (`kubectl get pod <p> -o jsonpath='{.spec.imagePullSecrets}'`). If it is empty on a recipe workload, `CLERUM_REGISTRY_URL` differs between control-api and workflow-recipes: injection keys off the image host matching that URL. Both read the same `control-api-config` key by default. |
 
 ## Next steps
 

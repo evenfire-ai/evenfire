@@ -41,13 +41,15 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	profile-ui \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
-# Services that have unit tests (vitest)
+# Services that have unit tests
 TEST_SERVICES := \
 	workflow-approval-request-reader \
 	mcp-host \
@@ -60,8 +62,10 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
@@ -69,6 +73,14 @@ TEST_SERVICES := \
 -include Makefile.infra
 # ── Optional OSS-launch tooling (public snapshot / infra carve) — monorepo-only
 -include Makefile.oss
+
+# ── Prerequisites ────────────────────────────────────────────────────
+.PHONY: prereqs
+prereqs: ## Check every dependency for minikube-setup up front (Docker/minikube/kubectl/node/…) with per-platform install commands
+	@bash scripts/check-prereqs.sh
+
+.PHONY: doctor
+doctor: prereqs ## Alias for 'prereqs'
 
 # ── Install ──────────────────────────────────────────────────────────
 .PHONY: install-git-hooks
@@ -139,7 +151,8 @@ minikube-stop: ## Stop minikube cluster
 	minikube stop -p $(MINIKUBE_PROFILE)
 
 .PHONY: minikube-setup
-minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Needs ADMIN_PASSWORD in .env.
+minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
+	@if [ "$(SKIP_PREREQS)" != "true" ]; then $(MAKE) --no-print-directory prereqs; fi
 	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
 		scripts/minikube/full-setup.sh $(ARGS)
 
@@ -307,16 +320,9 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 	else \
 	  echo "Channel file not present; per-Host channel values are managed through Control UI/control-api."; \
 	fi
-	@# LLM API keys — read from the main checkout .env when running from a worktree
-	@ENV_FILE=""; GIT_COMMON_DIR="$$(git rev-parse --git-common-dir 2>/dev/null || true)"; if [ -n "$$GIT_COMMON_DIR" ]; then case "$$GIT_COMMON_DIR" in /*) GIT_COMMON_ABS="$$GIT_COMMON_DIR" ;; *) GIT_COMMON_ABS="$$(cd "$$GIT_COMMON_DIR" && pwd)" ;; esac; MAIN_REPO_DIR="$$(cd "$$GIT_COMMON_ABS/.." && pwd)"; if [ -f "$$MAIN_REPO_DIR/.env" ]; then ENV_FILE="$$MAIN_REPO_DIR/.env"; fi; fi; if [ -z "$$ENV_FILE" ] && [ -f .env ]; then ENV_FILE=".env"; fi; if [ -f "$$ENV_FILE" ]; then set -a && . "$$ENV_FILE" && set +a; fi; \
-	  kubectl --context=$(MINIKUBE_PROFILE) create secret generic chatllm-api-keys \
-	    --namespace=mcp-host \
-	    --from-literal=openai-api-key="$${OPENAI_API_KEY:-sk-test-placeholder-openai-key-00000000000000000000}" \
-	    --from-literal=claude-api-key="$${CLAUDE_API_KEY:-sk-ant-api03-test-placeholder-claude-key-000000000000000000000000000000000000000000000000000000}" \
-	    --from-literal=zai-api-key="$${ZAI_API_KEY:-zai-test-placeholder-zai-key-00000000000000000000}" \
-	    --from-literal=bailian-api-key="$${BAILIAN_API_KEY:-sk-test-placeholder-bailian-key-00000000000000000000}" \
-	    --dry-run=client -o yaml | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
-	@echo "  LLM API keys applied (provider: $${CLERUM_MODEL_PROVIDER:-zai})"
+	@# LLM API keys — all 21 providers from the registry; reads the main checkout
+	@# .env when running from a worktree. Original four keep placeholder fallbacks.
+	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/apply-llm-secret.sh
 
 .PHONY: minikube-apply-namespaces
 minikube-apply-namespaces: ## Create all namespaces

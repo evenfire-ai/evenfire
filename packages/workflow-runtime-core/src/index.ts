@@ -52,3 +52,10 @@ export type { PromptContext } from './injection/prompt'
 export type { SignalCallback } from './signal-poller/poller'
 export type { RuntimeTokenProvider } from './runtime-token-provider/provider'
 export type { ModelInjectionRequest } from './injection/model'
+
+export {
+  EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+  registryHostFromUrl,
+  imageRefHost,
+  isPlatformRegistryImage,
+} from './registry-image'
