@@ -1,5 +1,16 @@
 // control-api/test/services.orgApiKeyClient.test.ts
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  RegistryStatusError,
+  __resetUserTokenCacheForTests,
+  createKey,
+  listKeys,
+  revokeKey,
+} from '../src/services/orgApiKeyClient.js'
+import {
+  __resetRegistryIdentityCacheGenerationForTests,
+  invalidateRegistryIdentityCaches,
+} from '../src/services/registryIdentityCache.js'
 
 const { cfg, log } = vi.hoisted(() => ({
   cfg: { registryUrl: 'https://registry.test' },
@@ -10,14 +21,6 @@ vi.mock('../src/observability/logger.js', () => ({ rootLogger: log }))
 vi.mock('../src/services/registryVoucher.js', () => ({
   mintIdentityVoucher: vi.fn(() => 'voucher-jwt'),
 }))
-
-import {
-  RegistryStatusError,
-  __resetUserTokenCacheForTests,
-  createKey,
-  listKeys,
-  revokeKey,
-} from '../src/services/orgApiKeyClient.js'
 
 const admin = { id: 'admin-1', username: 'alice' } as never
 
@@ -30,8 +33,27 @@ function makeRes(status: number, body?: unknown): Response {
   } as unknown as Response
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, reject, resolve }
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  throw new Error(message)
+}
+
 let fetchMock: ReturnType<typeof vi.fn>
 beforeEach(() => {
+  __resetRegistryIdentityCacheGenerationForTests()
   __resetUserTokenCacheForTests()
   fetchMock = vi.fn()
   vi.stubGlobal('fetch', fetchMock)
@@ -52,6 +74,82 @@ describe('orgApiKeyClient', () => {
     // second key request carries the cached bearer
     const lastInit = fetchMock.mock.calls.at(-1)![1] as RequestInit
     expect((lastInit.headers as Record<string, string>).Authorization).toBe('Bearer user-tok')
+  })
+
+  it('does not reuse a cached user token after registry identity invalidates', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeRes(200, { token: 'tok-alpha' })) // /user/exchange
+      .mockResolvedValueOnce(makeRes(200, { keys: [] })) // GET alpha keys
+      .mockResolvedValueOnce(makeRes(200, { token: 'tok-bravo' })) // /user/exchange after identity change
+      .mockResolvedValueOnce(makeRes(200, { keys: [] })) // GET bravo keys
+
+    await listKeys(admin, 'alpha')
+    invalidateRegistryIdentityCaches()
+    await listKeys(admin, 'bravo')
+
+    const exchangeCalls = fetchMock.mock.calls.filter(c => String(c[0]).endsWith('/user/exchange'))
+    expect(exchangeCalls).toHaveLength(2)
+    const keyCalls = fetchMock.mock.calls.filter(c => String(c[0]).includes('/keys'))
+    expect((keyCalls[0]![1]!.headers as Record<string, string>).Authorization).toBe(
+      'Bearer tok-alpha'
+    )
+    expect((keyCalls[1]![1]!.headers as Record<string, string>).Authorization).toBe(
+      'Bearer tok-bravo'
+    )
+  })
+
+  it('does not cache or return a stale pending user-token exchange after invalidation', async () => {
+    const staleExchange = deferred<Response>()
+    let exchangeCalls = 0
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/user/exchange')) {
+        exchangeCalls += 1
+        if (exchangeCalls === 1) return staleExchange.promise
+        return Promise.resolve(makeRes(200, { token: 'tok-bravo' }))
+      }
+      return Promise.resolve(makeRes(200, { keys: [] }))
+    })
+
+    const staleRequest = listKeys(admin, 'alpha')
+    await waitUntil(() => exchangeCalls === 1, 'stale user-token exchange did not start')
+
+    invalidateRegistryIdentityCaches()
+
+    await listKeys(admin, 'bravo')
+    staleExchange.resolve(makeRes(200, { token: 'tok-alpha' }))
+    await expect(staleRequest).resolves.toEqual({ keys: [] })
+
+    await listKeys(admin, 'bravo')
+    const exchangeRequests = fetchMock.mock.calls.filter(c =>
+      String(c[0]).endsWith('/user/exchange')
+    )
+    const keyRequests = fetchMock.mock.calls.filter(c => String(c[0]).includes('/keys'))
+    expect(exchangeRequests).toHaveLength(2)
+    expect(
+      keyRequests.map(c => (c[1]!.headers as Record<string, string>).Authorization)
+    ).not.toContain('Bearer tok-alpha')
+    expect(keyRequests.at(-1)![1]!.headers).toMatchObject({ Authorization: 'Bearer tok-bravo' })
+  })
+
+  it('deduplicates same-generation pending user-token exchanges per admin', async () => {
+    const exchange = deferred<Response>()
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/user/exchange')) return exchange.promise
+      return Promise.resolve(makeRes(200, { keys: [] }))
+    })
+
+    const first = listKeys(admin, 'acme')
+    const second = listKeys(admin, 'acme')
+    await waitUntil(
+      () => fetchMock.mock.calls.filter(c => String(c[0]).endsWith('/user/exchange')).length === 1,
+      'user-token exchange was not deduplicated'
+    )
+
+    exchange.resolve(makeRes(200, { token: 'tok-shared' }))
+    await expect(Promise.all([first, second])).resolves.toEqual([{ keys: [] }, { keys: [] }])
+
+    const exchangeCalls = fetchMock.mock.calls.filter(c => String(c[0]).endsWith('/user/exchange'))
+    expect(exchangeCalls).toHaveLength(1)
   })
 
   it('on a gated-endpoint 401, evicts + re-exchanges once then retries', async () => {
@@ -92,7 +190,11 @@ describe('orgApiKeyClient', () => {
       message: 'registry_integration_error',
     })
     expect(log.error).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'registry_exchange_failed', status: 409, code: 'reserved_username' }),
+      expect.objectContaining({
+        event: 'registry_exchange_failed',
+        status: 409,
+        code: 'reserved_username',
+      }),
       expect.any(String)
     )
   })
@@ -109,11 +211,15 @@ describe('orgApiKeyClient', () => {
   })
 
   it('createKey returns the one-time key payload verbatim', async () => {
-    fetchMock
-      .mockResolvedValueOnce(makeRes(200, { token: 'tok' }))
-      .mockResolvedValueOnce(
-        makeRes(201, { id: 'k1', key: 'efrk_secret', key_prefix: 'efrk_sec', scopes: [], expires_at: null })
-      )
+    fetchMock.mockResolvedValueOnce(makeRes(200, { token: 'tok' })).mockResolvedValueOnce(
+      makeRes(201, {
+        id: 'k1',
+        key: 'efrk_secret',
+        key_prefix: 'efrk_sec',
+        scopes: [],
+        expires_at: null,
+      })
+    )
     const out = await createKey(admin, 'acme', { description: 'ci' })
     expect(out.key).toBe('efrk_secret')
   })

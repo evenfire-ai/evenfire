@@ -43,6 +43,7 @@ SERVICES := \
 	stdio-bridge \
 	profile-ui \
 	desktop-app \
+	profile-ui \
 	mcp-servers \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \

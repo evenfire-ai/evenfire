@@ -7,6 +7,10 @@ import * as ConfirmDialogModule from '../ConfirmDialog'
 import RegistryConnectPanel from '../RegistryConnectPanel'
 import { ToastProvider } from '../Toast'
 
+const publishScopeMocks = vi.hoisted(() => ({
+  refresh: vi.fn(),
+}))
+
 vi.mock('../../lib/api', () => ({
   getRegistryConnection: vi.fn(),
   requestRegistryConnection: vi.fn(),
@@ -14,6 +18,18 @@ vi.mock('../../lib/api', () => ({
   disconnectRegistryConnection: vi.fn(),
   recoverRegistryConnection: vi.fn(),
 }))
+vi.mock('../../lib/hooks/usePublishScope', async orig => {
+  const actual = await orig<typeof import('../../lib/hooks/usePublishScope')>()
+  return {
+    ...actual,
+    usePublishScope: () => ({
+      scope: null,
+      loading: false,
+      error: false,
+      refresh: publishScopeMocks.refresh,
+    }),
+  }
+})
 vi.mock('../ConfirmDialog', () => ({ useConfirmDialog: vi.fn() }))
 const { mockPush } = vi.hoisted(() => ({ mockPush: vi.fn() }))
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mockPush }) }))
@@ -24,6 +40,7 @@ function render(ui: React.ReactNode) {
 afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
+  publishScopeMocks.refresh.mockResolvedValue(null)
   vi.mocked(ConfirmDialogModule.useConfirmDialog).mockReturnValue({
     confirm: vi.fn().mockResolvedValue(true),
     confirmDialog: null,
@@ -31,10 +48,21 @@ beforeEach(() => {
 })
 
 describe('RegistryConnectPanel', () => {
+  it('renders a skeleton while registry connection status loads', () => {
+    vi.mocked(api.getRegistryConnection).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getRegistryConnection>
+    )
+    const view = render(<RegistryConnectPanel />)
+    expect(screen.getByRole('status', { name: /loading registry connection/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('shows the request form when disconnected', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
     render(<RegistryConnectPanel />)
     await waitFor(() => expect(screen.getByText('Request registration')).toBeInTheDocument())
+    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
   })
 
   it('shows the not-self-hosted banner on a not_self_hosted code', async () => {
@@ -121,6 +149,8 @@ describe('RegistryConnectPanel', () => {
     await waitFor(() =>
       expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
     )
+    expect(publishScopeMocks.refresh).toHaveBeenCalledTimes(1)
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
   })
 
   it('shows the expired-token message on a claim_expired code', async () => {
@@ -237,6 +267,8 @@ describe('RegistryConnectPanel', () => {
     // Scoped to the banner text (not just "@acme") because the success toast also
     // renders "Connected to @acme." — a bare /@acme/ match would be ambiguous.
     expect(await screen.findByText(/Connected to the Evenfire Registry.*@acme/)).toBeInTheDocument()
+    expect(publishScopeMocks.refresh).toHaveBeenCalledTimes(1)
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
     // The toast is a SEPARATE mutation from the view: branching the view but
     // leaving the toast unconditional tells a connected user to wait for an
     // operator who does not exist.
@@ -360,6 +392,8 @@ describe('RegistryConnectPanel', () => {
     render(<RegistryConnectPanel />)
     await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
     expect(await screen.findByText(/Connected to the Evenfire Registry.*@acme/)).toBeInTheDocument()
+    expect(publishScopeMocks.refresh).toHaveBeenCalledTimes(1)
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
   })
 
   // Renamed from the original "shows a retry message when recovery is not yet
@@ -525,6 +559,8 @@ describe('RegistryConnectPanel', () => {
     expect(message).toMatch(/lost permanently/i)
     expect(message).toMatch(/cannot be recovered/i)
     await waitFor(() => expect(api.disconnectRegistryConnection).toHaveBeenCalledTimes(1))
+    expect(publishScopeMocks.refresh).toHaveBeenCalledTimes(1)
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
   })
 
   it('does not disconnect the connecting view when Start over is cancelled', async () => {
@@ -540,6 +576,7 @@ describe('RegistryConnectPanel', () => {
     render(<RegistryConnectPanel />)
     await userEvent.click(await screen.findByRole('button', { name: /start over/i }))
     expect(api.disconnectRegistryConnection).not.toHaveBeenCalled()
+    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /finish connecting/i })).toBeInTheDocument()
   })
 
@@ -552,5 +589,125 @@ describe('RegistryConnectPanel', () => {
     render(<RegistryConnectPanel />)
     await screen.findByRole('button', { name: /finish connecting/i })
     expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
+  })
+
+  it('does not offer active disconnect and routes connected users to their organization', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      deploymentId: 'd',
+      org: 'acme',
+    })
+    render(<RegistryConnectPanel />)
+    await screen.findByText(/Connected to the Evenfire Registry/)
+
+    expect(screen.queryByRole('button', { name: /^disconnect$/i })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /go to your organization/i }))
+    expect(mockPush).toHaveBeenCalledWith('/marketplace/org/entries')
+    expect(api.disconnectRegistryConnection).not.toHaveBeenCalled()
+    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
+  })
+
+  it('refreshes publish scope after starting over from a rejected request', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'rejected',
+      deploymentId: 'd',
+      requestedOrgName: 'acme',
+    })
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /start over/i }))
+    await waitFor(() => expect(api.disconnectRegistryConnection).toHaveBeenCalledTimes(1))
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
+    expect(screen.getByText('Request registration')).toBeInTheDocument()
+  })
+
+  it('refreshes publish scope after already_connected re-sync returns connected', async () => {
+    const events: string[] = []
+    vi.mocked(api.getRegistryConnection)
+      .mockImplementationOnce(async () => {
+        events.push('initial-load')
+        return { state: 'disconnected' }
+      })
+      .mockImplementationOnce(async () => {
+        events.push('resync-load')
+        return { state: 'connected', deploymentId: 'd', org: 'acme' }
+      })
+    vi.mocked(api.requestRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'already_connected' })
+    )
+    publishScopeMocks.refresh.mockImplementationOnce(async options => {
+      events.push(`refresh:${JSON.stringify(options)}`)
+      return null
+    })
+
+    render(<RegistryConnectPanel />)
+    await userEvent.type(await screen.findByLabelText(/organization/i), 'acme')
+    await userEvent.type(screen.getByLabelText(/email/i), 'a@x.io')
+    await userEvent.click(screen.getByRole('button', { name: /request registration/i }))
+
+    expect(await screen.findByText(/Connected to the Evenfire Registry.*@acme/)).toBeInTheDocument()
+    expect(events).toEqual(['initial-load', 'resync-load', 'refresh:{"force":true}'])
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
+  })
+
+  it('refreshes publish scope after not_pending re-sync returns disconnected', async () => {
+    vi.mocked(api.getRegistryConnection)
+      .mockResolvedValueOnce({
+        state: 'approved',
+        deploymentId: 'd',
+        requestedOrgName: 'acme',
+      })
+      .mockResolvedValueOnce({ state: 'disconnected' })
+    vi.mocked(api.submitRegistryClaim).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'not_pending' })
+    )
+
+    render(<RegistryConnectPanel />)
+    await userEvent.type(await screen.findByLabelText(/claim token/i), 'tok-1')
+    await userEvent.click(screen.getByRole('button', { name: /complete connection/i }))
+
+    await waitFor(() => expect(api.getRegistryConnection).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Request registration')).toBeInTheDocument()
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
+  })
+
+  it('does not force-refresh publish scope when already_connected re-sync fails', async () => {
+    vi.mocked(api.getRegistryConnection)
+      .mockResolvedValueOnce({ state: 'disconnected' })
+      .mockRejectedValueOnce(new Error('load failed'))
+    vi.mocked(api.requestRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'already_connected' })
+    )
+
+    render(<RegistryConnectPanel />)
+    await userEvent.type(await screen.findByLabelText(/organization/i), 'acme')
+    await userEvent.type(screen.getByLabelText(/email/i), 'a@x.io')
+    await userEvent.click(screen.getByRole('button', { name: /request registration/i }))
+
+    await waitFor(() => expect(api.getRegistryConnection).toHaveBeenCalledTimes(2))
+    expect(publishScopeMocks.refresh).not.toHaveBeenCalled()
+  })
+
+  it('refreshes publish scope after not_recoverable re-sync returns connected', async () => {
+    vi.mocked(api.getRegistryConnection)
+      .mockResolvedValueOnce({
+        state: 'connecting',
+        deploymentId: 'dep-1',
+        requestedOrgName: 'acme',
+      })
+      .mockResolvedValueOnce({
+        state: 'connected',
+        deploymentId: 'dep-1',
+        org: 'acme',
+        authEnabled: true,
+      })
+    vi.mocked(api.recoverRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'not_recoverable' })
+    )
+
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+
+    expect(await screen.findByText(/Connected to the Evenfire Registry.*@acme/)).toBeInTheDocument()
+    expect(publishScopeMocks.refresh).toHaveBeenCalledWith({ force: true })
   })
 })

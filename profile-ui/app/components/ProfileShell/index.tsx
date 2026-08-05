@@ -1,17 +1,29 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { createContext, useContext, useState } from 'react'
+import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { MobileHeader } from '@components/MobileHeader'
 import { Sidebar } from '@components/Sidebar'
 import { PROFILE_ROUTES } from '@constants/routes'
+import { profileRouteForPathname } from '@lib/profileAppFrame'
 import type { ProfileShellProps } from './types'
 
-export function ProfileShell({ currentRoute, children }: ProfileShellProps) {
+const ProfileShellContext = createContext(false)
+
+export function ProfileShell({ children }: ProfileShellProps) {
+  const isInsideProfileShell = useContext(ProfileShellContext)
+  if (isInsideProfileShell) return <>{children}</>
+
+  return <PersistentProfileShell>{children}</PersistentProfileShell>
+}
+
+function PersistentProfileShell({ children }: ProfileShellProps) {
   const router = useRouter()
+  const pathname = usePathname()
   const { logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const currentRoute = profileRouteForPathname(pathname)
 
   function handleLogout() {
     logout()
@@ -31,7 +43,9 @@ export function ProfileShell({ currentRoute, children }: ProfileShellProps) {
         onNavigate={() => setMenuOpen(false)}
         onLogout={handleLogout}
       />
-      <main className="cu-main">{children}</main>
+      <main className="cu-main">
+        <ProfileShellContext.Provider value>{children}</ProfileShellContext.Provider>
+      </main>
     </div>
   )
 }

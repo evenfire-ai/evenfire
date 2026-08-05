@@ -1,157 +1,22 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { useAuth } from '@components/AuthContext'
-import { getManageableTeams, isSilentApiError } from '@lib/api'
-import { listApprovalChannelTargets } from '@lib/approvalChannels'
+import { useProfileAccess } from '@components/ProfileAccessContext'
 import packageJson from '../../../package.json'
 import { PROFILE_SIDEBAR_ITEMS } from './constants'
 import { IconLogout } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
 
-const MEMBER_ROUTE_ACCESS_CACHE_PREFIX = 'profile-ui.member-route-access.'
-const APPROVAL_CHANNEL_ACCESS_CACHE_PREFIX = 'profile-ui.approval-channel-access.'
-
-function memberRouteAccessCacheKey(userId: string): string {
-  return `${MEMBER_ROUTE_ACCESS_CACHE_PREFIX}${userId}`
-}
-
-function approvalChannelAccessCacheKey(userId: string): string {
-  return `${APPROVAL_CHANNEL_ACCESS_CACHE_PREFIX}${userId}`
-}
-
-function readCachedBoolean(key: string): boolean | null {
-  if (!key || typeof window === 'undefined') return null
-  try {
-    const value = window.sessionStorage.getItem(key)
-    if (value === 'true') return true
-    if (value === 'false') return false
-  } catch {
-    return null
-  }
-  return null
-}
-
-function readCachedMemberRouteAccess(userId: string): boolean | null {
-  if (!userId) return null
-  return readCachedBoolean(memberRouteAccessCacheKey(userId))
-}
-
-function readCachedApprovalChannelAccess(userId: string): boolean | null {
-  if (!userId) return null
-  return readCachedBoolean(approvalChannelAccessCacheKey(userId))
-}
-
-function writeCachedBoolean(key: string, allowed: boolean): void {
-  if (!key || typeof window === 'undefined') return
-  try {
-    window.sessionStorage.setItem(key, String(allowed))
-  } catch {
-    // Ignore private-mode or storage quota failures; the API result still drives this render.
-  }
-}
-
-function writeCachedMemberRouteAccess(userId: string, allowed: boolean): void {
-  if (!userId) return
-  writeCachedBoolean(memberRouteAccessCacheKey(userId), allowed)
-}
-
-function writeCachedApprovalChannelAccess(userId: string, allowed: boolean): void {
-  if (!userId) return
-  writeCachedBoolean(approvalChannelAccessCacheKey(userId), allowed)
-}
-
 export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
-  const { authState } = useAuth()
-  const userId = authState.me?.id || ''
-  const activeRoleCanManage = authState.me?.role === 'admin' || authState.me?.role === 'inviter'
-  const [hasManageableTeams, setHasManageableTeams] = useState(
-    () => readCachedMemberRouteAccess(userId) ?? false
-  )
-  const [hasExternalChannelAccess, setHasExternalChannelAccess] = useState(
-    () => readCachedApprovalChannelAccess(userId) ?? false
-  )
-  const canManageMembers = activeRoleCanManage || hasManageableTeams
-
-  useEffect(() => {
-    let cancelled = false
-    if (!authState.isLoggedIn || !userId) {
-      setHasManageableTeams(false)
-      return
-    }
-
-    const cachedAccess = readCachedMemberRouteAccess(userId)
-    if (cachedAccess !== null) {
-      setHasManageableTeams(cachedAccess)
-    } else {
-      setHasManageableTeams(false)
-    }
-
-    if (activeRoleCanManage) {
-      writeCachedMemberRouteAccess(userId, true)
-      setHasManageableTeams(true)
-      return
-    }
-
-    void getManageableTeams()
-      .then(response => {
-        if (cancelled) return
-        const allowed = Boolean(response.items?.length)
-        writeCachedMemberRouteAccess(userId, allowed)
-        setHasManageableTeams(allowed)
-      })
-      .catch(error => {
-        if (!cancelled && !isSilentApiError(error)) {
-          writeCachedMemberRouteAccess(userId, false)
-          setHasManageableTeams(false)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activeRoleCanManage, authState.isLoggedIn, userId])
-
-  useEffect(() => {
-    let cancelled = false
-    if (!authState.isLoggedIn || !userId) {
-      setHasExternalChannelAccess(false)
-      return
-    }
-    const cachedAccess = readCachedApprovalChannelAccess(userId)
-    if (cachedAccess !== null) {
-      setHasExternalChannelAccess(cachedAccess)
-    }
-    void listApprovalChannelTargets()
-      .then(items => {
-        if (!cancelled) {
-          const allowed = items.length > 0
-          writeCachedApprovalChannelAccess(userId, allowed)
-          setHasExternalChannelAccess(allowed)
-        }
-      })
-      .catch(error => {
-        if (!cancelled && !isSilentApiError(error)) {
-          if (cachedAccess === true) return
-          writeCachedApprovalChannelAccess(userId, false)
-          setHasExternalChannelAccess(false)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [authState.isLoggedIn, userId])
+  const { approvalTargets, approvalTargetsLoading, canManageMembers, manageableTeamsLoading } =
+    useProfileAccess()
+  const hasExternalChannelAccess = approvalTargets.length > 0
 
   const navigationItems = (
     Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>
   )
-    .filter(
-      ([routeKey]) =>
-        routeKey !== 'settings' &&
-        (routeKey !== 'members' || canManageMembers) &&
-        (routeKey !== 'approvalChannels' || hasExternalChannelAccess)
-    )
+    .filter(([routeKey]) => routeKey !== 'settings')
     .sort(([, first], [, second]) => first.label.localeCompare(second.label))
   const settings = PROFILE_SIDEBAR_ITEMS.settings
 
@@ -175,19 +40,42 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
         </div>
       </div>
       <nav className="cu-sidebar__nav" aria-label="Main sections">
-        {navigationItems.map(([routeKey, item]) => (
-          <Link
-            key={routeKey}
-            href={item.href}
-            className="cu-sidebar__item"
-            data-active={currentRoute === routeKey ? 'true' : 'false'}
-            aria-current={currentRoute === routeKey ? 'page' : undefined}
-            onClick={onNavigate}
-          >
-            <span className="cu-sidebar__icon">{item.icon}</span>
-            <span className="cu-sidebar__label">{item.label}</span>
-          </Link>
-        ))}
+        {navigationItems.map(([routeKey, item]) => {
+          const accessLoading =
+            (routeKey === 'members' && manageableTeamsLoading && !canManageMembers) ||
+            (routeKey === 'approvalChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
+          const accessDenied =
+            (routeKey === 'members' && !canManageMembers) ||
+            (routeKey === 'approvalChannels' && !hasExternalChannelAccess)
+
+          if (accessLoading) {
+            return (
+              <div
+                key={routeKey}
+                className="cu-sidebar__item cu-sidebar__item--loading"
+                aria-hidden="true"
+              >
+                <span className="cu-sidebar__icon cu-skeleton" />
+                <span className="cu-sidebar__label cu-skeleton" />
+              </div>
+            )
+          }
+          if (accessDenied) return null
+
+          return (
+            <Link
+              key={routeKey}
+              href={item.href}
+              className="cu-sidebar__item"
+              data-active={currentRoute === routeKey ? 'true' : 'false'}
+              aria-current={currentRoute === routeKey ? 'page' : undefined}
+              onClick={onNavigate}
+            >
+              <span className="cu-sidebar__icon">{item.icon}</span>
+              <span className="cu-sidebar__label">{item.label}</span>
+            </Link>
+          )
+        })}
       </nav>
       <div className="cu-sidebar__footer">
         <Link
