@@ -166,10 +166,43 @@ function dockerconfigMatchesHost(blob: string | undefined, host: string): boolea
     const parsed = JSON.parse(Buffer.from(blob, 'base64').toString('utf8')) as {
       auths?: Record<string, unknown>
     }
-    return !!parsed?.auths && Object.prototype.hasOwnProperty.call(parsed.auths, host)
+    if (!parsed?.auths || !Object.prototype.hasOwnProperty.call(parsed.auths, host)) return false
+    return dockerconfigEntryCarriesCredential(parsed.auths[host])
   } catch {
     return false
   }
+}
+
+/**
+ * Does an `auths[<host>]` entry carry something the kubelet can actually present?
+ *
+ * Host presence alone is not enough. `{"auths":{"registry.example":{}}}` parses cleanly,
+ * matches the host, and is entirely unusable — the kubelet finds no credential to send and
+ * the pull goes out anonymous. Accepting it is wrong in BOTH directions:
+ *
+ *  - for a Secret we own, it classifies an empty copy as healthy instead of repairing it;
+ *  - for a FOREIGN copy it is worse, because the all-or-nothing gate reads "usable foreign"
+ *    as "somebody's live credential is sealed in here" and refuses to mint at all. Nothing
+ *    was ever served through an empty entry, so that is a self-inflicted outage: every
+ *    private install fails closed on account of a Secret that could never pull.
+ *
+ * Accepted forms, all of which the kubelet understands: `auth` (base64 `user:password`, what
+ * Docker writes), the split `username`/`password` form some tools emit, and the
+ * `identitytoken` / `registrytoken` fields credential helpers use. Any ONE non-empty string
+ * suffices — this is a usability check, not a validity check. Whether the credential still
+ * WORKS is the registry's answer to give, costs a round trip per install, and belongs to
+ * the out-of-band-revocation problem, which is tracked separately.
+ */
+function dockerconfigEntryCarriesCredential(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false
+  const e = entry as Record<string, unknown>
+  const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v.trim() !== ''
+  return (
+    nonEmpty(e.auth) ||
+    nonEmpty(e.password) ||
+    nonEmpty(e.identitytoken) ||
+    nonEmpty(e.registrytoken)
+  )
 }
 
 /**
@@ -464,7 +497,9 @@ function foreignUsabilityProblem(current: SecretView, host: string): string | nu
     return `its type is "${current.type ?? 'unset'}", not ${DOCKERCONFIG_TYPE} — the kubelet ignores it for image pulls`
   }
   if (!dockerconfigMatchesHost(current.dockerconfig, host)) {
-    return `its ${DOCKERCONFIG_KEY} carries no entry for "${host}", so the kubelet will never select it`
+    // Two different repairs, so name which one it is: a missing entry is usually the wrong
+    // registry host, an empty one is usually a half-written or template-generated Secret.
+    return `its ${DOCKERCONFIG_KEY} carries no usable credential for "${host}" (the entry is absent, or present but carries no auth/password/token), so the kubelet will never select it`
   }
   return null
 }

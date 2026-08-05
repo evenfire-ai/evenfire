@@ -532,6 +532,67 @@ describe('ensureRegistryPullSecret — never touches a Secret we do not own', ()
     expect(mintOrgPullCredential).not.toHaveBeenCalled()
   })
 
+  // The sharp edge of that boundary: `auths[host]` PRESENT but carrying nothing. It parses,
+  // it names our host, and it is completely unusable — the kubelet finds no credential to
+  // send and pulls anonymously. Reading host-presence alone as "usable" put this on the
+  // BLOCKING side, so an empty or template-generated Secret in any platform namespace
+  // fail-closed every private install in the org, permanently, over a copy that could never
+  // have served a pull. It is unusable, so it must not block.
+  it('does not block the mint for a foreign entry that names our host but carries no credential', async () => {
+    const { gateway, mock } = gw()
+    const emptyEntry = Buffer.from(JSON.stringify({ auths: { [HOST]: {} } })).toString('base64')
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, UI, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { [DOCKERCONFIG_KEY]: emptyEntry },
+    })
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('created')
+    expect(mintOrgPullCredential).toHaveBeenCalledTimes(1)
+    // Unusable does not mean ours: invariant 1 still forbids touching it.
+    const squatter = await readStored(mock, UI)
+    expect(squatter.blob).toBe(emptyEntry)
+    expect(squatter.labels['clerum.io/managed-by']).toBeUndefined()
+  })
+
+  // A caller that actually needs that namespace must still fail — unusable is not "fine",
+  // it is "fatal to whoever references it". Otherwise we would persist a CRD pointing at a
+  // Secret the kubelet cannot use, which is the silent ImagePullBackOff this exists to stop.
+  it('still fails a caller that requires the namespace holding the empty foreign entry', async () => {
+    const { gateway, mock } = gw()
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, UI, {
+      type: 'kubernetes.io/dockerconfigjson',
+      data: {
+        [DOCKERCONFIG_KEY]: Buffer.from(JSON.stringify({ auths: { [HOST]: {} } })).toString(
+          'base64'
+        ),
+      },
+    })
+
+    await expect(ensureRegistryPullSecrets(gateway, ALL)).rejects.toMatchObject({
+      reason: 'foreign_secret_unusable',
+      status: 409,
+    })
+  })
+
+  // Same tightening, our side of the fence: an empty entry in a Secret WE own is broken, not
+  // healthy. Left as "valid" it would survive every pass while pulling anonymously.
+  it('repairs a Secret we own whose entry names our host but carries no credential', async () => {
+    const { gateway, mock } = gw()
+    mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
+      type: 'kubernetes.io/dockerconfigjson',
+      labels: OURS,
+      annotations: { [FINGERPRINT_ANNOTATION]: fingerprintOf('efrk_live') },
+      data: {
+        [DOCKERCONFIG_KEY]: Buffer.from(JSON.stringify({ auths: { [HOST]: {} } })).toString(
+          'base64'
+        ),
+      },
+    })
+
+    await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('repaired')
+    expect(decodeHosts((await readStored(mock, NS)).blob)).toEqual([HOST])
+  })
+
   // The remedy is not obvious from a bare 409 — the namespace that fails is not the one
   // holding the external Secret — so the message has to name both and say what to do.
   it('names the external namespace, the unfillable one, and both remedies', async () => {
