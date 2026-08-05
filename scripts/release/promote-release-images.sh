@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Anchored to this script's own location, not the caller's cwd. The
+# workflow always invokes this from the repo root, but node's dynamic
+# import() below resolves a relative specifier against the current
+# directory, not the script file -- run this from any other directory and
+# "./scripts/release/images-manifest.mjs" silently resolves to the wrong
+# (or a nonexistent) path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 REGISTRY="ghcr.io/evenfire-ai"
 DRY_RUN="${DRY_RUN:-true}"
 RELEASE_REF="${RELEASE_REF:?RELEASE_REF is required}"
@@ -25,7 +33,7 @@ MOVE_STABLE=false
 # report success -- and promote nothing -- after failing to even read its
 # own image list. Command substitution assignment IS visible to `set -e`.
 if ! IMAGES_TSV="$(node -e '
-  import("./scripts/release/images-manifest.mjs").then(m =>
+  import("'"$SCRIPT_DIR"'/images-manifest.mjs").then(m =>
     m.publishedImages().forEach(i => console.log(`${i.name}\t${(i.source_paths||[]).join(",")}`)))')"; then
   echo "::error::could not load the published image list (deploy/images.json via images-manifest.mjs); see the Node error above" >&2
   exit 1

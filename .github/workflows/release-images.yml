@@ -36,8 +36,14 @@ jobs:
         run: |
           set -euo pipefail
           VER=v0.20.2
+          # sudo on the extract, matching ci-public.yml's precedent for
+          # installing a binary into /usr/local/bin (kubectl at :411,
+          # gitleaks at :495). This path only runs for real on a release
+          # tag push, so it can't be rehearsed beforehand -- match what's
+          # already proven rather than relying on the non-sudo form hosted
+          # runners happen to permit today.
           curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${VER}/go-containerregistry_Linux_x86_64.tar.gz" \
-            | tar -xz -C /usr/local/bin crane
+            | sudo tar -xz -C /usr/local/bin crane
           crane version
 
       - name: Log in to ghcr.io

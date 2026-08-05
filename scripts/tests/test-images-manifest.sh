@@ -233,6 +233,122 @@ assert_every_matrix_image_has_a_manifest_row() {
   fi
 }
 
+# deploy/images.json's source_paths is a FOURTH hand-maintained copy of the
+# same path data as build-publish.yml's `filters:` block (the paths-filter
+# step in the detect job) -- on top of the image/path/dockerfile/rooted
+# copies the cases above already guard. `filters:` decides which images get
+# rebuilt; resolve-release-images.mjs reads source_paths to decide which
+# images the release gate still watches for source changes after the
+# published build. They agree today (checked programmatically), but nothing
+# enforced it: add a path to one image's `filters:` entry and forget
+# source_paths, and builds stay correct while the release gate silently
+# stops watching that path -- letting a release promote an image whose
+# source moved after it was built.
+#
+# Several images share one filter (mcp-host/-slim/-full/-desktop all read
+# needs.detect.outputs.mcp-host; the four workflow-recipes-family images
+# share needs.detect.outputs.workflow-recipes), so each image is mapped to
+# its filter via its own `changed: ${{ needs.detect.outputs.<key> }}`
+# expression in the build-push include: list, not by assuming the image
+# name equals the filter key.
+#
+# \x27 stands in for a literal apostrophe (the filters: block quotes its
+# paths, e.g. - 'control-api/**') so the regex source needs no single quote
+# that would otherwise close the outer bash '...' this whole script is
+# wrapped in.
+#
+# Same guard-and-.catch() treatment as the other workflow-parsing cases
+# above, for the same reason: an unguarded regex miss here must be a loud
+# fail, not empty stdout read as "no mismatches". Additionally, any line
+# inside the filters: block that matches neither a "key:" line nor a
+# "- 'path'" line is itself a parse failure rather than a silently dropped
+# line -- a structural change to the block (e.g. a multi-line YAML anchor)
+# must not quietly shrink the parsed path list to something that happens to
+# still match.
+assert_source_paths_match_filters() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter "filters:" block (a line "filters: |" through the blank line before "  build-push:") in ${wfPath}`)
+        process.exit(1)
+      }
+
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        } else {
+          console.log(`PARSE_ERROR: unrecognized line in the filters: block: ${JSON.stringify(line)}`)
+          process.exit(1)
+        }
+      }
+      if (Object.keys(filters).length === 0) {
+        console.log("PARSE_ERROR: the filters: block parsed to zero filter keys")
+        process.exit(1)
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section (a line "include:" through the next 4-space-indented "steps:") in ${wfPath}`)
+        process.exit(1)
+      }
+      const blocks = sectionMatch[1].split(/\n(?=\s*- image:)/)
+      const filterKeyOf = {}
+      for (const block of blocks) {
+        const name = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!name) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (!changedKey) {
+          console.log(`PARSE_ERROR: matrix entry ${name} has no "changed: \${{ needs.detect.outputs.<key> }}" line`)
+          process.exit(1)
+        }
+        filterKeyOf[name] = changedKey
+      }
+      if (Object.keys(filterKeyOf).length === 0) {
+        console.log("PARSE_ERROR: parsed zero image -> filter-key mappings from the build-push matrix")
+        process.exit(1)
+      }
+
+      const bad = []
+      for (const [name, filterKey] of Object.entries(filterKeyOf)) {
+        const img = m.IMAGES.find(i => i.name === name)
+        if (!img) { bad.push(`${name}:no-manifest-row`); continue }
+        const filterPaths = filters[filterKey]
+        if (!filterPaths) { bad.push(`${name}:no-filters-block-for-${filterKey}`); continue }
+        const manifestPaths = [...(img.source_paths || [])].sort()
+        const wfPaths = [...filterPaths].sort()
+        if (JSON.stringify(manifestPaths) !== JSON.stringify(wfPaths)) {
+          bad.push(`${name}:source_paths=[${manifestPaths.join("|")}] filter[${filterKey}]=[${wfPaths.join("|")}]`)
+        }
+      }
+      console.log(bad.join(","))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "source_paths/filters comparison failed: $output"
+  elif [ -z "$output" ]; then
+    pass "every image's source_paths matches its filter's path list in build-publish.yml"
+  else
+    fail "source_paths disagrees with filters: $output"
+  fi
+}
+
 # THREE copies of the 28-image list exist in build-publish.yml, not two:
 # build-push's `image:` matrix dimension (the array that, crossed with
 # `arch`, produces the 56 base combinations), build-push's `include:` list
@@ -355,6 +471,7 @@ assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_unpublished_images_are_exactly_the_known_three
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
+assert_source_paths_match_filters
 assert_all_three_image_lists_agree
 assert_every_defined_case_is_invoked
 
