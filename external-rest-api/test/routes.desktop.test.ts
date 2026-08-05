@@ -88,8 +88,14 @@ describe('routes/desktop', () => {
       rpcProxyVersion: releaseManifest.rpcProxyVersion,
       desktopVersion: releaseManifest.desktopVersion,
       minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
-      releaseTag: `desktop-app-${releaseManifest.desktopVersion}`,
-      releaseUrl: `https://github.com/example/evenfire/releases/tag/desktop-app-${releaseManifest.desktopVersion}`,
+      releaseTag: `v${releaseManifest.desktopVersion}`,
+      releaseUrl: `https://github.com/example/evenfire/releases/tag/v${releaseManifest.desktopVersion}`,
     })
+  })
+
+  it('defaults the release base URL to the real repository', async () => {
+    delete process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL
+    const { config } = await import('../src/config.js')
+    expect(config.desktopReleaseBaseUrl).toBe('https://github.com/evenfire-ai/evenfire/releases')
   })
 })

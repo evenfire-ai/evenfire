@@ -60,8 +60,11 @@ jobs:
           - workflow-approval-request-reader
           - stdio-bridge
           - external-rest-api
+          - profile-ui
           - desktop-app
+          - profile-ui
           - mcp-servers
+          - packages/desktop-app-links
           - packages/workflow-runtime-core
           - packages/workflow-sdk
 
@@ -110,7 +113,7 @@ jobs:
       # ~10 pre-existing type errors in its __tests__ — worth fixing, but as its own
       # change rather than smuggled into a CI-coverage PR.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
@@ -309,6 +312,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Run bash -n on all .sh files
         run: |
@@ -336,6 +341,18 @@ jobs:
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
+
+      - name: Test release coordinates (writer, checker, floor decoupling)
+        run: bash scripts/tests/test-release-coordinates.sh
+
+      - name: Test precommit release-manifest exemption
+        run: bash scripts/tests/test-precommit-release-manifest-ignore.sh
+
+      - name: Validate release manifest matches package versions
+        run: node scripts/release/update-desktop-release-manifest.mjs --validate-only
+
+      - name: Validate service version bumps
+        run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
 
   # ─── Platform NGINX image guard (CVE baseline) ────────────────────────────
   nginx-image-guard:

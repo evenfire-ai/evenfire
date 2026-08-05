@@ -29,6 +29,18 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     // The sidebar's primary nav region. 'Settings' lives in the footer outside
     // this region, so it is targeted with a global locator below.
     const mainNav = page.getByRole('navigation', { name: 'Main sections' })
+    const sidebar = page.locator('.cu-sidebar')
+    await expect(sidebar).toHaveCount(1)
+    const sidebarElement = await sidebar.elementHandle()
+    if (!sidebarElement) throw new Error('Control UI sidebar did not mount')
+
+    async function expectPersistentSidebar() {
+      expect(
+        await sidebarElement.evaluate(
+          element => element.isConnected && element === document.querySelector('.cu-sidebar')
+        )
+      ).toBe(true)
+    }
 
     // 1) Agents — sidebar href is /agents, which next.config rewrites to the
     //    /hosts page (the browser URL is not stable across rewrites), so assert
@@ -37,6 +49,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expect(
       page.getByText('Manage available agents and their host mappings.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-agents')
 
     // 2) Contexts — /contexts is a real App Router segment; URL is stable.
@@ -45,6 +58,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expect(
       page.getByText('Group connectors into reusable access scopes.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-contexts')
 
     // 3) Connectors — sidebar href is /connectors (rewritten from /mcp-servers);
@@ -54,6 +68,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expect(
       page.getByText('Browse connector deployments and context bindings.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-connectors')
 
     // 4) External Channels — sidebar href is /external-channels (rewritten from
@@ -63,20 +78,18 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expect(
       page.getByText('Route channel messages to the selected agent.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-external-channels')
 
-    // 5) LLM Models — this is an expandable sidebar GROUP rendered as a <button>
-    //    (not a link), so clicking it only toggles its subnav. Expand the group,
-    //    then follow the 'Catalog' child link (href = CONTROL_ROUTES.llmModels.root
-    //    = /llm-models) into the model catalog page. Scope to the sidebar nav so
-    //    the 'Catalog' match is unambiguous.
-    await mainNav.getByRole('button', { name: 'LLM Models', exact: true }).click()
-    await mainNav.getByRole('link', { name: 'Catalog', exact: true }).click()
+    // 5) LLM Models — Catalog and Discovery Review share one tabbed operator
+    //    surface, so the sidebar uses one direct link.
+    await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
     // The subtitle is long; anchor on a unique leading substring.
     await expect(
-      page.getByText('Operator-declared allowlist of usable models per provider')
+      page.getByText('The authoritative allowlist of manual and discovered models')
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-llm-models')
 
     // 6) Users & Teams — sidebar href is /users-and-teams/users (rewritten from
@@ -89,6 +102,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
         { exact: true }
       )
     ).toBeVisible({ timeout: 20_000 })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-users-teams')
 
     // 7) Settings — rendered in the sidebar FOOTER (outside 'Main sections').
@@ -100,6 +114,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expect(page.getByText('Manage your Control UI admin account and theme.')).toBeVisible({
       timeout: 20_000,
     })
+    await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-settings')
   })
 })

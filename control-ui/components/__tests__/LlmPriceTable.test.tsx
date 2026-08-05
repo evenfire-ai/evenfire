@@ -24,7 +24,9 @@ function renderTable(overrides: Partial<React.ComponentProps<typeof LlmPriceTabl
   return render(
     <LlmPriceTable
       items={prices}
+      unpricedItems={[]}
       onCreate={vi.fn()}
+      onAddMissingPrice={vi.fn()}
       onEdit={vi.fn()}
       onDelete={vi.fn().mockResolvedValue(undefined)}
       onRefresh={vi.fn()}
@@ -71,25 +73,53 @@ describe('LlmPriceTable', () => {
     expect(screen.getByText('No prices match this search.')).toBeInTheDocument()
   })
 
-  it('renders the banner slot inside the card, after the panel header (not above it)', () => {
-    const { container } = renderTable({
-      banner: <div data-testid="unpriced-banner">2 models have no price</div>,
+  it('renders an unpriced model as a compact missing row with an add-price warning', () => {
+    const onAddMissingPrice = vi.fn()
+    renderTable({
+      unpricedItems: [{ provider: 'openai', model: 'gpt-5' }],
+      onAddMissingPrice,
     })
-    const card = container.querySelector('.cu-card')
-    const slot = container.querySelector('.cu-px-unpriced-slot')
-    // The banner lives in the in-card slot so it can't push the page layout.
-    expect(slot).not.toBeNull()
-    expect(card?.contains(slot as Node)).toBe(true)
-    expect(slot?.querySelector('[data-testid="unpriced-banner"]')).not.toBeNull()
-    // Slot must come after the sticky panel header inside the card.
-    const head = card?.querySelector('.cu-table-panel__head') as HTMLElement
-    expect(
-      head.compareDocumentPosition(slot as Node) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
+
+    expect(screen.getByText('gpt-5')).toBeInTheDocument()
+    expect(screen.getByText('Missing')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'OpenAI/gpt-5 has no enabled price' })).toBeVisible()
+    expect(screen.getByRole('link', { name: 'Add price' })).toHaveAttribute(
+      'href',
+      '/cost-and-usage/llm-prices/new?provider=openai&model=gpt-5'
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add price for OpenAI/gpt-5' }))
+    expect(onAddMissingPrice).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5' })
   })
 
-  it('omits the banner slot when no banner is provided', () => {
-    const { container } = renderTable()
-    expect(container.querySelector('.cu-px-unpriced-slot')).toBeNull()
+  it('decorates an existing unpriced price row without duplicating it', () => {
+    renderTable({
+      unpricedItems: [{ provider: 'claude', model: 'claude-sonnet-4-6' }],
+    })
+
+    expect(screen.getAllByText('claude-sonnet-4-6')).toHaveLength(1)
+    expect(
+      screen.getByRole('button', {
+        name: 'Anthropic/claude-sonnet-4-6 has no enabled price',
+      })
+    ).toBeVisible()
+    expect(screen.getByRole('link', { name: 'Review price' })).toHaveAttribute(
+      'href',
+      '/cost-and-usage/llm-prices/price-1/edit'
+    )
+    expect(screen.queryByText('Missing')).toBeNull()
+  })
+
+  it('supports an unpriced model without a specific provider', () => {
+    renderTable({
+      items: [],
+      unpricedItems: [{ provider: null, model: 'shared-model' }],
+    })
+
+    expect(screen.getByText('Any provider')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Add price' })).toHaveAttribute(
+      'href',
+      '/cost-and-usage/llm-prices/new?model=shared-model'
+    )
   })
 })

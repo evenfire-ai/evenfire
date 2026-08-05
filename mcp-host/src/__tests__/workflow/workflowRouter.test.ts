@@ -92,7 +92,13 @@ async function createTestApp(
   app.use('/api/v1/workflow', createWorkflowRouter(service as never))
 
   return new Promise(resolve => {
-    const server = app.listen(0, () => {
+    // Bind to 127.0.0.1 explicitly, not the wildcard listen(0). macOS's
+    // ephemeral allocator can hand a wildcard bind a port a daemon (Docker,
+    // VS Code) already holds on 127.0.0.1, and the kernel routes loopback to
+    // the more-specific bind — so this test's fetch would reach that foreign
+    // process and see its response instead of ours. A specific bind cannot be
+    // handed an occupied port, which removes the flake at its source.
+    const server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address() as AddressInfo
       resolve({ baseUrl: `http://127.0.0.1:${addr.port}`, server })
     })

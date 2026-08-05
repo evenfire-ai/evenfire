@@ -542,8 +542,9 @@ else
   build_control_ui_image
 
   build_image "profile-ui" \
-    "${PROJECT_DIR}/profile-ui" \
-    "clerum/profile-ui:test"
+    "${PROJECT_DIR}" \
+    "clerum/profile-ui:test" \
+    "${PROJECT_DIR}/profile-ui/Dockerfile"
 fi
 
 # Registry now lives in the sibling evenfire-registry repo. Use

@@ -1,7 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
+  type RegistryConnectionStatus,
   type RegistryRecoveryError,
   disconnectRegistryConnection,
   getRegistryConnection,
@@ -9,7 +12,9 @@ import {
   requestRegistryConnection,
   submitRegistryClaim,
 } from '../lib/api'
+import { usePublishScope } from '../lib/hooks/usePublishScope'
 import { useConfirmDialog } from './ConfirmDialog'
+import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { Button, TextInput } from './ui'
@@ -31,9 +36,50 @@ type View =
   | { kind: 'not-self-hosted' }
   | { kind: 'error' }
 
+function viewForRegistryStatus(s: RegistryConnectionStatus): View {
+  if (s.state === 'connected') {
+    return { kind: 'connected', org: s.org, authEnabled: s.authEnabled }
+  }
+  if (s.state === 'connecting') {
+    return {
+      kind: 'connecting',
+      deploymentId: s.deploymentId,
+      requestedOrgName: s.requestedOrgName,
+      authEnabled: s.authEnabled,
+      recoveryError: s.recoveryError,
+    }
+  }
+  if (s.state === 'approved') {
+    return {
+      kind: 'approved',
+      deploymentId: s.deploymentId,
+      requestedOrgName: s.requestedOrgName,
+    }
+  }
+  if (s.state === 'rejected') return { kind: 'rejected', requestedOrgName: s.requestedOrgName }
+  if (s.state === 'pending') {
+    return {
+      kind: 'pending',
+      deploymentId: s.deploymentId,
+      requestedOrgName: s.requestedOrgName,
+    }
+  }
+  if (s.state === 'disconnected') return { kind: 'request' }
+
+  const never: never = s.state
+  void never
+  return { kind: 'error' }
+}
+
+function viewNeedsPublishScopeResync(view: View): boolean {
+  return view.kind === 'connected' || view.kind === 'request'
+}
+
 export default function RegistryConnectPanel() {
   const { showToast } = useToast()
+  const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const { refresh: refreshPublishScope } = usePublishScope()
   const [view, setView] = useState<View>({ kind: 'loading' })
   // request-form fields
   const [orgName, setOrgName] = useState('')
@@ -52,49 +98,27 @@ export default function RegistryConnectPanel() {
   // approved and a human must paste the token they were given out of band —
   // A1's claim token only becomes redeemable once the registry poll flips
   // pending → approved.
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<View | null> => {
     try {
       const s = await getRegistryConnection()
-      if (s.state === 'connected')
-        setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
-      else if (s.state === 'connecting')
-        setView({
-          kind: 'connecting',
-          deploymentId: s.deploymentId,
-          requestedOrgName: s.requestedOrgName,
-          authEnabled: s.authEnabled,
-          recoveryError: s.recoveryError,
-        })
-      else if (s.state === 'approved')
-        setView({
-          kind: 'approved',
-          deploymentId: s.deploymentId,
-          requestedOrgName: s.requestedOrgName,
-        })
-      else if (s.state === 'rejected')
-        setView({ kind: 'rejected', requestedOrgName: s.requestedOrgName })
-      else if (s.state === 'pending')
-        setView({
-          kind: 'pending',
-          deploymentId: s.deploymentId,
-          requestedOrgName: s.requestedOrgName,
-        })
-      else if (s.state === 'disconnected') setView({ kind: 'request' })
-      else {
-        // Exhaustiveness guard. The old default was `{kind:'request'}`, which
-        // renders the registration FORM for any unrecognised state — and
-        // re-registering deletes the deployment keypair. A new state must be a
-        // compile error here, never a data-loss path.
-        const never: never = s.state
-        void never
-        setView({ kind: 'error' })
-      }
+      const nextView = viewForRegistryStatus(s)
+      setView(nextView)
+      return nextView
     } catch (e) {
       const code = (e as { code?: string }).code
       if (code === 'not_self_hosted') setView({ kind: 'not-self-hosted' })
       else setView({ kind: 'error' })
+      return null
     }
   }, [])
+
+  const loadAfterRegistryStateChange = useCallback(async () => {
+    const nextView = await load()
+    if (nextView && viewNeedsPublishScopeResync(nextView)) {
+      await refreshPublishScope({ force: true })
+    }
+    return nextView
+  }, [load, refreshPublishScope])
 
   useEffect(() => {
     void load()
@@ -125,6 +149,7 @@ export default function RegistryConnectPanel() {
       // approve it by hand (pending, the original claim-token flow).
       if (s.state === 'connected') {
         setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
+        void refreshPublishScope({ force: true })
         showToast(`Connected to @${s.org}.`, { tone: 'success' })
       } else if (s.state === 'connecting') {
         setView({
@@ -146,8 +171,8 @@ export default function RegistryConnectPanel() {
       }
     } catch (e) {
       const code = (e as { code?: string }).code
-      if (code === 'already_connected') await load()
-      else if (code === 'recovery_in_progress') await load()
+      if (code === 'already_connected') await loadAfterRegistryStateChange()
+      else if (code === 'recovery_in_progress') await loadAfterRegistryStateChange()
       else if (code === 'org_blocklisted')
         setFormError('That organization name is not available. Try a different one.')
       else if (code === 'org_name_taken')
@@ -182,6 +207,7 @@ export default function RegistryConnectPanel() {
       const { org } = await submitRegistryClaim({ claimToken: claimToken.trim() })
       setClaimToken('')
       setView({ kind: 'connected', org })
+      void refreshPublishScope({ force: true })
       showToast(`Connected to @${org}.`, { tone: 'success' })
     } catch (e) {
       const code = (e as { code?: string }).code
@@ -196,7 +222,7 @@ export default function RegistryConnectPanel() {
           'This deployment can no longer authenticate: its one-time credentials were issued but never stored. Disconnect, then register again with a different organization name.'
         )
       else if (code === 'not_pending')
-        await load() // server state moved on — re-sync
+        await loadAfterRegistryStateChange() // server state moved on — re-sync
       else setFormError('Could not complete the claim. Try again shortly.')
     } finally {
       setBusy(false)
@@ -213,10 +239,13 @@ export default function RegistryConnectPanel() {
       const s = await recoverRegistryConnection()
       if (s.state === 'connected') {
         setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
+        void refreshPublishScope({ force: true })
         showToast(`Connected to @${s.org}.`, { tone: 'success' })
       } else {
-        await load()
-        setFormError('Still finishing the connection. Try again in a moment.')
+        const nextView = await loadAfterRegistryStateChange()
+        if (!nextView || !viewNeedsPublishScopeResync(nextView)) {
+          setFormError('Still finishing the connection. Try again in a moment.')
+        }
       }
     } catch (e) {
       const code = (e as { code?: string }).code
@@ -228,7 +257,7 @@ export default function RegistryConnectPanel() {
         setFormError('This deployment has been suspended by Evenfire. Contact support.')
       else if (code === 'client_unavailable')
         setFormError('This deployment can no longer authenticate. Contact support.')
-      else if (code === 'not_recoverable') await load()
+      else if (code === 'not_recoverable') await loadAfterRegistryStateChange()
       else setFormError('Could not finish connecting. Try again shortly.')
     } finally {
       setBusy(false)
@@ -241,6 +270,7 @@ export default function RegistryConnectPanel() {
     setBusy(true)
     try {
       await disconnectRegistryConnection()
+      void refreshPublishScope({ force: true })
     } catch {
       /* best-effort — the next GET reports disconnected once the row is gone */
     } finally {
@@ -252,10 +282,11 @@ export default function RegistryConnectPanel() {
   }
 
   // From the `connecting` view: with re-registration blocked server-side by
-  // recovery_in_progress, this DELETE is now the ONLY remaining path that can
+  // recovery_in_progress, this DELETE is the ONLY remaining path that can
   // destroy a recoverable deployment — it deletes the keypair and permanently
-  // squats the org name at the registry. Route it through the same confirm
-  // dialog as handleDisconnect instead of a bare button.
+  // squats the org name at the registry. It is a broken-state recovery action
+  // (the connection never completed), so unlike the removed connected-state
+  // Disconnect it is kept — but gated behind a danger confirm, never a bare button.
   async function handleStartOverFromConnecting() {
     const ok = await confirm({
       title: 'Start over',
@@ -268,6 +299,7 @@ export default function RegistryConnectPanel() {
     setBusy(true)
     try {
       await disconnectRegistryConnection()
+      void refreshPublishScope({ force: true })
     } catch {
       /* best-effort — the next GET reports disconnected once the row is gone */
     } finally {
@@ -278,45 +310,15 @@ export default function RegistryConnectPanel() {
     setView({ kind: 'request' })
   }
 
-  async function handleDisconnect() {
-    const ok = await confirm({
-      title: 'Disconnect from the Evenfire Registry',
-      message:
-        'This deletes this deployment’s stored registry credentials. It will stop publishing and pulling private images until you connect again. This cannot be undone.',
-      confirmLabel: 'Disconnect',
-      tone: 'danger',
-    })
-    if (!ok) return
-    try {
-      await disconnectRegistryConnection()
-      showToast('Disconnected from the Evenfire Registry.', { tone: 'success' })
-    } catch {
-      showToast('Could not disconnect.', { tone: 'error' })
-    }
-    setView({ kind: 'request' })
-  }
-
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader
-          title="Connect to Evenfire Registry"
-          actions={
-            view.kind === 'connected' ? (
-              <Button
-                type="button"
-                variant="danger"
-                size="sm"
-                onClick={() => void handleDisconnect()}
-              >
-                Disconnect
-              </Button>
-            ) : null
-          }
-        />
+        <TablePanelHeader title="Connect to Evenfire Registry" />
 
         <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading…</p> : null}
+          {view.kind === 'loading' ? (
+            <SectionLoadingSkeleton label="Loading registry connection" rows={3} />
+          ) : null}
 
           {view.kind === 'not-self-hosted' ? (
             <p className="cu-banner">
@@ -485,10 +487,25 @@ export default function RegistryConnectPanel() {
           ) : null}
 
           {view.kind === 'connected' ? (
-            <p className="cu-banner cu-banner--ok">
-              Connected to the Evenfire Registry{view.org ? ` as @${view.org}` : ''}. This
-              deployment can now publish entries and push/pull images.
-            </p>
+            <div className="cu-form-stack">
+              <p className="cu-banner cu-banner--ok">
+                Connected to the Evenfire Registry{view.org ? ` as @${view.org}` : ''}. This
+                deployment can now publish entries and push/pull images.
+              </p>
+              <p className="cu-muted-note">
+                This connection is permanent: the organization name is tied to this deployment.
+                Removing it later takes a change to the cluster.
+              </p>
+              <div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
+                >
+                  Go to your organization
+                </Button>
+              </div>
+            </div>
           ) : null}
         </div>
       </div>

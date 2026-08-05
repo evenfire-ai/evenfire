@@ -3,6 +3,7 @@
 import React, { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -83,7 +84,18 @@ function CreateLlmModelContent() {
 
 export default function CreateLlmModelPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <BodyLoadingSkeleton
+          backLabel="Back to models"
+          icon={<IconModels />}
+          primaryActionLabel="Add model"
+          sections={3}
+          subtitle="Allow a provider/model so agents and runtime can select it."
+          title="Add allowed model"
+        />
+      }
+    >
       <CreateLlmModelContent />
     </Suspense>
   )

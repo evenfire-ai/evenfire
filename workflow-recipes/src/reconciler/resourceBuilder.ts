@@ -1,6 +1,11 @@
 import * as k8s from '@kubernetes/client-node'
 import { createHash, randomBytes } from 'node:crypto'
 import {
+  EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+  isPlatformRegistryImage,
+} from '@clerum/workflow-runtime-core'
+import { loadConfig } from '../config'
+import {
   ConfigMapResourceDef,
   CronJobDef,
   DaemonSetDef,
@@ -879,8 +884,22 @@ function buildPodTemplate(
     const st = secretKeys?.get(name)?.state
     return st !== 'denied' && st !== 'error'
   })
+  // The PLATFORM pull credential is injected here, AFTER the ownership filter, for any
+  // workload whose image is hosted on our own registry. It is deliberately not something
+  // a recipe declares: control-api provisions it and labels it `managed-by=control-api`
+  // only, which is *unlabeled* to the #637 model — so a recipe naming it would be denied,
+  // and making it `shared` would let any recipe mount it as an envSecret and read the
+  // credential. Injecting it means the recipe never references it, so it is never
+  // classified, and there is no path for a recipe to reach its contents.
+  const pullSecretNames = [...allowedPullSecrets]
+  if (
+    isPlatformRegistryImage(workload.image, loadConfig().registryUrl) &&
+    !pullSecretNames.includes(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+  ) {
+    pullSecretNames.push(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+  }
   const imagePullSecrets =
-    allowedPullSecrets.length > 0 ? allowedPullSecrets.map(name => ({ name })) : undefined
+    pullSecretNames.length > 0 ? pullSecretNames.map(name => ({ name })) : undefined
   const ownershipInitContainer = buildVolumeOwnershipInitContainer(workload)
 
   const pluginSdkEnv = buildPluginWorkloadSdkEnv(

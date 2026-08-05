@@ -2,11 +2,11 @@
 
 This is the orientation guide. Read it first, then branch:
 
-| You want to…                               | Go to                                                             |
-| ------------------------------------------ | ----------------------------------------------------------------- |
-| Set up credentials and the model allowlist | [Operator guide](../deploy/llm-providers.md)                      |
-| Add a provider that isn't in the list      | [Adding a provider](adding-a-provider.md)                         |
-| Understand the Control UI surface          | [Control UI](../surfaces/control-ui.md)                          |
+| You want to…                               | Go to                                        |
+| ------------------------------------------ | -------------------------------------------- |
+| Set up credentials and the model allowlist | [Operator guide](../deploy/llm-providers.md) |
+| Add a provider that isn't in the list      | [Adding a provider](adding-a-provider.md)    |
+| Understand the Control UI surface          | [Control UI](../surfaces/control-ui.md)      |
 
 > Code and API group still use the historical name **clerum** (`clerum.io`,
 > `CLERUM_*`, `@clerum/*`). Same project — [code names](../concepts/code-names.md).
@@ -232,9 +232,11 @@ to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 
 - **Fail-closed**: a row must exist and be `enabled`. A provider with no enabled
   rows is unusable and flagged in the wizard.
-- **Discovery**: `/llm-models/discovery` can sync a catalog from models.dev,
-  which lands rows as **disabled** for the operator to curate — it never
-  auto-enables anything.
+- **Discovery review**: `/llm-models` and `/llm-models/discovery` are the
+  route-backed Catalog and Discovery Review tabs of one operator surface. A
+  models.dev sync still lands rows as **disabled** for the operator to curate —
+  it never auto-enables anything. Models missing from the latest live catalog
+  remain in Catalog with a **Stale** row indicator and provider-level stale count.
 - **Deployed resources are never interrupted.** If a model falls out of the
   allowlist, running Hosts keep working (a `WARN` plus a metric, marked "out of
   allowlist" in the UI). Hard enforcement applies only to _new_ selections: host

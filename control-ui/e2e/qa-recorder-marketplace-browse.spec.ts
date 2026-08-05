@@ -1,10 +1,10 @@
 // control-ui/e2e/qa-recorder-marketplace-browse.spec.ts
 //
-// Read-only Marketplace catalog browse journey: opens the connectors catalog,
-// exercises search + category filter, switches to the Plugins tab, then probes
-// the registry through the Control API and — when entries exist — opens the
-// first entry detail and asserts its header, version, Install action, and
-// kebab menu. Nothing is installed or mutated; no confirm flag or cleanup.
+// Read-only Marketplace catalog browse journey: opens the connector catalog,
+// exercises search + category filter, then probes the registry through the
+// Control API and — when entries exist — opens the first entry detail and
+// asserts its header, version, Install action, and kebab menu. Nothing is
+// installed or mutated; no confirm flag or cleanup.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,
@@ -25,7 +25,7 @@ type RegistryEntrySummary = {
 type RegistryEntryListResponse = { data?: RegistryEntrySummary[] }
 
 test.describe('optional QA recorder: Control UI marketplace browse', () => {
-  test('Marketplace catalog browse, search, filter, plugins tab, and first entry detail', async ({
+  test('Marketplace connector catalog browse, search, filter, and first entry detail', async ({
     page,
   }, testInfo) => {
     assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
@@ -36,7 +36,7 @@ test.describe('optional QA recorder: Control UI marketplace browse', () => {
     await page.getByRole('link', { name: 'Marketplace', exact: true }).click()
     await expect(page).toHaveURL(/\/marketplace\/connectors$/)
 
-    // Catalog shell: the TablePanelHeader subtitle and the entry-type tablist
+    // Catalog shell: the TablePanelHeader subtitle and connector-only tablist
     // render regardless of catalog size or empty/loading/error state.
     await expect(
       page.getByText('Discover and install connectors and plugins from the Marketplace.', {
@@ -47,9 +47,7 @@ test.describe('optional QA recorder: Control UI marketplace browse', () => {
     await expect(entryTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible({
       timeout: 20_000,
     })
-    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
+    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
 
     // Search: a query that matches nothing drives the result set to the empty
     // state (the catalog also shows it when entirely empty, so this is resilient
@@ -64,13 +62,6 @@ test.describe('optional QA recorder: Control UI marketplace browse', () => {
 
     // Category filter is part of the shell toolbar.
     await expect(page.getByLabel('Filter by category', { exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
-
-    // Switch to the Plugins tab; the search input re-binds to plugins.
-    await entryTabs.getByRole('tab', { name: 'Plugins', exact: true }).click()
-    await expect(page).toHaveURL(/\/marketplace\/plugins$/)
-    await expect(page.getByLabel('Search Marketplace plugins', { exact: true })).toBeVisible({
       timeout: 20_000,
     })
 

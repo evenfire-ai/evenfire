@@ -365,7 +365,7 @@ describe('memberRegistrationEnrollment', () => {
     fetchMock.mockClear()
     // Assert at the STORE boundary: with a stored credential lingering from the
     // hosted half, a dropped mode gate would still show fetch=0 while running
-    // enrollment DB reads on every remote (incl. managed/MCC) boot.
+    // enrollment DB reads on every remote (incl. managed) boot.
     store.getActiveMemberRegistrationCredential.mockClear()
     cfg.memberRegistrationMode = 'remote'
     await runBootEnrollment()

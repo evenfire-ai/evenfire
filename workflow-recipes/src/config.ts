@@ -2,6 +2,7 @@
  * Workload Recipes Controller (WRC) configuration.
  * Follows the same env-config pattern as host-context-controller/src/config.ts
  */
+import { registryHostFromUrl } from '@clerum/workflow-runtime-core'
 
 export interface DbConfig {
   connectionString?: string
@@ -36,6 +37,14 @@ export interface OperatorConfig {
    */
   sandboxUiNamespace: string
   hostNamespace: string
+  /**
+   * Base URL of the evenfire registry. Deliberately the SAME variable control-api reads
+   * (`CLERUM_REGISTRY_URL`), because both services must agree on which images are ours:
+   * control-api provisions the platform pull credential for those images, WRC attaches it.
+   * A divergence here means recipe pods silently get no credential while MCP servers do.
+   * Empty (the default) disables platform pull-secret injection entirely.
+   */
+  registryUrl: string
   selfName: string
   internalControlJwtWrcHmacSecret: string
   enableCustomCoordinatorImage: boolean
@@ -169,6 +178,34 @@ function getNetworkPolicyEnforcementMode(): NetworkPolicyEnforcementMode {
   )
 }
 
+/**
+ * Startup warning for a `CLERUM_REGISTRY_URL` the platform-registry predicate cannot use.
+ *
+ * `isPlatformRegistryImage(image, registryUrl)` derives a host from this URL and returns
+ * false for EVERY image when it cannot — so an unset or unparseable value silently turns
+ * off platform image-pull credential injection altogether. control-api still mints and
+ * writes the pull Secret and reports success; WRC just never references it, and recipe
+ * pods sit in ImagePullBackOff with no failing request to attribute it to. Unset is a
+ * legitimate configuration (no platform registry), so this warns rather than throwing —
+ * but it must not be silent. Risk R3 in
+ * docs/architecture/registry-pull-secret-recipe-workloads.md.
+ *
+ * Returns null when the URL yields a host, otherwise the message to log.
+ */
+export function registryUrlStartupWarning(registryUrl: string): string | null {
+  if (registryHostFromUrl(registryUrl)) return null
+  const cause = registryUrl?.trim()
+    ? `CLERUM_REGISTRY_URL="${registryUrl.trim()}" has no parseable host (it needs a scheme, e.g. https://)`
+    : 'CLERUM_REGISTRY_URL is not set'
+  return (
+    `[Clerum] WARN: ${cause} — platform registry image-pull credential injection is DISABLED. ` +
+    'Recipe workloads whose images come from the platform registry will fail with ImagePullBackOff ' +
+    '("unauthorized: authentication required") even though control-api provisioned the credential. ' +
+    'Project control-api-config.CLERUM_REGISTRY_URL into this Deployment — see ' +
+    'deploy/base/control-plane/workflow-recipes.yaml.'
+  )
+}
+
 export function loadConfig(): OperatorConfig {
   const workflowMaxSteps = getEnvBoundedInt(
     'WRC_MAX_WORKFLOW_STEPS',
@@ -248,6 +285,7 @@ export function loadConfig(): OperatorConfig {
     sandboxNamespace: getEnv('CLERUM_SANDBOX_NAMESPACE', 'sandbox-recipes'),
     sandboxUiNamespace: getEnv('CLERUM_SANDBOX_UI_NAMESPACE', 'sandbox-ui'),
     hostNamespace: getEnv('CLERUM_HOST_NAMESPACE', 'mcp-host'),
+    registryUrl: getEnv('CLERUM_REGISTRY_URL', ''),
     selfName: getEnv('CLERUM_OPERATOR_NAME', 'workflow-recipes'),
     internalControlJwtWrcHmacSecret: getEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', ''),
     enableCustomCoordinatorImage: getEnvBool('WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE', false),

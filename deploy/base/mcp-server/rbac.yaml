@@ -15,9 +15,20 @@ rules:
     verbs: ["get", "list"]
   # Secrets: required for registry install flow with credentials
   # (api-key/bearer-token/oauth2 tokens stored as K8s Secrets in mcp-server ns)
+  #
+  # `patch` (issue #223) backs connector credential rotation:
+  # PUT /admin/mcp-secrets/:name uses gateway.mergeSecret(), an RFC 7396
+  # merge-patch the API server applies atomically, so rotating one key cannot
+  # wipe the other credentials on the same Secret and two concurrent rotations
+  # cannot race. The alternative — read-then-replace, as PUT /admin/secrets
+  # does in the secrets namespace — carries exactly that race.
+  #
+  # Scope note: RBAC has no wildcards in resourceNames, so this verb applies to
+  # every Secret in this namespace, and it also enables removeSecretKey().
+  # No route other than the rotation endpoint uses either today.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create", "update", "delete"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
