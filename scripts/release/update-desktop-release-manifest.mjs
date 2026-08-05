@@ -87,6 +87,25 @@ export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null,
 `
 }
 
+const SEMVER_RE = /^\d+\.\d+\.\d+$/
+
+// Numeric MAJOR.MINOR.PATCH comparison. Deliberately matches the semantics of
+// compareSemverLike in desktop-app/src/appService.ts:177, which is what the
+// update gate at :840 evaluates at runtime. No prerelease handling on either
+// side, so the two cannot disagree.
+//
+// TEMPORARY: Task 5 creates scripts/release/release-coordinates.mjs and
+// replaces this local definition with an import from it. It lives here now
+// only because that module does not exist yet.
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1
+  }
+  return 0
+}
+
 function validate(manifest, versions, options = {}) {
   const fields = options.deferDesktopRelease
     ? ['externalRestApiVersion', 'rpcProxyVersion']
@@ -96,13 +115,21 @@ function validate(manifest, versions, options = {}) {
       throw new Error(`${field}=${manifest[field]} does not match package.json ${versions[field]}`)
     }
   }
-  if (manifest.minimumDesktopVersion !== manifest.desktopVersion) {
-    throw new Error('minimumDesktopVersion must match desktopVersion for this release model')
+  if (!SEMVER_RE.test(manifest.minimumDesktopVersion)) {
+    throw new Error(
+      `minimumDesktopVersion=${manifest.minimumDesktopVersion} is not MAJOR.MINOR.PATCH`
+    )
+  }
+  if (compareVersions(manifest.minimumDesktopVersion, manifest.desktopVersion) > 0) {
+    throw new Error(
+      `minimumDesktopVersion=${manifest.minimumDesktopVersion} is greater than desktopVersion=${manifest.desktopVersion}`
+    )
   }
 }
 
 const previousRef = argValue('--previous')
 const releaseId = argValue('--release-id') || 'local'
+const minimumDesktopVersion = argValue('--minimum-desktop-version')
 const validateOnly = process.argv.includes('--validate-only')
 const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
 
@@ -117,12 +144,30 @@ if (validateOnly) {
   process.exit(0)
 }
 
-const previous = previousManifest(previousRef) || {
-  releaseId,
-  externalRestApiVersion: versions.externalRestApiVersion,
-  rpcProxyVersion: versions.rpcProxyVersion,
-  desktopVersion: versions.desktopVersion,
-  minimumDesktopVersion: versions.desktopVersion,
+let previous = previousManifest(previousRef)
+
+// HEAD's floor always outranks one read via --previous: HEAD reflects the
+// most recent operator decision. Never synthesize a floor from
+// desktopVersion -- if nothing readable carries a floor, the operator must
+// say so explicitly.
+const inherited = manifestAtHead?.minimumDesktopVersion || previous?.minimumDesktopVersion
+
+if (!inherited && !minimumDesktopVersion) {
+  throw new Error(
+    'no minimumDesktopVersion could be read; pass ' +
+      '--minimum-desktop-version explicitly rather than ' +
+      'defaulting it to desktopVersion'
+  )
+}
+
+if (!previous) {
+  previous = {
+    releaseId,
+    externalRestApiVersion: versions.externalRestApiVersion,
+    rpcProxyVersion: versions.rpcProxyVersion,
+    desktopVersion: versions.desktopVersion,
+    minimumDesktopVersion: inherited || minimumDesktopVersion,
+  }
 }
 const prevVersions = previousVersions(previousRef)
 
@@ -147,7 +192,22 @@ if (
     next.desktopVersion !== versions.desktopVersion)
 ) {
   next.desktopVersion = versions.desktopVersion
-  next.minimumDesktopVersion = versions.desktopVersion
+  changed = true
+}
+
+// The floor is a compatibility control, not a version. It moves ONLY when the
+// operator asks. Advancing it with every release would show "update required"
+// to every user of the previous release. See appService.ts:840.
+//
+// `previous` may carry a floor copied from an old --previous ref; always
+// re-apply `inherited` (HEAD-first) before letting an explicit flag win, so
+// a floor already raised on HEAD is never silently reverted.
+if (inherited && next.minimumDesktopVersion !== inherited) {
+  next.minimumDesktopVersion = inherited
+  changed = true
+}
+if (minimumDesktopVersion) {
+  next.minimumDesktopVersion = minimumDesktopVersion
   changed = true
 }
 
