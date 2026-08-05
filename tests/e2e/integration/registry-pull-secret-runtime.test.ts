@@ -67,6 +67,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { KUBE_CONTEXT, kubectl, sleep } from '../helpers.js'
 import { CONTROL_API_URL, fetchJson, isServiceUp } from './helpers.integration.js'
 
@@ -136,6 +139,8 @@ let mcpInstalled = false
 let mcpImage = ''
 /** True only when the node's docker cache was actually made cold before the MCP install. */
 let nodeWasCold = false
+/** Content digest the kubelet actually resolved and ran, for the privacy re-proof. */
+let pulledDigest = ''
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -311,6 +316,73 @@ function hostFromUrl(url: string): string {
 }
 
 /** Find the `Pulled` event for `pod` that mentions `image`. */
+/**
+ * The registry host of an image reference, by parsing rather than prefix matching.
+ *
+ * An OCI reference's host is the first `/`-separated segment, and only when it looks like a
+ * host (contains a dot or colon, or is `localhost`) — otherwise the reference is a Docker
+ * Hub shorthand like `nginx:latest` with no host at all.
+ */
+function imageHostOf(image: string): string {
+  const first = image.split('/')[0] ?? ''
+  if (first === 'localhost' || first.includes('.') || first.includes(':')) return first
+  return ''
+}
+
+/** `registry.host/org/name:tag` → `org/name`, the path the registry API is addressed by. */
+function imageRepositoryOf(image: string): string {
+  const withoutHost = image.split('/').slice(1).join('/')
+  // Strip a digest first: `repo@sha256:…` also contains a colon, so tag-stripping alone
+  // would truncate the digest instead of the tag.
+  const withoutDigest = withoutHost.split('@')[0]
+  const lastColon = withoutDigest.lastIndexOf(':')
+  const lastSlash = withoutDigest.lastIndexOf('/')
+  return lastColon > lastSlash ? withoutDigest.slice(0, lastColon) : withoutDigest
+}
+
+/** The tag or digest an image reference points at. */
+function imageReferenceOf(image: string): string {
+  const withoutHost = image.split('/').slice(1).join('/')
+  const at = withoutHost.indexOf('@')
+  if (at !== -1) return withoutHost.slice(at + 1)
+  const lastColon = withoutHost.lastIndexOf(':')
+  const lastSlash = withoutHost.lastIndexOf('/')
+  return lastColon > lastSlash ? withoutHost.slice(lastColon + 1) : 'latest'
+}
+
+/**
+ * Ask the registry for a manifest with NO credentials.
+ *
+ * This is the privacy proof the suite was missing. Everything else here shows that a pull
+ * SUCCEEDED with the injected Secret; none of it shows the pull would have FAILED without
+ * one — and a public image on our own host satisfies every one of those assertions. A 401/403
+ * here is the registry itself stating the repository is not anonymously readable.
+ *
+ * Returns the HTTP status, or null if the request could not be made at all (which must not
+ * be read as "private" — the caller distinguishes the two).
+ */
+async function anonymousManifestStatus(
+  repository: string,
+  reference: string
+): Promise<number | null> {
+  try {
+    const res = await fetch(`https://${registryHost}/v2/${repository}/manifests/${reference}`, {
+      method: 'GET',
+      headers: {
+        Accept:
+          'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json',
+        // The public host sits behind a UA filter that 403s some default agents; a 403 from
+        // the edge would be indistinguishable from a 403 from the registry's authz.
+        'User-Agent': 'curl/8.7.1',
+      },
+      signal: AbortSignal.timeout(20_000),
+    })
+    return res.status
+  } catch {
+    return null
+  }
+}
+
 function pulledEventMessage(pod: string, namespace: string, image: string): string | null {
   const events = kubectlJson<{ items?: Array<{ message?: string }> }>(
     `get events -n ${namespace} --field-selector involvedObject.name=${pod},reason=Pulled`
@@ -470,7 +542,11 @@ beforeAll(async () => {
   // suite, rather than trusting it at each use site.
   const rawImage = mcpEntry?.mcp_server_meta?.imageRef ?? ''
   mcpImage = rawImage === '' ? '' : safeToken(rawImage, 'catalog imageRef')
-  fixturesAvailable = Boolean(recipeEntry) && Boolean(mcpEntry) && mcpImage.startsWith(registryHost)
+  // Exact host, not a prefix. `startsWith` also accepts `registry.evenfire.ai.example.test/…`
+  // and anything else merely beginning with our host, letting a fixture that is NOT on our
+  // registry satisfy every assertion below.
+  fixturesAvailable =
+    Boolean(recipeEntry) && Boolean(mcpEntry) && imageHostOf(mcpImage) === registryHost
   if (!fixturesAvailable) {
     // Fatal under REQUIRE_CLUSTER: without private fixtures every runtime assertion in
     // this file is unreachable, so the suite would go green having proved nothing —
@@ -745,6 +821,145 @@ describe('registry pull secret — WRC materialization onto a recipe workload', 
   }, 300_000)
 })
 
+// ─── 2b. Negative control: the image is private and the pull NEEDS a credential ──
+
+/**
+ * Everything else in this file proves a pull SUCCEEDED with the credential we provisioned.
+ * None of it proves the pull would have FAILED without one — and a PUBLIC image on our own
+ * registry host satisfies every single one of those assertions. Without this block the suite
+ * can go green while the Secret is absent, malformed, ignored, or simply unnecessary.
+ *
+ * Two independent proofs, because each covers the other's blind spot:
+ *
+ *  1. The registry refuses an anonymous manifest read (401/403). That is the registry itself
+ *     stating the repository is not world-readable, independent of anything on the node.
+ *  2. A Pod running the same image with NO `imagePullSecrets` cannot start. That is the
+ *     kubelet demonstrating the credential is load-bearing on this exact cluster — which a
+ *     registry-level check alone cannot show (node-level ambient credentials, a mirror, or a
+ *     warm cache could all serve the image without our Secret).
+ *
+ * If the fixture were ever swapped for a public image, both fail. That is the point.
+ */
+describe('registry pull secret — negative control: the pull requires the credential', () => {
+  const NEG_POD = `e2e-pullsecret-negctl-${RUN_ID}`
+
+  it('the registry refuses an anonymous manifest read for the fixture', async () => {
+    if (!ready()) return
+
+    const status = await anonymousManifestStatus(
+      imageRepositoryOf(mcpImage),
+      imageReferenceOf(mcpImage)
+    )
+    if (status === null) {
+      unprovable(`could not reach ${registryHost} anonymously to prove the fixture is private`)
+      return
+    }
+    expect(
+      [401, 403],
+      `${mcpImage} is anonymously readable (HTTP ${status}) — it is NOT a private fixture, so ` +
+        'every "the credential worked" assertion in this suite would pass without the credential'
+    ).toContain(status)
+  }, 60_000)
+
+  it('a Pod without imagePullSecrets cannot pull the private image', async () => {
+    if (!ready()) return
+
+    // `Always` so the kubelet must contact the registry even if a layer is cached, and no
+    // service-account token so nothing ambient can stand in for the pull credential.
+    const manifest = JSON.stringify({
+      apiVersion: 'v1',
+      kind: 'Pod',
+      metadata: {
+        name: NEG_POD,
+        namespace: MCP_SERVERS_NS,
+        labels: { 'e2e-negative-control': 'true' },
+      },
+      spec: {
+        automountServiceAccountToken: false,
+        restartPolicy: 'Never',
+        // Satisfies PodSecurity `restricted`. Without it the admission plugin only WARNS
+        // here, but a cluster that enforces the profile would reject the Pod outright — and
+        // this test would then report "could not create the negative-control Pod" and skip,
+        // quietly losing the assertion instead of failing.
+        securityContext: {
+          runAsNonRoot: true,
+          runAsUser: 65532,
+          seccompProfile: { type: 'RuntimeDefault' },
+        },
+        containers: [
+          {
+            name: 'probe',
+            image: mcpImage,
+            imagePullPolicy: 'Always',
+            securityContext: {
+              allowPrivilegeEscalation: false,
+              capabilities: { drop: ['ALL'] },
+            },
+          },
+        ],
+      },
+    })
+
+    // Via a file, not a heredoc: the manifest embeds an env-derived image reference, and
+    // interpolating it into a shell command is the taint path CodeQL already flagged in this
+    // file once. `apply -f <path>` keeps it out of the command line entirely.
+    const workDir = mkdtempSync(join(tmpdir(), 'e2e-pullsecret-negctl-'))
+    const manifestPath = join(workDir, 'pod.json')
+    writeFileSync(manifestPath, manifest, 'utf-8')
+
+    try {
+      const created = kubectlOrNull(`apply -n ${MCP_SERVERS_NS} -f ${manifestPath}`)
+      if (created === null) {
+        unprovable('could not create the negative-control Pod')
+        return
+      }
+
+      const failed = await waitFor(
+        () =>
+          kubectlJson<{
+            status?: {
+              phase?: string
+              containerStatuses?: Array<{ state?: { waiting?: { reason?: string } } }>
+            }
+          }>(`get pod ${NEG_POD} -n ${MCP_SERVERS_NS}`),
+        pod => {
+          const reason = pod?.status?.containerStatuses?.[0]?.state?.waiting?.reason ?? ''
+          return reason === 'ErrImagePull' || reason === 'ImagePullBackOff'
+        },
+        180_000
+      )
+
+      const observed = kubectlJson<{
+        status?: {
+          phase?: string
+          containerStatuses?: Array<{ ready?: boolean; state?: { waiting?: { reason?: string } } }>
+        }
+      }>(`get pod ${NEG_POD} -n ${MCP_SERVERS_NS}`)
+
+      // The failure that matters most: if this Pod RUNS, the image is pullable without our
+      // Secret and the entire positive path proves nothing.
+      expect(
+        observed?.status?.containerStatuses?.[0]?.ready ?? false,
+        `the no-credential Pod is RUNNING ${mcpImage} — the image does not require the pull ` +
+          'credential on this cluster, so this suite cannot prove the credential works'
+      ).toBe(false)
+      expect(
+        failed,
+        `the no-credential Pod never reported ErrImagePull/ImagePullBackOff; observed ${JSON.stringify(
+          observed?.status ?? {}
+        )}`
+      ).not.toBeNull()
+    } finally {
+      // Unconditional: a leftover ImagePullBackOff Pod in `mcp-server` reads as a product
+      // failure to the next person who looks at the namespace.
+      kubectlOrNull(
+        `delete pod ${NEG_POD} -n ${MCP_SERVERS_NS} --ignore-not-found=true --wait=false`
+      )
+      rmSync(workDir, { recursive: true, force: true })
+    }
+  }, 240_000)
+})
+
 // ─── 3. McpServer -> HCC -> Deployment, and a real private pull ─────────────
 
 describe('registry pull secret — McpServer delegation, HCC materialization, real pull', () => {
@@ -861,9 +1076,21 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
       readyPod?.images ?? [],
       `the Ready Pod is not running ${mcpImage}; it runs ${JSON.stringify(readyPod?.images ?? [])}`
     ).toContain(mcpImage)
-    expect(mcpImage.startsWith(registryHost), `${mcpImage} is not on the private registry`).toBe(
-      true
-    )
+    expect(imageHostOf(mcpImage), `${mcpImage} is not on the private registry`).toBe(registryHost)
+
+    // Pin the exact content that ran, not just the tag it was requested by. A tag can be
+    // repointed between the negative control and here; `imageID` is what the kubelet
+    // actually resolved and started.
+    const status = kubectlJson<{
+      status?: { containerStatuses?: Array<{ imageID?: string }> }
+    }>(`get pod ${podName} -n ${MCP_SERVERS_NS}`)
+    const imageID = status?.status?.containerStatuses?.[0]?.imageID ?? ''
+    const digestMatch = imageID.match(/sha256:[0-9a-f]{64}/)
+    pulledDigest = digestMatch?.[0] ?? ''
+    expect(
+      pulledDigest,
+      `the Ready Pod reports no content digest (imageID="${imageID}"), so there is nothing to prove privacy about`
+    ).not.toBe('')
   }, 300_000)
 
   it('the kubelet performed a REAL authenticated pull, not a cache hit', () => {
@@ -888,6 +1115,24 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
     expect(message).toContain('Successfully pulled image')
     expect(message, 'pull event carries no transferred byte count').toMatch(/Image size: \d+ bytes/)
   })
+
+  // Closes the loop on the negative control. That block proved the TAG is not anonymously
+  // readable; this proves it of the exact digest the kubelet actually pulled, so a tag
+  // repointed to a public image mid-run cannot slip between the two.
+  it('the exact digest that was pulled is itself not anonymously readable', async () => {
+    if (!mcpInstalled || !pulledDigest) return
+
+    const status = await anonymousManifestStatus(imageRepositoryOf(mcpImage), pulledDigest)
+    if (status === null) {
+      unprovable(`could not reach ${registryHost} anonymously to re-prove the pulled digest`)
+      return
+    }
+    expect(
+      [401, 403],
+      `the digest actually pulled (${pulledDigest}) is anonymously readable (HTTP ${status}) — ` +
+        'the credential was not required for this content'
+    ).toContain(status)
+  }, 60_000)
 })
 
 // ─── 4. Pre-persistence failure ─────────────────────────────────────────────
@@ -900,7 +1145,11 @@ describe('registry pull secret — a provisioning failure is pre-persistence', (
     try {
       planted = plantForeignSandboxUiPullSecret()
       if (!planted) {
-        console.log('[pull-secret-runtime] could not plant the foreign Secret — skipping')
+        // Same rule as everywhere else in this file: a precondition that cannot be met is
+        // not a pass. This scenario is part of the strict acceptance claim — "a provisioning
+        // failure never persists a CRD" — and a run that silently skipped it must not be
+        // counted as one that proved it.
+        unprovable('could not plant the foreign Secret, so the pre-persistence path never ran')
         return
       }
 
