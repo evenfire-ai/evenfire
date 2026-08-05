@@ -117,6 +117,51 @@ assert_pull_in_ghcr_mode_is_derived_not_stored() {
   fi
 }
 
+# A published image with no source_paths let resolve-release-images.mjs's
+# drift check silently no-op: promote-release-images.sh builds its
+# --source-paths argument via `(i.source_paths||[]).join(',')`, which
+# produces '' for a missing (or empty) array, and the resolver's
+# `if (sourcePaths)` then reads '' as "no check requested" instead of
+# "nothing to check" -- the release gate prints a digest and exits 0 across a
+# window with a real diff, never complaining. Closed at the source here
+# rather than relying on that one consumer to notice the gap.
+#
+# The real images-manifest.mjs is copied (not symlinked) into a throwaway
+# tree, same reasoning as test-promote-release-images.sh's make_repo: it
+# resolves deploy/images.json relative to its OWN file location via
+# import.meta.url, which Node follows through a symlink back to this repo's
+# real manifest -- only a real copy next to a throwaway deploy/images.json
+# reads the throwaway one.
+assert_a_published_image_with_no_source_paths_is_rejected() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/scripts/release" "$d/deploy"
+  cp "$REPO_ROOT/scripts/release/images-manifest.mjs" "$d/scripts/release/"
+  cat > "$d/deploy/images.json" <<'JSON'
+{
+  "images": [
+    {
+      "name": "widget",
+      "path": "widget",
+      "published": true,
+      "deployed_to_minikube": false
+    }
+  ]
+}
+JSON
+  local out rc
+  out="$( cd "$d" && node -e '
+    import("./scripts/release/images-manifest.mjs").catch(err => {
+      console.log(err.message)
+      process.exit(1)
+    })' 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -qi "source_paths" <<< "$out"; then
+    pass "a published image with no source_paths is rejected at load time"
+  else
+    fail "expected a named failure about missing source_paths; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_unpublished_images_are_exactly_the_known_three() {
   local got
   got="$(node -e '
@@ -468,6 +513,7 @@ assert_manifest_parses_and_is_nonempty
 assert_every_published_image_has_a_build_matrix_entry
 assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
+assert_a_published_image_with_no_source_paths_is_rejected
 assert_unpublished_images_are_exactly_the_known_three
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row

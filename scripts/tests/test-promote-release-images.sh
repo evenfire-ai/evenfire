@@ -26,6 +26,8 @@ make_repo() {
   cp "$REPO_ROOT/scripts/release/images-manifest.mjs" "$d/scripts/release/"
   cp "$REPO_ROOT/scripts/release/resolve-release-images.mjs" "$d/scripts/release/"
   cp "$REPO_ROOT/scripts/release/promote-release-images.sh" "$d/scripts/release/"
+  # resolve-release-images.mjs imports argValue from here.
+  cp "$REPO_ROOT/scripts/release/release-coordinates.mjs" "$d/scripts/release/"
   cat > "$d/deploy/images.json" <<'JSON'
 {
   "images": [
@@ -154,11 +156,11 @@ assert_the_real_promotion_copies_to_the_v_prefixed_tag() {
   ( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=false RELEASE_REF=v0.1.0 \
         bash scripts/release/promote-release-images.sh >/dev/null 2>&1 )
   local log; log="$(cat "$d/copy-log" 2>/dev/null || echo '')"
-  # The consuming kustomize component and the operator recovery docs pin
-  # newTag: v0.6.0 / MINIKUBE_IMAGE_TAG=v0.6.1 -- WITH the v. This checks the
-  # actual `crane copy` destination argument, not just an echo string, since
-  # the echo and the real copy target were two separate lines that could
-  # drift from each other.
+  # The tag that lands must carry a "v" prefix -- the consuming workstream
+  # pins a v-prefixed image tag downstream. This checks the actual `crane
+  # copy` destination argument, not just an echo string, since the echo and
+  # the real copy target were two separate lines that could drift from each
+  # other.
   if grep -q 'ghcr.io/evenfire-ai/widget:v0.1.0$' <<< "$log" && grep -q 'ghcr.io/evenfire-ai/widget:stable$' <<< "$log"; then
     pass "a real promotion copies to the v-prefixed version tag and moves :stable for a strict release"
   else

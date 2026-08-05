@@ -77,17 +77,47 @@ assert_a_non_ancestor_revision_is_rejected() {
   rm -rf "$d"
 }
 
+assert_a_descendant_revision_is_rejected_with_accurate_advice() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  local new; new="$( cd "$d" && git rev-parse HEAD )"
+  local old; old="$( cd "$d" && git rev-parse HEAD~1 )"
+  # revision (HEAD, the NEWER commit) was built AFTER the release commit
+  # (HEAD~1, the OLDER one): :latest raced ahead on dev while an older
+  # commit got tagged for release -- e.g. a hotfix cut from an older base.
+  # The generic "predates this release, merge dev into main" advice is
+  # backwards here: an already-tagged historical commit cannot be merged
+  # into descending from a later one. Distinguished from
+  # assert_a_non_ancestor_revision_is_rejected above (which uses an
+  # unrelated bogus SHA, i.e. diverged history) by using a revision that
+  # IS related to tagSha, just on the wrong side of it.
+  make_stub "$d" "sha256:abc" "$new"
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
+        --image control-api --source-paths 'control-api/**' --tag-sha "$old" 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -qi "AFTER the release" <<< "$out" && ! grep -q "Merge dev into main" <<< "$out"; then
+    pass "a revision that descends from the release commit is rejected with accurate, non-backwards advice"
+  else
+    fail "expected non-backwards descendant advice (\"AFTER the release\", no \"Merge dev into main\"); got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_a_source_change_after_the_revision_is_rejected() {
   local d; d="$(mktemp -d)"; make_repo "$d"
   local old; old="$( cd "$d" && git rev-parse HEAD~1 )"
   make_stub "$d" "sha256:abc" "$old"
   # control-api/** DID change between $old and HEAD, so promoting $old would
-  # ship an image that predates the release's own source.
-  if ( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
-        --image control-api --source-paths 'control-api/**' --tag-sha HEAD >/dev/null 2>&1 ); then
-    fail "a source change after the published image was accepted"
-  else
+  # ship an image that predates the release's own source. Checked by message,
+  # not rc alone, matching its two siblings above (the ancestor guard and the
+  # missing-annotation guard): an rc-only check can't tell this specific
+  # guard firing apart from any other failure that happens to exit nonzero.
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
+        --image control-api --source-paths 'control-api/**' --tag-sha HEAD 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -qi "source changed" <<< "$out"; then
     pass "a source change after the published image is rejected"
+  else
+    fail "expected a named failure about the source changing after the published image; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -185,6 +215,7 @@ assert_every_defined_case_is_invoked() {
 
 assert_a_revision_that_is_an_ancestor_resolves
 assert_a_non_ancestor_revision_is_rejected
+assert_a_descendant_revision_is_rejected_with_accurate_advice
 assert_a_source_change_after_the_revision_is_rejected
 assert_a_missing_revision_annotation_fails_loudly
 assert_the_digest_is_resolved_once_and_reused

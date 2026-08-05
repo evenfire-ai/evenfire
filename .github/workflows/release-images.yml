@@ -2,6 +2,12 @@ name: Release images
 
 # Promotes dev-proven digests to a release tag. Never rebuilds -- prod promotes
 # what dev proved, per the rule build-publish.yml states in its own header.
+#
+# Prerequisite: no image carries an org.opencontainers.image.revision
+# annotation until build-publish.yml has run at least once with
+# build_all=true on dev (that's what the merge step writes it from). Until
+# that first full-matrix run happens, this workflow will correctly refuse
+# every image rather than promote one it cannot verify.
 on:
   push:
     tags: ['v*']

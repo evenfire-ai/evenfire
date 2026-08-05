@@ -10,8 +10,15 @@ name: Build & Publish
 # build_all=true rebuilds the whole matrix (use this for the first publish, or
 # to repopulate ghcr).
 #
-# Every image is built multi-arch (amd64 + arm64). Each arch is built
-# natively — no QEMU — as its own `build-push` matrix leg on a
+# Every image is built multi-arch (amd64 + arm64), not amd64-only: minikube
+# pulls these images directly onto arm64 hardware (Apple Silicon laptops), so
+# any image minikube can reach needs an arm64 leg, and building the whole
+# list uniformly avoids maintaining a separate opt-out list. Three published
+# images -- mcp-host-desktop, clerum-workflow-base, playwright-server -- are
+# not minikube-deployed and could drop the arm64 leg later if runner cost
+# matters; not done here, since it would only save three legs and would also
+# require the visibility guard to stop asserting arm64 for those three. Each
+# arch is built natively — no QEMU — as its own `build-push` matrix leg on a
 # runner that matches (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64),
 # pushed by digest, then the `merge` job combines the two digests into one
 # manifest list per image and pushes the sha-<7> and latest tags.

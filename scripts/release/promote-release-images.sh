@@ -13,10 +13,9 @@ REGISTRY="ghcr.io/evenfire-ai"
 DRY_RUN="${DRY_RUN:-true}"
 RELEASE_REF="${RELEASE_REF:?RELEASE_REF is required}"
 VERSION="${RELEASE_REF#v}"
-# The tag that lands must carry the same "v" the consuming kustomize
-# component and the operator recovery docs pin (newTag: v0.6.0,
-# MINIKUBE_IMAGE_TAG=v0.6.1) -- promoting to a bare :0.6.0 would produce a tag
-# nothing downstream ever pulls.
+# The tag that lands must carry a "v" prefix -- the consuming workstream pins
+# a v-prefixed image tag downstream, so promoting to a bare :0.6.0 would
+# produce a tag nothing ever pulls.
 TAG="v${VERSION}"
 TAG_SHA="$(git rev-parse "$RELEASE_REF^{commit}")"
 
@@ -64,7 +63,15 @@ for row in "${IMAGES[@]}"; do
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
         const m=JSON.parse(s).manifests||[];
         console.log(m.map(x=>x.platform?.architecture).filter(a=>a&&a!=="unknown").sort().join(","))})')"
-  if [ "$platforms" != "amd64,arm64" ]; then
+  # Subset match, not exact equality against "amd64,arm64": check-image-
+  # visibility.mjs's guard already treats a third platform as still
+  # multi-arch (it checks .includes for each of amd64/arm64), and an index
+  # with a third platform passing that guard but failing this one is exactly
+  # the kind of drift these two guards must not have between them.
+  has_amd64=false; has_arm64=false
+  case ",$platforms," in *,amd64,*) has_amd64=true ;; esac
+  case ",$platforms," in *,arm64,*) has_arm64=true ;; esac
+  if [ "$has_amd64" != true ] || [ "$has_arm64" != true ]; then
     echo "::error::$name@$digest is [$platforms], expected amd64,arm64"
     failed=1; continue
   fi

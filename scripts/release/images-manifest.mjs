@@ -16,7 +16,15 @@ const MANIFEST_PATH = 'deploy/images.json'
 
 function load() {
   const raw = fs.readFileSync(path.join(ROOT, MANIFEST_PATH), 'utf8')
-  const parsed = JSON.parse(raw)
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    // Match every other failure in this function: a `deploy/images.json:`
+    // prefix so a broken manifest names itself instead of surfacing a bare
+    // SyntaxError with no file attached.
+    throw new Error(`${MANIFEST_PATH}: invalid JSON -- ${error.message}`)
+  }
   if (!Array.isArray(parsed.images)) {
     throw new Error(`${MANIFEST_PATH} must contain an "images" array`)
   }
@@ -32,6 +40,21 @@ function load() {
       throw new Error(
         `${MANIFEST_PATH}: ${image.name} stores pull_in_ghcr_mode; it is derived ` +
           `from published && deployed_to_minikube and must not be written down`
+      )
+    }
+    // An empty source_paths silently disabled resolve-release-images.mjs's
+    // drift check: `(i.source_paths||[]).join(',')` produces '' for a missing
+    // array, and the resolver's `if (sourcePaths)` then treats '' as "no
+    // check requested" instead of "nothing to check", so the release gate
+    // exits 0 without ever diffing. Reject it here, at the source, rather
+    // than relying on every consumer to notice the gap on its own.
+    if (
+      image.published &&
+      (!Array.isArray(image.source_paths) || image.source_paths.length === 0)
+    ) {
+      throw new Error(
+        `${MANIFEST_PATH}: ${image.name} is published but has no source_paths -- the release gate ` +
+          `would silently skip its drift check`
       )
     }
   }

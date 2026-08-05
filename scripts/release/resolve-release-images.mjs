@@ -21,22 +21,12 @@
 // manifest list, and a per-leg `labels:` baked into each platform's image
 // config. The index read is one flat lookup with no --platform to get wrong
 // (`crane config --platform linux/amd64` would break if that leg's manifest
-// were ever the one missing while another platform's was present). Verified
-// against a real docker-buildx-built multi-arch index (amd64 + arm64, pushed
-// by digest, merged with `imagetools create --annotation index:...`, exactly
-// as build-publish.yml does it) during Task 4 development: `crane manifest
-// <ref> | jq .annotations` and `crane config --platform linux/amd64 <ref> |
-// jq .config.Labels` both returned the same revision, confirming either read
-// works against the real thing crane is stubbed to imitate here.
+// were ever the one missing while another platform's was present).
 import { execFileSync } from 'node:child_process'
 import process from 'node:process'
+import { argValue } from './release-coordinates.mjs'
 
 const REGISTRY = 'ghcr.io/evenfire-ai'
-
-function argValue(name) {
-  const index = process.argv.indexOf(name)
-  return index >= 0 ? process.argv[index + 1] : ''
-}
 
 function die(message) {
   console.error(`::error::${message}`)
@@ -83,11 +73,36 @@ if (!revision) {
 try {
   sh('git', ['merge-base', '--is-ancestor', revision, tagSha])
 } catch {
+  // Not-an-ancestor covers two different situations, and only one of them is
+  // "this image is stale": revision could be a DESCENDANT of tagSha (:latest
+  // raced ahead on dev after tagSha was already tagged -- no merge fixes an
+  // already-tagged historical commit into descending from a later one), or
+  // the two commits could share no ancestry at all (diverged history, e.g. a
+  // hotfix cut from an older base while dev moved on). Run the reverse check
+  // to tell them apart instead of assuming staleness in both.
+  let revisionIsDescendant = false
+  try {
+    sh('git', ['merge-base', '--is-ancestor', tagSha, revision])
+    revisionIsDescendant = true
+  } catch {
+    // Neither is an ancestor of the other -- diverged history.
+  }
+
+  if (revisionIsDescendant) {
+    die(
+      `${image}: the published image was built from ${revision}, which comes AFTER the release ` +
+        `commit ${tagSha} (it descends from it), not before -- :latest moved ahead on dev after ` +
+        `${tagSha} was already tagged. This is not a stale image and merging will not help, since ` +
+        `${tagSha} is fixed history now. Either cut the release tag from a commit that already ` +
+        `includes ${revision}, or wait for a fresh dev-proven build whose revision predates ${tagSha}.`
+    )
+  }
+
   die(
-    `${image}: the published image was built from ${revision}, which is not an ancestor of the ` +
-      `release commit ${tagSha} -- that image predates this release. :latest tracks dev, so re-running ` +
-      `build-publish would only move it further forward, not fix this. Merge dev into main so ` +
-      `${tagSha} descends from ${revision}, then cut the release tag again.`
+    `${image}: the published image was built from ${revision}, which shares no ancestry with the ` +
+      `release commit ${tagSha} -- they are on diverged history, so neither descends from the other. ` +
+      `Re-publish the image from a commit that is actually an ancestor of ${tagSha}, then cut the ` +
+      `release tag again.`
   )
 }
 
