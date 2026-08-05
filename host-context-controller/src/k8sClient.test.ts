@@ -3784,6 +3784,40 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('wires onExternalEgressRevoked to schedule a MODIFIED external-egress retry (B3)', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 21
+    ;(watcher as any).mcpWatchGeneration = 34
+    const server = {
+      name: 'openai-mcp',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'dev',
+        image: 'openai:latest',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+      },
+    }
+    const retrySpy = vi
+      .spyOn((watcher as any).externalEgressCoordinator, 'scheduleRetry')
+      .mockImplementation(() => undefined)
+    let captured: { onExternalEgressRevoked?: (s: unknown) => void } | undefined
+    mocks.netPolFullReconcile.mockImplementationOnce(
+      async (_contexts: unknown[], _servers: unknown[], options: typeof captured) => {
+        captured = options
+      }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(captured?.onExternalEgressRevoked).toBeTypeOf('function')
+    captured!.onExternalEgressRevoked!(server)
+    expect(retrySpy).toHaveBeenCalledWith('MODIFIED', server)
+    await watcher.stop()
+  })
+
   it('does not start runtime fleet convergence without a current NetworkPolicy safety certificate', async () => {
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true

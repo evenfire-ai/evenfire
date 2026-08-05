@@ -347,6 +347,15 @@ export interface NetworkPolicyFullReconcileOptions {
    * afterwards and must not delay this safety boundary.
    */
   onAuthoritativeRevocationComplete?: () => void
+  /**
+   * Fired at the moment each external-egress allow owned by an McpServer is
+   * revoked (or replaced) during the authoritative safety pass — before any
+   * isCurrent abort or inventory-changed throw can unwind the pass. The owner
+   * uses it to queue an additive recreation for the affected server; queuing in
+   * a pass epilogue instead would reproduce exactly the abort gap this hook
+   * closes.
+   */
+  onExternalEgressRevoked?: (server: McpServerCRD) => void
 }
 
 export class NetworkPolicyReconciler {
@@ -1455,7 +1464,10 @@ export class NetworkPolicyReconciler {
               policy => policy.metadata?.labels?.[MCPSERVER_LABEL] === server.name
             ),
             serverEffectIsCurrent,
-            recordSafetyPassRevocation
+            () => {
+              recordSafetyPassRevocation()
+              options.onExternalEgressRevoked?.(current)
+            }
           )
           if (!completed && serverCleanupAuthoritative()) {
             liveDesiredRevisionChanged = true
@@ -1706,7 +1718,27 @@ export class NetworkPolicyReconciler {
       }
       desired.delete(name!)
       if (!selected.policy) {
-        unprovableDnsPolicies.push(existing)
+        // DNS binding: the /32s cannot be proven without a fresh lookup, but
+        // the binding IDENTITY (protocol, spec-level ports, selector,
+        // ownership) can. Retain the live allow when identity is unchanged;
+        // revoke only on an identity change (a port move in the CRD changes the
+        // policy NAME and is handled by the stale lane above). The comparison is
+        // "modulo cidr": the desired policy is rebuilt WITH the live cidrs, so
+        // the cidrs compare against themselves and everything else must match
+        // exactly. A policy with no ipBlock peers is a deny disguised as an
+        // allow and is never retained.
+        const existingCidrs = (existing.spec?.egress ?? [])
+          .flatMap(rule => rule.to ?? [])
+          .map(peer => peer.ipBlock?.cidr)
+          .filter((cidr): cidr is string => typeof cidr === 'string')
+        const identityUnchanged =
+          existingCidrs.length > 0 &&
+          hasExpectedPolicyOwnership(existing, EXTERNAL_EGRESS_POLICY_TYPE) &&
+          sameNetworkPolicySpec(
+            existing,
+            this.buildExactHostEgressPolicy(server, name!, selected.binding, existingCidrs)
+          )
+        if (!identityUnchanged) unprovableDnsPolicies.push(existing)
         continue
       }
       const retainable =

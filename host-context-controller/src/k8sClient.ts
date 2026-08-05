@@ -2766,6 +2766,13 @@ export class McpServerWatcher implements McpServerProvider {
         resolveCurrentServer: name => this.servers.get(name),
         contextDesiredRevision: () => this.contextDesiredRevision,
         serverDesiredRevision: () => this.mcpServerDesiredRevision,
+        // B3 piece-2: queue an additive recreation for every server whose
+        // external-egress allow the authoritative pass revoked — fired at the
+        // deletion, so an abort/throw cannot strand a revoked-but-desired allow.
+        // The coordinator maps against the current cache (absent → DELETED, no
+        // recreate) and rebuilds from the current spec with fresh DNS.
+        onExternalEgressRevoked: server =>
+          this.externalEgressCoordinator.scheduleRetry('MODIFIED', server),
         onAuthoritativeRevocationComplete: () => {
           if (!this.recordNetworkPolicySafetyCertificate(safetyCertificate)) return
           authoritativeRevocationCompleted = true

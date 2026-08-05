@@ -2285,6 +2285,127 @@ describe('NetworkPolicyReconciler', () => {
     })
   })
 
+  describe('L3 — DNS-derived retention by binding identity (B3)', () => {
+    // Live DNS policy built through the reconciler's OWN builder so its identity
+    // is exact-by-construction; each test drifts exactly one dimension.
+    function makeDnsFixture() {
+      const server: McpServerCRD = {
+        name: 'openai-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'openai:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+        },
+      }
+      const binding = server.spec.egressBindings![0]
+      const name = (reconciler as any).externalEgressPolicyName(server.name, binding) as string
+      const live = (reconciler as any).buildExactHostEgressPolicy(server, name, binding, [
+        '1.2.3.4/32',
+      ]) as k8s.V1NetworkPolicy
+      live.metadata!.uid = 'live-dns-uid'
+      live.metadata!.resourceVersion = '11'
+      return { server, binding, name, live }
+    }
+
+    async function runSafety(server: McpServerCRD, live: k8s.V1NetworkPolicy): Promise<boolean> {
+      return (reconciler as any).reconcileExternalEgressSafety(
+        server,
+        [live],
+        () => true
+      ) as Promise<boolean>
+    }
+
+    function expectRevoked(name: string) {
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name,
+          namespace: 'mcp-server',
+          body: { preconditions: { uid: 'live-dns-uid', resourceVersion: '11' } },
+        })
+      )
+    }
+
+    it('(a) retains an unchanged DNS-derived allow — no revocation', async () => {
+      const { server, live } = makeDnsFixture()
+      await expect(runSafety(server, live)).resolves.toBe(true)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('(b) revokes on spec-level port drift under the same policy name', async () => {
+      const { server, name, live } = makeDnsFixture()
+      live.spec!.egress![0].ports = [{ port: 8443, protocol: 'TCP' }]
+      await expect(runSafety(server, live)).resolves.toBe(true)
+      expectRevoked(name)
+    })
+
+    it('(c) revokes on protocol drift TCP→UDP', async () => {
+      const { server, name, live } = makeDnsFixture()
+      live.spec!.egress![0].ports = [{ port: 443, protocol: 'UDP' }]
+      await expect(runSafety(server, live)).resolves.toBe(true)
+      expectRevoked(name)
+    })
+
+    it('(d) revokes a foreign-owned policy even when the spec is identical', async () => {
+      const { server, name, live } = makeDnsFixture()
+      live.metadata!.labels!['clerum.io/managed-by'] = 'foreign-controller'
+      await expect(runSafety(server, live)).resolves.toBe(true)
+      expectRevoked(name)
+    })
+
+    it('(f) revokes a degenerate zero-cidr "allow" (deny in disguise)', async () => {
+      const { server, name, live } = makeDnsFixture()
+      live.spec!.egress = []
+      await expect(runSafety(server, live)).resolves.toBe(true)
+      expectRevoked(name)
+    })
+
+    it('(e) queues recreation AT the revocation even when the pass then aborts and throws', async () => {
+      const { server, binding, name } = makeDnsFixture()
+      // Identity-drifted (protocol UDP) → this DNS allow is revoked (deleted).
+      const live = (reconciler as any).buildExactHostEgressPolicy(server, name, binding, [
+        '1.2.3.4/32',
+      ]) as k8s.V1NetworkPolicy
+      live.spec!.egress![0].ports = [{ port: 443, protocol: 'UDP' }]
+      live.metadata!.uid = 'live-dns-uid'
+      live.metadata!.resourceVersion = '11'
+
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => ({
+          items: !labelSelector && namespace === 'mcp-server' ? [live] : [],
+        })
+      )
+
+      let resolved: McpServerCRD | undefined = server
+      const spy = vi.fn()
+      // Flip authority false AT the deletion, so the pass aborts right after the
+      // revocation hook fires — reproducing the abort/throw window B3 must survive.
+      mockApi.deleteNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        resolved = undefined
+        return {}
+      })
+
+      const rec = makeReconciler(mockApi, new Map([[server.name, server]]), mockCustomApi)
+
+      await expect(
+        rec.fullReconcile([], [server], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          resolveCurrentServer: () => resolved,
+          onExternalEgressRevoked: spy,
+        })
+      ).rejects.toThrow(/inventory changed during authoritative revocation/)
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: server.name, namespace: server.namespace })
+      )
+    })
+  })
+
   describe('startup fullReconcile', () => {
     it('discovers and revokes orphaned policies with one missing ownership marker in every safety lane', async () => {
       const partiallyLabelledByNamespace: Record<string, k8s.V1NetworkPolicy[]> = {
@@ -3725,7 +3846,7 @@ describe('NetworkPolicyReconciler', () => {
       expect(dns.resolve4).not.toHaveBeenCalled()
     })
 
-    it('aborts certification when an identity-bound safety delete reports a recreate conflict', async () => {
+    it('aborts certification when an identity-drifted safety delete reports a recreate conflict', async () => {
       const server: McpServerCRD = {
         name: 'recreated-dns-server',
         namespace: 'mcp-server',
@@ -3741,6 +3862,14 @@ describe('NetworkPolicyReconciler', () => {
       const existing = mockApi.createNamespacedNetworkPolicy.mock.calls
         .map(call => (call[0] as { body: k8s.V1NetworkPolicy }).body)
         .find(policy => policy.metadata?.labels?.['clerum.io/policy-type'] === 'external-egress')!
+      // B3: identity-drift the live policy (protocol TCP→UDP) so the safety pass
+      // still revokes it. A same-intent (identity-stable) DNS allow is now
+      // RETAINED (see the retention pins in the B3 describe block); the revoke /
+      // abort machinery this test guards fires only for a drifted policy.
+      existing.spec!.egress = existing.spec!.egress!.map(rule => ({
+        ...rule,
+        ports: rule.ports?.map(port => ({ ...port, protocol: 'UDP' })),
+      }))
 
       vi.clearAllMocks()
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
@@ -3910,7 +4039,7 @@ describe('NetworkPolicyReconciler', () => {
       })
     })
 
-    it('revokes a same-intent DNS policy before readiness and defers its refresh', async () => {
+    it('revokes an identity-drifted DNS policy before readiness and defers its refresh', async () => {
       const server: McpServerCRD = {
         name: 'stable-dns-server',
         namespace: 'mcp-server',
@@ -3927,6 +4056,13 @@ describe('NetworkPolicyReconciler', () => {
         .map(call => (call[0] as { body: k8s.V1NetworkPolicy }).body)
         .find(policy => policy.metadata?.labels?.['clerum.io/policy-type'] === 'external-egress')
       expect(existing).toBeDefined()
+      // B3: identity-drift (protocol TCP→UDP) so this policy is revoked; a
+      // same-intent DNS allow is now retained. The revoke-before-readiness +
+      // defer-refresh machinery this test guards still fires on the drifted one.
+      existing!.spec!.egress = existing!.spec!.egress!.map(rule => ({
+        ...rule,
+        ports: rule.ports?.map(port => ({ ...port, protocol: 'UDP' })),
+      }))
 
       vi.clearAllMocks()
       let currentPolicies = [existing!]
@@ -3956,7 +4092,7 @@ describe('NetworkPolicyReconciler', () => {
       expect(dns.resolve4).not.toHaveBeenCalled()
     })
 
-    it('does not certify safety when a same-intent DNS policy cannot be revoked', async () => {
+    it('does not certify safety when an identity-drifted DNS policy cannot be revoked', async () => {
       const server: McpServerCRD = {
         name: 'undeletable-dns-server',
         namespace: 'mcp-server',
@@ -3973,6 +4109,13 @@ describe('NetworkPolicyReconciler', () => {
         .map(call => (call[0] as { body: k8s.V1NetworkPolicy }).body)
         .find(policy => policy.metadata?.labels?.['clerum.io/policy-type'] === 'external-egress')
       expect(existing).toBeDefined()
+      // B3: identity-drift (protocol TCP→UDP) so this policy is revoked; a
+      // same-intent DNS allow is now retained. The no-certify-when-revoke-fails
+      // machinery this test guards still fires on the drifted one.
+      existing!.spec!.egress = existing!.spec!.egress!.map(rule => ({
+        ...rule,
+        ports: rule.ports?.map(port => ({ ...port, protocol: 'UDP' })),
+      }))
 
       vi.clearAllMocks()
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
