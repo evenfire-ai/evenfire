@@ -20,6 +20,10 @@ import {
 // authoritative home). Task 4 re-exports it from registryVoucher.js and flips
 // this import to match the production path.
 import { VoucherUnavailableError } from '../src/services/registryConnectionDb.js'
+import {
+  __resetRegistryIdentityCacheGenerationForTests,
+  getRegistryIdentityCacheGeneration,
+} from '../src/services/registryIdentityCache.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
@@ -62,6 +66,16 @@ interface RawRowShape {
   registry_url: string | null
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 // Build a DB row whose private_key_encrypted is valid ciphertext under encKeyHex
 // (getRegistryConnection always decrypts it), with overridable columns.
 function makeRawRow(encKeyHex: string, overrides: Partial<RawRowShape> = {}): RawRowShape {
@@ -84,6 +98,7 @@ function makeRawRow(encKeyHex: string, overrides: Partial<RawRowShape> = {}): Ra
 
 afterEach(() => {
   __resetRegistryConnectionCacheForTests()
+  __resetRegistryIdentityCacheGenerationForTests()
   dbQuery.mockReset()
   cfg.registryConnectionMode = 'managed'
   cfg.registryVoucherPrivateKey = ''
@@ -178,6 +193,103 @@ describe('getRegistryConnection', () => {
     expect(row!.orgName).toBe('acme')
     expect(row!.status).toBe('connected')
   })
+
+  it('does not reinstall a stale pending row after a successful connect', async () => {
+    const encKey = randomBytes(32).toString('hex')
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = encKey
+    const key = deriveOAuthEncryptionKey(encKey)
+    const pendingRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const currentRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const connectedRow = makeRawRow(encKey, {
+      status: 'connected',
+      client_id: 'cid-current',
+      client_secret_encrypted: encryptOAuthSecret(key, 'secret-current'),
+      org_name: 'current-org',
+    })
+
+    dbQuery.mockImplementationOnce(() => pendingRead.promise)
+    const staleCaller = getRegistryConnection()
+
+    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    await markConnected({
+      deploymentId: 'dep-1',
+      clientId: 'cid-current',
+      clientSecret: 'secret-current',
+      orgName: 'current-org',
+    })
+
+    dbQuery.mockImplementationOnce(() => currentRead.promise)
+    const currentCaller = getRegistryConnection()
+    currentRead.resolve({ rows: [connectedRow], rowCount: 1 })
+
+    await expect(currentCaller).resolves.toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+
+    pendingRead.resolve({
+      rows: [
+        makeRawRow(encKey, {
+          status: 'pending',
+          client_id: null,
+          client_secret_encrypted: null,
+          org_name: null,
+        }),
+      ],
+      rowCount: 1,
+    })
+
+    await expect(staleCaller).resolves.toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
+    expect(await getRegistryConnection()).toMatchObject({
+      status: 'connected',
+      clientId: 'cid-current',
+      orgName: 'current-org',
+    })
+  })
+
+  it('does not reinstall a stale connected row after disconnect', async () => {
+    const encKey = randomBytes(32).toString('hex')
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = encKey
+    const key = deriveOAuthEncryptionKey(encKey)
+    const staleRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+    const currentRead = deferred<{ rows: RawRowShape[]; rowCount: number }>()
+
+    dbQuery.mockImplementationOnce(() => staleRead.promise)
+    const staleCaller = getRegistryConnection()
+
+    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    await deleteConnection()
+
+    dbQuery.mockImplementationOnce(() => currentRead.promise)
+    const currentCaller = getRegistryConnection()
+    currentRead.resolve({ rows: [], rowCount: 0 })
+
+    await expect(currentCaller).resolves.toBeNull()
+
+    staleRead.resolve({
+      rows: [
+        makeRawRow(encKey, {
+          status: 'connected',
+          client_id: 'cid-old',
+          client_secret_encrypted: encryptOAuthSecret(key, 'secret-old'),
+          org_name: 'old-org',
+        }),
+      ],
+      rowCount: 1,
+    })
+
+    await expect(staleCaller).resolves.toBeNull()
+    expect(await isRegistryAuthActive()).toBe(false)
+    await expect(getRegistryConnection()).resolves.toBeNull()
+  })
 })
 
 // ─── C-I3: execution coverage for the security-critical write + resolver paths ──
@@ -217,6 +329,7 @@ describe('upsertPendingConnection — writes ciphertext, never plaintext (C-I3a)
     expect(decryptOAuthSecret(deriveOAuthEncryptionKey(encKeyHex), storedPriv)).toBe(privateKey)
     // The public key is NOT encrypted (it is public material).
     expect(params[2]).toBe('PUB-PEM')
+    expect(getRegistryIdentityCacheGeneration()).toBe(1)
   })
 })
 
@@ -255,10 +368,12 @@ describe('markConnected — writes ciphertext for the client secret (C-I3a)', ()
 describe('deleteConnection', () => {
   it('deletes the singleton row and evicts the cache', async () => {
     dbQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    const before = getRegistryIdentityCacheGeneration()
     await deleteConnection()
     expect(
       dbQuery.mock.calls.some(([sql]) => /DELETE FROM registry_connection/.test(String(sql)))
     ).toBe(true)
+    expect(getRegistryIdentityCacheGeneration()).toBe(before + 1)
   })
 })
 
@@ -385,6 +500,7 @@ describe('markConnected — scoped write', () => {
       orgName: 'acme',
     })
     expect(ok).toBe(true)
+    expect(getRegistryIdentityCacheGeneration()).toBe(1)
     const upd = dbQuery.mock.calls.find(([sql]) =>
       String(sql).includes('UPDATE registry_connection')
     )
@@ -408,6 +524,7 @@ describe('markConnected — scoped write', () => {
       orgName: 'acme',
     })
     expect(ok).toBe(false)
+    expect(getRegistryIdentityCacheGeneration()).toBe(0)
   })
 })
 

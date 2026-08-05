@@ -3,6 +3,7 @@
 import React, { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -74,7 +75,18 @@ function CreateLlmPriceContent() {
 
 export default function CreateLlmPricePage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <BodyLoadingSkeleton
+          backLabel="Back to prices"
+          icon={<IconPrice />}
+          primaryActionLabel="Add price"
+          sections={3}
+          subtitle="Set per-1M-token prices for a provider/model so cost budgets can price usage."
+          title="Add LLM price"
+        />
+      }
+    >
       <CreateLlmPriceContent />
     </Suspense>
   )

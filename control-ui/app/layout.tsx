@@ -4,6 +4,7 @@ import '@uiw/react-markdown-preview/markdown.css'
 import '@uiw/react-md-editor/markdown-editor.css'
 import { AdminBridgeAlerts } from '../components/AdminBridgeAlerts'
 import { AuthProvider } from '../components/AuthContext'
+import { ControlAppFrame } from '../components/ControlAppFrame'
 import { ThemeProvider } from '../components/ThemeContext'
 import { ToastProvider } from '../components/Toast'
 import './globals.css'
@@ -32,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <ToastProvider>
             <AuthProvider>
               <AdminBridgeAlerts />
-              {children}
+              <ControlAppFrame>{children}</ControlAppFrame>
             </AuthProvider>
           </ToastProvider>
         </ThemeProvider>
