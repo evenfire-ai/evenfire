@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { PluginWorkloadError } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import type { PluginWorkloadSdkControlApiClient } from './controlApiClient'
-import { PromptBridgeHandler } from './handler'
+import { PromptBridgeHandler, type PromptBridgeHandlerDeps } from './handler'
 import type { LlmBridge } from './llmBridge'
 
 const validBody = {
@@ -22,6 +22,8 @@ const fallback: PromptBridgeTarget = {
   model: 'gpt-5.4-mini',
   credentialSlot: 'openai-api-key',
 }
+
+type FinalizePromptBridge = NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>
 
 function authorization(overrides: Record<string, unknown> = {}) {
   return {
@@ -50,7 +52,7 @@ function makeDeps(
     report?: ReturnType<typeof vi.fn>
     bootstrap?: () => { provider: string; model: string } | null
     onUsage?: (usage: any) => void
-    finalize?: ReturnType<typeof vi.fn>
+    finalize?: FinalizePromptBridge
   } = {}
 ) {
   const authorize = overrides.authorize ?? vi.fn().mockResolvedValue(authorization())
@@ -291,7 +293,7 @@ describe('PromptBridgeHandler', () => {
   })
 
   it('uses the SDK-only finalizer instead of separate status and usage reporting', async () => {
-    const finalize = vi.fn().mockResolvedValue({
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
       invocationId: 'inv-1',
       providerAttemptId: 'attempt-1',
       status: 'complete',
@@ -333,7 +335,7 @@ describe('PromptBridgeHandler', () => {
   })
 
   it('records an unknown spend receipt before returning an ambiguous provider error', async () => {
-    const finalize = vi.fn().mockResolvedValue({
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
       invocationId: 'inv-1',
       providerAttemptId: 'attempt-1',
       status: 'provider_unavailable',
@@ -376,7 +378,7 @@ describe('PromptBridgeHandler', () => {
 
   it('reconciles an exact-finalization failure into a durable unknown receipt', async () => {
     const finalize = vi
-      .fn()
+      .fn<FinalizePromptBridge>()
       .mockRejectedValueOnce(new Error('finalization transaction lost'))
       .mockResolvedValueOnce({
         invocationId: 'inv-1',
