@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { packageRoots } from '../prettier/paths.mjs'
-import { parseManifest } from '../release/release-coordinates.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const sortedPackageRoots = [...packageRoots].sort((a, b) => b.length - a.length)
@@ -253,6 +252,23 @@ if (relevantCounterPackages.length > 0) {
         `${MANIFEST_PATH} to check whether it needs re-syncing after a version bump: ${error.message}\n` +
         `Restore the file (e.g. \`git checkout HEAD -- ${MANIFEST_PATH}\`) or regenerate it with ` +
         `\`node scripts/release/update-desktop-release-manifest.mjs\`, then retry the commit.`
+    )
+  }
+
+  // Loaded lazily rather than imported at the top. A static import makes the
+  // hook fail at MODULE-LOAD time in any tree that has scripts/precommit but
+  // not scripts/release (a sparse checkout, a partial clone), which blocks
+  // every commit with a raw ESM stack trace before any of the messaging below
+  // can run. The re-sync is the only thing that needs it.
+  let parseManifest
+  try {
+    ;({ parseManifest } = await import('../release/release-coordinates.mjs'))
+  } catch (error) {
+    exitWithError(
+      `The pre-commit hook (scripts/precommit/bump-staged-package-versions.mjs) needs ` +
+        `scripts/release/release-coordinates.mjs to keep ${MANIFEST_PATH} in sync after a ` +
+        `version bump, and could not load it: ${error.message}\n` +
+        `If this is a sparse or partial checkout, include scripts/release/ in it.`
     )
   }
 
