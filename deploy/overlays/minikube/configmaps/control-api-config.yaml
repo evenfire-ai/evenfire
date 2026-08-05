@@ -53,13 +53,28 @@ data:
   WORKFLOW_APPROVAL_DEFAULT_TTL_SEC: '86400'
   WORKFLOW_APPROVAL_MAX_TTL_SEC: '172800'
   WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS: '60000'
-  # Minikube owns an in-cluster registry-api deployment. Keep the control-api
-  # pointed at that service so the operator Marketplace publish/install
-  # journey stays inside the branch-owned profile; the public registry is a
-  # production/self-hosted default, not a local test dependency. This URL is
-  # already in the registry allowlist and is reachable through the explicit
-  # control-api-to-registry NetworkPolicy.
-  CLERUM_REGISTRY_URL: 'http://registry-api.registry.svc.cluster.local:8085'
+  # OSS default: point at the shared registry so a self-hoster browses the
+  # public catalog out of the box and can run the connect flow (register →
+  # approve → claim) against it. self-hosted is the only mode that fits an OSS
+  # deployment (managed = MCC-provisioned, not in this repo). Registry auth
+  # turns on by itself once the connect flow completes and this deployment
+  # holds machine credentials: there is no flag to set and no restart needed.
+  # To run your OWN in-cluster registry instead, set CLERUM_REGISTRY_URL to
+  # http://registry-api.registry.svc.cluster.local:8085. That URL is already
+  # built into the allowlist, so no CLERUM_REGISTRY_URL_ALLOWLIST entry is
+  # needed for it; the setting is only for any OTHER registry URL. The
+  # allowlist applies to any explicitly self-hosted deployment with a registry
+  # URL configured, regardless of whether auth is active, and control-api
+  # refuses to start if the configured URL is not allowlisted.
+  #
+  # This key is the SINGLE definition of the registry URL for the whole
+  # control plane: workflow-recipes projects it via configMapKeyRef in the BASE
+  # Deployment (deploy/base/control-plane/workflow-recipes.yaml) instead of
+  # keeping a second copy, so this overlay only supplies the value. Both
+  # services must agree, because WRC decides which images are ours — and
+  # therefore get the platform pull credential — by comparing the image host
+  # against this URL's host. Change it here and WRC follows.
+  CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'
   REGISTRY_CONNECTION_MODE: 'self-hosted'
   # The Publisher UI (Sidebar entry + /publisher route) defaults ON for every
   # deploy. It only surfaces for an org-bound, non-curator deploy (the control-ui

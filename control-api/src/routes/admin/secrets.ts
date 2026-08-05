@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
@@ -30,6 +31,23 @@ const VERTEX_SERVICE_ACCOUNT_KEY: string = PROVIDER_CREDENTIAL_SLOTS.vertex[0].d
 // stop the guard from firing the day the other one changes.
 const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
 const RECIPE_SECRET_LABEL_VALUE = 'true'
+
+// `evenfire-registry-pull` is control-api's own image-pull credential, self-provisioned
+// into every platform workload namespace (registryPullSecretService). The mcp-secret and
+// recipe-secret routes below write into that SAME set of namespaces, so the name is
+// reachable from here — and the damage is not recoverable in place: the provisioner's
+// first invariant is "never write a Secret we do not own", so an operator who deletes the
+// platform Secret and creates an `Opaque` one under the reserved name makes every
+// private-image install into that namespace fail with `foreign_secret_unusable`, forever.
+// Reserve the name on the write and delete surfaces, exactly as the recipe surfaces do
+// (`isPlatformManagedWorkflowSecretName` in routes/admin/recipes.ts).
+function isPlatformManagedSecretName(name: unknown): boolean {
+  return typeof name === 'string' && name.trim() === EVENFIRE_REGISTRY_PULL_SECRET_NAME
+}
+
+const PLATFORM_MANAGED_SECRET_ERROR =
+  `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
+  'registry image-pull credential) and cannot be created, modified, or deleted here'
 
 // The plaintext data being written, merging base64 `data` and plaintext
 // `stringData` (stringData wins, matching Kubernetes Secret semantics).
@@ -318,6 +336,10 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         })
         return
       }
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
         res
           .status(400)
@@ -387,6 +409,16 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(400).json({
           error: 'Invalid secret name: must be lowercase alphanumeric and hyphens, max 253 chars',
         })
+        return
+      }
+      // The reserved name is guarded on POST and DELETE below; without it here the merge
+      // path was the way through. The recipe-secret label check further down does NOT cover
+      // it — the platform Secret carries `clerum.io/managed-by`, not the recipe label, so it
+      // passes that gate — and `mergeSecret` replaces any key it is given, including
+      // `.dockerconfigjson`. That is every private image pull in this namespace, broken by
+      // a route whose whole job is to refuse this name.
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
         return
       }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
@@ -506,6 +538,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
     asyncHandler(async (req, res) => {
+      // This route deletes by name with no ownership guard, so the reserved name is the
+      // only thing standing between a rollback call and the platform pull credential.
+      if (isPlatformManagedSecretName(req.params.name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       const deleted = await gateway.deleteSecret(req.params.name, config.mcpServersNamespace)
       res.status(200).json(deleted)
     })
@@ -689,6 +727,10 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(400).json({
           error: 'Invalid secret name: must be lowercase alphanumeric and hyphens, max 253 chars',
         })
+        return
+      }
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
         return
       }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {

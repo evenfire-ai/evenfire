@@ -1,4 +1,5 @@
 import { K8sNotFoundError } from '../src/services/resourceService.js'
+import type { SecretPreconditions } from '../src/types.js'
 
 type ResourceType =
   | 'hosts'
@@ -48,6 +49,11 @@ export class MockGateway {
       type?: string
       labels?: Record<string, string>
       annotations?: Record<string, string>
+      // Server-assigned identity. Real Secrets always carry both; seeding them is optional
+      // so existing tests are unaffected, and only a test that cares about object identity
+      // (e.g. a takeover between two reads of the same name) has to set them.
+      uid?: string
+      resourceVersion?: string
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
@@ -98,6 +104,8 @@ export class MockGateway {
       type?: string
       labels?: Record<string, string>
       annotations?: Record<string, string>
+      uid?: string
+      resourceVersion?: string
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
@@ -109,6 +117,8 @@ export class MockGateway {
       type: options?.type,
       labels: options?.labels,
       annotations: options?.annotations,
+      uid: options?.uid,
+      resourceVersion: options?.resourceVersion,
       data: options?.data,
       stringData: options?.stringData,
     })
@@ -263,6 +273,9 @@ export class MockGateway {
         namespace: entry.namespace,
         labels: entry.labels,
         annotations: entry.annotations,
+        // Only surfaced when seeded, so no existing assertion on this object changes shape.
+        ...(entry.uid !== undefined && { uid: entry.uid }),
+        ...(entry.resourceVersion !== undefined && { resourceVersion: entry.resourceVersion }),
       },
       type: entry.type || 'Opaque',
       data: entry.data,
@@ -292,7 +305,17 @@ export class MockGateway {
     return req
   }
 
-  async updateSecret(req: unknown): Promise<unknown> {
+  /**
+   * Mock Secret replace. Honours `precondition` the way the API server does: a `uid` or
+   * `resourceVersion` that disagrees with the stored object is a 409, not a silent
+   * overwrite. Without this a test could not tell an ownership-bound write from a
+   * name-addressed one — both would "pass" — which is the exact defect the preconditions
+   * exist to prevent.
+   *
+   * A successful write bumps `resourceVersion`, so a caller replaying a stale version is
+   * rejected on the second attempt just as it would be against a real cluster.
+   */
+  async updateSecret(req: unknown, precondition?: SecretPreconditions): Promise<unknown> {
     const body = req as {
       name: string
       namespace?: string
@@ -302,16 +325,52 @@ export class MockGateway {
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
-    this.secretStore.set(this.key(body.name, body.namespace), {
+    const key = this.key(body.name, body.namespace)
+    const existing = this.secretStore.get(key)
+    this.assertPrecondition(body.name, existing, precondition)
+    this.secretStore.set(key, {
       name: body.name,
       namespace: body.namespace || this.ns,
       type: body.type,
       labels: body.labels,
       annotations: body.annotations,
+      uid: existing?.uid,
+      resourceVersion: MockGateway.nextResourceVersion(existing?.resourceVersion),
       data: body.data,
       stringData: body.stringData,
     })
     return req
+  }
+
+  /**
+   * Reject a mutation whose preconditions do not match the stored object, with the same
+   * 409 the API server returns. `undefined` fields are not constraints — a caller that
+   * supplies neither gets the historical last-writer-wins behaviour.
+   */
+  private assertPrecondition(
+    name: string,
+    existing: { uid?: string; resourceVersion?: string } | undefined,
+    precondition?: SecretPreconditions
+  ): void {
+    if (!precondition) return
+    const mismatch =
+      (precondition.uid !== undefined && existing?.uid !== precondition.uid) ||
+      (precondition.resourceVersion !== undefined &&
+        existing?.resourceVersion !== precondition.resourceVersion)
+    if (!mismatch) return
+    const err = new Error(
+      `Operation cannot be fulfilled on secrets "${name}": the object has been modified; please apply your changes to the latest version and try again`
+    ) as Error & { statusCode: number; code: number }
+    err.statusCode = 409
+    err.code = 409
+    throw err
+  }
+
+  /** Monotonic, and only meaningful relative to itself — exactly like the real one. */
+  private static nextResourceVersion(current?: string): string | undefined {
+    if (current === undefined) return undefined
+    const n = Number(current)
+    return Number.isFinite(n) ? String(n + 1) : `${current}-1`
   }
 
   async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
@@ -327,9 +386,16 @@ export class MockGateway {
     return { name: req.name, namespace: ns, deletedKey: req.key }
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
+  /** Mock Secret delete. Honours `precondition` exactly as `updateSecret` does. */
+  async deleteSecret(
+    name: string,
+    namespace?: string,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
     const ns = namespace || this.ns
-    const deleted = this.secretStore.delete(this.key(name, ns))
+    const key = this.key(name, ns)
+    this.assertPrecondition(name, this.secretStore.get(key), precondition)
+    const deleted = this.secretStore.delete(key)
     return { deleted, name, namespace: ns }
   }
 

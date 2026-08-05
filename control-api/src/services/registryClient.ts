@@ -592,6 +592,38 @@ export async function createOrgGrant(
   })
 }
 
+/**
+ * Mint a PULL-ONLY registry credential for `orgName` using our machine identity.
+ *
+ * Hits the registry's `POST /org/:org/registry-pull-credential`, which — once the
+ * companion registry change ships — authorizes an org-bound machine holding
+ * `registry:manage-keys` (our tenant client's standing scope) to mint a pull-only,
+ * rotate-on-call key for its OWN org. The endpoint also returns a `dockerconfigjson`,
+ * but we DELIBERATELY ignore it: it is keyed on the registry's own token-issuer host,
+ * whereas the kubelet matches on the image host (our configured registry URL host).
+ * The caller builds the dockerconfigjson locally from `key`, keyed on that host.
+ *
+ * Rotate-on-call: each call revokes the org's prior pull key, so callers MUST
+ * read-before-mint (only call when the on-cluster Secret is absent or broken) or they
+ * orphan a working credential.
+ *
+ * Carries an explicit timeout: `authedFetch` only bounds GETs, and this POST sits on the
+ * install path behind an in-process dedupe — a stalled origin would otherwise hang every
+ * concurrent install for that namespace. The response is validated because a missing
+ * `key` would otherwise render a valid-LOOKING dockerconfigjson (`_:undefined`) that gets
+ * written as a permanently unusable credential which later reads classify as healthy.
+ */
+export async function mintOrgPullCredential(orgName: string): Promise<{ key: string }> {
+  const res = await orgRegistryFetch<{ username: string; key: string; dockerconfigjson: string }>(
+    `/org/${encodeURIComponent(orgName)}/registry-pull-credential`,
+    { method: 'POST', signal: AbortSignal.timeout(READ_TIMEOUT_MS) }
+  )
+  if (!res || typeof res.key !== 'string' || res.key.length === 0) {
+    throw new Error('registry returned no pull key for the image-pull credential')
+  }
+  return { key: res.key }
+}
+
 export async function listOrgGrants(orgName: string): Promise<unknown> {
   return orgRegistryFetch(`/org/${encodeURIComponent(orgName)}/grants`)
 }
