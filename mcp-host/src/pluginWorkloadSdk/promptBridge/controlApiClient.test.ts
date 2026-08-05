@@ -94,6 +94,8 @@ describe('PluginWorkloadSdkControlApiClient', () => {
         defaultProvider: null,
         defaultModel: null,
         v2Ready: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
       })
     )
     const client = makeClient(fetchImpl as unknown as typeof fetch)
@@ -106,6 +108,9 @@ describe('PluginWorkloadSdkControlApiClient', () => {
       policyReady: false,
       policyState: 'missing',
       policyReason: 'grant_missing',
+      clientNotificationsPolicyReady: false,
+      clientNotificationsPolicyState: 'missing',
+      clientNotificationsPolicyReason: 'grant_missing',
     })
     expect(fetchImpl).toHaveBeenCalledWith(
       'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/capabilities',
@@ -128,6 +133,8 @@ describe('PluginWorkloadSdkControlApiClient', () => {
         defaultProvider: null,
         defaultModel: null,
         v2Ready: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
       })
     )
     const client = makeClient(fetchImpl as unknown as typeof fetch)
@@ -135,6 +142,35 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     await expect(client.ensurePromptBridgeCapabilities()).rejects.toMatchObject({
       code: 'provider_policy_denied',
       retryable: false,
+    })
+  })
+
+  it('proves provider-free clientNotifications readiness from the capabilities contract', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'missing',
+        policyRevision: 0,
+        policyHash: null,
+        defaultTargetRef: null,
+        defaultProvider: null,
+        defaultModel: null,
+        v2Ready: false,
+        clientNotificationsPolicyState: 'active',
+        clientNotificationsReady: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(client.verifyClientNotificationsBootstrap()).resolves.toEqual({
+      ready: true,
+      contractVersion: 2,
+      policyReady: true,
+      policyState: 'active',
     })
   })
 

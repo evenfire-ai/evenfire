@@ -50,7 +50,8 @@ export type PluginWorkloadProviderAttemptContext = {
   }
   attemptCount: number
   fallbackUsed: boolean
-  llmSecretName: string
+  /** Known only after credential resolution; pre-provider failures may not have one. */
+  llmSecretName?: string
 }
 
 const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {

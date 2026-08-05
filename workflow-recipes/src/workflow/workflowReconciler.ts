@@ -209,6 +209,30 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function pluginWorkloadSdkPolicyReason(
+  spec: WorkflowRecipeSpec,
+  proof: EagerSdkBootstrapProof | undefined
+): string {
+  if (spec.pluginWorkloadSdk?.promptBridge && proof?.policyReady === false) {
+    return proof.policyReason ?? proof.policyState ?? 'unknown'
+  }
+  if (
+    spec.pluginWorkloadSdk?.clientNotifications &&
+    proof?.clientNotificationsPolicyReady === false
+  ) {
+    return (
+      proof.clientNotificationsPolicyReason ?? proof.clientNotificationsPolicyState ?? 'unknown'
+    )
+  }
+  return (
+    proof?.policyReason ??
+    proof?.clientNotificationsPolicyReason ??
+    proof?.policyState ??
+    proof?.clientNotificationsPolicyState ??
+    'unknown'
+  )
+}
+
 function normalizeCidrs(cidrs: string[]): string[] {
   return [...new Set(cidrs.map(cidr => cidr.trim()).filter(Boolean))].sort()
 }
@@ -941,7 +965,7 @@ export class WorkflowReconciler {
       case 'awaiting_policy':
         return {
           phase: 'awaiting_policy',
-          message: `Plugin Workload SDK operator policy pending (${bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'})`,
+          message: `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, bootstrapProof)})`,
           pluginWorkloadSdkBootstrapProof: bootstrapProof,
         }
       case 'deploying':
@@ -1403,14 +1427,13 @@ export class WorkflowReconciler {
             }
           }
           const eagerPolicyPending = eagerStatus === 'awaiting_policy'
+          const pluginWorkloadSdkDeclared =
+            spec.pluginWorkloadSdk?.promptBridge !== undefined ||
+            spec.pluginWorkloadSdk?.clientNotifications !== undefined
           const eagerReady =
             (eagerStatus === 'ready' || eagerPolicyPending) &&
-            (!spec.pluginWorkloadSdk?.promptBridge || eagerBootstrapProof !== undefined)
-          if (
-            eagerStatus === 'ready' &&
-            spec.pluginWorkloadSdk?.promptBridge &&
-            !eagerBootstrapProof
-          ) {
+            (!pluginWorkloadSdkDeclared || eagerBootstrapProof !== undefined)
+          if (eagerStatus === 'ready' && pluginWorkloadSdkDeclared && !eagerBootstrapProof) {
             return withWorkflowConditions({
               phase: 'deploying',
               message: `Plugin Workload SDK bootstrap policy proof pending (${classification})`,
@@ -1418,7 +1441,7 @@ export class WorkflowReconciler {
             })
           }
           const eagerMessage = eagerPolicyPending
-            ? `Plugin Workload SDK operator policy pending (${eagerBootstrapProof?.policyReason ?? eagerBootstrapProof?.policyState ?? 'unknown'}) (${classification})`
+            ? `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, eagerBootstrapProof)}) (${classification})`
             : eagerReady
               ? `Plugin Workload SDK mcp-host registered (${classification})`
               : `Plugin Workload SDK mcp-host starting (${classification})`

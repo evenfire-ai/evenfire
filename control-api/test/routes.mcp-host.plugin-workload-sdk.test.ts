@@ -848,6 +848,31 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/finalize', () => {
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ error: 'idempotency_conflict', retryable: false })
   })
+
+  it('accepts a failed no-execution finalization without usage claims', async () => {
+    vi.mocked(finalizer.finalizePromptBridge).mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: finalizationBody.providerAttemptId,
+      status: 'failed',
+      outcome: 'not_executed',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({
+        ...finalizationBody,
+        status: 'failed',
+        reason: 'credential_unavailable',
+        usage: undefined,
+      })
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({ status: 'failed', outcome: 'not_executed' })
+    expect(finalizer.finalizePromptBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'failed', reason: 'credential_unavailable' })
+    )
+  })
 })
 
 describe('GET /mcp-host/plugin-workload-sdk/invocations/:recipeRef', () => {

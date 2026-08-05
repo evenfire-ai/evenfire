@@ -17,7 +17,10 @@ import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClien
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
 import { configurePluginWorkloadSdkBootstrapIdentity } from '../pluginWorkloadSdk/bootstrapIdentity'
-import type { PluginWorkloadSdkBootstrapProof } from '../pluginWorkloadSdk/promptBridge/controlApiClient'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkClientNotificationsBootstrapProof,
+} from '../pluginWorkloadSdk/promptBridge/controlApiClient'
 import type { ApiKeys } from '../types'
 import { type LlmUsageEvent, type UsageReporter, newRequestId } from '../usage/usageReporter'
 import {
@@ -306,6 +309,7 @@ export class WorkflowService {
         provider: string,
         model: string
       ) => Promise<PluginWorkloadSdkBootstrapProof | null>
+      verifyPluginWorkloadSdkClientNotifications?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>
     }
   ) {
     this.recipeName = recipeName
@@ -325,6 +329,8 @@ export class WorkflowService {
     this.onPluginWorkloadSdkBootstrapConfigured =
       opts?.onPluginWorkloadSdkBootstrapConfigured ?? null
     this.verifyPluginWorkloadSdkBootstrapV2 = opts?.verifyPluginWorkloadSdkBootstrapV2 ?? null
+    this.verifyPluginWorkloadSdkClientNotifications =
+      opts?.verifyPluginWorkloadSdkClientNotifications ?? null
   }
 
   private readonly onLlmConfigured:
@@ -344,6 +350,10 @@ export class WorkflowService {
 
   private readonly verifyPluginWorkloadSdkBootstrapV2:
     | ((provider: string, model: string) => Promise<PluginWorkloadSdkBootstrapProof | null>)
+    | null = null
+
+  private readonly verifyPluginWorkloadSdkClientNotifications:
+    | (() => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>)
     | null = null
 
   private notifyLlmConfigured(provider: string, model: string, apiKey: string): void {
@@ -372,6 +382,9 @@ export class WorkflowService {
         : {}),
       ...(this.verifyPluginWorkloadSdkBootstrapV2
         ? { verify: this.verifyPluginWorkloadSdkBootstrapV2 }
+        : {}),
+      ...(this.verifyPluginWorkloadSdkClientNotifications
+        ? { verifyClientNotifications: this.verifyPluginWorkloadSdkClientNotifications }
         : {}),
     })
   }

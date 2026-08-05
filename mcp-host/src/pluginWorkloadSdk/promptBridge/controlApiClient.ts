@@ -66,6 +66,8 @@ export interface PluginWorkloadSdkCapabilities {
   defaultProvider: string | null
   defaultModel: string | null
   v2Ready: boolean
+  clientNotificationsPolicyState: string
+  clientNotificationsReady: boolean
 }
 
 export interface PluginWorkloadSdkBootstrapProof {
@@ -94,6 +96,22 @@ export interface PluginWorkloadSdkBootstrapProof {
   defaultTargetRef?: string
   defaultProvider?: string
   defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
+}
+
+export interface PluginWorkloadSdkClientNotificationsBootstrapProof {
+  ready: true
+  contractVersion: 2
+  policyReady: boolean
+  policyState: string
+  policyReason?:
+    | 'grant_missing'
+    | 'policy_unreviewed'
+    | 'policy_revoking'
+    | 'policy_disabled'
+    | 'policy_not_ready'
 }
 
 export interface ReissuedPromptBridgeCredentialTicket {
@@ -111,8 +129,8 @@ export interface ReissuedPromptBridgeCredentialTicket {
 export interface FinalizePromptBridgeResponse {
   invocationId: string
   providerAttemptId: string
-  status: 'complete' | 'provider_unavailable'
-  outcome: 'exact' | 'unknown'
+  status: 'complete' | 'failed' | 'provider_unavailable'
+  outcome: 'exact' | 'unknown' | 'not_executed'
   idempotent: boolean
   usageAccepted: boolean
 }
@@ -182,7 +200,9 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
     (value.defaultTargetRef === null || typeof value.defaultTargetRef === 'string') &&
     (value.defaultProvider === null || typeof value.defaultProvider === 'string') &&
     (value.defaultModel === null || typeof value.defaultModel === 'string') &&
-    typeof value.v2Ready === 'boolean'
+    typeof value.v2Ready === 'boolean' &&
+    typeof value.clientNotificationsPolicyState === 'string' &&
+    typeof value.clientNotificationsReady === 'boolean'
   )
 }
 
@@ -217,8 +237,12 @@ function isFinalizePromptBridgeResponse(value: unknown): value is FinalizePrompt
   return (
     typeof result.invocationId === 'string' &&
     typeof result.providerAttemptId === 'string' &&
-    (result.status === 'complete' || result.status === 'provider_unavailable') &&
-    (result.outcome === 'exact' || result.outcome === 'unknown') &&
+    (result.status === 'complete' ||
+      result.status === 'failed' ||
+      result.status === 'provider_unavailable') &&
+    (result.outcome === 'exact' ||
+      result.outcome === 'unknown' ||
+      result.outcome === 'not_executed') &&
     typeof result.idempotent === 'boolean' &&
     typeof result.usageAccepted === 'boolean'
   )
@@ -594,6 +618,50 @@ export class PluginWorkloadSdkControlApiClient {
             defaultModel: capabilities.defaultModel,
           }
         : {}),
+      clientNotificationsPolicyReady: capabilities.clientNotificationsReady,
+      clientNotificationsPolicyState: capabilities.clientNotificationsPolicyState,
+      ...(capabilities.clientNotificationsReady
+        ? {}
+        : {
+            clientNotificationsPolicyReason:
+              capabilities.clientNotificationsPolicyState === 'missing'
+                ? 'grant_missing'
+                : capabilities.clientNotificationsPolicyState === 'legacy_unreviewed'
+                  ? 'policy_unreviewed'
+                  : capabilities.clientNotificationsPolicyState === 'revoking'
+                    ? 'policy_revoking'
+                    : capabilities.clientNotificationsPolicyState === 'disabled'
+                      ? 'policy_disabled'
+                      : 'policy_not_ready',
+          }),
+    }
+  }
+
+  /**
+   * Fresh readiness proof for the provider-free clientNotifications family.
+   * It shares the v2 capabilities contract but never invents a provider/model
+   * binding for a notifications-only recipe.
+   */
+  async verifyClientNotificationsBootstrap(): Promise<PluginWorkloadSdkClientNotificationsBootstrapProof> {
+    const capabilities = await this.getPromptBridgeCapabilities()
+    const policyReady = capabilities.clientNotificationsReady
+    const policyReason = policyReady
+      ? undefined
+      : capabilities.clientNotificationsPolicyState === 'missing'
+        ? 'grant_missing'
+        : capabilities.clientNotificationsPolicyState === 'legacy_unreviewed'
+          ? 'policy_unreviewed'
+          : capabilities.clientNotificationsPolicyState === 'revoking'
+            ? 'policy_revoking'
+            : capabilities.clientNotificationsPolicyState === 'disabled'
+              ? 'policy_disabled'
+              : 'policy_not_ready'
+    return {
+      ready: true,
+      contractVersion: 2,
+      policyReady,
+      policyState: capabilities.clientNotificationsPolicyState,
+      ...(policyReason ? { policyReason } : {}),
     }
   }
 
@@ -721,7 +789,7 @@ export class PluginWorkloadSdkControlApiClient {
     attemptGeneration: number
     providerAttemptId: string
     providerAttemptIndex: number
-    status: 'complete' | 'provider_unavailable'
+    status: 'complete' | 'failed' | 'provider_unavailable'
     reason: string
     target: PromptBridgeTarget
     usage?: {

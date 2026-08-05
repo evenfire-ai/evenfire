@@ -57,7 +57,11 @@ export class HttpMcpHostClient implements McpHostClient {
   async configurePluginWorkloadSdkBootstrap(
     endpoint: string,
     token: string,
-    body: { provider: string; model: string }
+    body: {
+      capabilityFamily?: 'promptBridge' | 'clientNotifications'
+      provider?: string
+      model?: string
+    }
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const url = `${endpoint}${PLUGIN_SDK_BOOTSTRAP_PATH}`
     const controller = new AbortController()

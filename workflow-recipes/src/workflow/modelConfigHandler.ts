@@ -94,7 +94,11 @@ export interface McpHostClient {
   configurePluginWorkloadSdkBootstrap?(
     endpoint: string,
     token: string,
-    body: { provider: string; model: string }
+    body: {
+      capabilityFamily?: 'promptBridge' | 'clientNotifications'
+      provider?: string
+      model?: string
+    }
   ): Promise<{ status: number; body: Record<string, unknown> }>
 }
 
@@ -191,12 +195,16 @@ export class ModelConfigHandler {
    * key into the eager mcp-host.
    */
   async configurePluginWorkloadSdkBootstrap(
-    provider: string,
-    model: string,
+    provider: string | undefined,
+    model: string | undefined,
     mcpHostEndpoint: string,
-    wrcConfigureToken: string
+    wrcConfigureToken: string,
+    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge'
   ): Promise<ConfigureModelResult> {
-    if (!isLlmProviderId(provider) || !isRunnableLlmModelId(model)) {
+    if (
+      capabilityFamily === 'promptBridge' &&
+      (!provider || !model || !isLlmProviderId(provider) || !isRunnableLlmModelId(model))
+    ) {
       return { status: 400, body: { error: 'Invalid Plugin Workload SDK bootstrap target' } }
     }
     if (!this.mcpHost.configurePluginWorkloadSdkBootstrap) {
@@ -206,25 +214,39 @@ export class ModelConfigHandler {
       const result = await this.mcpHost.configurePluginWorkloadSdkBootstrap(
         mcpHostEndpoint,
         wrcConfigureToken,
-        { provider, model }
+        {
+          ...(capabilityFamily === 'clientNotifications' ? { capabilityFamily } : {}),
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
+        }
       )
       if (result.status >= 400) {
         return { status: 502, body: { error: 'mcp_host bootstrap failed' } }
       }
+      const familyProofValid =
+        capabilityFamily === 'clientNotifications'
+          ? result.body.capabilityFamily === 'clientNotifications' &&
+            typeof result.body.policyReady === 'boolean' &&
+            typeof result.body.policyState === 'string'
+          : isBootstrapIdentityProof(result.body)
       if (
         result.body.configured !== true ||
         result.body.ready !== true ||
         result.body.contractVersion !== 2 ||
-        result.body.provider !== provider ||
-        result.body.model !== model ||
-        !isBootstrapIdentityProof(result.body)
+        (capabilityFamily === 'clientNotifications'
+          ? result.body.capabilityFamily !== capabilityFamily
+          : result.body.capabilityFamily !== undefined &&
+            result.body.capabilityFamily !== capabilityFamily) ||
+        (capabilityFamily === 'promptBridge' &&
+          (result.body.provider !== provider || result.body.model !== model)) ||
+        !familyProofValid
       ) {
         return {
           status: 502,
           body: { error: 'mcp_host bootstrap identity is not Plugin Workload SDK v2' },
         }
       }
-      const policyProof = isBootstrapPolicyProof(result.body)
+      const policyProof = capabilityFamily === 'promptBridge' && isBootstrapPolicyProof(result.body)
       return {
         status: 202,
         body: {
@@ -233,6 +255,7 @@ export class ModelConfigHandler {
           provider,
           model,
           contractVersion: 2,
+          capabilityFamily,
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),
@@ -241,6 +264,15 @@ export class ModelConfigHandler {
             : {}),
           ...(typeof result.body.policyReason === 'string'
             ? { policyReason: result.body.policyReason }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyReady === 'boolean'
+            ? { clientNotificationsPolicyReady: result.body.clientNotificationsPolicyReady }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyState === 'string'
+            ? { clientNotificationsPolicyState: result.body.clientNotificationsPolicyState }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyReason === 'string'
+            ? { clientNotificationsPolicyReason: result.body.clientNotificationsPolicyReason }
             : {}),
           ...(policyProof
             ? {

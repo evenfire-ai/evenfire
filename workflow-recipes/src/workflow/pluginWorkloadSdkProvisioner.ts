@@ -41,8 +41,8 @@ export interface EagerSdkBootstrapProof {
   ready: true
   contractVersion: 2
   podUid: string
-  provider: string
-  model: string
+  provider?: string
+  model?: string
   policyReady?: boolean
   policyState?: string
   policyReason?: string
@@ -53,6 +53,9 @@ export interface EagerSdkBootstrapProof {
   defaultTargetRef?: string
   defaultProvider?: string
   defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
   verifiedAt: string
 }
 
@@ -279,13 +282,15 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     const readiness = await this.readinessForEagerSdkMcpHost(recipeName)
-    if (!spec.pluginWorkloadSdk?.promptBridge) {
+    const promptBridge = spec.pluginWorkloadSdk?.promptBridge !== undefined
+    const clientNotifications = spec.pluginWorkloadSdk?.clientNotifications !== undefined
+    if (!promptBridge && !clientNotifications) {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
     if (!this.deps.modelConfigHandler) {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
-      return readiness.status
+      return 'failed'
     }
     if (readiness.status !== 'ready') {
       this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
@@ -299,20 +304,30 @@ export class PluginWorkloadSdkProvisioner {
       return 'deploying'
     }
 
-    if (!mcpHostAgent) return 'failed'
-    const configureKey = `${readiness.uid}:${mcpHostAgent.provider}:${mcpHostAgent.model}`
+    if (promptBridge && !mcpHostAgent) return 'failed'
+    const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
         namespace
       )
       const mcpHostEndpoint = buildMcpHostUrl(recipeName, this.deps.config.sandboxNamespace)
-      const result = await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
-        mcpHostAgent.provider,
-        mcpHostAgent.model,
-        mcpHostEndpoint,
-        wrcConfigureToken
-      )
+      const result =
+        capabilityFamily === 'promptBridge'
+          ? await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+              mcpHostAgent!.provider,
+              mcpHostAgent!.model,
+              mcpHostEndpoint,
+              wrcConfigureToken
+            )
+          : await this.deps.modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+              undefined,
+              undefined,
+              mcpHostEndpoint,
+              wrcConfigureToken,
+              'clientNotifications'
+            )
       if (result.status >= 400) {
         this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
@@ -330,7 +345,10 @@ export class PluginWorkloadSdkProvisioner {
       }
       this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
-      if (spec.pluginWorkloadSdk.promptBridge && proof.policyReady === false) {
+      if (promptBridge && proof.policyReady === false) {
+        return 'awaiting_policy'
+      }
+      if (clientNotifications && proof.clientNotificationsPolicyReady === false) {
         return 'awaiting_policy'
       }
     } catch (err) {
@@ -496,6 +514,29 @@ function parseEagerSdkBootstrapProof(
   body: Record<string, unknown>,
   podUid: string
 ): EagerSdkBootstrapProof | null {
+  if (body.capabilityFamily === 'clientNotifications') {
+    if (
+      body.configured !== true ||
+      body.ready !== true ||
+      body.contractVersion !== 2 ||
+      body.capabilityFamily !== 'clientNotifications' ||
+      typeof body.policyReady !== 'boolean' ||
+      typeof body.policyState !== 'string'
+    ) {
+      return null
+    }
+    return {
+      ready: true,
+      contractVersion: 2,
+      podUid,
+      clientNotificationsPolicyReady: body.policyReady,
+      clientNotificationsPolicyState: body.policyState,
+      ...(typeof body.policyReason === 'string'
+        ? { clientNotificationsPolicyReason: body.policyReason }
+        : {}),
+      verifiedAt: new Date().toISOString(),
+    }
+  }
   if (
     body.configured !== true ||
     body.ready !== true ||
@@ -536,6 +577,15 @@ function parseEagerSdkBootstrapProof(
           defaultProvider: body.defaultProvider as string,
           defaultModel: body.defaultModel as string,
         }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyReady === 'boolean'
+      ? { clientNotificationsPolicyReady: body.clientNotificationsPolicyReady }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyState === 'string'
+      ? { clientNotificationsPolicyState: body.clientNotificationsPolicyState }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyReason === 'string'
+      ? { clientNotificationsPolicyReason: body.clientNotificationsPolicyReason }
       : {}),
   }
 }

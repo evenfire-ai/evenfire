@@ -21,6 +21,7 @@ import {
   type WorkflowRecipeResource,
   deletePluginWorkloadSdkGrant,
   getAdminUsers,
+  getPluginWorkloadSdkLegacyInventory,
   getRecipes,
   isSilentApiError,
   listLlmHostSecrets,
@@ -125,6 +126,9 @@ export default function PluginWorkloadSdkPage() {
   const [grants, setGrants] = useState<PluginWorkloadSdkGrant[]>([])
   const [grantsLoading, setGrantsLoading] = useState(true)
   const [grantsError, setGrantsError] = useState('')
+  const [legacyInventory, setLegacyInventory] = useState<Awaited<
+    ReturnType<typeof getPluginWorkloadSdkLegacyInventory>
+  > | null>(null)
   const [grantSearch, setGrantSearch] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editing, setEditing] = useState<PluginWorkloadSdkGrant | 'new' | null>(null)
@@ -181,6 +185,9 @@ export default function PluginWorkloadSdkPage() {
       const r = await listPluginWorkloadSdkGrants()
       const items = (r.items || []) as PluginWorkloadSdkGrant[]
       setGrants(items)
+      void getPluginWorkloadSdkLegacyInventory()
+        .then(setLegacyInventory)
+        .catch(() => setLegacyInventory(null))
       const userRefs = items.flatMap(grant => grant.allowedUserRefs)
       void fetchUsersByRefs(userRefs)
         .then(mergeLoadedUsers)
@@ -336,6 +343,7 @@ export default function PluginWorkloadSdkPage() {
             error={grantsError}
             deletingId={deletingId}
             userMap={userMap}
+            legacyInventory={legacyInventory}
             onEdit={setEditing}
             onDelete={handleDelete}
           />

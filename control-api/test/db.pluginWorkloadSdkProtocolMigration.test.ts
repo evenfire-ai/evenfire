@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  addPluginWorkloadSdkAttemptLedgerColumns,
+  addPluginWorkloadSdkNotExecutedSpendOutcome,
   addPluginWorkloadSdkProtocolAndRevocation,
   addPluginWorkloadSdkRuntimeAccess,
+  repairPluginWorkloadSdkLegacyGrantPolicies,
 } from '../src/services/pluginWorkloadSdkSchema.js'
 
 describe('plugin workload SDK protocol migration', () => {
@@ -28,5 +31,46 @@ describe('plugin workload SDK protocol migration', () => {
     expect(migrationSql).toContain('TO control_api_runtime')
     expect(migrationSql).toContain('plugin_workload_sdk_invocation_attempts')
     expect(migrationSql).toContain('plugin_workload_sdk_provider_attempts')
+  })
+
+  it('preserves only complete ordered active policies while adding the attempt ledger', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+
+    await addPluginWorkloadSdkAttemptLedgerColumns({ query } as never)
+
+    const migrationSql = String(query.mock.calls[0]?.[0])
+    expect(migrationSql).toContain(
+      "policy_state IN ('active', 'legacy_unreviewed', 'revoking', 'disabled')"
+    )
+    expect(migrationSql).toContain("jsonb_typeof(prompt_targets) = 'array'")
+    expect(migrationSql).toContain("(prompt_targets -> 0 ->> 'targetRef') = default_target_ref")
+    expect(migrationSql).toContain("(prompt_targets -> 0 ->> 'provider') = provider")
+    expect(migrationSql).toContain("COUNT(DISTINCT target ->> 'targetRef')")
+    expect(migrationSql).toContain("policy_state = 'active'")
+  })
+
+  it('provides an idempotent forward repair for valid policies already marked legacy', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+
+    await repairPluginWorkloadSdkLegacyGrantPolicies({ query } as never)
+
+    const migrationSql = String(query.mock.calls[0]?.[0])
+    expect(migrationSql).toContain("SET policy_state = 'active'")
+    expect(migrationSql).toContain('policy_revision = 1')
+    expect(migrationSql).toContain("policy_state = 'legacy_unreviewed'")
+    expect(migrationSql).toContain('policy_revision = 0')
+    expect(migrationSql).toContain("capability_family = 'promptBridge'")
+    expect(migrationSql).not.toContain('clientNotifications')
+  })
+
+  it('keeps no-execution receipts distinct from unknown provider spend', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+
+    await addPluginWorkloadSdkNotExecutedSpendOutcome({ query } as never)
+
+    const migrationSql = String(query.mock.calls[0]?.[0])
+    expect(migrationSql).toContain("outcome IN ('exact', 'unknown', 'not_executed')")
+    expect(migrationSql).toContain("outcome IN ('unknown', 'not_executed')")
+    expect(migrationSql).toContain('DROP CONSTRAINT IF EXISTS')
   })
 })

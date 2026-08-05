@@ -5,7 +5,7 @@ import { ingestUsageEventsInTransaction } from './usageEvents.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-export type PromptBridgeFinalizationStatus = 'complete' | 'provider_unavailable'
+export type PromptBridgeFinalizationStatus = 'complete' | 'failed' | 'provider_unavailable'
 
 export type PromptBridgeFinalizationUsage = {
   llmSecretName: string
@@ -39,7 +39,7 @@ export type PromptBridgeFinalizationResult = {
   invocationId: string
   providerAttemptId: string
   status: PromptBridgeFinalizationStatus
-  outcome: 'exact' | 'unknown'
+  outcome: 'exact' | 'unknown' | 'not_executed'
   idempotent: boolean
   usageAccepted: boolean
 }
@@ -128,7 +128,7 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
   } else if (input.usage) {
     throw new PromptBridgeFinalizationError(
       'invalid_request',
-      'provider_unavailable finalization cannot claim exact usage',
+      'non-complete finalization cannot claim exact usage',
       400
     )
   }
@@ -146,7 +146,7 @@ type SpendOutcomeRow = {
   provider: string
   model: string
   credential_slot: string
-  outcome: 'exact' | 'unknown'
+  outcome: 'exact' | 'unknown' | 'not_executed'
   input_tokens: number | string | null
   output_tokens: number | string | null
 }
@@ -155,7 +155,8 @@ function mapExistingOutcome(
   row: SpendOutcomeRow,
   input: PromptBridgeFinalizationInput
 ): PromptBridgeFinalizationResult {
-  const expectedOutcome = input.status === 'complete' ? 'exact' : 'unknown'
+  const expectedOutcome =
+    input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
   if (
     row.invocation_id !== input.invocationId ||
     row.recipe_namespace !== input.recipeNamespace ||
@@ -190,9 +191,10 @@ function mapExistingOutcome(
 
 /**
  * Finalize one physical promptBridge attempt and its logical invocation in a
- * single trace-ingest transaction.  Exact usage is inserted through the same
- * receipt binder as the normal usage endpoint; unknown provider spend gets an
- * immutable ledger row instead of disappearing behind provider_unavailable.
+ * single trace-ingest transaction. Exact usage is inserted through the same
+ * receipt binder as the normal usage endpoint; unknown provider spend and
+ * proven no-execution failures get immutable ledger rows instead of
+ * disappearing behind a public provider_unavailable response.
  */
 export async function finalizePromptBridge(
   input: PromptBridgeFinalizationInput
@@ -303,9 +305,11 @@ export async function finalizePromptBridgeInTransaction(
   // unknown ledger entry is then the only honest accounting result and still
   // prevents replay.
   const compatibleProviderStatuses =
-    input.status === 'provider_unavailable'
-      ? new Set(['in_progress', 'provider_unavailable', 'complete', 'failed'])
-      : new Set(['in_progress', 'complete'])
+    input.status === 'complete'
+      ? new Set(['in_progress', 'complete'])
+      : input.status === 'failed'
+        ? new Set(['reserved', 'in_progress', 'failed'])
+        : new Set(['reserved', 'in_progress', 'provider_unavailable', 'complete', 'failed'])
   if (
     !compatibleStatuses.has(currentInvocationStatus) ||
     !compatibleStatuses.has(currentReceiptStatus) ||
@@ -318,7 +322,8 @@ export async function finalizePromptBridgeInTransaction(
     )
   }
 
-  const outcome = input.status === 'complete' ? 'exact' : 'unknown'
+  const outcome =
+    input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
   let usageAccepted = false
 
   // Promote the immutable physical and attempt receipts before exact usage is

@@ -158,22 +158,64 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
   })
 
-  it('treats credential resolution failure as terminal and never redeems a fallback', async () => {
+  it('closes a reserved SDK-only attempt when credential resolution fails before the provider', async () => {
     const resolve = vi.fn(async () => {
       throw new PluginWorkloadError(
         'provider_unavailable',
         'authorized provider credentials are unavailable',
+        false,
+        'credential_unavailable',
         false
       )
     })
     const { bridge, providerCalls } = makeBridge({}, resolve)
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+    const credentialTicketIssuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: 'fresh-primary',
+        providerAttemptId: 'attempt-primary',
+        providerAttemptIndex: 1,
+      })),
+    }
 
-    await expect(bridge.complete(request)).rejects.toMatchObject({
+    await expect(
+      bridge.complete({
+        ...request,
+        credentialTicketIssuer,
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
       code: 'provider_unavailable',
       retryable: false,
+      providerAttempt: {
+        providerAttemptId: 'attempt-primary',
+        providerAttemptIndex: 1,
+        target: primary,
+        attemptCount: 1,
+        fallbackUsed: false,
+      },
     })
     expect(resolve).toHaveBeenCalledTimes(1)
     expect(providerCalls).toEqual([])
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'attempt-primary',
+      providerAttemptIndex: 1,
+      status: 'failed',
+    })
+
+    await expect(
+      bridge.complete({
+        ...request,
+        deferSuccessfulAttemptAcknowledgement: true,
+        credentialTicketIssuer,
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'credential_unavailable',
+      providerAttempt: { providerAttemptId: 'attempt-primary' },
+    })
+    expect(providerAttemptReporter.report).toHaveBeenCalledTimes(2)
   })
 
   it('reissues a fresh target-bound ticket immediately before each credential resolution', async () => {

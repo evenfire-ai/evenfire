@@ -312,7 +312,10 @@ describe('Plugin Workload SDK promptBridge deterministic HTTP runtime', () => {
     expect(active.issuedTickets).toEqual([PRIMARY.targetRef])
     expect(active.credentialCalls).toEqual([PRIMARY.targetRef])
     expect(active.providerCalls).toEqual([])
-    expect(active.reportedStatuses).toEqual(['provider_unavailable'])
+    // The HTTP contract remains provider_unavailable, but the logical
+    // invocation is revivable because credential resolution proved that no
+    // provider call was executed.
+    expect(active.reportedStatuses).toEqual(['failed'])
   })
 
   it('rejects an unauthorized target before ticket, credential, or provider lookup', async () => {

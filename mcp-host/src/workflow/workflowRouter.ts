@@ -168,6 +168,7 @@ export function createWorkflowRouter(service: WorkflowService): Router {
       // apiKey/secret-shaped field supplied by a caller is ignored before the
       // service boundary and can never reach the SDK context holder.
       const body: PluginWorkloadSdkBootstrapRequest = {
+        capabilityFamily: raw?.capabilityFamily,
         provider: raw?.provider,
         model: raw?.model,
       }

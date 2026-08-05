@@ -85,7 +85,7 @@ export interface PromptBridgeHandlerDeps {
     attemptGeneration: number
     providerAttemptId: string
     providerAttemptIndex: number
-    status: 'complete' | 'provider_unavailable'
+    status: 'complete' | 'failed' | 'provider_unavailable'
     reason: string
     target: PromptBridgeTarget
     usage?: {
@@ -474,28 +474,39 @@ export class PromptBridgeHandler {
       }
     } catch (err) {
       unknownProviderAttempt = err instanceof PluginWorkloadError ? err.providerAttempt : undefined
+      let providerAttemptFinalized = false
       if (this.deps.finalizePromptBridge && unknownProviderAttempt) {
         try {
+          const finalizationStatus =
+            err instanceof PluginWorkloadError && err.providerMayHaveExecuted
+              ? 'provider_unavailable'
+              : 'failed'
           await this.deps.finalizePromptBridge({
             invocationId: authorized.invocationId,
             attemptGeneration: authorized.attemptGeneration,
             providerAttemptId: unknownProviderAttempt.providerAttemptId,
             providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
-            status: 'provider_unavailable',
+            status: finalizationStatus,
             reason:
               err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
             target: unknownProviderAttempt.target,
           })
+          providerAttemptFinalized = true
         } catch {
           console.warn('[PluginWorkloadSdk] provider spend finalization failed')
         }
       }
+      // The public error code is deliberately not the idempotency decision.
+      // A broker/configuration failure uses `provider_unavailable` as the
+      // safe workload-facing code, but `providerMayHaveExecuted=false` proves
+      // that this invocation did not reach a provider and can be revived with
+      // the same key after the operator repairs the credential/policy. Only a
+      // positive/ambiguous execution signal permanently fences the key.
       const status =
-        err instanceof PluginWorkloadError &&
-        (err.code === 'provider_unavailable' || err.providerMayHaveExecuted)
+        err instanceof PluginWorkloadError && err.providerMayHaveExecuted
           ? 'provider_unavailable'
           : 'failed'
-      if (!this.deps.finalizePromptBridge || !unknownProviderAttempt) {
+      if (!this.deps.finalizePromptBridge || !unknownProviderAttempt || !providerAttemptFinalized) {
         await reportInvocationStatusBestEffort(
           this.deps.controlApiClient,
           authorized.invocationId,

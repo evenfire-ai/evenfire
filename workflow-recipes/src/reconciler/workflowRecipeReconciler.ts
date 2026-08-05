@@ -2386,7 +2386,7 @@ export class WorkflowRecipeReconciler {
       // active+BootstrapNotReady as a settled state.
       const sdkOnlyBootstrapPending =
         sdkOnlyRuntime?.phase === 'active' &&
-        recipe.spec.pluginWorkloadSdk?.promptBridge !== undefined &&
+        recipe.spec.pluginWorkloadSdk !== undefined &&
         sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {

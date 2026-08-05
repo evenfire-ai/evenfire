@@ -3232,9 +3232,30 @@ export type PluginWorkloadSdkGrant = {
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets: PluginWorkloadSdkPromptTarget[]
   defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
+  revocationId: string | null
   policyRevision: number
   createdAt: string
   updatedAt: string
+}
+
+export type PluginWorkloadSdkLegacyGrantInventoryItem = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export type PluginWorkloadSdkLegacyGrantInventory = {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
 }
 
 export type PluginWorkloadSdkGrantInput = {
@@ -3295,6 +3316,16 @@ export async function listPluginWorkloadSdkGrants(filter?: {
     recipeNamespace: filter?.recipeNamespace,
     recipeName: filter?.recipeName,
   }) as Promise<{ items?: PluginWorkloadSdkGrant[] }>
+}
+
+export async function getPluginWorkloadSdkLegacyInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  return apiGet('/api/v1/admin/plugin-workload-sdk/legacy-inventory', {
+    recipeNamespace: filter?.recipeNamespace,
+    recipeName: filter?.recipeName,
+  }) as Promise<PluginWorkloadSdkLegacyGrantInventory>
 }
 
 export async function upsertPluginWorkloadSdkGrant(

@@ -184,7 +184,7 @@ function parsePromptBridgeFinalizationBody(
     attemptGeneration < 1 ||
     providerAttemptIndex < 1 ||
     providerAttemptIndex > 4 ||
-    !['complete', 'provider_unavailable'].includes(String(status)) ||
+    !['complete', 'failed', 'provider_unavailable'].includes(String(status)) ||
     !reason ||
     reason.length > 128 ||
     !targetRef ||
@@ -695,6 +695,11 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     asyncHandler(async (_req, res) => {
       const claims = _req.mcpHostJwt!
       const grant = await findGrant(claims.recipeNamespace, claims.recipeName, 'promptBridge')
+      const clientNotificationsGrant = await findGrant(
+        claims.recipeNamespace,
+        claims.recipeName,
+        'clientNotifications'
+      )
       const v2Ready = Boolean(
         grant &&
         grant.policyState === 'active' &&
@@ -702,6 +707,12 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         grant.promptTargets.length > 0 &&
         grant.defaultTargetRef !== null &&
         grant.promptTargets[0]?.targetRef === grant.defaultTargetRef
+      )
+      const clientNotificationsReady = Boolean(
+        clientNotificationsGrant &&
+        clientNotificationsGrant.policyState === 'active' &&
+        clientNotificationsGrant.allowedCallers.length > 0 &&
+        clientNotificationsGrant.allowedEventTypes.length > 0
       )
       const primaryTarget = grant?.promptTargets[0] ?? null
       res.status(200).json({
@@ -717,6 +728,8 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultProvider: primaryTarget?.provider ?? null,
         defaultModel: primaryTarget?.model ?? null,
         v2Ready,
+        clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',
+        clientNotificationsReady,
       })
     })
   )

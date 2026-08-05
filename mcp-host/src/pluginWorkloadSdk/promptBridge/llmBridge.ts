@@ -141,6 +141,39 @@ function providerOutcomeUnknownError(
   )
 }
 
+/**
+ * A ticket reserves the physical attempt before the broker resolves a
+ * credential. Preserve that receipt when surfacing a pre-provider failure so
+ * the SDK-only handler can close all three lifecycle records atomically. The
+ * secret name is intentionally absent here: the broker failed before it could
+ * prove which Secret was used.
+ */
+function withProviderAttemptContext(
+  error: unknown,
+  providerAttempt: PluginWorkloadProviderAttemptContext
+): PluginWorkloadError {
+  const publicError =
+    error instanceof ClassifiedProviderError
+      ? error.toPluginWorkloadError()
+      : error instanceof PluginWorkloadError
+        ? error
+        : new PluginWorkloadError(
+            'provider_unavailable',
+            'provider credentials could not be resolved',
+            false,
+            'credential_unavailable',
+            false
+          )
+  return new PluginWorkloadError(
+    publicError.code,
+    publicError.message,
+    publicError.retryable,
+    publicError.reason,
+    publicError.providerMayHaveExecuted,
+    providerAttempt
+  )
+}
+
 async function withinDeadline<T>(
   operation: () => Promise<T>,
   timeoutMs: number,
@@ -332,15 +365,26 @@ export class LlmBridge {
         // not leave that row in_progress until the lease sweep when the broker
         // rejects the Secret read; close it before surfacing the terminal
         // credential/configuration failure to the caller.
-        if (
-          ticket.providerAttemptId &&
-          ticket.providerAttemptIndex !== undefined &&
-          !request.deferSuccessfulAttemptAcknowledgement
-        ) {
+        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+          // `deferSuccessfulAttemptAcknowledgement` applies only to the
+          // successful SDK-only terminal ACK. A ticket has already reserved a
+          // physical attempt, so every pre-provider credential/configuration
+          // failure must close that attempt as `failed`, regardless of the
+          // logical finalizer mode. Otherwise the logical invocation closes
+          // while the physical ledger remains reserved/in_progress forever.
           await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
             providerAttemptId: ticket.providerAttemptId,
             providerAttemptIndex: ticket.providerAttemptIndex,
             status: 'failed',
+          })
+        }
+        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+          throw withProviderAttemptContext(error, {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            target: authorized.target,
+            attemptCount: index + 1,
+            fallbackUsed: index > 0,
           })
         }
         throw error
@@ -393,32 +437,46 @@ export class LlmBridge {
             }
           )
         }
-        if (providerMayHaveExecuted || !providerAttemptAcknowledged) {
+        const providerAttemptContext =
+          ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
+            ? {
+                providerAttemptId: ticket.providerAttemptId,
+                providerAttemptIndex: ticket.providerAttemptIndex,
+                target: authorized.target,
+                attemptCount: index + 1,
+                fallbackUsed: index > 0,
+                llmSecretName: credential.llmSecretName,
+              }
+            : undefined
+        if (!providerAttemptAcknowledged) {
           // Once execution may have started, a failed receipt is not a safe
           // failover signal. Closing the logical invocation as terminal
           // provider_unavailable prevents the same idempotency key from
           // reviving into a second billable provider call.
-          throw providerOutcomeUnknownError(
-            ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
-              ? {
-                  providerAttemptId: ticket.providerAttemptId,
-                  providerAttemptIndex: ticket.providerAttemptIndex,
-                  target: authorized.target,
-                  attemptCount: index + 1,
-                  fallbackUsed: index > 0,
-                  llmSecretName: credential.llmSecretName,
-                }
-              : undefined
-          )
+          throw providerOutcomeUnknownError(providerAttemptContext)
         }
-        if (!(error instanceof ClassifiedProviderError)) throw error
+        if (!(error instanceof ClassifiedProviderError)) {
+          if (providerMayHaveExecuted) {
+            throw providerOutcomeUnknownError(providerAttemptContext)
+          }
+          // Provider construction/configuration failed before execution. Carry
+          // the receipt so SDK-only finalization can atomically mark it
+          // not_executed and leave the idempotency key revivable.
+          throw providerAttemptContext
+            ? withProviderAttemptContext(error, providerAttemptContext)
+            : error
+        }
         lastProviderError = error
         const failureClass = classifyFailoverClass(
           error.classified.code,
           error.classified.retryable
         )
         const eligible = failureClass !== null && triggerOn.has(failureClass)
-        if (!eligible || index === request.targets.length - 1) throw error.toPluginWorkloadError()
+        if (!eligible || index === request.targets.length - 1) {
+          throw providerAttemptContext
+            ? withProviderAttemptContext(error.toPluginWorkloadError(), providerAttemptContext)
+            : error.toPluginWorkloadError()
+        }
       }
     }
 
@@ -536,7 +594,11 @@ export class LlmBridge {
           `LLM provider error: ${classified.code}`,
           classified.retryable,
           reason,
-          classified.code === LlmErrorCode.ApiCallFailed
+          // This branch runs only after the provider call was entered. Even a
+          // provider-declared auth/rate-limit response is not proof that no
+          // billable work occurred, so it must remain fenced as an ambiguous
+          // physical outcome rather than reviving the idempotency key.
+          true
         )
       )
     } finally {

@@ -73,6 +73,11 @@ generated config, secrets, and rollouts match the current worktree:
 make minikube-pre-gate-sync GATE=<gate-name>
 ```
 
+For target-aware promptBridge or provider-free `clientNotifications` upgrades,
+follow the fail-closed migration and rollout order in
+[Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
+before enabling the feature flag.
+
 When deployable code changed and the E2E runner will manage port-forwards
 itself, force the sync and skip the short-lived background port-forward refresh:
 

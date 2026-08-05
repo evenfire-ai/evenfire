@@ -319,6 +319,8 @@ describe('buildPluginWorkloadSdkStatus', () => {
         defaultTargetRef: 'primary-zai',
         defaultProvider: 'zai',
         defaultModel: 'glm-4.7',
+        clientNotificationsPolicyReady: true,
+        clientNotificationsPolicyState: 'active',
         verifiedAt: NOW,
       },
       now: NOW,
@@ -346,6 +348,45 @@ describe('buildPluginWorkloadSdkStatus', () => {
       message: 'Capability validated (promptBridge, clientNotifications)',
       validatedAt: NOW,
       verifiedAt: NOW,
+    })
+  })
+
+  it('keeps a mixed recipe pending until every declared family has an active proof', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({
+        promptBridge: {},
+        clientNotifications: { allowedEventTypes: ['a.b'] },
+      }),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        policyReady: true,
+        policyState: 'active',
+        clientNotificationsPolicyReady: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsPolicyReason: 'grant_missing',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+
+    expect(projection.conditions[0]).toMatchObject({
+      type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+      status: 'False',
+      reason: 'PolicyNotConfigured',
+      message: 'Plugin Workload SDK clientNotifications is awaiting an operator grant',
+    })
+    expect(projection.capability).toMatchObject({
+      state: 'awaiting_policy',
+      promptBridge: true,
+      clientNotifications: true,
+      validatedAt: null,
     })
   })
 
@@ -435,6 +476,80 @@ describe('buildPluginWorkloadSdkStatus', () => {
       policyRevision: null,
       policyHash: null,
       defaultTargetRef: null,
+    })
+  })
+
+  it('does not validate a clientNotifications-only recipe before its grant is proven', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { clientNotifications: { allowedEventTypes: ['e2e.test'] } },
+        { agent: undefined }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        clientNotificationsPolicyReady: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsPolicyReason: 'grant_missing',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'PolicyNotConfigured',
+        message: 'Plugin Workload SDK clientNotifications is awaiting an operator grant',
+        lastTransitionTime: NOW,
+      },
+      {
+        type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+        status: 'True',
+        reason: 'grant_missing',
+        message: 'Plugin Workload SDK clientNotifications is awaiting an operator grant',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toMatchObject({
+      state: 'awaiting_policy',
+      promptBridge: false,
+      clientNotifications: true,
+      validatedAt: null,
+    })
+  })
+
+  it('keeps clientNotifications-only recipes degraded while the SDK host is not ready', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { clientNotifications: { allowedEventTypes: ['e2e.test'] } },
+        { agent: undefined }
+      ),
+      existingConditions: undefined,
+      phase: 'deploying',
+      featureFlagEnabled: true,
+      now: NOW,
+    })
+
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'BootstrapNotReady',
+        message: 'Plugin Workload SDK host readiness proof is not ready',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toMatchObject({
+      state: 'degraded',
+      promptBridge: false,
+      clientNotifications: true,
+      validatedAt: null,
     })
   })
 

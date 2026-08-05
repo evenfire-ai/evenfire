@@ -2,11 +2,15 @@ import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import { isLlmProvider } from '../llm/registryCore'
 import type { LlmProvider } from '../llm/registryCore'
 import type { ConfigureResponse, PluginWorkloadSdkBootstrapRequest } from '../workflow/types'
-import type { PluginWorkloadSdkBootstrapProof } from './promptBridge/controlApiClient'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkClientNotificationsBootstrapProof,
+} from './promptBridge/controlApiClient'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   onConfigured?: (context: { provider: LlmProvider; defaultModel: string }) => void
   verify?: (provider: string, model: string) => Promise<PluginWorkloadSdkBootstrapProof | null>
+  verifyClientNotifications?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>
 }
 
 /**
@@ -18,6 +22,27 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   req: PluginWorkloadSdkBootstrapRequest | undefined,
   deps: PluginWorkloadSdkBootstrapIdentityDeps
 ): Promise<ConfigureResponse> {
+  if (req?.capabilityFamily === 'clientNotifications') {
+    const proof = deps.verifyClientNotifications ? await deps.verifyClientNotifications() : null
+    if (!proof) {
+      return {
+        configured: false,
+        ready: false,
+        contractVersion: 2,
+        capabilityFamily: 'clientNotifications',
+        message: 'Plugin Workload SDK clientNotifications readiness is not available',
+      }
+    }
+    return {
+      configured: true,
+      ready: proof.ready,
+      contractVersion: 2,
+      capabilityFamily: 'clientNotifications',
+      policyReady: proof.policyReady,
+      policyState: proof.policyState,
+      ...(proof.policyReason ? { policyReason: proof.policyReason } : {}),
+    }
+  }
   if (!req?.provider) {
     return { configured: false, message: 'provider is required' }
   }
@@ -41,6 +66,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   return {
     configured: true,
     ready: true,
+    capabilityFamily: 'promptBridge',
     provider: req.provider,
     model,
     contractVersion: 2,
@@ -51,5 +77,14 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     ...(proof?.defaultTargetRef !== undefined ? { defaultTargetRef: proof.defaultTargetRef } : {}),
     ...(proof?.defaultProvider !== undefined ? { defaultProvider: proof.defaultProvider } : {}),
     ...(proof?.defaultModel !== undefined ? { defaultModel: proof.defaultModel } : {}),
+    ...(proof?.clientNotificationsPolicyReady !== undefined
+      ? { clientNotificationsPolicyReady: proof.clientNotificationsPolicyReady }
+      : {}),
+    ...(proof?.clientNotificationsPolicyState !== undefined
+      ? { clientNotificationsPolicyState: proof.clientNotificationsPolicyState }
+      : {}),
+    ...(proof?.clientNotificationsPolicyReason !== undefined
+      ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
+      : {}),
   }
 }

@@ -2,7 +2,10 @@ import express, { type Express } from 'express'
 import type http from 'http'
 import { type RuntimeJwtBinding, getJwtRuntimeBinding } from '../../workflow/mcpHostRuntimeJwt'
 import type { ClientNotificationsHandler } from '../clientNotifications/handler'
-import type { PluginWorkloadSdkBootstrapProof } from '../promptBridge/controlApiClient'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkClientNotificationsBootstrapProof,
+} from '../promptBridge/controlApiClient'
 import type { PromptBridgeHandler } from '../promptBridge/handler'
 import { registerSdkRoutes } from './routes'
 
@@ -93,6 +96,7 @@ export interface SdkServerOptions {
    * required namespace. Fails closed with 503 on any drift.
    */
   getRuntimeBinding?: () => RuntimeJwtBinding | null
+  verifyClientNotificationsBootstrap?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof>
 }
 
 /**
@@ -148,6 +152,13 @@ export class PluginWorkloadSdkServer {
     expectedModel: string
   ): Promise<PluginWorkloadSdkBootstrapProof> {
     return this.opts.promptBridgeHandler.verifyBootstrapV2(expectedProvider, expectedModel)
+  }
+
+  verifyClientNotificationsBootstrap(): Promise<PluginWorkloadSdkClientNotificationsBootstrapProof> {
+    if (!this.opts.verifyClientNotificationsBootstrap) {
+      return Promise.reject(new Error('clientNotifications bootstrap verifier is not configured'))
+    }
+    return this.opts.verifyClientNotificationsBootstrap()
   }
 
   async start(): Promise<void> {

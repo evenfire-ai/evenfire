@@ -393,6 +393,7 @@ export function maybeCreatePluginWorkloadSdkServer(
     maxConnections: config.pluginWorkloadSdkMaxConnections,
     maxRequestsPerMinutePerWorkload: config.pluginWorkloadSdkMaxRpmPerWorkload,
     maxConcurrentPerWorkload: config.pluginWorkloadSdkMaxConnectionsPerWorkload,
+    verifyClientNotificationsBootstrap: () => controlApiClient.verifyClientNotificationsBootstrap(),
     // Re-validate the rotating runtime token on every request: the boot-time
     // gate is one-shot, but refreshed tokens could in theory carry a drifted
     // binding. Fail closed instead of trusting the boot decision forever.

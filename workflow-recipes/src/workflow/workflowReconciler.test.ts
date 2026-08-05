@@ -1340,6 +1340,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         defaultTargetRef: 'primary-zai',
         defaultProvider: 'zai',
         defaultModel: 'glm-4.7',
+        clientNotificationsPolicyReady: true,
+        clientNotificationsPolicyState: 'active',
       },
     }),
   }
@@ -1385,6 +1387,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     defaultTargetRef: 'primary-zai',
     defaultProvider: 'zai',
     defaultModel: 'glm-4.7',
+    clientNotificationsPolicyReady: true,
+    clientNotificationsPolicyState: 'active',
   })
 
   beforeEach(() => {
@@ -1580,6 +1584,17 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('creates a provider-free eager mcp-host for clientNotifications-only without an agent', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: {
+        configured: true,
+        ready: true,
+        contractVersion: 2,
+        capabilityFamily: 'clientNotifications',
+        policyReady: true,
+        policyState: 'active',
+      },
+    })
 
     const result = await reconciler.reconcilePluginWorkloadSdkOnly(
       'notifications-only',
@@ -1600,7 +1615,13 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     const envNames = (pod.spec.containers[0].env ?? []).map((entry: { name: string }) => entry.name)
     expect(envNames).not.toContain('CLERUM_MODEL_PROVIDER')
     expect(envNames).not.toContain('CLERUM_MODEL')
-    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).not.toHaveBeenCalled()
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      expect.any(String),
+      'wrc-configure-token',
+      'clientNotifications'
+    )
   })
 
   it('cleans SDK-only host resources idempotently without creating workflow resources', async () => {
@@ -1833,8 +1854,19 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     )
   })
 
-  it('does NOT broker a provider for clientNotifications-only recipes', async () => {
+  it('does not broker a provider for clientNotifications-only recipes but proves its grant', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: {
+        configured: true,
+        ready: true,
+        contractVersion: 2,
+        capabilityFamily: 'clientNotifications',
+        policyReady: true,
+        policyState: 'active',
+      },
+    })
 
     await reconciler.reconcile(
       'notif-recipe',
@@ -1856,7 +1888,47 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       call => call[0].body.metadata.name
     )
     expect(podNames).toContain('notif-recipe-mcp-host')
-    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).not.toHaveBeenCalled()
+    expect(mockModelConfigHandler.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      expect.any(String),
+      'wrc-configure-token',
+      'clientNotifications'
+    )
+  })
+
+  it('keeps clientNotifications-only recipes awaiting policy when the host proves no grant', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+    mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
+      status: 202,
+      body: {
+        configured: true,
+        ready: true,
+        contractVersion: 2,
+        capabilityFamily: 'clientNotifications',
+        policyReady: false,
+        policyState: 'missing',
+        policyReason: 'grant_missing',
+      },
+    })
+
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+      'notifications-policy-pending',
+      'uid-notifications-policy-pending',
+      sandboxNamespace,
+      sdkSpec({
+        agent: undefined,
+        steps: undefined,
+        pluginWorkloadSdk: {
+          clientNotifications: { allowedEventTypes: ['e2e.test'] },
+          allowedCallers: ['sdk-caller'],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('awaiting_policy')
+    expect(result.message).toContain('operator policy pending')
+    expect(result.message).toContain('grant_missing')
   })
 
   it('skips the provider broker while the eager mcp-host is not ready', async () => {

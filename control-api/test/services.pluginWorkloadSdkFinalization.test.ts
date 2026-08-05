@@ -206,6 +206,83 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     ])
   })
 
+  it('atomically records a pre-provider failure as not_executed without usage', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      {
+        id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        method: 'promptBridge',
+        status: 'in_progress',
+        attempt_generation: 1,
+      },
+      {
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        method: 'promptBridge',
+        status: 'in_progress',
+      },
+      {
+        id: IDS.providerAttempt,
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        attempt_index: 1,
+        target_ref: inputBase.target.targetRef,
+        provider: inputBase.target.provider,
+        model: inputBase.target.model,
+        credential_slot: inputBase.target.credentialSlot,
+        status: 'reserved',
+      },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 }
+    )
+
+    const result = await finalizePromptBridgeInTransaction(
+      { ...inputBase, status: 'failed', reason: 'credential_unavailable' },
+      db as never
+    )
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      outcome: 'not_executed',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    expect(ingest).not.toHaveBeenCalled()
+    expect(project).not.toHaveBeenCalled()
+    const insert = db.query.mock.calls.find(([statement]: [string]) =>
+      statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+    )
+    expect(insert?.[1]).toEqual([
+      IDS.providerAttempt,
+      IDS.invocation,
+      inputBase.recipeNamespace,
+      inputBase.recipeName,
+      1,
+      1,
+      inputBase.target.targetRef,
+      inputBase.hostRef,
+      inputBase.target.provider,
+      inputBase.target.model,
+      inputBase.target.credentialSlot,
+      'not_executed',
+      'credential_unavailable',
+      null,
+      null,
+      null,
+    ])
+  })
+
   it('converts a previously acknowledged physical attempt into a durable unknown outcome', async () => {
     const db = dbWithRows(
       [],
@@ -303,5 +380,35 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         conflictingDb as never
       )
     ).rejects.toMatchObject<PromptBridgeFinalizationError>({ code: 'conflict', httpStatus: 409 })
+  })
+
+  it('replays a not_executed finalization idempotently', async () => {
+    const row = {
+      provider_attempt_id: IDS.providerAttempt,
+      invocation_id: IDS.invocation,
+      recipe_namespace: inputBase.recipeNamespace,
+      recipe_name: inputBase.recipeName,
+      attempt_generation: 1,
+      attempt_index: 1,
+      target_ref: inputBase.target.targetRef,
+      host_ref: inputBase.hostRef,
+      provider: inputBase.target.provider,
+      model: inputBase.target.model,
+      credential_slot: inputBase.target.credentialSlot,
+      outcome: 'not_executed',
+      input_tokens: null,
+      output_tokens: null,
+    }
+    await expect(
+      finalizePromptBridgeInTransaction(
+        { ...inputBase, status: 'failed', reason: 'credential_unavailable' },
+        dbWithRows([], row) as never
+      )
+    ).resolves.toMatchObject({
+      status: 'failed',
+      outcome: 'not_executed',
+      idempotent: true,
+      usageAccepted: false,
+    })
   })
 })

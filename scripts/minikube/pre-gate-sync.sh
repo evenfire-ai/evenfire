@@ -202,8 +202,8 @@ provision_gfs_serving() {
 
 assert_no_legacy_prompt_bridge_grants() {
   # Target-aware promptBridge authorization is fail-closed for legacy rows.
-  # Inventory them after migrations and before any target-aware mcp-host rollout
-  # so an operator gets an actionable gate failure instead of a silent outage.
+  # Inventory only policies that require migration review; intentionally
+  # disabled/revoking grants are already fenced and must not block an upgrade.
   # This check deliberately does not infer a provider, model, slot, or order;
   # migration remains an explicit operator-reviewed action.
   local legacy_count query
@@ -211,7 +211,7 @@ assert_no_legacy_prompt_bridge_grants() {
     SELECT count(*)::int
      FROM plugin_workload_sdk_grants
      WHERE capability_family = 'promptBridge'
-       AND policy_state <> 'active';
+       AND policy_state = 'legacy_unreviewed';
   "
   # Keep the command after `kubectl exec --` on the same continued shell
   # command. A bare newline after `--` makes kubectl receive no command and

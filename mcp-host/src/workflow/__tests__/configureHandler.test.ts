@@ -69,6 +69,7 @@ describe('POST /configure — JWT scope', () => {
       apiKey: 'must-not-be-consumed',
     })
     expect(result).toEqual({
+      capabilityFamily: 'promptBridge',
       configured: true,
       ready: true,
       provider: 'openai',

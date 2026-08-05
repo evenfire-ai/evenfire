@@ -134,6 +134,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     expect(result).toEqual({
       status: 202,
       body: {
+        capabilityFamily: 'promptBridge',
         configured: true,
         ready: true,
         provider: 'openai',
@@ -185,6 +186,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     expect(result).toEqual({
       status: 202,
       body: {
+        capabilityFamily: 'promptBridge',
         configured: true,
         ready: true,
         provider: 'openai',

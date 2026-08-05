@@ -265,16 +265,85 @@ describe('PromptBridgeHandler', () => {
     expect(complete).not.toHaveBeenCalled()
   })
 
-  it('reports terminal provider configuration failures without widening fallback', async () => {
+  it('reports pre-provider credential/configuration failures as revivable failed invocations', async () => {
     const complete = vi
       .fn()
       .mockRejectedValue(
-        new PluginWorkloadError('provider_unavailable', 'credentials unavailable', false)
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'credentials unavailable',
+          false,
+          'credential_unavailable',
+          false
+        )
       )
     const { handler, report } = makeDeps({ complete })
     await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
       code: 'provider_unavailable',
       retryable: false,
+    })
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'failed', 1)
+  })
+
+  it('atomically finalizes the physical attempt as not_executed in SDK-only mode', async () => {
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'failed',
+      outcome: 'not_executed',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const complete = vi.fn().mockRejectedValue(
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'credentials unavailable',
+        false,
+        'credential_unavailable',
+        false,
+        {
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          target: primary,
+          attemptCount: 1,
+          fallbackUsed: false,
+        }
+      )
+    )
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'credential_unavailable',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'failed',
+        reason: 'credential_unavailable',
+        target: primary,
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('keeps an ambiguous/post-provider failure terminal even when the public code is the same', async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'provider outcome unknown',
+          false,
+          'outcome_unknown',
+          true
+        )
+      )
+    const { handler, report } = makeDeps({ complete })
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
     })
     expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
   })

@@ -9,6 +9,7 @@ import { applyMemberRegistrationCredentialsSchema } from './services/memberRegis
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
   addPluginWorkloadSdkJitCredentialTicketColumns,
+  addPluginWorkloadSdkNotExecutedSpendOutcome,
   addPluginWorkloadSdkPromptTargetPolicyColumns,
   addPluginWorkloadSdkProtocolAndRevocation,
   addPluginWorkloadSdkProviderAttemptLedger,
@@ -20,6 +21,7 @@ import {
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
   relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  repairPluginWorkloadSdkLegacyGrantPolicies,
 } from './services/pluginWorkloadSdkSchema.js'
 import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
 
@@ -5123,6 +5125,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0085_plugin_workload_sdk_spend_outcome_host_ref_nullable',
     apply: relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  },
+  {
+    version: '0086_plugin_workload_sdk_legacy_policy_repair',
+    apply: repairPluginWorkloadSdkLegacyGrantPolicies,
+  },
+  {
+    version: '0087_plugin_workload_sdk_not_executed_spend_outcome',
+    apply: addPluginWorkloadSdkNotExecutedSpendOutcome,
   },
 ]
 

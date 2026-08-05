@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   deletePluginWorkloadSdkGrant,
+  getPluginWorkloadSdkLegacyInventory,
   getPluginWorkloadSdkQuota,
   listLlmHostSecrets,
   listPluginWorkloadSdkGrants,
@@ -49,6 +50,16 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('recipeNamespace=sandbox-recipes')
     expect(url).toContain('recipeName=r1')
+  })
+
+  it('loads the read-only legacy grant inventory for explicit operator review', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { legacyPromptBridgeGrants: 1, items: [] }))
+    await getPluginWorkloadSdkLegacyInventory()
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/admin/plugin-workload-sdk/legacy-inventory')
+    expect(init.credentials).toBe('include')
   })
 
   it('upsertPluginWorkloadSdkGrant POSTs the grant payload as JSON', async () => {

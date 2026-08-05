@@ -103,6 +103,7 @@ export interface ConfigureRequest {
 
 export interface ConfigureResponse {
   configured: boolean
+  capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: string
   model?: string
   /**
@@ -121,11 +122,15 @@ export interface ConfigureResponse {
   defaultTargetRef?: string
   defaultProvider?: string
   defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
   message?: string
 }
 
 /** Public identity handshake for a stepless Plugin Workload SDK host. */
 export interface PluginWorkloadSdkBootstrapRequest {
+  capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: LlmProvider
   model?: string
 }

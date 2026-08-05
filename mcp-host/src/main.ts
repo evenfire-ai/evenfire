@@ -2796,6 +2796,14 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
             return null
           }
         },
+        verifyClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
+          } catch {
+            return null
+          }
+        },
       }),
   })
   try {
@@ -2990,6 +2998,14 @@ async function main(): Promise<void> {
           if (!pluginWorkloadSdkServer) return null
           try {
             return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+          } catch {
+            return null
+          }
+        },
+        verifyPluginWorkloadSdkClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
           } catch {
             return null
           }

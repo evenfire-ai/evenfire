@@ -189,10 +189,11 @@ export async function addPluginWorkloadSdkJitCredentialTicketColumns(db: DbClien
 }
 
 /**
- * Monotonic follow-up for the attempt/lease contract. Existing migrations are
- * never edited because long-lived databases intentionally skip versions that
- * are already recorded. Existing promptBridge rows are marked legacy without
- * inferring provider, model, credential slot, default, or ordering.
+ * Monotonic attempt/lease migration. A policy written by the ordered-policy
+ * writer is already an explicit operator decision and must not be invalidated
+ * merely because the attempt ledger is being added. Only rows that cannot
+ * prove an ordered, provider-bound policy are moved to the fail-closed
+ * legacy state. No policy is reconstructed from the old flat model columns.
  */
 export async function addPluginWorkloadSdkAttemptLedgerColumns(db: DbClient): Promise<void> {
   await db.query(`
@@ -201,7 +202,7 @@ export async function addPluginWorkloadSdkAttemptLedgerColumns(db: DbClient): Pr
     DO $$ BEGIN
       ALTER TABLE plugin_workload_sdk_grants
         ADD CONSTRAINT plugin_workload_sdk_grants_policy_state_check
-        CHECK (policy_state IN ('active', 'legacy_unreviewed'));
+        CHECK (policy_state IN ('active', 'legacy_unreviewed', 'revoking', 'disabled'));
     EXCEPTION WHEN duplicate_object THEN NULL;
     END $$;
 
@@ -298,17 +299,101 @@ export async function addPluginWorkloadSdkAttemptLedgerColumns(db: DbClient): Pr
      )
     ON CONFLICT (invocation_id, attempt_generation) DO NOTHING;
 
-    -- Every promptBridge row that predates this migration is unreviewed. Do
-    -- not infer a routable policy from legacy provider/model/slot columns;
-    -- only an explicit operator upsert/resave may move it to active.
+    -- Preserve only a policy that proves the complete ordered contract. Do
+    -- not infer a routable policy from legacy provider/model columns. Rows
+    -- already revoking/disabled remain fenced; malformed/legacy active rows
+    -- become explicitly reviewable and fail closed.
     UPDATE plugin_workload_sdk_grants
        SET policy_state = 'legacy_unreviewed',
            policy_revision = 0
-     WHERE capability_family = 'promptBridge';
+     WHERE capability_family = 'promptBridge'
+       AND policy_state = 'active'
+       AND NOT (
+         policy_revision >= 1
+         AND provider IS NOT NULL
+         AND btrim(provider) <> ''
+         AND default_target_ref IS NOT NULL
+         AND btrim(default_target_ref) <> ''
+         AND CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                  THEN jsonb_array_length(prompt_targets) > 0 ELSE false END
+         AND CASE WHEN jsonb_typeof(allowed_callers) = 'array'
+                  THEN jsonb_array_length(allowed_callers) > 0 ELSE false END
+         AND (prompt_targets -> 0 ->> 'targetRef') = default_target_ref
+         AND (prompt_targets -> 0 ->> 'provider') = provider
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                    THEN prompt_targets ELSE '[]'::jsonb END
+             ) AS target
+            WHERE jsonb_typeof(target) <> 'object'
+               OR btrim(COALESCE(target ->> 'targetRef', '')) = ''
+               OR btrim(COALESCE(target ->> 'provider', '')) = ''
+               OR btrim(COALESCE(target ->> 'model', '')) = ''
+               OR btrim(COALESCE(target ->> 'credentialSlot', '')) = ''
+         )
+         AND (
+           SELECT COUNT(DISTINCT target ->> 'targetRef')
+             FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                    THEN prompt_targets ELSE '[]'::jsonb END
+             ) AS target
+         ) = CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                  THEN jsonb_array_length(prompt_targets) ELSE 0 END
+       );
 
     CREATE INDEX IF NOT EXISTS plugin_workload_sdk_invocations_lease_idx
       ON plugin_workload_sdk_invocations (status, lease_expires_at)
       WHERE status = 'in_progress';
+  `)
+}
+
+/**
+ * Repairs databases that recorded the original 0078 migration before the
+ * non-degrading predicate shipped. The ordered target policy is retained and
+ * explicitly re-activated at revision 1; malformed rows remain
+ * legacy_unreviewed. The operation is idempotent and never touches
+ * clientNotifications or a policy already fenced as revoking/disabled.
+ */
+export async function repairPluginWorkloadSdkLegacyGrantPolicies(db: DbClient): Promise<void> {
+  await db.query(`
+    UPDATE plugin_workload_sdk_grants
+       SET policy_state = 'active',
+           policy_revision = 1,
+           updated_at = now()
+     WHERE capability_family = 'promptBridge'
+       AND policy_state = 'legacy_unreviewed'
+       AND policy_revision = 0
+       AND provider IS NOT NULL
+       AND btrim(provider) <> ''
+       AND default_target_ref IS NOT NULL
+       AND btrim(default_target_ref) <> ''
+       AND CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                THEN jsonb_array_length(prompt_targets) > 0 ELSE false END
+       AND CASE WHEN jsonb_typeof(allowed_callers) = 'array'
+                THEN jsonb_array_length(allowed_callers) > 0 ELSE false END
+       AND (prompt_targets -> 0 ->> 'targetRef') = default_target_ref
+       AND (prompt_targets -> 0 ->> 'provider') = provider
+       AND NOT EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                  THEN prompt_targets ELSE '[]'::jsonb END
+           ) AS target
+          WHERE jsonb_typeof(target) <> 'object'
+             OR btrim(COALESCE(target ->> 'targetRef', '')) = ''
+             OR btrim(COALESCE(target ->> 'provider', '')) = ''
+             OR btrim(COALESCE(target ->> 'model', '')) = ''
+             OR btrim(COALESCE(target ->> 'credentialSlot', '')) = ''
+       )
+       AND (
+         SELECT COUNT(DISTINCT target ->> 'targetRef')
+           FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                  THEN prompt_targets ELSE '[]'::jsonb END
+           ) AS target
+       ) = CASE WHEN jsonb_typeof(prompt_targets) = 'array'
+                THEN jsonb_array_length(prompt_targets) ELSE 0 END;
   `)
 }
 
@@ -491,7 +576,7 @@ export async function addPluginWorkloadSdkSpendOutcomeLedger(db: DbClient): Prom
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
       credential_slot TEXT NOT NULL,
-      outcome TEXT NOT NULL CHECK (outcome IN ('exact', 'unknown')),
+      outcome TEXT NOT NULL CHECK (outcome IN ('exact', 'unknown', 'not_executed')),
       reason TEXT NOT NULL,
       input_tokens INTEGER NULL CHECK (input_tokens IS NULL OR input_tokens >= 0),
       output_tokens INTEGER NULL CHECK (output_tokens IS NULL OR output_tokens >= 0),
@@ -499,13 +584,36 @@ export async function addPluginWorkloadSdkSpendOutcomeLedger(db: DbClient): Prom
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       CONSTRAINT plugin_workload_sdk_spend_outcomes_token_pair_check
         CHECK ((outcome = 'exact' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
-            OR (outcome = 'unknown' AND input_tokens IS NULL AND output_tokens IS NULL))
+            OR (outcome IN ('unknown', 'not_executed')
+                AND input_tokens IS NULL AND output_tokens IS NULL))
     );
     CREATE INDEX IF NOT EXISTS plugin_workload_sdk_spend_outcomes_recipe_idx
       ON plugin_workload_sdk_spend_outcomes (recipe_namespace, recipe_name, created_at DESC);
     REVOKE ALL ON TABLE plugin_workload_sdk_spend_outcomes
       FROM PUBLIC, trace_maintenance_runtime, workflow_recipes_runtime;
     GRANT SELECT, INSERT ON TABLE plugin_workload_sdk_spend_outcomes TO control_api_runtime;
+  `)
+}
+
+/**
+ * Extend the immutable spend ledger for pre-provider failures. Older
+ * installations already have the table from 0084; this migration changes only
+ * the two constraints and never rewrites existing exact/unknown receipts.
+ */
+export async function addPluginWorkloadSdkNotExecutedSpendOutcome(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE plugin_workload_sdk_spend_outcomes
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_spend_outcomes_token_pair_check;
+    ALTER TABLE plugin_workload_sdk_spend_outcomes
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_spend_outcomes_outcome_check;
+    ALTER TABLE plugin_workload_sdk_spend_outcomes
+      ADD CONSTRAINT plugin_workload_sdk_spend_outcomes_outcome_check
+        CHECK (outcome IN ('exact', 'unknown', 'not_executed'));
+    ALTER TABLE plugin_workload_sdk_spend_outcomes
+      ADD CONSTRAINT plugin_workload_sdk_spend_outcomes_token_pair_check
+        CHECK ((outcome = 'exact' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
+            OR (outcome IN ('unknown', 'not_executed')
+                AND input_tokens IS NULL AND output_tokens IS NULL));
   `)
 }
 

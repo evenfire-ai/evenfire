@@ -186,8 +186,8 @@ export interface PluginWorkloadSdkBootstrapProofInput {
   ready: true
   contractVersion: 2
   podUid: string
-  provider: string
-  model: string
+  provider?: string
+  model?: string
   policyReady?: boolean
   policyState?: string
   policyReason?: string
@@ -196,6 +196,9 @@ export interface PluginWorkloadSdkBootstrapProofInput {
   defaultTargetRef?: string
   defaultProvider?: string
   defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
   verifiedAt: string
 }
 
@@ -324,11 +327,22 @@ export function buildPluginWorkloadSdkStatus(args: {
     }
   }
 
-  if (promptBridge && policyPending) {
+  const clientNotificationsPolicyPending =
+    clientNotifications &&
+    bootstrapProof?.ready === true &&
+    bootstrapProof.clientNotificationsPolicyReady !== true
+  if (policyPending || clientNotificationsPolicyPending) {
+    const family = promptBridge && policyPending ? 'promptBridge' : 'clientNotifications'
+    const policyReason =
+      family === 'clientNotifications'
+        ? (bootstrapProof?.clientNotificationsPolicyReason ??
+          bootstrapProof?.clientNotificationsPolicyState ??
+          'unknown')
+        : (bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown')
     const message =
-      bootstrapProof?.policyReason === 'grant_missing'
-        ? 'Plugin Workload SDK promptBridge is awaiting an operator grant'
-        : `Plugin Workload SDK promptBridge policy is not ready (${bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'})`
+      policyReason === 'grant_missing'
+        ? `Plugin Workload SDK ${family} is awaiting an operator grant`
+        : `Plugin Workload SDK ${family} policy is not ready (${policyReason})`
     return {
       conditions: [
         {
@@ -341,7 +355,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         {
           type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
           status: 'True',
-          reason: bootstrapProof?.policyReason ?? 'PolicyNotReady',
+          reason: policyReason,
           message,
           lastTransitionTime: now,
         },
@@ -356,8 +370,8 @@ export function buildPluginWorkloadSdkStatus(args: {
           ? {
               bootstrapContractVersion: bootstrapProof.contractVersion,
               bootstrapPodUid: bootstrapProof.podUid,
-              bootstrapProvider: bootstrapProof.provider,
-              bootstrapModel: bootstrapProof.model,
+              ...(bootstrapProof.provider ? { bootstrapProvider: bootstrapProof.provider } : {}),
+              ...(bootstrapProof.model ? { bootstrapModel: bootstrapProof.model } : {}),
               verifiedAt: bootstrapProof.verifiedAt,
             }
           : {}),
@@ -365,8 +379,8 @@ export function buildPluginWorkloadSdkStatus(args: {
     }
   }
 
-  if (promptBridge && !bootstrapProof?.ready) {
-    const message = 'promptBridge bootstrap policy proof is not ready'
+  if ((promptBridge || clientNotifications) && !bootstrapProof?.ready) {
+    const message = 'Plugin Workload SDK host readiness proof is not ready'
     return {
       conditions: [
         {
@@ -415,8 +429,8 @@ export function buildPluginWorkloadSdkStatus(args: {
         ? {
             bootstrapContractVersion: bootstrapProof.contractVersion,
             bootstrapPodUid: bootstrapProof.podUid,
-            bootstrapProvider: bootstrapProof.provider,
-            bootstrapModel: bootstrapProof.model,
+            ...(bootstrapProof.provider ? { bootstrapProvider: bootstrapProof.provider } : {}),
+            ...(bootstrapProof.model ? { bootstrapModel: bootstrapProof.model } : {}),
             verifiedAt: bootstrapProof.verifiedAt,
             ...(bootstrapProof.policyRevision !== undefined
               ? { policyRevision: bootstrapProof.policyRevision }

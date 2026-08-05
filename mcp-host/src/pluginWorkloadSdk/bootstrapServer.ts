@@ -63,6 +63,7 @@ export class PluginWorkloadSdkBootstrapServer {
         // Identity-only projection: credential-shaped extras never cross the
         // handler boundary even if a caller includes them in the JSON object.
         const request: PluginWorkloadSdkBootstrapRequest = {
+          capabilityFamily: raw?.capabilityFamily,
           provider: raw?.provider,
           model: raw?.model,
         }
