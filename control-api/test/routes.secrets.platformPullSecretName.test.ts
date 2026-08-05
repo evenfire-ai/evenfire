@@ -81,6 +81,54 @@ describe('platform-managed Secret name is reserved', () => {
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
+  // The gap this file's own header missed. POST and DELETE were reserved; the MERGE path
+  // was not, and it is the one that can quietly replace `.dockerconfigjson` with anything —
+  // every private image pull in `mcp-server`, broken through a route whose stated job is to
+  // refuse this name. The recipe-secret label check inside the handler does NOT cover it:
+  // the platform Secret carries `clerum.io/managed-by`, not the recipe label, so it passes.
+  it('PUT /admin/mcp-secrets/:name refuses the reserved name and merges nothing', async () => {
+    const gateway = createGateway()
+    // Shaped like the real platform Secret: present, and NOT a recipe secret — the exact
+    // state in which every other guard in the handler waves it through.
+    gateway.getSecret = vi.fn(async () => ({
+      metadata: {
+        name: EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/managed-by': 'control-api' },
+      },
+      type: 'kubernetes.io/dockerconfigjson',
+      data: { '.dockerconfigjson': 'e30=' },
+    })) as never
+    const mergeSecret = vi.fn(async (body: unknown) => body)
+    ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
+
+    const res = await request(makeApp(gateway))
+      .put(`/admin/mcp-secrets/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}`)
+      .send({ data: { '.dockerconfigjson': 'bm90LWEtY3JlZGVudGlhbA==' } })
+      .expect(400)
+
+    expect(res.body.error).toMatch(/platform-managed/)
+    expect(mergeSecret).not.toHaveBeenCalled()
+  })
+
+  it('still merges into an ordinary connector Secret whose name merely resembles it', async () => {
+    const gateway = createGateway()
+    gateway.getSecret = vi.fn(async () => ({
+      metadata: { name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`, namespace: 'mcp-server' },
+      type: 'Opaque',
+      data: {},
+    })) as never
+    const mergeSecret = vi.fn(async (body: unknown) => body)
+    ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
+
+    await request(makeApp(gateway))
+      .put(`/admin/mcp-secrets/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`)
+      .send({ data: { token: 'fine' } })
+      .expect(200)
+
+    expect(mergeSecret).toHaveBeenCalled()
+  })
+
   it('still deletes an ordinary connector Secret whose name merely resembles it', async () => {
     const gateway = createGateway()
 

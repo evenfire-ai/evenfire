@@ -411,6 +411,16 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         })
         return
       }
+      // The reserved name is guarded on POST and DELETE below; without it here the merge
+      // path was the way through. The recipe-secret label check further down does NOT cover
+      // it — the platform Secret carries `clerum.io/managed-by`, not the recipe label, so it
+      // passes that gate — and `mergeSecret` replaces any key it is given, including
+      // `.dockerconfigjson`. That is every private image pull in this namespace, broken by
+      // a route whose whole job is to refuse this name.
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
         res
           .status(400)
