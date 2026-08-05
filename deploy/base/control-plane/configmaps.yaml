@@ -590,6 +590,24 @@ data:
           proxy_set_header Authorization $http_authorization;
         }
 
+        # SDK-only promptBridge finalization is the atomic accounting boundary:
+        # it closes the physical provider attempt, logical invocation, and
+        # exact/unknown spend outcome in one control-api transaction. Keep it
+        # behind the same mcp-host JWT gateway as invocation status; omitting
+        # this route lets the provider execute while the runtime can only
+        # surface provider_unavailable after the result is already billable.
+        location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$ {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         # Provider-attempt status is part of the promptBridge audit contract.
         # It must remain behind the same mcp-host JWT gateway as invocation
         # status; otherwise the provider call can be authorized and issued a

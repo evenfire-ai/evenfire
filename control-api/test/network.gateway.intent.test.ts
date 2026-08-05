@@ -391,6 +391,19 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(route).toContain('proxy_set_header Authorization $http_authorization;')
   })
 
+  it('routes SDK-only promptBridge finalization through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
   it('routes promptBridge provider-attempt status through the mcp-host gateway', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')

@@ -2,23 +2,22 @@
  * Operator journey (control-ui, camino B) for a Plugin Workload SDK recipe.
  *
  * Mirrors what a real operator does — NOT a kubectl apply — in order:
- *   1. Publish the SDK recipe to the Marketplace (registry-api).
- *   2. Instantiate it from the Marketplace UI  → POST /admin/registry/install-recipe
- *      → a versioned WorkflowRecipe CRD in sandbox-recipes.
- *   3. Wait for the stepless eager mcp-host identity bootstrap. A fresh recipe
+ *   1. Start from the external plugin recipe already installed by its supported
+ *      Minikube deployment script. Public plugin publishing is intentionally
+ *      hidden from this self-hosted console because plugins are org-private.
+ *   2. Wait for the stepless eager mcp-host identity bootstrap. A fresh recipe
  *      normally reports `awaiting_policy` until the operator creates a grant;
  *      this is an expected policy state, not provider failure.
- *   4. Configure the two SDK grants (promptBridge + clientNotifications) from
+ *   3. Configure the two SDK grants (promptBridge + clientNotifications) from
  *      the grant page UI so an allowed user can receive notifications.
- *   5. Verify both grants are listed and bound to the installed recipe.
+ *   4. Verify both grants are listed and bound to the installed recipe.
  *
  * Runs ONLY against an allowed local profile. Point it at the branch profile
  * port-forwards:
- *   CONTROL_UI baseURL (playwright.config), CONTROL_API_URL, REGISTRY_URL.
+ *   CONTROL_UI baseURL (playwright.config), CONTROL_API_URL.
  *
- * Required services (port-forwarded): control-ui, control-api, registry-api,
- * workflow-recipes (WRC). The recipe image clerum/workflow-plugin-sdk-e2e:test
- * must be loaded in the profile (built by scripts/minikube/build-images.sh).
+ * Required services (port-forwarded): control-ui, control-api, workflow-recipes
+ * (WRC). Set E2E_PLUGIN_SDK_RECIPE_NAME to the externally installed recipe.
  */
 import { type Page, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
@@ -30,11 +29,6 @@ const BASE_API =
   process.env.CONTROL_API_BASE_URL ||
   process.env.CONTROL_API_URL ||
   process.env.E2E_CONTROL_API_URL ||
-  ''
-const REGISTRY_BASE =
-  process.env.REGISTRY_API_BASE_URL ||
-  process.env.REGISTRY_API_URL ||
-  process.env.REGISTRY_URL ||
   ''
 const CONTROL_UI_BASE = process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || ''
 const ADMIN_USER =
@@ -79,12 +73,16 @@ if (PROVIDER === FALLBACK_PROVIDER) {
   throw new Error('Plugin Workload SDK E2E requires distinct primary and fallback providers.')
 }
 const RECIPE_NS = 'sandbox-recipes'
-const EVENT_TYPE = 'e2e.test.notification'
+const EVENT_TYPE = process.env.E2E_PLUGIN_SDK_EVENT_TYPE || 'fullstack.prompt.notify'
+const CALLER_REF = process.env.E2E_PLUGIN_SDK_CALLER_REF || 'backend'
 const USER_EMAIL =
   process.env.E2E_DESKTOP_USER_EMAIL ||
   process.env.E2E_DEV_LOGIN_EMAIL ||
   process.env.TEST_USER_EMAIL ||
   'test@clerum.io'
+const INSTALLED_RECIPE_NAME =
+  process.env.E2E_PLUGIN_SDK_RECIPE_NAME || process.env.E2E_SANDBOX_UI_RECIPE || ''
+const KEEP_GRANTS = process.env.E2E_PLUGIN_SDK_KEEP_GRANTS === '1'
 const adminSessionName = ['control', 'ui', 'admin', 'session'].join('_')
 const authHeaderName = ['Author', 'ization'].join('')
 const bearerPrefix = ['Bea', 'rer'].join('') + ' '
@@ -171,7 +169,6 @@ function assertMutableBranchProfile(): void {
   const urls = [
     ['CONTROL_UI_BASE_URL', CONTROL_UI_BASE],
     ['CONTROL_API_BASE_URL', BASE_API],
-    ['REGISTRY_API_BASE_URL', REGISTRY_BASE],
   ] as const
   for (const [name, raw] of urls) {
     if (!raw) throw new Error(`${name} is required; shared localhost defaults are forbidden.`)
@@ -188,12 +185,6 @@ function assertMutableBranchProfile(): void {
       throw new Error(`${name} uses a shared fixed port (${parsed.port}); use branch ports.env.`)
     }
   }
-}
-
-function uniqueName(base: string): string {
-  return `${base}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    .slice(0, 50)
-    .replace(/-$/, '')
 }
 
 async function api(
@@ -287,43 +278,6 @@ async function resolveUserRef(token: string): Promise<string> {
   return match.id
 }
 
-function recipeManifest(name: string, userRef: string): Record<string, unknown> {
-  return {
-    apiVersion: 'clerum.io/v1alpha1',
-    kind: 'WorkflowRecipe',
-    metadata: { name },
-    spec: {
-      agent: { provider: PROVIDER, model: MODEL },
-      workloads: [
-        {
-          id: 'sdk-caller',
-          type: 'deployment',
-          image: 'clerum/workflow-plugin-sdk-e2e:test',
-          env: [
-            { name: 'E2E_SDK_CALLER_REF', value: 'sdk-caller' },
-            { name: 'E2E_SDK_EVENT_TYPE', value: EVENT_TYPE },
-            { name: 'E2E_SDK_USER_REF', value: userRef },
-            { name: 'E2E_SDK_QUOTA_LIMIT', value: '3' },
-          ],
-        },
-      ],
-      pluginWorkloadSdk: {
-        promptBridge: {
-          allowedModels: [MODEL],
-          maxRequestsPerRun: 10,
-          maxInvocationsPerMinute: 60,
-        },
-        clientNotifications: {
-          allowedEventTypes: [EVENT_TYPE],
-          allowedUserRefs: true,
-          maxNotificationsPerRun: 10,
-        },
-        allowedCallers: ['sdk-caller'],
-      },
-    },
-  }
-}
-
 async function waitForSdkState(
   token: string,
   recipeName: string,
@@ -344,83 +298,41 @@ async function waitForSdkState(
   )
 }
 
-test.describe('Plugin Workload SDK — operator journey (Marketplace → install → grants)', () => {
-  test('operator publishes, installs and grants an SDK recipe end to end', async ({
+test.describe('Plugin Workload SDK — operator journey (installed plugin → grants)', () => {
+  test('operator opens an installed plugin and grants SDK capabilities end to end', async ({
     page,
   }, testInfo) => {
     test.setTimeout(240_000)
     assertMutableBranchProfile()
+    if (!INSTALLED_RECIPE_NAME) {
+      throw new Error(
+        'E2E_PLUGIN_SDK_RECIPE_NAME is required; install the external plugin before the operator journey.'
+      )
+    }
     if (PROVIDER === 'zai' || FALLBACK_PROVIDER === 'zai') {
       throw new Error(
         'Plugin Workload SDK T3 requires OpenAI or Claude targets; Z.AI is disabled for this lane.'
       )
     }
-    const entryName = uniqueName('e2e-op-sdk')
     const token = await loginApiToken()
     const userRef = await resolveUserRef(token)
-    let installedRecipeName = ''
+    const installedRecipeName = INSTALLED_RECIPE_NAME
     const cleanupErrors: string[] = []
 
     try {
-      // 1. Publish to the Marketplace through the operator's visible form.
+      // 1. Open the externally installed plugin through the operator's visible
+      // Installed plugins page. The external repository's deployment script is
+      // the authoritative install path for this local compatibility sample.
       await uiLogin(page)
-      await page.locator('text=Marketplace').first().click()
-      await expect(page.getByRole('button', { name: '+ Publish to Marketplace' })).toBeVisible({
-        timeout: 15_000,
+      await dismissAdminEmailReminder(page)
+      await page.getByRole('link', { name: 'Installed plugins', exact: true }).click()
+      const installedPluginRow = page.getByRole('link', {
+        name: `Open ${installedRecipeName}`,
       })
-      await page.getByRole('button', { name: '+ Publish to Marketplace' }).click()
-      await expect(page.getByRole('heading', { name: 'Publish to Marketplace' })).toBeVisible({
-        timeout: 15_000,
-      })
-      await page.getByRole('radio', { name: 'Plugin' }).click()
-      await page.locator('#pub-name').fill(entryName)
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await page.locator('#pub-author').fill('e2e-test')
-      await page
-        .locator('#pub-description')
-        .fill('Operator-journey SDK recipe (promptBridge + clientNotifications).')
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await page
-        .locator('#pub-recipe-yaml')
-        .fill(JSON.stringify(recipeManifest(entryName, userRef)))
-      await page.getByRole('button', { name: 'Continue' }).click()
-      const publishResponse = page.waitForResponse(
-        response =>
-          response.url().includes('/api/v1/admin/registry/entries') &&
-          response.request().method() === 'POST',
-        { timeout: 60_000 }
-      )
-      await page.getByRole('button', { name: 'Publish to Marketplace' }).click()
-      expect((await publishResponse).status()).toBeLessThan(300)
-      await expect(page.getByText('Published successfully.')).toBeVisible({ timeout: 15_000 })
+      await expect(installedPluginRow).toBeVisible({ timeout: 20_000 })
+      await expect(installedPluginRow).toContainText(installedRecipeName)
 
-      // 2. Operator instantiates it from the Marketplace UI. Recipe entries install
-      //    directly from the catalog, unlike connector entries that open the wizard.
-      const pluginsTab = page.getByRole('tab', { name: 'Plugins', exact: true })
-      await expect(pluginsTab).toBeVisible({ timeout: 15_000 })
-      await pluginsTab.click()
-      await expect(page.getByLabel('Search Marketplace plugins')).toBeVisible({ timeout: 15_000 })
-      await page.getByLabel('Search Marketplace plugins').fill(entryName)
-      const row = page.locator('tr', { hasText: entryName })
-      await expect(row).toBeVisible({ timeout: 15_000 })
-      const installResp = page.waitForResponse(
-        r => r.url().includes('/admin/registry/install-recipe') && r.request().method() === 'POST',
-        { timeout: 60_000 }
-      )
-      await row.getByRole('button', { name: /^Install$/ }).click()
-      const resp = await installResp
-      expect(resp.status()).toBe(201)
-      const installedBody = (await resp.json().catch(() => ({}))) as {
-        name?: string
-        recipeName?: string
-      }
-      installedRecipeName = installedBody.recipeName || installedBody.name || ''
-      expect(installedRecipeName).not.toBe('')
-      await expect(row.getByRole('button', { name: 'Installed' })).toBeDisabled()
-
-      // 3. The eager mcp-host proves the SDK identity before a grant exists.
-      // The expected fresh-install state is awaiting_policy; no provider call
-      // is authorized until the operator completes the grant journey below.
+      // 2. The eager mcp-host proves the SDK identity before a grant exists.
       const identityState = await waitForSdkState(
         token,
         installedRecipeName,
@@ -429,26 +341,21 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       )
       expect(['awaiting_policy', 'validated']).toContain(identityState)
 
-      // 4. promptBridge grant — configured through the grant page UI. Add the
-      // fallback first, then the bootstrap target, and reorder it visibly so
-      // the saved policy proves both providers plus an explicit default/order.
-      // Navigate through the visible application shell so this test proves the
-      // operator journey rather than jumping directly to the grant route.
-      await page.getByRole('link', { name: 'Plugins', exact: true }).click()
-      await expect(page.getByRole('button', { name: 'Plugins SDK' })).toBeVisible({
-        timeout: 15_000,
-      })
+      // 3. Enter the Plugin Workload SDK panel through the visible shell.
       await page.getByRole('button', { name: 'Plugins SDK' }).click()
       await expect(page.getByRole('button', { name: 'New grant' })).toBeVisible({
         timeout: 15_000,
       })
+      // 4. promptBridge grant — configured through the grant page UI. Add the
+      // fallback first, then the bootstrap target, and reorder it visibly so
+      // the saved policy proves both providers plus an explicit default/order.
       await dismissAdminEmailReminder(page)
       await page.getByRole('button', { name: 'New grant' }).click()
       await page
         .locator('#sdk-recipe-pick')
         .selectOption({ label: `${installedRecipeName} (${RECIPE_NS})` })
       await expect(page.locator('#sdk-family')).toHaveValue('promptBridge')
-      await page.locator('#sdk-callers').fill('sdk-caller')
+      await page.locator('#sdk-callers').fill(CALLER_REF)
       const saveGrantButton = page.getByRole('button', { name: 'Save grant' })
 
       await page.locator('#sdk-provider').selectOption(FALLBACK_PROVIDER)
@@ -491,7 +398,7 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       await page.locator('#sdk-family').selectOption('clientNotifications')
       await expect(page.locator('#sdk-userrefs')).toBeVisible({ timeout: 10_000 })
       // Defensive against prefill gaps: ensure caller + event type are present.
-      await page.locator('#sdk-callers').fill('sdk-caller')
+      await page.locator('#sdk-callers').fill(CALLER_REF)
       if (!(await page.locator('#sdk-events').inputValue()).includes(EVENT_TYPE)) {
         await page.locator('#sdk-events').fill(EVENT_TYPE)
       }
@@ -570,7 +477,10 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
       })
       expect(JSON.stringify(promptGrant)).not.toMatch(/secret|token/i)
     } finally {
-      if (installedRecipeName) {
+      // The external recipe is a durable fixture for the following Desktop
+      // journey. Keep its grants when requested; otherwise remove only grants
+      // created by this operator run and leave the installed plugin intact.
+      if (!KEEP_GRANTS) {
         try {
           const grantList = await api(
             token,
@@ -621,57 +531,6 @@ test.describe('Plugin Workload SDK — operator journey (Marketplace → install
         } catch (error) {
           cleanupErrors.push(`list/delete grants: ${String(error)}`)
         }
-        try {
-          const uninstalled = await api(
-            token,
-            'DELETE',
-            `/api/v1/admin/registry/uninstall/${installedRecipeName}?type=recipe`
-          )
-          if (uninstalled.status >= 300 && uninstalled.status !== 404) {
-            cleanupErrors.push(`uninstall ${installedRecipeName}: ${uninstalled.status}`)
-          }
-          if (uninstalled.status < 300 || uninstalled.status === 404) {
-            let recipeStatus = uninstalled.status
-            for (let attempt = 0; attempt < 15 && recipeStatus !== 404; attempt++) {
-              await delay(1_000)
-              recipeStatus = (
-                await api(
-                  token,
-                  'GET',
-                  `/api/v1/admin/recipes/${encodeURIComponent(installedRecipeName)}`
-                )
-              ).status
-            }
-            if (recipeStatus !== 404) {
-              cleanupErrors.push(
-                `recipe cleanup postcondition failed: ${installedRecipeName} still returned HTTP ${recipeStatus}`
-              )
-            }
-          }
-        } catch (error) {
-          cleanupErrors.push(`uninstall ${installedRecipeName}: ${String(error)}`)
-        }
-      }
-      try {
-        const deletedEntry = await fetch(
-          `${REGISTRY_BASE}/api/v1/entries/${encodeURIComponent(entryName)}/versions/1.0.0`,
-          { method: 'DELETE' }
-        )
-        if (!deletedEntry.ok && deletedEntry.status !== 404) {
-          cleanupErrors.push(`delete registry entry ${entryName}: ${deletedEntry.status}`)
-        }
-        if (deletedEntry.ok || deletedEntry.status === 404) {
-          const afterDelete = await fetch(
-            `${REGISTRY_BASE}/api/v1/entries/${encodeURIComponent(entryName)}/versions/1.0.0`
-          )
-          if (afterDelete.status !== 404) {
-            cleanupErrors.push(
-              `registry cleanup postcondition failed: ${entryName} returned HTTP ${afterDelete.status}`
-            )
-          }
-        }
-      } catch (error) {
-        cleanupErrors.push(`delete registry entry ${entryName}: ${String(error)}`)
       }
       if (cleanupErrors.length > 0) {
         await testInfo.attach('operator-journey-cleanup-errors', {
