@@ -6794,6 +6794,8 @@ h3 {
 
 .composer-input-shell {
   position: relative;
+  display: grid;
+  gap: var(--space-1-5);
 }
 
 .composer-input-shell--drag-active textarea {
@@ -6802,8 +6804,10 @@ h3 {
 }
 
 .composer-input-shell textarea {
-  padding-right: 12px;
-  padding-bottom: 40px;
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  overflow-y: hidden;
 }
 
 .composer-drop-overlay {
@@ -6822,14 +6826,13 @@ h3 {
 }
 
 .composer-input-actions {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-1);
+  min-width: 0;
+  padding-top: var(--space-1-5);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.16);
 }
 
 .composer textarea::placeholder {
@@ -10784,14 +10787,7 @@ pre {
     align-items: stretch;
   }
 
-  .composer-input-shell textarea {
-    padding-right: 12px;
-    padding-bottom: 72px;
-  }
-
   .composer-input-actions {
-    left: 10px;
-    right: 10px;
     justify-content: flex-end;
     flex-wrap: wrap;
   }
