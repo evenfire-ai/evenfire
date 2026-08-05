@@ -3,15 +3,17 @@
 import React, { Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { CreateFlowLoadingScreen } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { PublishToRegistryForm } from '@components/PublishToRegistryForm'
 import { IconStore } from '@components/Sidebar/icons'
+import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function PublishRegistryPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<CreateFlowLoadingScreen {...CREATE_FLOW_LOADING.publishRegistryEntry} />}>
       <PublishRegistryPageContent />
     </Suspense>
   )

@@ -42,6 +42,16 @@ const key = {
 }
 
 describe('RegistryApiKeysPanel', () => {
+  it('renders a skeleton while registry API keys load', () => {
+    vi.mocked(api.listRegistryApiKeys).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>
+    )
+    const view = render(<RegistryApiKeysPanel />)
+    expect(screen.getByRole('status', { name: /loading registry api keys/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('renders the org header and table on success', async () => {
     vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [key] })
     render(<RegistryApiKeysPanel />)

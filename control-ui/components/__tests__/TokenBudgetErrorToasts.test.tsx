@@ -139,8 +139,8 @@ describe('structured budget/price errors surface an error toast', () => {
     render(<EditLlmPricePage />)
 
     // Wait for the loaded price form, then submit.
-    const saveButton = await screen.findByRole('button', { name: 'Save price' })
-    fireEvent.click(saveButton)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save price' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Save price' }))
 
     await waitFor(() => {
       expect(mockShowToast).toHaveBeenCalledWith(expect.stringContaining('used by 1 budget'), {

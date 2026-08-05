@@ -5,11 +5,13 @@ import {
   __resetTokenCacheForTests,
   applyPublishScope,
   getCategories,
+  invalidateRegistryIdentityCaches,
   mintToken,
   publishEntry,
   resolvePublishScope,
   searchEntries,
 } from '../src/services/registryClient.js'
+import { __resetRegistryIdentityCacheGenerationForTests } from '../src/services/registryIdentityCache.js'
 
 // mintToken() with NO envOverride resolves both the active decision and the
 // credential pair through this mode-aware dependency. Most tests in this file
@@ -37,8 +39,27 @@ const ENV_OVERRIDE: NodeJS.ProcessEnv = {
   CLERUM_REGISTRY_AUTH_ENABLED: 'true',
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, reject, resolve }
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  throw new Error(message)
+}
+
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV }
+  __resetRegistryIdentityCacheGenerationForTests()
   __resetTokenCacheForTests()
   __resetScopeCacheForTests()
   connDb.resolveMachineCreds.mockReset().mockImplementation(async () => {
@@ -548,6 +569,224 @@ describe('registryClient — resolvePublishScope', () => {
     expect(second).toEqual(first)
     expect(fetchMock.mock.calls.length).toBe(callsAfterFirst)
   })
+
+  it('revalidates cached publish scope after the registry cache TTL expires', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    let whoamiCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) {
+        return Promise.resolve(fakeTokenResponse('tok-scope', 6000))
+      }
+      whoamiCalls += 1
+      const orgName = whoamiCalls === 1 ? 'alpha' : 'bravo'
+      return Promise.resolve(
+        new Response(JSON.stringify({ clientId: orgName, orgName, curator: false }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'alpha',
+      scope: '@alpha',
+    })
+
+    vi.setSystemTime(Date.now() + 14_999)
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'alpha',
+      scope: '@alpha',
+    })
+
+    vi.setSystemTime(Date.now() + 1)
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'bravo',
+      scope: '@bravo',
+    })
+    expect(whoamiCalls).toBe(2)
+  })
+
+  it('invalidates cached token and publish scope when registry identity changes', async () => {
+    let tokenCalls = 0
+    let whoamiCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/oauth/token')) {
+        tokenCalls += 1
+        return Promise.resolve(fakeTokenResponse(tokenCalls === 1 ? 'tok-alpha' : 'tok-bravo'))
+      }
+      whoamiCalls += 1
+      const headers = init?.headers as Record<string, string> | undefined
+      const orgName = headers?.Authorization === 'Bearer tok-alpha' ? 'alpha' : 'bravo'
+      return Promise.resolve(
+        new Response(JSON.stringify({ clientId: orgName, orgName, curator: false }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'alpha',
+      scope: '@alpha',
+    })
+
+    invalidateRegistryIdentityCaches()
+
+    await expect(resolvePublishScope()).resolves.toEqual({
+      curator: false,
+      orgName: 'bravo',
+      scope: '@bravo',
+    })
+    expect(tokenCalls).toBe(2)
+    expect(whoamiCalls).toBe(2)
+  })
+
+  it('does not reuse a connected scope after disconnect invalidation', async () => {
+    let tokenCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/oauth/token')) {
+        tokenCalls += 1
+        return Promise.resolve(fakeTokenResponse(tokenCalls === 1 ? 'tok-connected' : 'tok-open'))
+      }
+      const headers = init?.headers as Record<string, string> | undefined
+      const connected = headers?.Authorization === 'Bearer tok-connected'
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            clientId: connected ? 'acme' : 'unbound',
+            orgName: connected ? 'acme' : null,
+            curator: false,
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }
+        )
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    expect(await resolvePublishScope()).toEqual({
+      curator: false,
+      orgName: 'acme',
+      scope: '@acme',
+    })
+
+    invalidateRegistryIdentityCaches()
+
+    expect(await resolvePublishScope()).toEqual({
+      curator: false,
+      orgName: null,
+      scope: null,
+    })
+  })
+
+  it('does not return an older pending publish-scope result after identity invalidation', async () => {
+    const staleWhoami = deferred<Response>()
+    let tokenCalls = 0
+    let whoamiCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/oauth/token')) {
+        tokenCalls += 1
+        return Promise.resolve(fakeTokenResponse(tokenCalls === 1 ? 'tok-alpha' : 'tok-bravo'))
+      }
+      whoamiCalls += 1
+      const headers = init?.headers as Record<string, string> | undefined
+      if (headers?.Authorization === 'Bearer tok-alpha') return staleWhoami.promise
+      return Promise.resolve(
+        new Response(JSON.stringify({ clientId: 'bravo', orgName: 'bravo', curator: false }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const staleRequest = resolvePublishScope()
+    await waitUntil(() => whoamiCalls === 1, 'stale whoami request did not start')
+
+    invalidateRegistryIdentityCaches()
+
+    const freshScope = await resolvePublishScope()
+    expect(freshScope).toEqual({ curator: false, orgName: 'bravo', scope: '@bravo' })
+
+    staleWhoami.resolve(
+      new Response(JSON.stringify({ clientId: 'alpha', orgName: 'alpha', curator: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    expect(await staleRequest).toEqual(freshScope)
+
+    expect(await resolvePublishScope()).toEqual(freshScope)
+    expect(tokenCalls).toBe(2)
+    expect(whoamiCalls).toBe(2)
+  })
+
+  it('does not return an older pending token mint after identity invalidation', async () => {
+    const staleToken = deferred<Response>()
+    let tokenCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (!url.endsWith('/oauth/token')) throw new Error(`unexpected fetch: ${url}`)
+      tokenCalls += 1
+      if (tokenCalls === 1) return staleToken.promise
+      return Promise.resolve(fakeTokenResponse('tok-bravo', 600))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const staleRequest = mintToken(ENV_OVERRIDE)
+    await waitUntil(() => tokenCalls === 1, 'stale token request did not start')
+
+    invalidateRegistryIdentityCaches()
+
+    await expect(mintToken(ENV_OVERRIDE)).resolves.toBe('tok-bravo')
+    staleToken.resolve(fakeTokenResponse('tok-alpha', 600))
+    await expect(staleRequest).resolves.toBe('tok-bravo')
+
+    await expect(mintToken(ENV_OVERRIDE)).resolves.toBe('tok-bravo')
+    expect(tokenCalls).toBe(2)
+  })
+
+  it('fails closed when identity changes again during a stale token retry', async () => {
+    const staleToken = deferred<Response>()
+    const retryToken = deferred<Response>()
+    let tokenCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (!url.endsWith('/oauth/token')) throw new Error(`unexpected fetch: ${url}`)
+      tokenCalls += 1
+      if (tokenCalls === 1) return staleToken.promise
+      if (tokenCalls === 2) return retryToken.promise
+      return Promise.resolve(fakeTokenResponse('tok-charlie', 600))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const staleRequest = mintToken(ENV_OVERRIDE)
+    await waitUntil(() => tokenCalls === 1, 'stale token request did not start')
+
+    invalidateRegistryIdentityCaches()
+    staleToken.resolve(fakeTokenResponse('tok-alpha', 600))
+    await waitUntil(() => tokenCalls === 2, 'stale token retry did not start')
+
+    invalidateRegistryIdentityCaches()
+    retryToken.resolve(fakeTokenResponse('tok-bravo', 600))
+
+    await expect(staleRequest).rejects.toMatchObject({
+      code: 'registry_unavailable',
+      status: 503,
+    })
+    expect(tokenCalls).toBe(2)
+  })
 })
 
 describe('registryClient — applyPublishScope', () => {
@@ -662,6 +901,26 @@ describe('registryClient — catalog read-through cache', () => {
     expect(entryGets.length).toBe(1)
   })
 
+  it('does not serve cached default catalog across registry identity invalidation', async () => {
+    let entryCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      entryCalls += 1
+      return Promise.resolve(okSearch(entryCalls === 1 ? 'alpha' : 'bravo'))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const first = await searchEntries({ limit: 200 })
+    expect(first.data).toEqual([{ name: 'alpha' }])
+
+    invalidateRegistryIdentityCaches()
+
+    const second = await searchEntries({ limit: 200 })
+    expect(second.data).toEqual([{ name: 'bravo' }])
+    expect(entryCalls).toBe(2)
+  })
+
   it('revalidates after the TTL expires and serves the fresh value', async () => {
     vi.useFakeTimers()
     let n = 0
@@ -703,6 +962,76 @@ describe('registryClient — catalog read-through cache', () => {
       (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/categories')
     )
     expect(catGets.length).toBe(1)
+  })
+
+  it('does not serve cached categories across registry identity invalidation', async () => {
+    let categoryCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      categoryCalls += 1
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: categoryCalls === 1 ? ['alpha'] : ['bravo'] }), {
+          status: 200,
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await expect(getCategories()).resolves.toEqual({ data: ['alpha'] })
+    invalidateRegistryIdentityCaches()
+    await expect(getCategories()).resolves.toEqual({ data: ['bravo'] })
+    expect(categoryCalls).toBe(2)
+  })
+
+  it('does not serve stale-while-error catalog data across identity invalidation', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      const entryCalls = fetchMock.mock.calls.filter(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/entries')
+      ).length
+      return Promise.resolve(
+        entryCalls <= 1 ? okSearch('alpha') : new Response('down', { status: 503 })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await expect(searchEntries({ limit: 200 })).resolves.toMatchObject({
+      data: [{ name: 'alpha' }],
+    })
+    invalidateRegistryIdentityCaches()
+
+    await expect(searchEntries({ limit: 200 })).rejects.toMatchObject({
+      code: 'registry_unavailable',
+      status: 503,
+    })
+  })
+
+  it('does not return or cache an older pending default catalog after invalidation', async () => {
+    const staleCatalog = deferred<Response>()
+    let entryCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      entryCalls += 1
+      if (entryCalls === 1) return staleCatalog.promise
+      return Promise.resolve(okSearch('bravo'))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const staleRequest = searchEntries({ limit: 200 })
+    await waitUntil(() => entryCalls === 1, 'stale catalog request did not start')
+
+    invalidateRegistryIdentityCaches()
+
+    const fresh = await searchEntries({ limit: 200 })
+    expect(fresh.data).toEqual([{ name: 'bravo' }])
+
+    staleCatalog.resolve(okSearch('alpha'))
+    await expect(staleRequest).resolves.toEqual(fresh)
+    await expect(searchEntries({ limit: 200 })).resolves.toEqual(fresh)
+    expect(entryCalls).toBe(2)
   })
 
   it('invalidates the catalog cache after a publish so the next catalog load refetches', async () => {
