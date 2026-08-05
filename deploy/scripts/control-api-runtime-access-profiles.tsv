@@ -38,6 +38,7 @@ plugin_workload_sdk_grants	legacy_dml
 plugin_workload_sdk_invocations	legacy_dml
 plugin_workload_sdk_provider_attempts	legacy_dml
 plugin_workload_sdk_quota_counters	legacy_dml
+plugin_workload_sdk_spend_outcomes	append
 profiles	legacy_dml
 rate_limit_buckets	legacy_dml
 registry_connection	legacy_dml

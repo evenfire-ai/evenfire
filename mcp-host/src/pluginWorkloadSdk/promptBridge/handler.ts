@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import { PluginWorkloadError } from '../domain/errors'
+import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import {
   DEFAULT_IDEMPOTENCY_KEY_PATTERN,
   DEFAULT_MAX_REQUEST_CONTENT_BYTES,
@@ -26,7 +26,8 @@ import type { LlmBridge } from './llmBridge'
  *   1. Validate input (purpose enum, idempotency key pattern, content cap).
  *   2. Authorize through control-api via the anti-corruption layer.
  *   3. Call the co-located LLM bridge (provider bound to this mcp-host).
- *   4. Report completion status back to the audit trail (best-effort).
+ *   4. Report physical and logical completion status back to the audit trail
+ *      (idempotent and best-effort at the transport boundary).
  *   5. Return PromptBridgeResult — or a PluginWorkloadError (spec §15).
  *
  * v1 invariant: inference-only. No tools, no conversational session.
@@ -35,6 +36,39 @@ import type { LlmBridge } from './llmBridge'
 const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
 const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 const MAX_METADATA_BYTES = 16 * 1024
+
+/**
+ * A provider response is already potentially billable when this acknowledgement
+ * is sent. Preserve that response if the audit transport is unavailable; the
+ * generation fence and maintenance sweep prevent the unfinished ledger row
+ * from being retried as a fresh provider call. Usage is emitted once the
+ * physical provider receipt is confirmed, even if the logical invocation ACK
+ * must be retried, because usage binding is anchored to that immutable receipt.
+ */
+async function reportInvocationStatusBestEffort(
+  client: PluginWorkloadSdkControlApiClient,
+  invocationId: string,
+  recipeNamespace: string,
+  recipeName: string,
+  status: 'complete' | 'failed' | 'provider_unavailable',
+  attemptGeneration: number
+): Promise<boolean> {
+  try {
+    await client.reportInvocationStatus(
+      invocationId,
+      recipeNamespace,
+      recipeName,
+      status,
+      attemptGeneration
+    )
+    return true
+  } catch {
+    // Keep this log static. The request, provider response, and credentials
+    // must not be copied into process logs while preserving the original error.
+    console.warn('[PluginWorkloadSdk] invocation acknowledgement failed')
+    return false
+  }
+}
 
 export interface PromptBridgeHandlerDeps {
   controlApiClient: PluginWorkloadSdkControlApiClient
@@ -45,6 +79,24 @@ export interface PromptBridgeHandlerDeps {
   maxRequestContentBytes?: number
   /** Public provider/model identity from the live spec.agent binding. */
   getBootstrapTarget?: () => { provider: string; model: string } | null
+  /** SDK-only atomic accounting boundary; workflow mode keeps the legacy reporter. */
+  finalizePromptBridge?: (input: {
+    invocationId: string
+    attemptGeneration: number
+    providerAttemptId: string
+    providerAttemptIndex: number
+    status: 'complete' | 'provider_unavailable'
+    reason: string
+    target: PromptBridgeTarget
+    usage?: {
+      llmSecretName: string
+      callerRef: string
+      fallbackUsed: boolean
+      attemptCount: number
+      inputTokens: number
+      outputTokens: number
+    }
+  }) => Promise<unknown>
   onUsage?: (usage: {
     invocationId: string
     attemptGeneration: number
@@ -265,6 +317,7 @@ export class PromptBridgeHandler {
     if (!selected || !sameTarget(selected, authorized.selectedTarget)) {
       throw unexpectedAuthorizationResponse()
     }
+    let unknownProviderAttempt: PluginWorkloadProviderAttemptContext | undefined
     try {
       const completion = await this.deps.llmBridge.complete({
         invocationId: authorized.invocationId,
@@ -297,43 +350,116 @@ export class PromptBridgeHandler {
               status: input.status,
             }),
         },
+        deferSuccessfulAttemptAcknowledgement: Boolean(this.deps.finalizePromptBridge),
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
       })
 
-      await this.deps.controlApiClient.reportInvocationStatus(
-        authorized.invocationId,
-        this.deps.recipeNamespace,
-        this.deps.recipeName,
-        'complete',
-        authorized.attemptGeneration
-      )
+      const providerAttemptAcknowledged = completion.providerAttemptAcknowledged !== false
+      const providerAttemptId = completion.providerAttemptId
+      const providerAttemptIndex = completion.providerAttemptIndex
+      if (
+        this.deps.finalizePromptBridge &&
+        (typeof providerAttemptId !== 'string' ||
+          typeof providerAttemptIndex !== 'number' ||
+          !Number.isInteger(providerAttemptIndex) ||
+          providerAttemptIndex < 1)
+      ) {
+        throw new PluginWorkloadError(
+          'provider_unavailable',
+          'provider attempt receipt is missing from the SDK-only completion',
+          false,
+          'configuration'
+        )
+      }
+      if (
+        this.deps.finalizePromptBridge &&
+        typeof providerAttemptId === 'string' &&
+        typeof providerAttemptIndex === 'number' &&
+        Number.isInteger(providerAttemptIndex) &&
+        providerAttemptIndex >= 1
+      ) {
+        try {
+          await this.deps.finalizePromptBridge({
+            invocationId: authorized.invocationId,
+            attemptGeneration: authorized.attemptGeneration,
+            providerAttemptId,
+            providerAttemptIndex,
+            status: 'complete',
+            reason: providerAttemptAcknowledged
+              ? 'provider_completed'
+              : 'provider_completion_acknowledgement_recovered',
+            target: completion.servedTarget,
+            usage: {
+              llmSecretName: completion.llmSecretName,
+              callerRef,
+              fallbackUsed: completion.fallbackUsed,
+              attemptCount: completion.attemptCount,
+              inputTokens: completion.usage.inputTokens,
+              outputTokens: completion.usage.outputTokens,
+            },
+          })
+        } catch {
+          // Returning provider content before durable finalization would hide
+          // a possible spend. Surface an explicit unknown outcome instead.
+          throw new PluginWorkloadError(
+            'provider_unavailable',
+            'provider result could not be durably finalized; retry with a new idempotency key after investigation',
+            false,
+            'outcome_unknown',
+            true,
+            {
+              providerAttemptId,
+              providerAttemptIndex,
+              target: completion.servedTarget,
+              attemptCount: completion.attemptCount,
+              fallbackUsed: completion.fallbackUsed,
+              llmSecretName: completion.llmSecretName,
+            }
+          )
+        }
+      } else {
+        await reportInvocationStatusBestEffort(
+          this.deps.controlApiClient,
+          authorized.invocationId,
+          this.deps.recipeNamespace,
+          this.deps.recipeName,
+          providerAttemptAcknowledged ? 'complete' : 'provider_unavailable',
+          authorized.attemptGeneration
+        )
+      }
 
-      // Usage is emitted only after the generation-fenced terminal ACK. A
-      // result whose audit transition was rejected must not enter metering as
-      // if the provider call had completed authoritatively.
-      this.deps.onUsage?.({
-        invocationId: authorized.invocationId,
-        attemptGeneration: authorized.attemptGeneration,
-        provider: completion.servedTarget.provider,
-        model: completion.model,
-        servedTarget: completion.servedTarget,
-        fallbackUsed: completion.fallbackUsed,
-        attemptCount: completion.attemptCount,
-        ...(completion.providerAttemptId
-          ? { providerAttemptId: completion.providerAttemptId }
-          : {}),
-        ...(completion.providerAttemptIndex !== undefined
-          ? { providerAttemptIndex: completion.providerAttemptIndex }
-          : {}),
-        llmSecretName: completion.llmSecretName,
-        inputTokens: completion.usage.inputTokens,
-        outputTokens: completion.usage.outputTokens,
-        callerRef,
-        ...(request.metadata ? { metadata: request.metadata } : {}),
-      })
+      if (!this.deps.finalizePromptBridge && providerAttemptAcknowledged) {
+        // A confirmed physical completion is enough for receipt binding. If
+        // the logical invocation ACK is lost, the usage reporter can still
+        // retry against the durable provider-attempt receipt; suppressing the
+        // event here would silently lose metering after a successful call.
+        this.deps.onUsage?.({
+          invocationId: authorized.invocationId,
+          attemptGeneration: authorized.attemptGeneration,
+          provider: completion.servedTarget.provider,
+          model: completion.model,
+          servedTarget: completion.servedTarget,
+          fallbackUsed: completion.fallbackUsed,
+          attemptCount: completion.attemptCount,
+          ...(completion.providerAttemptId
+            ? { providerAttemptId: completion.providerAttemptId }
+            : {}),
+          ...(completion.providerAttemptIndex !== undefined
+            ? { providerAttemptIndex: completion.providerAttemptIndex }
+            : {}),
+          llmSecretName: completion.llmSecretName,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+          callerRef,
+          ...(request.metadata ? { metadata: request.metadata } : {}),
+        })
+      }
 
+      // Preserve a real provider response even when its physical receipt was
+      // not acknowledged. The invocation was closed as provider_unavailable
+      // above, so the idempotency key cannot be revived into a second call.
       return {
         invocationId: authorized.invocationId,
         model: completion.model,
@@ -347,17 +473,38 @@ export class PromptBridgeHandler {
         createdAt: new Date().toISOString(),
       }
     } catch (err) {
+      unknownProviderAttempt = err instanceof PluginWorkloadError ? err.providerAttempt : undefined
+      if (this.deps.finalizePromptBridge && unknownProviderAttempt) {
+        try {
+          await this.deps.finalizePromptBridge({
+            invocationId: authorized.invocationId,
+            attemptGeneration: authorized.attemptGeneration,
+            providerAttemptId: unknownProviderAttempt.providerAttemptId,
+            providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
+            status: 'provider_unavailable',
+            reason:
+              err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
+            target: unknownProviderAttempt.target,
+          })
+        } catch {
+          console.warn('[PluginWorkloadSdk] provider spend finalization failed')
+        }
+      }
       const status =
-        err instanceof PluginWorkloadError && err.code === 'provider_unavailable'
+        err instanceof PluginWorkloadError &&
+        (err.code === 'provider_unavailable' || err.providerMayHaveExecuted)
           ? 'provider_unavailable'
           : 'failed'
-      await this.deps.controlApiClient.reportInvocationStatus(
-        authorized.invocationId,
-        this.deps.recipeNamespace,
-        this.deps.recipeName,
-        status,
-        authorized.attemptGeneration
-      )
+      if (!this.deps.finalizePromptBridge || !unknownProviderAttempt) {
+        await reportInvocationStatusBestEffort(
+          this.deps.controlApiClient,
+          authorized.invocationId,
+          this.deps.recipeNamespace,
+          this.deps.recipeName,
+          status,
+          authorized.attemptGeneration
+        )
+      }
       throw err
     }
   }

@@ -34,6 +34,7 @@ const MAX_PENDING_EVENFIRE_URLS = 20
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 let mainWindowLifecycleReady = false
 let mainWindowRendererReady = false
+let appWindowVisibilityWired = false
 const appServiceInitializer = createRetryableInitializer(() => appService.initialize())
 
 function enqueuePendingEvenfireUrl(rawUrl: string): void {
@@ -116,9 +117,20 @@ function wireWindowVisibility(win: BrowserWindow): void {
   win.on('restore', emit)
   win.on('focus', emit)
   win.on('blur', emit)
-  // A future secondary BrowserWindow can take focus without emitting a focus
-  // event on the main window. App-level events keep the main renderer's
-  // application-focus view authoritative in that case as well.
+}
+
+/**
+ * App-level focus events are process-scoped. Register them once so closing and
+ * recreating the main window cannot accumulate listeners that retain a
+ * destroyed WebContents instance.
+ */
+function wireAppWindowVisibility(): void {
+  if (appWindowVisibilityWired) return
+  appWindowVisibilityWired = true
+  const emit = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send('window:visibility', windowState(mainWindow))
+  }
   app.on('browser-window-focus', emit)
   app.on('browser-window-blur', emit)
 }
@@ -374,6 +386,7 @@ async function createWindow(): Promise<void> {
   })
 
   wireWindowVisibility(window)
+  wireAppWindowVisibility()
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => {

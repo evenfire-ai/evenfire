@@ -250,11 +250,11 @@ export type WorkflowInputContractSchema = {
 export type WorkflowInputValues = Record<string, string | number | boolean>
 
 export type PluginWorkloadSdkCapabilityStatus = {
-  state: 'validated' | 'disabled' | 'degraded'
+  state: 'validated' | 'awaiting_policy' | 'disabled' | 'degraded'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string
-  validatedAt?: string
+  validatedAt?: string | null
 }
 
 export type WorkflowRecipeResource = Record<string, unknown> & {

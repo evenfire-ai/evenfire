@@ -81,6 +81,12 @@ export class OpenAIProvider implements SingleTurnProvider {
     )
 
     const choice = response.choices[0]
+    const usageReported =
+      response.usage != null &&
+      Number.isInteger(response.usage.prompt_tokens) &&
+      response.usage.prompt_tokens >= 0 &&
+      Number.isInteger(response.usage.completion_tokens) &&
+      response.usage.completion_tokens >= 0
     return {
       content: choice.message.content ?? '',
       usage: {
@@ -88,6 +94,7 @@ export class OpenAIProvider implements SingleTurnProvider {
         output_tokens: response.usage?.completion_tokens ?? 0,
         total_tokens: response.usage?.total_tokens ?? 0,
       },
+      usage_reported: usageReported,
       finish_reason: this.mapFinishReason(choice.finish_reason),
     }
   }
@@ -141,6 +148,12 @@ export class OpenAIProvider implements SingleTurnProvider {
         arguments: this.parseArguments(tc.function.arguments),
       })) ?? null
 
+    const usageReported =
+      response.usage != null &&
+      Number.isInteger(response.usage.prompt_tokens) &&
+      response.usage.prompt_tokens >= 0 &&
+      Number.isInteger(response.usage.completion_tokens) &&
+      response.usage.completion_tokens >= 0
     return {
       content: message.content,
       tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : null,
@@ -149,6 +162,7 @@ export class OpenAIProvider implements SingleTurnProvider {
         output_tokens: response.usage?.completion_tokens ?? 0,
         total_tokens: response.usage?.total_tokens ?? 0,
       },
+      usage_reported: usageReported,
       finish_reason: this.mapFinishReason(choice.finish_reason),
     }
   }

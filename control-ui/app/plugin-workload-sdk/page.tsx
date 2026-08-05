@@ -36,8 +36,9 @@ import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
-  getCredentialSlotOptions,
+  buildPromptBridgeTargetPolicy,
   getModelOptions,
+  getPromptBridgeCredentialSlotOptions,
   getProviderLabel,
   normalizeProvider,
 } from '@lib/llm'
@@ -464,7 +465,7 @@ function GrantFormModal({
       .then(result => {
         if (cancelled) return
         setAvailableCredentialKeys(
-          Array.from(new Set((result.items ?? []).flatMap(item => item.keys))).sort((a, b) =>
+          Array.from(new Set((result.items ?? []).flatMap(item => item.keys ?? []))).sort((a, b) =>
             a.localeCompare(b)
           )
         )
@@ -544,7 +545,7 @@ function GrantFormModal({
     [allowedCatalog, modelProvider]
   )
   const credentialSlotOptions = useMemo(
-    () => getCredentialSlotOptions(modelProvider, availableCredentialKeys),
+    () => getPromptBridgeCredentialSlotOptions(modelProvider, availableCredentialKeys),
     [availableCredentialKeys, modelProvider]
   )
   const userOptions = useMemo(
@@ -590,23 +591,25 @@ function GrantFormModal({
         quotaLimits.maxOutputTokens = grant.quotaLimits.maxOutputTokens
     }
 
+    const routingPolicy =
+      family === 'promptBridge' ? buildPromptBridgeTargetPolicy(promptTargets) : undefined
     const payload: PluginWorkloadSdkGrantInput = {
       recipeNamespace: recipeNamespace.trim(),
       recipeName: recipeName.trim(),
       capabilityFamily: family,
       // R1: persist the explicit provider (control-api requires it for
       // promptBridge). Omitted for clientNotifications, which has no model.
-      provider: family === 'promptBridge' ? promptTargets[0]?.provider : undefined,
+      provider: routingPolicy?.provider,
       // Retained only as legacy inventory metadata; runtime selection uses the
       // ordered targets below and never falls back to this flat list.
-      allowedModels: family === 'promptBridge' ? promptTargets.map(target => target.model) : [],
+      allowedModels: routingPolicy?.allowedModels ?? [],
       allowedEventTypes: family === 'clientNotifications' ? eventTypesList : [],
       allowedTargetRefs: family === 'clientNotifications' ? parseList(allowedTargetRefs) : [],
       allowedUserRefs: family === 'clientNotifications' ? allowedUserRefs : [],
       allowedCallers: callersList,
       quotaLimits,
-      promptTargets: family === 'promptBridge' ? promptTargets : undefined,
-      defaultTargetRef: family === 'promptBridge' ? promptTargets[0]?.targetRef : undefined,
+      promptTargets: routingPolicy?.promptTargets,
+      defaultTargetRef: routingPolicy?.defaultTargetRef,
     }
     // Edit mode: preserve modelPolicies, which the form does not expose, so the
     // full-column upsert does not wipe policies configured outside this form.

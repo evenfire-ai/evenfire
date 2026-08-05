@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   type LlmModelCatalogEntry,
+  buildPromptBridgeTargetPolicy,
   getCredentialSlotOptions,
+  getPromptBridgeCredentialSlotOptions,
   normalizeLlmPolicy,
   providerSupportsFallbackCredentialSlot,
   validateLlmPolicy,
@@ -52,6 +54,57 @@ describe('getCredentialSlotOptions (spec R4.5.6)', () => {
     // Another provider's keys never leak in.
     expect(opts).not.toContain('openai-api-key')
     expect(opts).not.toContain('openai-api-key-fb1')
+  })
+})
+
+describe('getPromptBridgeCredentialSlotOptions', () => {
+  it('keeps canonical multiline and multi-slot provider identities selectable', () => {
+    expect(getPromptBridgeCredentialSlotOptions('vertex')).toEqual(['vertex-service-account-json'])
+    expect(getPromptBridgeCredentialSlotOptions('bedrock')).toEqual([
+      'aws-access-key-id',
+      'aws-secret-access-key',
+    ])
+  })
+
+  it('allows suffixed extra identities only for single-key providers', () => {
+    expect(
+      getPromptBridgeCredentialSlotOptions('claude', [
+        'claude-api-key',
+        'claude-api-key-fb1',
+        'vertex-service-account-json-fb1',
+      ])
+    ).toEqual(['claude-api-key', 'claude-api-key-fb1'])
+  })
+})
+
+describe('buildPromptBridgeTargetPolicy', () => {
+  it('derives the default, provider and model inventory from ordered targets', () => {
+    const fallback = {
+      targetRef: 'fallback-openai',
+      provider: 'openai',
+      model: 'gpt-5.4',
+      credentialSlot: 'openai-api-key-fb1',
+    }
+    const primary = {
+      targetRef: 'primary-claude',
+      provider: 'claude',
+      model: 'claude-opus-4-8',
+      credentialSlot: 'claude-api-key',
+    }
+
+    expect(buildPromptBridgeTargetPolicy([primary, fallback])).toEqual({
+      provider: 'claude',
+      allowedModels: ['claude-opus-4-8', 'gpt-5.4'],
+      promptTargets: [primary, fallback],
+      defaultTargetRef: 'primary-claude',
+    })
+  })
+
+  it('does not invent a provider or default for an empty policy', () => {
+    expect(buildPromptBridgeTargetPolicy([])).toEqual({
+      allowedModels: [],
+      promptTargets: [],
+    })
   })
 })
 

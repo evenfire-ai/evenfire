@@ -37,6 +37,11 @@ import {
   redeemPluginWorkloadSdkCredentialTicketJti,
   resolveRecipientProfiles,
 } from '../../services/pluginWorkloadSdkDb.js'
+import {
+  PromptBridgeFinalizationError,
+  type PromptBridgeFinalizationInput,
+  finalizePromptBridge,
+} from '../../services/pluginWorkloadSdkFinalization.js'
 import { markInvocationStatus } from '../../services/pluginWorkloadSdkInvocationAuditor.js'
 import type { McpHostAccessClaims } from '../../utils/auth/mcpHostJwtToken.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
@@ -148,6 +153,102 @@ function validateCallerRef(value: unknown, res: Response): string | null {
     return null
   }
   return value.trim()
+}
+
+function parsePromptBridgeFinalizationBody(
+  body: Record<string, unknown>,
+  claims: McpHostAccessClaims,
+  res: Response
+): PromptBridgeFinalizationInput | null {
+  const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
+  const providerAttemptId =
+    typeof body.providerAttemptId === 'string' ? body.providerAttemptId.trim() : ''
+  const attemptGeneration = Number.isInteger(body.attemptGeneration)
+    ? Number(body.attemptGeneration)
+    : 0
+  const providerAttemptIndex = Number.isInteger(body.providerAttemptIndex)
+    ? Number(body.providerAttemptIndex)
+    : 0
+  const status = body.status
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+  const target = isPlainObject(body.target) ? body.target : null
+  const targetRef = typeof target?.targetRef === 'string' ? target.targetRef.trim() : ''
+  const provider = typeof target?.provider === 'string' ? target.provider.trim() : ''
+  const model = typeof target?.model === 'string' ? target.model.trim() : ''
+  const credentialSlot =
+    typeof target?.credentialSlot === 'string' ? target.credentialSlot.trim() : ''
+
+  if (
+    !invocationId ||
+    !providerAttemptId ||
+    attemptGeneration < 1 ||
+    providerAttemptIndex < 1 ||
+    providerAttemptIndex > 4 ||
+    !['complete', 'provider_unavailable'].includes(String(status)) ||
+    !reason ||
+    reason.length > 128 ||
+    !targetRef ||
+    !provider ||
+    !model ||
+    !credentialSlot
+  ) {
+    res.status(400).json({
+      error:
+        'invocationId, attemptGeneration, providerAttemptId, providerAttemptIndex, status, reason and target are required',
+    })
+    return null
+  }
+
+  const rawUsage = body.usage
+  let usage: PromptBridgeFinalizationInput['usage']
+  if (rawUsage !== undefined) {
+    if (!isPlainObject(rawUsage)) {
+      res.status(400).json({ error: 'usage must be an object' })
+      return null
+    }
+    const llmSecretName =
+      typeof rawUsage.llmSecretName === 'string' ? rawUsage.llmSecretName.trim() : ''
+    const callerRef = typeof rawUsage.callerRef === 'string' ? rawUsage.callerRef.trim() : ''
+    const attemptCount = Number.isInteger(rawUsage.attemptCount) ? Number(rawUsage.attemptCount) : 0
+    const inputTokens = Number.isInteger(rawUsage.inputTokens) ? Number(rawUsage.inputTokens) : -1
+    const outputTokens = Number.isInteger(rawUsage.outputTokens)
+      ? Number(rawUsage.outputTokens)
+      : -1
+    if (
+      !llmSecretName ||
+      !callerRef ||
+      typeof rawUsage.fallbackUsed !== 'boolean' ||
+      attemptCount < 1 ||
+      attemptCount > 4 ||
+      inputTokens < 0 ||
+      outputTokens < 0
+    ) {
+      res.status(400).json({ error: 'usage fields are invalid' })
+      return null
+    }
+    usage = {
+      llmSecretName,
+      callerRef,
+      fallbackUsed: rawUsage.fallbackUsed,
+      attemptCount,
+      inputTokens,
+      outputTokens,
+    }
+  }
+
+  return {
+    invocationId,
+    recipeNamespace: claims.recipeNamespace,
+    recipeName: claims.recipeName,
+    hostRef: claims.hostRefs[0] ?? '',
+    attemptGeneration,
+    providerAttemptId,
+    providerAttemptIndex,
+    status: status as PromptBridgeFinalizationInput['status'],
+    target: { targetRef, provider, model, credentialSlot },
+    reason,
+    ...(usage ? { usage } : {}),
+  }
 }
 
 // ─── promptBridge input validation (plan §2.7) ───────────────────────────
@@ -903,6 +1004,49 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         return
       }
       res.status(200).json({ id: invocation.id, status })
+    })
+  )
+
+  // Finalization is the SDK-only promptBridge accounting boundary. It binds
+  // the provider receipt, logical invocation, and exact/unknown spend outcome
+  // in one idempotent transaction; callers must not separately report status
+  // and usage for this lane.
+  router.post(
+    '/mcp-host/plugin-workload-sdk/invocations/:id/finalize',
+    asyncHandler(async (req, res) => {
+      const claims = req.mcpHostJwt!
+      const body = isPlainObject(req.body) ? req.body : {}
+      if (!checkRecipeBinding(body, claims, res)) return
+      const parsed = parsePromptBridgeFinalizationBody(body, claims, res)
+      if (!parsed) return
+      if (parsed.invocationId !== req.params.id) {
+        res.status(400).json({ error: 'invocation id does not match path' })
+        return
+      }
+      try {
+        const result = await finalizePromptBridge(parsed)
+        res.status(result.idempotent ? 200 : 201).json(result)
+      } catch (error) {
+        if (error instanceof PromptBridgeFinalizationError) {
+          const errorCode =
+            error.code === 'conflict'
+              ? 'idempotency_conflict'
+              : error.code === 'binding_mismatch'
+                ? 'provider_policy_denied'
+                : error.code === 'stale_attempt'
+                  ? 'provider_unavailable'
+                  : error.code === 'not_found'
+                    ? 'invalid_request'
+                    : error.code
+          res.status(error.httpStatus).json({
+            error: errorCode,
+            message: error.message,
+            retryable: false,
+          })
+          return
+        }
+        throw error
+      }
     })
   )
 

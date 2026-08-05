@@ -126,6 +126,8 @@ export interface CompletionRequest {
 export interface CompletionResponse {
   content: string
   usage: TokenUsage
+  /** True only when the provider response carried authoritative token counters. */
+  usage_reported?: boolean
   finish_reason: FinishReason
 }
 
@@ -150,6 +152,8 @@ export interface ToolCompletionResponse {
   content: string | null
   tool_calls: ToolCall[] | null
   usage: TokenUsage
+  /** True only when the provider response carried authoritative token counters. */
+  usage_reported?: boolean
   finish_reason: FinishReason
 }
 

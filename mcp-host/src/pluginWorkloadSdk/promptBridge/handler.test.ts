@@ -50,6 +50,7 @@ function makeDeps(
     report?: ReturnType<typeof vi.fn>
     bootstrap?: () => { provider: string; model: string } | null
     onUsage?: (usage: any) => void
+    finalize?: ReturnType<typeof vi.fn>
   } = {}
 ) {
   const authorize = overrides.authorize ?? vi.fn().mockResolvedValue(authorization())
@@ -79,6 +80,7 @@ function makeDeps(
     recipeName: 'r1',
     promptTimeoutMs: 120_000,
     ...(overrides.bootstrap ? { getBootstrapTarget: overrides.bootstrap } : {}),
+    ...(overrides.finalize ? { finalizePromptBridge: overrides.finalize } : {}),
     onUsage: overrides.onUsage,
   })
   return { handler, authorize, complete, report }
@@ -198,6 +200,44 @@ describe('PromptBridgeHandler', () => {
     )
   })
 
+  it('preserves metering when the logical terminal acknowledgement is unavailable', async () => {
+    const report = vi.fn().mockRejectedValue(new Error('control-api unavailable'))
+    const onUsage = vi.fn()
+    const { handler, complete } = makeDeps({ report, onUsage })
+
+    const result = await handler.handle(validBody, 'api')
+
+    expect(result).toMatchObject({ invocationId: 'inv-1', content: 'summary text' })
+    expect(complete).toHaveBeenCalledOnce()
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete', 1)
+    // The provider-attempt receipt is authoritative for usage binding, so a
+    // lost logical ACK must not silently discard the billable usage event.
+    expect(onUsage).toHaveBeenCalledOnce()
+  })
+
+  it('closes the invocation as provider_unavailable when the physical receipt is unknown', async () => {
+    const report = vi.fn().mockResolvedValue(undefined)
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+      providerAttemptAcknowledged: false,
+    })
+    const onUsage = vi.fn()
+    const { handler } = makeDeps({ complete, report, onUsage })
+
+    const result = await handler.handle(validBody, 'api')
+
+    expect(result).toMatchObject({ invocationId: 'inv-1', content: 'summary text' })
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
+    expect(onUsage).not.toHaveBeenCalled()
+  })
+
   it('does not repeat a provider charge for an existing non-failed replay', async () => {
     const authorize = vi
       .fn()
@@ -235,5 +275,141 @@ describe('PromptBridgeHandler', () => {
       retryable: false,
     })
     expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
+  })
+
+  it('preserves the original provider error when the failure audit acknowledgement fails', async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValue(new PluginWorkloadError('provider_unavailable', 'provider failed', false))
+    const report = vi.fn().mockRejectedValue(new Error('control-api unavailable'))
+    const { handler } = makeDeps({ complete, report })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      message: 'provider failed',
+    })
+  })
+
+  it('uses the SDK-only finalizer instead of separate status and usage reporting', async () => {
+    const finalize = vi.fn().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'complete',
+      outcome: 'exact',
+      idempotent: false,
+      usageAccepted: true,
+    })
+    const onUsage = vi.fn()
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler, report } = makeDeps({ complete, finalize, onUsage })
+
+    await expect(handler.handle(validBody, 'api')).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      content: 'summary text',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 2,
+        status: 'complete',
+        target: fallback,
+        usage: expect.objectContaining({ inputTokens: 10, outputTokens: 5 }),
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+    expect(onUsage).not.toHaveBeenCalled()
+  })
+
+  it('records an unknown spend receipt before returning an ambiguous provider error', async () => {
+    const finalize = vi.fn().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'provider_unavailable',
+      outcome: 'unknown',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const complete = vi.fn().mockRejectedValue(
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'provider outcome unknown',
+        false,
+        'outcome_unknown',
+        true,
+        {
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          target: primary,
+          attemptCount: 1,
+          fallbackUsed: false,
+          llmSecretName: 'provider-secret',
+        }
+      )
+    )
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'provider_unavailable',
+        reason: 'outcome_unknown',
+        target: primary,
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('reconciles an exact-finalization failure into a durable unknown receipt', async () => {
+    const finalize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('finalization transaction lost'))
+      .mockResolvedValueOnce({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'provider_unavailable',
+        outcome: 'unknown',
+        idempotent: false,
+        usageAccepted: false,
+      })
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+    })
+    expect(finalize).toHaveBeenCalledTimes(2)
+    expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
+    expect(finalize).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ status: 'provider_unavailable', reason: 'outcome_unknown' })
+    )
+    expect(report).not.toHaveBeenCalled()
   })
 })

@@ -333,6 +333,11 @@ export async function addPluginWorkloadSdkProtocolAndRevocation(db: DbClient): P
 
     ALTER TABLE plugin_workload_sdk_invocations
       ADD COLUMN IF NOT EXISTS contract_version INTEGER NOT NULL DEFAULT 2;
+    -- Keep the default at v1 during the rolling-update compatibility window.
+    -- New writers send contract_version=2 explicitly; an older pod that omits
+    -- the column is therefore identifiable and can be swept conservatively.
+    ALTER TABLE plugin_workload_sdk_invocations
+      ALTER COLUMN contract_version SET DEFAULT 1;
     DO $$ BEGIN
       ALTER TABLE plugin_workload_sdk_invocations
         ADD CONSTRAINT plugin_workload_sdk_invocations_contract_version_check
@@ -370,6 +375,17 @@ export async function addPluginWorkloadSdkProtocolAndRevocation(db: DbClient): P
        AND attempts.attempt_generation = invocations.attempt_generation
        AND invocations.contract_version = 1
        AND invocations.status = 'failed';
+
+    DO $$ BEGIN
+      ALTER TABLE plugin_workload_sdk_invocations
+        ADD CONSTRAINT plugin_workload_sdk_invocations_v2_lease_check
+        CHECK (
+          contract_version = 1
+          OR status <> 'in_progress'
+          OR lease_expires_at IS NOT NULL
+        );
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
 
     CREATE INDEX IF NOT EXISTS plugin_workload_sdk_invocations_contract_idx
       ON plugin_workload_sdk_invocations (recipe_namespace, recipe_name, contract_version, created_at DESC);
@@ -446,5 +462,61 @@ export async function addPluginWorkloadSdkRuntimeAccess(db: DbClient): Promise<v
       plugin_workload_sdk_invocation_attempts,
       plugin_workload_sdk_provider_attempts
       TO control_api_runtime;
+  `)
+}
+
+/**
+ * Durable spend outcome for a physical promptBridge attempt.  The provider
+ * attempt ledger prevents a second execution, while this table preserves the
+ * accounting truth when the provider response is known only to have possibly
+ * executed (for example, a timeout or a lost completion acknowledgement).
+ * Rows are immutable and keyed by the physical attempt id so retries of the
+ * finalization request are safe.
+ */
+export async function addPluginWorkloadSdkSpendOutcomeLedger(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS plugin_workload_sdk_spend_outcomes (
+      provider_attempt_id UUID PRIMARY KEY,
+      invocation_id UUID NOT NULL,
+      recipe_namespace TEXT NOT NULL,
+      recipe_name TEXT NOT NULL,
+      attempt_generation INTEGER NOT NULL CHECK (attempt_generation >= 1),
+      attempt_index INTEGER NOT NULL CHECK (attempt_index BETWEEN 1 AND 4),
+      target_ref TEXT NOT NULL,
+      -- A normal finalization is bound to the runtime JWT host_ref.  A stale
+      -- lease can be detected only after mcp-host has disappeared, however,
+      -- so that recovery row is intentionally unattributed rather than
+      -- fabricating a host identity from recipe names.
+      host_ref TEXT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      credential_slot TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('exact', 'unknown')),
+      reason TEXT NOT NULL,
+      input_tokens INTEGER NULL CHECK (input_tokens IS NULL OR input_tokens >= 0),
+      output_tokens INTEGER NULL CHECK (output_tokens IS NULL OR output_tokens >= 0),
+      usage_request_id UUID NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT plugin_workload_sdk_spend_outcomes_token_pair_check
+        CHECK ((outcome = 'exact' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
+            OR (outcome = 'unknown' AND input_tokens IS NULL AND output_tokens IS NULL))
+    );
+    CREATE INDEX IF NOT EXISTS plugin_workload_sdk_spend_outcomes_recipe_idx
+      ON plugin_workload_sdk_spend_outcomes (recipe_namespace, recipe_name, created_at DESC);
+    REVOKE ALL ON TABLE plugin_workload_sdk_spend_outcomes
+      FROM PUBLIC, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT ON TABLE plugin_workload_sdk_spend_outcomes TO control_api_runtime;
+  `)
+}
+
+/**
+ * The spend ledger was initially shipped with a required host_ref.  Stale
+ * lease recovery has no bearer token from which to prove that binding, so
+ * existing clusters must converge to the same nullable shape as fresh ones.
+ */
+export async function relaxPluginWorkloadSdkSpendOutcomeHostRef(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE plugin_workload_sdk_spend_outcomes
+      ALTER COLUMN host_ref DROP NOT NULL;
   `)
 }

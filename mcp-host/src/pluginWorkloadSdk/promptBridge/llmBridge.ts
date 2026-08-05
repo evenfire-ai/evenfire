@@ -4,7 +4,7 @@ import { type SingleTurnProvider, createLLMProvider } from '../../llm'
 import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
 import { isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
-import { PluginWorkloadError } from '../domain/errors'
+import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import type { BrokeredCredential } from './credentialBrokerClient'
 
@@ -19,6 +19,10 @@ class ClassifiedProviderError extends Error {
 
   toPluginWorkloadError(): PluginWorkloadError {
     return this.publicError
+  }
+
+  get providerMayHaveExecuted(): boolean {
+    return this.publicError.providerMayHaveExecuted
   }
 }
 
@@ -64,6 +68,8 @@ export interface LlmBridgeRequest {
   policyHash: string
   credentialTicketIssuer: PromptBridgeCredentialTicketIssuer
   providerAttemptReporter?: PromptBridgeProviderAttemptReporter
+  /** SDK-only lane finalizes a successful physical attempt atomically in the handler. */
+  deferSuccessfulAttemptAcknowledgement?: boolean
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
   maxTokens?: number
   temperature?: number
@@ -79,9 +85,34 @@ export interface LlmBridgeResult {
   llmSecretName: string
   providerAttemptId?: string
   providerAttemptIndex?: number
+  /** False means the provider result is real but its terminal receipt is not. */
+  providerAttemptAcknowledged?: boolean
   content: string
   usage: { inputTokens: number; outputTokens: number }
   finishReason: 'complete' | 'length' | 'content_filter'
+}
+
+/**
+ * Provider execution is the source of truth for the caller's result. A lost
+ * terminal acknowledgement must not turn a potentially billable completion
+ * into a revivable failure. The caller receives the result together with an
+ * explicit receipt flag; the handler then closes the logical invocation as
+ * provider_unavailable when the physical receipt is unknown.
+ */
+async function reportProviderAttemptBestEffort(
+  reporter: PromptBridgeProviderAttemptReporter | undefined,
+  input: Parameters<PromptBridgeProviderAttemptReporter['report']>[0]
+): Promise<boolean> {
+  if (!reporter) return true
+  try {
+    await reporter.report(input)
+    return true
+  } catch {
+    // Keep this log static. Provider responses and credential material must
+    // never be copied into process logs while preserving the provider outcome.
+    console.warn('[PluginWorkloadSdk] provider attempt acknowledgement failed')
+    return false
+  }
 }
 
 const DEFAULT_MAX_LLM_RESPONSE_BYTES = 1024 * 1024
@@ -95,6 +126,19 @@ const DEFAULT_PROMPT_BRIDGE_FAILOVER_CLASSES: readonly FailoverClass[] = [
 
 function remainingTimeoutMs(deadlineAt: number): number {
   return deadlineAt - Date.now()
+}
+
+function providerOutcomeUnknownError(
+  providerAttempt?: PluginWorkloadProviderAttemptContext
+): PluginWorkloadError {
+  return new PluginWorkloadError(
+    'provider_unavailable',
+    'provider execution outcome is unknown; retry with a new idempotency key after investigation',
+    false,
+    'outcome_unknown',
+    true,
+    providerAttempt
+  )
 }
 
 async function withinDeadline<T>(
@@ -225,12 +269,8 @@ export class LlmBridge {
           remainingTimeoutMs(deadlineAt),
           'timeout'
         )
-        if (
-          request.providerAttemptReporter &&
-          skippedTicket.providerAttemptId &&
-          skippedTicket.providerAttemptIndex !== undefined
-        ) {
-          await request.providerAttemptReporter.report({
+        if (skippedTicket.providerAttemptId && skippedTicket.providerAttemptIndex !== undefined) {
+          await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
             providerAttemptId: skippedTicket.providerAttemptId,
             providerAttemptIndex: skippedTicket.providerAttemptIndex,
             status: 'skipped',
@@ -293,11 +333,11 @@ export class LlmBridge {
         // rejects the Secret read; close it before surfacing the terminal
         // credential/configuration failure to the caller.
         if (
-          request.providerAttemptReporter &&
           ticket.providerAttemptId &&
-          ticket.providerAttemptIndex !== undefined
+          ticket.providerAttemptIndex !== undefined &&
+          !request.deferSuccessfulAttemptAcknowledgement
         ) {
-          await request.providerAttemptReporter.report({
+          await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
             providerAttemptId: ticket.providerAttemptId,
             providerAttemptIndex: ticket.providerAttemptIndex,
             status: 'failed',
@@ -312,16 +352,16 @@ export class LlmBridge {
           { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
           breaker
         )
-        if (
-          request.providerAttemptReporter &&
-          ticket.providerAttemptId &&
-          ticket.providerAttemptIndex !== undefined
-        ) {
-          await request.providerAttemptReporter.report({
-            providerAttemptId: ticket.providerAttemptId,
-            providerAttemptIndex: ticket.providerAttemptIndex,
-            status: 'complete',
-          })
+        let providerAttemptAcknowledged = true
+        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+          providerAttemptAcknowledged = await reportProviderAttemptBestEffort(
+            request.providerAttemptReporter,
+            {
+              providerAttemptId: ticket.providerAttemptId,
+              providerAttemptIndex: ticket.providerAttemptIndex,
+              status: 'complete',
+            }
+          )
         }
         return {
           ...completion,
@@ -333,18 +373,43 @@ export class LlmBridge {
           ...(ticket.providerAttemptIndex !== undefined
             ? { providerAttemptIndex: ticket.providerAttemptIndex }
             : {}),
+          providerAttemptAcknowledged,
         }
       } catch (error) {
-        if (
-          request.providerAttemptReporter &&
-          ticket.providerAttemptId &&
-          ticket.providerAttemptIndex !== undefined
-        ) {
-          await request.providerAttemptReporter.report({
-            providerAttemptId: ticket.providerAttemptId,
-            providerAttemptIndex: ticket.providerAttemptIndex,
-            status: error instanceof ClassifiedProviderError ? 'provider_unavailable' : 'failed',
-          })
+        const providerMayHaveExecuted =
+          (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
+          (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
+        let providerAttemptAcknowledged = true
+        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+          providerAttemptAcknowledged = await reportProviderAttemptBestEffort(
+            request.providerAttemptReporter,
+            {
+              providerAttemptId: ticket.providerAttemptId,
+              providerAttemptIndex: ticket.providerAttemptIndex,
+              status:
+                error instanceof ClassifiedProviderError || providerMayHaveExecuted
+                  ? 'provider_unavailable'
+                  : 'failed',
+            }
+          )
+        }
+        if (providerMayHaveExecuted || !providerAttemptAcknowledged) {
+          // Once execution may have started, a failed receipt is not a safe
+          // failover signal. Closing the logical invocation as terminal
+          // provider_unavailable prevents the same idempotency key from
+          // reviving into a second billable provider call.
+          throw providerOutcomeUnknownError(
+            ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
+              ? {
+                  providerAttemptId: ticket.providerAttemptId,
+                  providerAttemptIndex: ticket.providerAttemptIndex,
+                  target: authorized.target,
+                  attemptCount: index + 1,
+                  fallbackUsed: index > 0,
+                  llmSecretName: credential.llmSecretName,
+                }
+              : undefined
+          )
         }
         if (!(error instanceof ClassifiedProviderError)) throw error
         lastProviderError = error
@@ -416,18 +481,28 @@ export class LlmBridge {
       const maxBytes = this.opts.maxResponseBytes ?? DEFAULT_MAX_LLM_RESPONSE_BYTES
       if (Buffer.byteLength(response.content, 'utf8') > maxBytes) {
         throw new PluginWorkloadError(
-          'payload_too_large',
-          'LLM response exceeded the maximum buffer size'
+          'provider_unavailable',
+          'provider returned a response that cannot be safely recorded',
+          false,
+          'outcome_unknown',
+          true
         )
       }
       const inputTokens = response.usage?.input_tokens ?? 0
       const outputTokens = response.usage?.output_tokens ?? 0
-      if (inputTokens < 0 || outputTokens < 0) {
+      if (
+        response.usage_reported === false ||
+        inputTokens < 0 ||
+        outputTokens < 0 ||
+        !Number.isInteger(inputTokens) ||
+        !Number.isInteger(outputTokens)
+      ) {
         throw new PluginWorkloadError(
           'provider_unavailable',
           'provider returned invalid usage',
           false,
-          'provider_unavailable'
+          'outcome_unknown',
+          true
         )
       }
       return {
@@ -446,7 +521,8 @@ export class LlmBridge {
             'provider_unavailable',
             'LLM provider did not respond within the request timeout',
             true,
-            'timeout'
+            'timeout',
+            true
           )
         )
       }
@@ -459,7 +535,8 @@ export class LlmBridge {
           'provider_unavailable',
           `LLM provider error: ${classified.code}`,
           classified.retryable,
-          reason
+          reason,
+          classified.code === LlmErrorCode.ApiCallFailed
         )
       )
     } finally {

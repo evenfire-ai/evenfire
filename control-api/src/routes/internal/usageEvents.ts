@@ -164,109 +164,6 @@ function checkClaimBinding(
   return null
 }
 
-async function checkSdkOnlyUsageBinding(
-  events: unknown[],
-  claims: McpHostAccessClaims,
-  db: DbClient
-): Promise<BindingViolation | null> {
-  const sdkEvents = events.flatMap((event, index) => {
-    if (!event || typeof event !== 'object') return []
-    const record = event as Record<string, unknown>
-    const sdkSource =
-      (record.source_kind === 'unknown' || record.source_kind === 'plugin_workload_sdk') &&
-      record.channel_type === 'plugin_workload_sdk'
-    const workflowSdkSource =
-      record.source_kind === 'workflow' && record.channel_type === 'plugin_workload_sdk'
-    return sdkSource || workflowSdkSource ? [{ index, record }] : []
-  })
-  if (sdkEvents.length === 0) return null
-
-  const invocationIds = new Set<string>()
-  const providerAttemptIds = new Set<string>()
-  for (const { index, record } of sdkEvents) {
-    const metadata = record.prompt_bridge_metadata
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-    }
-    const invocationId = (metadata as { invocation_id?: unknown }).invocation_id
-    const generation = (metadata as { attempt_generation?: unknown }).attempt_generation
-    const providerAttemptId = (metadata as { provider_attempt_id?: unknown }).provider_attempt_id
-    const providerAttemptIndex = (metadata as { provider_attempt_index?: unknown })
-      .provider_attempt_index
-    if (
-      typeof invocationId !== 'string' ||
-      !Number.isInteger(generation) ||
-      Number(generation) < 1 ||
-      typeof providerAttemptId !== 'string' ||
-      !Number.isInteger(providerAttemptIndex) ||
-      Number(providerAttemptIndex) < 1
-    ) {
-      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-    }
-    invocationIds.add(invocationId)
-    providerAttemptIds.add(providerAttemptId)
-  }
-
-  const [receiptResult, providerAttemptResult] = await Promise.all([
-    db.query(
-      `SELECT invocation_id::text, attempt_generation, method, target_refs, recipe_namespace, recipe_name
-         FROM plugin_workload_sdk_invocation_attempts
-        WHERE invocation_id = ANY($1::uuid[])`,
-      [[...invocationIds]]
-    ),
-    db.query(
-      `SELECT id::text, invocation_id::text, attempt_generation, attempt_index,
-              target_ref, provider, model, credential_slot, status,
-              recipe_namespace, recipe_name
-         FROM plugin_workload_sdk_provider_attempts
-        WHERE id = ANY($1::uuid[])`,
-      [[...providerAttemptIds]]
-    ),
-  ])
-  const receipts = new Map(
-    (receiptResult.rows as Array<Record<string, unknown>>).map(row => [
-      `${String(row.invocation_id)}:${Number(row.attempt_generation)}`,
-      row,
-    ])
-  )
-  const providerAttempts = new Map(
-    (providerAttemptResult.rows as Array<Record<string, unknown>>).map(row => [String(row.id), row])
-  )
-
-  for (const { index, record } of sdkEvents) {
-    const metadata = record.prompt_bridge_metadata as Record<string, unknown>
-    const invocationId = String(metadata.invocation_id)
-    const generation = Number(metadata.attempt_generation)
-    const providerAttemptId = String(metadata.provider_attempt_id)
-    const providerAttemptIndex = Number(metadata.provider_attempt_index)
-    const targetRef = String(metadata.target_ref ?? '')
-    const receipt = receipts.get(`${invocationId}:${generation}`)
-    const providerAttempt = providerAttempts.get(providerAttemptId)
-    const targetRefs = Array.isArray(receipt?.target_refs) ? receipt.target_refs.map(String) : []
-    if (
-      !receipt ||
-      receipt.method !== 'promptBridge' ||
-      receipt.recipe_namespace !== claims.recipeNamespace ||
-      receipt.recipe_name !== claims.recipeName ||
-      !targetRefs.includes(targetRef) ||
-      !providerAttempt ||
-      providerAttempt.invocation_id !== invocationId ||
-      Number(providerAttempt.attempt_generation) !== generation ||
-      Number(providerAttempt.attempt_index) !== providerAttemptIndex ||
-      providerAttempt.recipe_namespace !== claims.recipeNamespace ||
-      providerAttempt.recipe_name !== claims.recipeName ||
-      providerAttempt.target_ref !== targetRef ||
-      providerAttempt.provider !== String(record.provider ?? '') ||
-      providerAttempt.model !== String(record.model ?? '') ||
-      providerAttempt.credential_slot !== String(metadata.credential_slot ?? '') ||
-      providerAttempt.status !== 'complete'
-    ) {
-      return { index, reason: 'recipe_token_invalid_sdk_usage_binding' }
-    }
-  }
-  return null
-}
-
 function collectWorkflowUsageCandidates(events: unknown[]): WorkflowUsageCandidate[] {
   const candidates: WorkflowUsageCandidate[] = []
   for (let i = 0; i < events.length; i++) {
@@ -375,12 +272,14 @@ export function createInternalUsageEventsRouter(): Router {
         return res.status(403).json({ error: 'claim_binding_mismatch', ...violation })
       }
       const transactionResult = await withTraceIngestTransaction(async db => {
-        const sdkBinding = await checkSdkOnlyUsageBinding(events, req.mcpHostJwt!, db)
-        if (sdkBinding) return { violation: sdkBinding }
         const workflowBinding = await checkWorkflowRunBinding(events, req.mcpHostJwt!, db)
         if (workflowBinding.violation) return { violation: workflowBinding.violation }
 
-        const ingest = await ingestUsageEventsInTransaction(events, db)
+        const ingest = await ingestUsageEventsInTransaction(events, db, {
+          recipeNamespace: req.mcpHostJwt!.recipeNamespace,
+          recipeName: req.mcpHostJwt!.recipeName,
+        })
+        if (ingest.bindingViolation) return { violation: ingest.bindingViolation }
         await projectAcceptedUsageEvents(db, ingest.acceptedEvents, workflowBinding.bindings, {
           recipeNamespace: req.mcpHostJwt!.recipeNamespace,
           recipeName: req.mcpHostJwt!.recipeName,

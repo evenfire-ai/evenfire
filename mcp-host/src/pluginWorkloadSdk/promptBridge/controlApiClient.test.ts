@@ -372,6 +372,50 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
   })
 
+  it('finalizes one provider attempt with an idempotent exact usage receipt', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'complete',
+        outcome: 'exact',
+        idempotent: false,
+        usageAccepted: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const result = await client.finalizePromptBridge({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+      invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 1,
+      status: 'complete',
+      reason: 'provider_completed',
+      target,
+      usage: {
+        llmSecretName: 'zai-api-key',
+        callerRef: 'api',
+        fallbackUsed: false,
+        attemptCount: 1,
+        inputTokens: 3,
+        outputTokens: 4,
+      },
+    })
+    expect(result).toMatchObject({ outcome: 'exact', usageAccepted: true })
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize'
+    )
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'complete',
+      usage: { inputTokens: 3, outputTokens: 4 },
+    })
+  })
+
   it('submitClientNotification maps event_type_not_allowed', async () => {
     const fetchImpl = vi
       .fn()

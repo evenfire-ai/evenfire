@@ -245,6 +245,7 @@ export function maybeCreatePluginWorkloadSdkServer(
     pluginWorkloadSdkEnabled: config.pluginWorkloadSdkEnabled,
     mcpHostRuntimeAccessToken: runtimeAuth?.accessToken ?? config.mcpHostRuntimeAccessToken ?? '',
     podNamespace: config.podNamespace ?? '',
+    pluginWorkloadSdkCredentialBrokerUrl: config.pluginWorkloadSdkCredentialBrokerUrl,
   })
   if (!gate.start) {
     console.log(
@@ -338,6 +339,15 @@ export function maybeCreatePluginWorkloadSdkServer(
           return { provider: context.provider, model: context.defaultModel }
         }
       : undefined,
+    finalizePromptBridge:
+      config.pluginWorkloadSdkRuntimeMode === 'sdk-only'
+        ? input =>
+            controlApiClient.finalizePromptBridge({
+              recipeNamespace: binding.recipeNamespace,
+              recipeName: binding.recipeName,
+              ...input,
+            })
+        : undefined,
     onUsage: usage => {
       if (!usageReporter) return
       const event = buildPromptBridgeUsageEvent({

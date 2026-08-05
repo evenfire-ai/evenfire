@@ -7,6 +7,7 @@ import * as notificationEmitter from '../src/services/notificationEmitter.js'
 import * as authorizer from '../src/services/pluginWorkloadSdkAuthorizer.js'
 import { issuePluginWorkloadSdkCredentialTicket } from '../src/services/pluginWorkloadSdkCredentialTicket.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
+import * as finalizer from '../src/services/pluginWorkloadSdkFinalization.js'
 import * as auditor from '../src/services/pluginWorkloadSdkInvocationAuditor.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
 
@@ -65,6 +66,13 @@ vi.mock('../src/services/pluginWorkloadSdkInvocationAuditor.js', async () => {
   }
 })
 
+vi.mock('../src/services/pluginWorkloadSdkFinalization.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/pluginWorkloadSdkFinalization.js')
+  >('../src/services/pluginWorkloadSdkFinalization.js')
+  return { ...actual, finalizePromptBridge: vi.fn() }
+})
+
 const NS = 'sandbox-recipes'
 const RECIPE = 'sdk-recipe'
 
@@ -111,6 +119,7 @@ beforeEach(() => {
   vi.mocked(authorizer.authorizeClientNotification).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
   vi.mocked(auditor.markInvocationStatus).mockReset().mockResolvedValue(true)
+  vi.mocked(finalizer.finalizePromptBridge).mockReset()
   vi.mocked(sdkDb.getInvocationById).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockReset()
@@ -770,6 +779,74 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/status', () => {
       expectedCurrentStatus: 'in_progress',
       expectedAttemptGeneration: 1,
     })
+  })
+})
+
+describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/finalize', () => {
+  const finalizationBody = {
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    invocationId: 'inv-1',
+    attemptGeneration: 1,
+    providerAttemptId: '22222222-2222-4222-8222-222222222222',
+    providerAttemptIndex: 1,
+    status: 'complete',
+    reason: 'provider_completed',
+    target: {
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+    },
+    usage: {
+      llmSecretName: 'zai-api-key',
+      callerRef: 'api',
+      fallbackUsed: false,
+      attemptCount: 1,
+      inputTokens: 2,
+      outputTokens: 3,
+    },
+  }
+
+  it('passes the recipe-bound finalization request to the atomic service', async () => {
+    vi.mocked(finalizer.finalizePromptBridge).mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: finalizationBody.providerAttemptId,
+      status: 'complete',
+      outcome: 'exact',
+      idempotent: false,
+      usageAccepted: true,
+    })
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send(finalizationBody)
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({ outcome: 'exact', usageAccepted: true })
+    expect(finalizer.finalizePromptBridge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        recipeNamespace: NS,
+        recipeName: RECIPE,
+        hostRef: expect.any(String),
+      })
+    )
+  })
+
+  it('returns a structured conflict without allowing a retryable provider call', async () => {
+    vi.mocked(finalizer.finalizePromptBridge).mockRejectedValue(
+      new finalizer.PromptBridgeFinalizationError(
+        'conflict',
+        'provider attempt was finalized with a different immutable outcome',
+        409
+      )
+    )
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send(finalizationBody)
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'idempotency_conflict', retryable: false })
   })
 })
 

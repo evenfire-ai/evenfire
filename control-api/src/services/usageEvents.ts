@@ -53,10 +53,22 @@ export type UsageIngestResult = {
 export type UsageIngestTransactionResult = {
   result: UsageIngestResult
   acceptedEvents: LlmUsageEvent[]
+  bindingViolation?: UsageBindingViolation
+}
+
+export type UsageBindingViolation = {
+  index: number
+  reason: 'recipe_token_invalid_sdk_usage_binding'
+}
+
+export type UsageBindingContext = {
+  recipeNamespace: string
+  recipeName: string
 }
 
 type PromptBridgeAttemptBinding = {
   invocation_id: string
+  recipe_namespace: string
   recipe_name: string
   attempt_generation: number
   method: string
@@ -73,6 +85,8 @@ type ProviderAttemptBinding = {
   model: string
   credential_slot: string
   status: string
+  recipe_namespace: string
+  recipe_name: string
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -342,10 +356,11 @@ function buildInsertParams(events: LlmUsageEvent[]): unknown[] {
  * that actually executed, while a stale generation or forged target is
  * rejected before it can enter the usage ledger.
  */
-async function filterEventsByAttemptReceipt(
+async function bindEventsToAttemptReceipts(
   events: LlmUsageEvent[],
-  db: DbClient
-): Promise<{ accepted: LlmUsageEvent[]; rejected: number }> {
+  db: DbClient,
+  binding?: UsageBindingContext
+): Promise<{ accepted: LlmUsageEvent[]; rejected: number; violation?: UsageBindingViolation }> {
   // Both runtime lanes use the same immutable attempt receipt.  SDK-only
   // hosts emit source_kind=plugin_workload_sdk; step-bearing hosts retain
   // source_kind=workflow for run attribution but mark the channel as the
@@ -358,6 +373,16 @@ async function filterEventsByAttemptReceipt(
       event.source_kind === 'workflow')
   const sdkEvents = events.filter(isPromptBridgeSdkEvent)
   if (sdkEvents.length === 0) return { accepted: events, rejected: 0 }
+  if (!binding) {
+    return {
+      accepted: [],
+      rejected: sdkEvents.length,
+      violation: {
+        index: events.findIndex(isPromptBridgeSdkEvent),
+        reason: 'recipe_token_invalid_sdk_usage_binding',
+      },
+    }
+  }
   const invocationIds = [
     ...new Set(
       sdkEvents
@@ -373,10 +398,12 @@ async function filterEventsByAttemptReceipt(
   }
   const result = await db.query(
     `SELECT attempts.invocation_id::text, attempts.attempt_generation, attempts.method,
-            attempts.target_refs, attempts.recipe_name
+            attempts.target_refs, attempts.recipe_namespace, attempts.recipe_name
        FROM plugin_workload_sdk_invocation_attempts attempts
-      WHERE attempts.invocation_id = ANY($1::uuid[])`,
-    [invocationIds]
+      WHERE attempts.invocation_id = ANY($1::uuid[])
+        AND attempts.recipe_namespace = $2
+        AND attempts.recipe_name = $3`,
+    [invocationIds, binding.recipeNamespace, binding.recipeName]
   )
   const receipts = new Map<string, PromptBridgeAttemptBinding>()
   for (const row of result.rows as PromptBridgeAttemptBinding[]) {
@@ -388,10 +415,13 @@ async function filterEventsByAttemptReceipt(
   const providerAttempts = providerAttemptIds.length
     ? await db.query(
         `SELECT id::text, invocation_id::text, attempt_generation, attempt_index,
-                target_ref, provider, model, credential_slot, status
+                target_ref, provider, model, credential_slot, status,
+                recipe_namespace, recipe_name
            FROM plugin_workload_sdk_provider_attempts
-          WHERE id = ANY($1::uuid[])`,
-        [[...new Set(providerAttemptIds)]]
+          WHERE id = ANY($1::uuid[])
+            AND recipe_namespace = $2
+            AND recipe_name = $3`,
+        [[...new Set(providerAttemptIds)], binding.recipeNamespace, binding.recipeName]
       )
     : { rows: [] }
   const providerAttemptById = new Map<string, ProviderAttemptBinding>()
@@ -421,10 +451,14 @@ async function filterEventsByAttemptReceipt(
     const physicalCompatible =
       hasPhysicalAttempt &&
       receipt?.method === 'promptBridge' &&
+      receipt.recipe_namespace === binding.recipeNamespace &&
+      receipt.recipe_name === binding.recipeName &&
       receipt.recipe_name === event.recipe_name &&
       typeof targetRef === 'string' &&
       targetRefs.some(ref => ref === targetRef) &&
       providerAttemptById.get(providerAttemptId!)?.invocation_id === invocationId &&
+      providerAttemptById.get(providerAttemptId!)?.recipe_namespace === binding.recipeNamespace &&
+      providerAttemptById.get(providerAttemptId!)?.recipe_name === binding.recipeName &&
       providerAttemptById.get(providerAttemptId!)?.attempt_generation === generation &&
       providerAttemptById.get(providerAttemptId!)?.attempt_index === providerAttemptIndex &&
       providerAttemptById.get(providerAttemptId!)?.target_ref === targetRef &&
@@ -438,7 +472,21 @@ async function filterEventsByAttemptReceipt(
       rejected += 1
     }
   }
-  return { accepted, rejected }
+  const firstInvalidSdkEvent = events.findIndex(
+    event => isPromptBridgeSdkEvent(event) && !accepted.includes(event)
+  )
+  return {
+    accepted,
+    rejected,
+    ...(firstInvalidSdkEvent >= 0
+      ? {
+          violation: {
+            index: firstInvalidSdkEvent,
+            reason: 'recipe_token_invalid_sdk_usage_binding',
+          },
+        }
+      : {}),
+  }
 }
 
 export async function ingestUsageEvents(
@@ -450,7 +498,8 @@ export async function ingestUsageEvents(
 
 export async function ingestUsageEventsInTransaction(
   rawEvents: unknown[],
-  db: DbClient
+  db: DbClient,
+  binding?: UsageBindingContext
 ): Promise<UsageIngestTransactionResult> {
   const total = rawEvents.length
   let validated: LlmUsageEvent[] = []
@@ -466,7 +515,14 @@ export async function ingestUsageEventsInTransaction(
     }
   }
 
-  const receiptFilter = await filterEventsByAttemptReceipt(validated, db)
+  const receiptFilter = await bindEventsToAttemptReceipts(validated, db, binding)
+  if (receiptFilter.violation) {
+    return {
+      result: { accepted: 0, duplicates: 0, rejected: rejected + receiptFilter.rejected },
+      acceptedEvents: [],
+      bindingViolation: receiptFilter.violation,
+    }
+  }
   validated = receiptFilter.accepted
   rejected += receiptFilter.rejected
   if (validated.length === 0) {

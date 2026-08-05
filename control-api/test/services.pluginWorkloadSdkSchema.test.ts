@@ -63,4 +63,16 @@ describe('pluginWorkloadSdkSchema', () => {
     expect(source).toMatch(/redeemed_at TIMESTAMPTZ NULL/)
     expect(source).toMatch(/addPluginWorkloadSdkJitCredentialTicketColumns/)
   })
+
+  it('persists exact or unknown provider spend as an immutable attempt ledger', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    expect(source).toMatch(/plugin_workload_sdk_spend_outcomes/)
+    expect(source).toMatch(/outcome IN \('exact', 'unknown'\)/)
+    expect(source).toMatch(/plugin_workload_sdk_spend_outcomes_token_pair_check/)
+    expect(source).toMatch(/addPluginWorkloadSdkSpendOutcomeLedger/)
+  })
 })

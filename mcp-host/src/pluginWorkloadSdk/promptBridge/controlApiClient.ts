@@ -108,6 +108,15 @@ export interface ReissuedPromptBridgeCredentialTicket {
   expiresInSeconds: number
 }
 
+export interface FinalizePromptBridgeResponse {
+  invocationId: string
+  providerAttemptId: string
+  status: 'complete' | 'provider_unavailable'
+  outcome: 'exact' | 'unknown'
+  idempotent: boolean
+  usageAccepted: boolean
+}
+
 export interface SubmitClientNotificationResponse {
   notificationId: string
   replay: boolean
@@ -199,6 +208,19 @@ function isReissuedPromptBridgeCredentialTicket(
     /^[a-f0-9]{64}$/.test(ticket.policyHash) &&
     Number.isInteger(ticket.expiresInSeconds) &&
     (ticket.expiresInSeconds as number) > 0
+  )
+}
+
+function isFinalizePromptBridgeResponse(value: unknown): value is FinalizePromptBridgeResponse {
+  if (typeof value !== 'object' || value === null) return false
+  const result = value as Record<string, unknown>
+  return (
+    typeof result.invocationId === 'string' &&
+    typeof result.providerAttemptId === 'string' &&
+    (result.status === 'complete' || result.status === 'provider_unavailable') &&
+    (result.outcome === 'exact' || result.outcome === 'unknown') &&
+    typeof result.idempotent === 'boolean' &&
+    typeof result.usageAccepted === 'boolean'
   )
 }
 
@@ -678,13 +700,75 @@ export class PluginWorkloadSdkControlApiClient {
     status: 'complete' | 'failed' | 'provider_unavailable',
     attemptGeneration: number
   ): Promise<void> {
-    // A completion is not safe to return until control-api has accepted the
-    // generation-fenced terminal transition. Swallowing this error would let
-    // the caller observe a result whose audit/usage lease is still active.
+    // The handler owns the conservative policy for a lost ACK: it preserves a
+    // real provider result, reports provider_unavailable when the physical
+    // receipt is unknown, and lets the idempotent caller retry this operation.
     await this.post(
       `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(invocationId)}/status`,
       { recipeNamespace, recipeName, status, attemptGeneration }
     )
+  }
+
+  /**
+   * Atomically closes one SDK-only provider attempt and records exact or
+   * unknown spend. This replaces separate status + usage calls for the
+   * stepless runtime; the route is idempotent on providerAttemptId.
+   */
+  async finalizePromptBridge(body: {
+    recipeNamespace: string
+    recipeName: string
+    invocationId: string
+    attemptGeneration: number
+    providerAttemptId: string
+    providerAttemptIndex: number
+    status: 'complete' | 'provider_unavailable'
+    reason: string
+    target: PromptBridgeTarget
+    usage?: {
+      llmSecretName: string
+      callerRef: string
+      fallbackUsed: boolean
+      attemptCount: number
+      inputTokens: number
+      outputTokens: number
+    }
+  }): Promise<FinalizePromptBridgeResponse> {
+    const result = await this.post(
+      `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(body.invocationId)}/finalize`,
+      {
+        recipeNamespace: body.recipeNamespace,
+        recipeName: body.recipeName,
+        invocationId: body.invocationId,
+        attemptGeneration: body.attemptGeneration,
+        providerAttemptId: body.providerAttemptId,
+        providerAttemptIndex: body.providerAttemptIndex,
+        status: body.status,
+        reason: body.reason,
+        target: body.target,
+        ...(body.usage ? { usage: body.usage } : {}),
+      }
+    )
+    if (!isFinalizePromptBridgeResponse(result)) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api returned an unexpected response shape for promptBridge finalization',
+        true
+      )
+    }
+    if (
+      result.invocationId !== body.invocationId ||
+      result.providerAttemptId !== body.providerAttemptId ||
+      result.status !== body.status
+    ) {
+      throw new PluginWorkloadError(
+        'provider_unavailable',
+        'control-api returned a finalization for a different provider attempt',
+        false,
+        'outcome_unknown',
+        true
+      )
+    }
+    return result
   }
 
   async submitClientNotification(body: {

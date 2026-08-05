@@ -15,9 +15,11 @@ import {
   addPluginWorkloadSdkProviderColumn,
   addPluginWorkloadSdkRevocationEpoch,
   addPluginWorkloadSdkRuntimeAccess,
+  addPluginWorkloadSdkSpendOutcomeLedger,
   addPluginWorkloadSdkUsageSourceKind,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
+  relaxPluginWorkloadSdkSpendOutcomeHostRef,
 } from './services/pluginWorkloadSdkSchema.js'
 import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
 
@@ -5113,6 +5115,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0083_plugin_workload_sdk_runtime_access',
     apply: addPluginWorkloadSdkRuntimeAccess,
+  },
+  {
+    version: '0084_plugin_workload_sdk_spend_outcome_ledger',
+    apply: addPluginWorkloadSdkSpendOutcomeLedger,
+  },
+  {
+    version: '0085_plugin_workload_sdk_spend_outcome_host_ref_nullable',
+    apply: relaxPluginWorkloadSdkSpendOutcomeHostRef,
   },
 ]
 

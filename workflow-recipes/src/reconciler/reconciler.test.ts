@@ -409,7 +409,9 @@ describe('WorkflowRecipeReconciler', () => {
     )
 
     expect(result.phase).toBe('active')
-    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+      preserveWorkflowRuntime: false,
+    })
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
@@ -437,7 +439,9 @@ describe('WorkflowRecipeReconciler', () => {
       )
 
       expect(result.phase).toBe(phase)
-      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
     }
   )
 
@@ -480,7 +484,9 @@ describe('WorkflowRecipeReconciler', () => {
       pluginWorkloadSdkTeardownConfirmed: true,
       message: 'Plugin Workload SDK disabled after confirmed teardown',
     })
-    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe')
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+      preserveWorkflowRuntime: false,
+    })
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 

@@ -1033,13 +1033,13 @@ Resolution happens at reconciliation time only:
 
 The **default LLM configuration** for every agentic (`instruction`) step. Steps may override `model` / `provider` via `steps[].agent`. The reconciler resolves the recipe's `mcp-host` agent from `spec.agent` first, then falls back to the first step declaring a _complete_ agent.
 
-| Field                 | Type   | Required | Description                                                                                                      |
-| --------------------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                 |
-| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`.                                                                      |
-| `secretRef.name`      | string | No       | Secret holding the API key.                                                                                      |
-| `secretRef.namespace` | string | No       | Secret namespace.                                                                                                |
-| `soulRef.storageRef`  | object | No       | `SOUL.md` in object storage: `bucket`, `key`, `provider` (`s3`\|`gcs`\|`spaces`\|`minio`), `region`, `endpoint`. |
+| Field                 | Type   | Required | Description                                                                                                                                                                                                                             |
+| --------------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                                                                                                                                        |
+| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`, `vertex`, `bedrock`, `openrouter`, `gemini`, `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`, `deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `azure`. |
+| `secretRef.name`      | string | No       | Secret holding the API key.                                                                                                                                                                                                             |
+| `secretRef.namespace` | string | No       | Secret namespace.                                                                                                                                                                                                                       |
+| `soulRef.storageRef`  | object | No       | `SOUL.md` in object storage: `bucket`, `key`, `provider` (`s3`\|`gcs`\|`spaces`\|`minio`), `region`, `endpoint`.                                                                                                                        |
 
 \* The schema marks no field required, but the reconciler treats an agent as usable only when **both** `provider` and `model` are set. A half-declared `spec.agent` behaves as if absent.
 
@@ -1058,7 +1058,7 @@ spec:
 **What gets rejected**
 
 - **CEL R1** — `agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge`. An agent remains invalid for an ordinary workloads-only recipe, but a stepless `promptBridge` recipe uses `spec.agent` as the eager mcp-host bootstrap binding rather than as a workflow agent.
-- A `provider` outside the four-value enum.
+- A `provider` outside the canonical provider enum.
 - An `instruction` step with no resolvable agent: _"step requires an agent configuration"_.
 
 ### 3.10 MCP Servers (`spec.mcpServers`)
@@ -1122,10 +1122,10 @@ spec:
 
 The recipe-wide egress intent for the **workflow runtime** (snippet-runner and custom-coordinator pods). It is the shared allowlist that per-step snippet HTTP capabilities must be a subset of. Distinct from `workloads[].egressBindings` (§3.2), which governs long-lived workload pods.
 
-| Field               | Type     | Required | Description                                                                                                                                                           |
-| ------------------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `http.egressClass`  | string   | No       | Enum `exact-host` (default) or `public-web`. `public-web` is an explicit opt-in for public TCP 80/443 with private, metadata, link-local and reserved ranges blocked. |
-| `http.allowedHosts` | string[] | No       | Max 20, each max 253, pattern `^[a-z0-9][a-z0-9.-]*[a-z0-9]$`.                                                                                                        |
+| Field               | Type     | Required | Description                                                                                                                                                        |
+| ------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `http.egressClass`  | string   | No       | Enum `exact-host` (default) or `public-web`. `public-web` is an explicit opt-in for public TCP 443 with private, metadata, link-local and reserved ranges blocked. |
+| `http.allowedHosts` | string[] | No       | Max 20, each max 253, pattern `^[a-z0-9][a-z0-9.-]*[a-z0-9]$`.                                                                                                     |
 
 ```yaml
 spec:
@@ -2875,7 +2875,7 @@ The spec-level rules in the shipped CRD are numbered in comments (R1-R18, W1, O1
 
 | ID  | Message                                                                                                                                                                 |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | `agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge`                                                                                                 |
+| R1  | `agent requires workflow steps or spec.pluginWorkloadSdk.promptBridge`                                                                                                  |
 | R1a | `spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage`                                                                 |
 | R2  | `recipe must define at least workloads or steps`                                                                                                                        |
 | R3  | `duplicate step IDs are not allowed`                                                                                                                                    |

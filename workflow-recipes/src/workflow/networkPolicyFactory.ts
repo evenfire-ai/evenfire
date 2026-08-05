@@ -198,16 +198,24 @@ export function buildWorkflowNetworkPolicies(
     'clerum.io/managed-by': 'wrc',
   }
   const includeCoordinator = config.includeCoordinator !== false
+  const usesCoordinatorLane = (policy: k8s.V1NetworkPolicy): boolean => {
+    if (policy.spec?.podSelector?.matchLabels?.['clerum.io/component'] === 'workflow-coordinator') {
+      return true
+    }
+    // Coordinator-to-workload ingress policies select the workload pod, so
+    // their metadata.name and podSelector do not identify the coordinator.
+    // Classify them by the semantic peer label instead of a generated name;
+    // truncateRfc1123WithHash may remove the textual coordinator prefix.
+    return Boolean(
+      policy.spec?.ingress?.some(rule =>
+        rule._from?.some(
+          peer => peer.podSelector?.matchLabels?.['clerum.io/component'] === 'workflow-coordinator'
+        )
+      )
+    )
+  }
   const filterCoordinatorPolicies = (policies: k8s.V1NetworkPolicy[]) =>
-    includeCoordinator
-      ? policies
-      : policies.filter(policy => {
-          const name = policy.metadata?.name ?? ''
-          return (
-            !name.startsWith(`${config.recipeName}-coord-to-`) &&
-            !name.startsWith(`${config.recipeName}-coordinator-to-`)
-          )
-        })
+    includeCoordinator ? policies : policies.filter(policy => !usesCoordinatorLane(policy))
   const dnsEgressRule: k8s.V1NetworkPolicyEgressRule = {
     to: [
       {

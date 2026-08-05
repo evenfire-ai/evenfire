@@ -1238,6 +1238,9 @@ export async function markPluginWorkloadSdkProviderAttemptStatus(input: {
   attemptGeneration: number
   status: Exclude<PluginWorkloadSdkProviderAttemptStatus, 'reserved' | 'in_progress'>
 }): Promise<boolean> {
+  // Terminal reports are idempotent: a committed response whose HTTP reply
+  // was lost must be safe to repeat. A different terminal outcome still
+  // returns false, so a late failure can never downgrade a completed attempt.
   const result = await pool.query(
     `UPDATE plugin_workload_sdk_provider_attempts
         SET status = $6,
@@ -1248,14 +1251,19 @@ export async function markPluginWorkloadSdkProviderAttemptStatus(input: {
         AND recipe_namespace = $3
         AND recipe_name = $4
         AND attempt_generation = $5
-        AND status IN ('reserved', 'in_progress')
-        AND EXISTS (
-          SELECT 1
-            FROM plugin_workload_sdk_invocations inv
-           WHERE inv.id = $2
-             AND inv.status = 'in_progress'
-             AND inv.attempt_generation = $5
-             AND inv.lease_expires_at > now()
+        AND (
+          status = $6
+          OR (
+            status IN ('reserved', 'in_progress')
+            AND EXISTS (
+              SELECT 1
+                FROM plugin_workload_sdk_invocations inv
+               WHERE inv.id = $2
+                 AND inv.status = 'in_progress'
+                 AND inv.attempt_generation = $5
+                 AND inv.lease_expires_at > now()
+            )
+          )
         )`,
     [
       input.id,
@@ -1640,16 +1648,28 @@ export async function updateInvocationStatus(
     expectedCurrentStatus?: PluginWorkloadSdkInvocationStatus
   } = {}
 ): Promise<boolean> {
-  const values: unknown[] = [id, status, opts.completed ?? false, opts.leaseSeconds ?? 0]
+  // Every in-progress invocation must carry a lease. Without this guard an
+  // older rolling-update writer can create a v2 row that the stale sweep can
+  // never identify, leaving the idempotency key permanently wedged.
+  // The terminal branch below also makes identical completion reports
+  // idempotent while preserving the expected-status CAS for new transitions.
+  const leaseSeconds = opts.leaseSeconds
+  if (
+    status === 'in_progress' &&
+    (typeof leaseSeconds !== 'number' || !Number.isInteger(leaseSeconds) || leaseSeconds <= 0)
+  ) {
+    return false
+  }
+  const values: unknown[] = [id, status, opts.completed ?? false, leaseSeconds ?? 0]
   let bindingClause = ''
   if (opts.recipeNamespace !== undefined && opts.recipeName !== undefined) {
     values.push(opts.recipeNamespace, opts.recipeName)
     bindingClause = ` AND recipe_namespace = $${values.length - 1} AND recipe_name = $${values.length}`
   }
-  let statusGuardClause = ''
+  let expectedStatusPlaceholder = ''
   if (opts.expectedCurrentStatus !== undefined) {
     values.push(opts.expectedCurrentStatus)
-    statusGuardClause = ` AND status = $${values.length}`
+    expectedStatusPlaceholder = `$${values.length}`
   }
   let generationGuardClause = ''
   if (opts.expectedAttemptGeneration !== undefined) {
@@ -1667,7 +1687,11 @@ export async function updateInvocationStatus(
              ELSE NULL
            END,
            completed_at = CASE WHEN $3 THEN now() ELSE NULL END
-       WHERE id = $1${bindingClause}${statusGuardClause}${generationGuardClause}`,
+       WHERE id = $1${bindingClause}
+         AND (
+           ${expectedStatusPlaceholder ? `status = ${expectedStatusPlaceholder}` : 'TRUE'}
+           OR (status = $2 AND $2 NOT IN ('in_progress', 'accepted'))
+         )${generationGuardClause}`,
       values
     )
     if ((result.rowCount ?? 0) === 0) return false
@@ -1735,23 +1759,71 @@ export async function reviveFailedInvocation(input: {
 }
 
 /**
- * Mark stale in_progress invocations as failed (mcp-host restart recovery —
- * plan §2.4). Returns the number of rows transitioned.
+ * Close stale in_progress invocations conservatively as provider_unavailable
+ * (mcp-host restart recovery — plan §2.4). A provider call may have executed
+ * before the host disappeared, so marking the row failed would allow the
+ * idempotency authorizer to revive it and create a second billable call. The
+ * terminal provider_unavailable state is intentionally not auto-revivable;
+ * callers must choose a fresh idempotency key after an operator investigates.
+ * Returns the number of rows transitioned.
  */
-export async function failStaleInvocations(_olderThanSeconds: number): Promise<number> {
+export async function failStaleInvocations(olderThanSeconds: number): Promise<number> {
+  const timeoutSeconds = Math.max(1, Math.floor(olderThanSeconds))
   return withTransaction(async db => {
     const result = await db.query(
       `UPDATE plugin_workload_sdk_invocations
-       SET status = 'failed', updated_at = now(), completed_at = now()
-       WHERE status = 'in_progress'
-         AND lease_expires_at IS NOT NULL
-         AND lease_expires_at < now()
-       RETURNING id, attempt_generation`
+       SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
+         WHERE status = 'in_progress'
+         AND (
+           (lease_expires_at IS NOT NULL AND lease_expires_at < now())
+           OR (
+             lease_expires_at IS NULL
+             AND updated_at < now() - interval '1 second' * $1
+           )
+         )
+       RETURNING id, attempt_generation`,
+      [timeoutSeconds]
     )
     for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
+      const physicalAttempts = await db.query(
+        `SELECT id, recipe_namespace, recipe_name, attempt_generation,
+                attempt_index, target_ref, provider, model, credential_slot
+           FROM plugin_workload_sdk_provider_attempts
+          WHERE invocation_id = $1
+            AND attempt_generation = $2
+            AND status IN ('reserved', 'in_progress', 'complete', 'failed')
+          FOR UPDATE`,
+        [row.id, row.attempt_generation]
+      )
+      for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
+        // The host has disappeared, so no current JWT can prove a host_ref.
+        // Persist an unattributed unknown outcome instead of inventing one
+        // from recipe names; the physical-attempt PK makes this idempotent.
+        await db.query(
+          `INSERT INTO plugin_workload_sdk_spend_outcomes
+             (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
+              attempt_generation, attempt_index, target_ref, host_ref, provider, model,
+              credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'unknown',
+                   'stale_lease', NULL, NULL, NULL)
+           ON CONFLICT (provider_attempt_id) DO NOTHING`,
+          [
+            String(attempt.id),
+            row.id,
+            String(attempt.recipe_namespace),
+            String(attempt.recipe_name),
+            Number(attempt.attempt_generation),
+            Number(attempt.attempt_index),
+            String(attempt.target_ref),
+            String(attempt.provider),
+            String(attempt.model),
+            String(attempt.credential_slot),
+          ]
+        )
+      }
       await db.query(
         `UPDATE plugin_workload_sdk_invocation_attempts
-            SET status = 'failed', lease_expires_at = NULL, completed_at = now()
+            SET status = 'provider_unavailable', lease_expires_at = NULL, completed_at = now()
           WHERE invocation_id = $1 AND attempt_generation = $2`,
         [row.id, row.attempt_generation]
       )

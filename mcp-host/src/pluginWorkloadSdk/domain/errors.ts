@@ -35,8 +35,23 @@ export const PLUGIN_WORKLOAD_ERROR_REASONS = [
   'configuration',
   'timeout',
   'network',
+  'outcome_unknown',
 ] as const
 export type PluginWorkloadErrorReason = (typeof PLUGIN_WORKLOAD_ERROR_REASONS)[number]
+
+export type PluginWorkloadProviderAttemptContext = {
+  providerAttemptId: string
+  providerAttemptIndex: number
+  target: {
+    targetRef: string
+    provider: string
+    model: string
+    credentialSlot: string
+  }
+  attemptCount: number
+  fallbackUsed: boolean
+  llmSecretName: string
+}
 
 const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
   capability_not_declared: 403,
@@ -63,12 +78,18 @@ export class PluginWorkloadError extends Error {
   readonly retryable: boolean
   readonly httpStatus: number
   readonly reason?: PluginWorkloadErrorReason
+  /** True when the provider may already have accepted or returned a call. */
+  readonly providerMayHaveExecuted: boolean
+  /** Internal immutable context needed to persist an unknown spend receipt. */
+  readonly providerAttempt?: PluginWorkloadProviderAttemptContext
 
   constructor(
     code: PluginWorkloadErrorCode,
     message: string,
     retryable = false,
-    reason?: PluginWorkloadErrorReason
+    reason?: PluginWorkloadErrorReason,
+    providerMayHaveExecuted = false,
+    providerAttempt?: PluginWorkloadProviderAttemptContext
   ) {
     super(message)
     this.name = 'PluginWorkloadError'
@@ -76,6 +97,8 @@ export class PluginWorkloadError extends Error {
     this.retryable = retryable
     this.httpStatus = ERROR_HTTP_STATUS[code]
     this.reason = reason
+    this.providerMayHaveExecuted = providerMayHaveExecuted
+    this.providerAttempt = providerAttempt
   }
 
   toBody(): {

@@ -46,7 +46,8 @@ class FakeProvider implements Partial<SingleTurnProvider> {
 function makeBridge(
   providers: Record<string, FakeProvider>,
   resolve?: PromptBridgeCredentialResolver['resolve'],
-  createBreaker?: (target: PromptBridgeTarget) => CircuitBreaker
+  createBreaker?: (target: PromptBridgeTarget) => CircuitBreaker,
+  maxResponseBytes?: number
 ) {
   const providerCalls: string[] = []
   const credentialCalls: string[] = []
@@ -68,7 +69,11 @@ function makeBridge(
     return (providers[model.name] ?? null) as unknown as SingleTurnProvider | null
   }) as typeof createLLMProvider
   return {
-    bridge: new LlmBridge(resolver, { createProvider, createBreaker }),
+    bridge: new LlmBridge(resolver, {
+      createProvider,
+      createBreaker,
+      ...(maxResponseBytes !== undefined ? { maxResponseBytes } : {}),
+    }),
     providerCalls,
     credentialCalls,
     resolver,
@@ -134,6 +139,23 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       `${fallback.provider}/${fallback.model}`,
     ])
     expect(JSON.stringify(providerCalls)).not.toContain('secret-')
+  })
+
+  it('treats a successful response without authoritative usage as an unknown spend', async () => {
+    const missingUsage = new FakeProvider(() => Promise.resolve({ ...OK, usage_reported: false }))
+    const { bridge, providerCalls, credentialCalls } = makeBridge({
+      [primary.model]: missingUsage,
+    })
+
+    await expect(
+      bridge.complete({ ...request, targets: [{ target: primary }] })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+      providerMayHaveExecuted: true,
+    })
+    expect(credentialCalls).toEqual([primary.targetRef])
+    expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
   })
 
   it('treats credential resolution failure as terminal and never redeems a fallback', async () => {
@@ -363,6 +385,78 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       providerAttemptId: `attempt-${fallback.targetRef}`,
       providerAttemptIndex: 2,
       status: 'complete',
+    })
+  })
+
+  it('preserves a provider completion when its audit acknowledgement fails', async () => {
+    const provider = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge } = makeBridge({ [primary.model]: provider })
+    const providerAttemptReporter = {
+      report: vi.fn().mockRejectedValue(new Error('control-api unavailable')),
+    }
+    const credentialTicketIssuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: 'fresh-primary',
+        providerAttemptId: 'attempt-primary',
+        providerAttemptIndex: 1,
+      })),
+    }
+
+    const result = await bridge.complete({
+      ...request,
+      targets: [{ target: primary }],
+      credentialTicketIssuer,
+      providerAttemptReporter,
+    })
+
+    expect(result).toMatchObject({
+      servedTarget: primary,
+      content: OK.content,
+      usage: { inputTokens: 3, outputTokens: 4 },
+      providerAttemptAcknowledged: false,
+    })
+    expect(provider.completeSingleTurn).toHaveBeenCalledOnce()
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'attempt-primary',
+      providerAttemptIndex: 1,
+      status: 'complete',
+    })
+  })
+
+  it('does not turn a post-provider response rejection into a revivable failure', async () => {
+    const provider = new FakeProvider(() => Promise.resolve({ ...OK, content: 'too-large' }))
+    const { bridge, providerCalls } = makeBridge(
+      { [primary.model]: provider },
+      undefined,
+      undefined,
+      4
+    )
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: primary }],
+        credentialTicketIssuer: {
+          issue: vi.fn(async () => ({
+            credentialTicket: 'fresh-primary',
+            providerAttemptId: 'attempt-primary',
+            providerAttemptIndex: 1,
+          })),
+        },
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+      reason: 'outcome_unknown',
+      providerMayHaveExecuted: true,
+    })
+    expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'attempt-primary',
+      providerAttemptIndex: 1,
+      status: 'provider_unavailable',
     })
   })
 

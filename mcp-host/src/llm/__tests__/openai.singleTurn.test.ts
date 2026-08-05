@@ -323,5 +323,19 @@ describe('OpenAI token usage mapping', () => {
       output_tokens: 18,
       total_tokens: 60,
     })
+    expect(result.usage_reported).toBe(true)
+  })
+
+  it('marks missing provider usage as non-authoritative instead of exact zero', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue({
+      choices: [{ message: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+    })
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+
+    const result = await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }])
+
+    expect(result.usage_reported).toBe(false)
+    expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0, total_tokens: 0 })
   })
 })

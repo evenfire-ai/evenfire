@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ingestUsageEvents, validateUsageEvent } from '../src/services/usageEvents.js'
+import {
+  ingestUsageEvents,
+  ingestUsageEventsInTransaction,
+  validateUsageEvent,
+} from '../src/services/usageEvents.js'
 
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
@@ -31,6 +35,26 @@ const VALID_EVENT = {
   cache_read_tokens: 40,
   cache_write_tokens: 10,
   prompt_bridge_metadata: null,
+}
+
+const SDK_EVENT = {
+  ...VALID_EVENT,
+  host_ref: 'sandbox-recipes/sdk-recipe',
+  source_kind: 'plugin_workload_sdk',
+  channel_type: 'plugin_workload_sdk',
+  recipe_name: 'sdk-recipe',
+  llm_secret_name: 'zai-secret',
+  task_id: null,
+  prompt_bridge_metadata: {
+    invocation_id: '33333333-3333-4333-8333-333333333333',
+    target_ref: 'zai-primary',
+    credential_slot: 'zai-api-key',
+    fallback_used: false,
+    attempt_count: 1,
+    attempt_generation: 1,
+    provider_attempt_id: '44444444-4444-4444-8444-444444444444',
+    provider_attempt_index: 1,
+  },
 }
 
 describe('validateUsageEvent', () => {
@@ -269,5 +293,21 @@ describe('ingestUsageEvents', () => {
       'not-an-object',
     ])
     expect(result).toEqual({ accepted: 1, duplicates: 1, rejected: 2 })
+  })
+
+  it('fails closed when SDK usage has no persisted authoritative receipt', async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const db = { query: mockPoolQuery } as never
+    const result = await ingestUsageEventsInTransaction([SDK_EVENT], db, {
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'sdk-recipe',
+    })
+
+    expect(result.bindingViolation).toEqual({
+      index: 0,
+      reason: 'recipe_token_invalid_sdk_usage_binding',
+    })
+    expect(result.result.accepted).toBe(0)
+    expect(mockPoolQuery).toHaveBeenCalledTimes(2)
   })
 })

@@ -12,6 +12,8 @@ describe('plugin workload SDK protocol migration', () => {
 
     const migrationSql = String(query.mock.calls[0]?.[0])
     expect(migrationSql).toContain('completed_at = COALESCE(attempts.completed_at, now())')
+    expect(migrationSql).toContain('ALTER COLUMN contract_version SET DEFAULT 1')
+    expect(migrationSql).toContain('plugin_workload_sdk_invocations_v2_lease_check')
   })
 
   it('grants attempt-ledger DML only to control_api_runtime', async () => {

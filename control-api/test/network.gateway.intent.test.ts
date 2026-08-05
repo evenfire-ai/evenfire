@@ -333,13 +333,13 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
-  it('keeps the Minikube control-api Marketplace on the branch-local registry', () => {
+  it('keeps the Minikube control-api Marketplace on the shared registry', () => {
     const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
 
-    expect(controlApiConfig).toContain(
+    expect(controlApiConfig).toContain("CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'")
+    expect(controlApiConfig).not.toContain(
       "CLERUM_REGISTRY_URL: 'http://registry-api.registry.svc.cluster.local:8085'"
     )
-    expect(controlApiConfig).not.toContain("CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'")
   })
 
   it('keeps the stateless heartbeat route POST-only through the mcp-host gateway', () => {

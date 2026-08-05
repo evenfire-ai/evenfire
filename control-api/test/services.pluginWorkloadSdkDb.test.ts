@@ -7,6 +7,7 @@ import {
   finalizePluginWorkloadSdkRevocation,
   getPluginWorkloadSdkLegacyGrantInventory,
   hashPromptTargetPolicy,
+  markPluginWorkloadSdkProviderAttemptStatus,
   redeemPluginWorkloadSdkCredentialTicketJti,
   registerPluginWorkloadSdkCredentialTicketJti,
   reservePluginWorkloadSdkProviderAttempt,
@@ -346,6 +347,7 @@ describe('invocation retry lifecycle timestamps', () => {
         recipeNamespace: 'sandbox-recipes',
         recipeName: 'sdk-recipe',
         expectedCurrentStatus: 'failed',
+        leaseSeconds: 180,
       })
     ).resolves.toBe(true)
     const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
@@ -355,18 +357,96 @@ describe('invocation retry lifecycle timestamps', () => {
       'inv-1',
       'in_progress',
       false,
-      0,
+      180,
       'sandbox-recipes',
       'sdk-recipe',
       'failed',
     ])
   })
 
+  it('rejects an in-progress transition without a positive lease', async () => {
+    await expect(
+      updateInvocationStatus('inv-1', 'in_progress', {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+      })
+    ).resolves.toBe(false)
+    expect(pool.query).not.toHaveBeenCalled()
+  })
+
+  it('accepts a repeated terminal invocation report without weakening the CAS guard', async () => {
+    await expect(
+      updateInvocationStatus('inv-1', 'complete', {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        expectedCurrentStatus: 'in_progress',
+        expectedAttemptGeneration: 1,
+      })
+    ).resolves.toBe(true)
+    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('status = $7')
+    expect(sql).toContain("status = $2 AND $2 NOT IN ('in_progress', 'accepted')")
+  })
+
+  it('makes provider-attempt terminal reports idempotent and outcome-specific', async () => {
+    await expect(
+      markPluginWorkloadSdkProviderAttemptStatus({
+        id: 'attempt-1',
+        invocationId: 'inv-1',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        attemptGeneration: 1,
+        status: 'complete',
+      })
+    ).resolves.toBe(true)
+    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('status = $6')
+    expect(sql).toContain("status IN ('reserved', 'in_progress')")
+  })
+
   it('sweeps by the latest retry timestamp rather than the original reservation', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'inv-1', attempt_generation: 2 }],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-2',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 2,
+            attempt_index: 1,
+            target_ref: 'primary-openai',
+            provider: 'openai',
+            model: 'gpt-5.4-mini',
+            credential_slot: 'openai-api-key',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValue({ rows: [], rowCount: 1 } as never)
     await expect(failStaleInvocations(150)).resolves.toBe(1)
     const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain("SET status = 'provider_unavailable'")
     expect(sql).toContain('lease_expires_at < now()')
-    expect(sql).not.toContain('created_at < now()')
+    expect(sql).toContain('lease_expires_at IS NULL')
+    expect(sql).toContain('updated_at < now()')
+    expect(sql).toContain('RETURNING id, attempt_generation')
+    expect(pool.query).toHaveBeenCalledTimes(5)
+    expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain(
+      'FROM plugin_workload_sdk_provider_attempts'
+    )
+    expect(vi.mocked(pool.query).mock.calls[2]?.[0] as string).toContain(
+      'INSERT INTO plugin_workload_sdk_spend_outcomes'
+    )
+    expect(vi.mocked(pool.query).mock.calls[3]?.[0] as string).toContain(
+      "SET status = 'provider_unavailable'"
+    )
+    expect(vi.mocked(pool.query).mock.calls[4]?.[0] as string).toContain(
+      "SET status = 'provider_unavailable'"
+    )
   })
 })
 

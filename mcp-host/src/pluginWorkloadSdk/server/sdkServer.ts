@@ -19,14 +19,42 @@ import { registerSdkRoutes } from './routes'
 
 export const PLUGIN_WORKLOAD_SDK_REQUIRED_NAMESPACE = 'sandbox-recipes'
 
+/** Validate the WRC credential-broker base URL before any SDK listener binds. */
+export function validatePluginWorkloadSdkCredentialBrokerUrl(value: string): string | null {
+  const raw = value.trim()
+  if (!raw) return 'CLERUM_WRC_URL is required when Plugin Workload SDK is enabled'
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'CLERUM_WRC_URL must be an absolute http(s) URL'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'CLERUM_WRC_URL must use http or https'
+  }
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    return 'CLERUM_WRC_URL must not contain credentials, query parameters, or fragments'
+  }
+  if (parsed.pathname !== '' && parsed.pathname !== '/') {
+    return 'CLERUM_WRC_URL must be a service base URL without a path'
+  }
+  return null
+}
+
 export function shouldStartPluginWorkloadSdk(config: {
   pluginWorkloadSdkEnabled: boolean
   mcpHostRuntimeAccessToken: string
   podNamespace: string
+  pluginWorkloadSdkCredentialBrokerUrl?: string
 }): { start: boolean; reason: string } {
   if (!config.pluginWorkloadSdkEnabled) {
     return { start: false, reason: 'PLUGIN_WORKLOAD_SDK_ENABLED is not set' }
   }
+
+  const brokerUrlError = validatePluginWorkloadSdkCredentialBrokerUrl(
+    config.pluginWorkloadSdkCredentialBrokerUrl ?? ''
+  )
+  if (brokerUrlError) return { start: false, reason: brokerUrlError }
 
   const runtimeBinding = getJwtRuntimeBinding(config.mcpHostRuntimeAccessToken)
   if (runtimeBinding?.recipeNamespace !== PLUGIN_WORKLOAD_SDK_REQUIRED_NAMESPACE) {

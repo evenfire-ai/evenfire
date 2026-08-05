@@ -386,7 +386,6 @@ function hasPublicHttpEgressRule(policy: {
       ]
       return (
         ports.has(443) &&
-        ports.has(80) &&
         rule.to?.some(target => {
           const block = target.ipBlock
           return Boolean(
@@ -412,7 +411,7 @@ function publicHttpEgressCidrs(policy: {
     policy.spec?.egress
       ?.filter(rule => {
         const ports = new Set(rule.ports?.map(port => port.port))
-        return ports.has(443) && ports.has(80)
+        return ports.has(443)
       })
       .flatMap(rule => rule.to?.map(target => target.ipBlock?.cidr).filter(Boolean) ?? []) ?? []
   )
