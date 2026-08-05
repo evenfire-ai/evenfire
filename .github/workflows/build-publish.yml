@@ -177,10 +177,46 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Crossed against every `include` entry below (none of them set
-        # `arch`), so each of the 28 images gets one amd64 leg and one arm64
-        # leg — 56 combinations total, each on a runner native to its arch.
+        # `image` must be a real dimension here, not just a key inside each
+        # `include` entry. `arch` is the only *other* dimension, so the base
+        # cross-product is arch x image = 2 x 28 = 56 combinations; each
+        # `include` entry below (keyed by `image`) then merges its
+        # path/dockerfile/rooted/changed fields onto only the 2 combinations
+        # (one per arch) that share its `image` value. Drop the `image:`
+        # dimension and arch would be the *only* base dimension (2 total
+        # combinations), and all 28 `include` entries would stack onto those
+        # same 2, each overwriting the last — every leg ending up with
+        # whichever image's fields were declared last in the list.
         arch: [amd64, arm64]
+        image:
+          - channel-reader
+          - workflow-approval-request-reader
+          - control-api
+          - control-ui
+          - external-rest-api
+          - host-context-controller
+          - mcp-host
+          - mcp-host-slim
+          - mcp-host-full
+          - mcp-host-desktop
+          - mcp-proxy
+          - gfs-controller
+          - nginx-egress-proxy
+          - profile-ui
+          - rpc-proxy
+          - workflow-recipes
+          - workflow-coordinator
+          - workflow-snippet-runner
+          - clerum-workflow-base
+          - stdio-bridge
+          - workspace-files-controller
+          - airtable-mcp-server
+          - playwright-server
+          - web-search-mcp
+          - mock-mcp-server
+          - mock-stdio-mcp-server
+          - webhook-gateway
+          - webhook-proxy
         include:
           - image: channel-reader
             path: channel-reader
@@ -329,16 +365,23 @@ jobs:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
           platforms: linux/${{ matrix.arch }}
-          # Attestations are disabled per-leg: imagetools builds the final index
-          # from two platform digests, and an index-of-indexes is not valid, so
-          # provenance cannot survive the merge as-is. Re-add later with a
-          # dedicated attest step on the merged index if supply-chain metadata
-          # is wanted back.
+          # Attestations are disabled per-leg. Provenance attestations don't
+          # push cleanly in push-by-digest mode (they need a repo:tag target,
+          # not a bare digest push), and `docker buildx imagetools create`
+          # flattens the source indexes it merges rather than carrying
+          # per-platform attestation manifests forward -- so provenance could
+          # not survive to the merged index anyway. Re-add later with a
+          # dedicated attest step on the merged index if supply-chain
+          # metadata is wanted back.
           provenance: false
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-          # Per-arch scope. Both legs previously wrote the same scope and thrashed.
+          # Per-arch scope: each arch now builds in its own job/leg (see the
+          # split above), so each needs its own gha cache scope. Before this
+          # change, one job built both platforms in a single buildx
+          # invocation and correctly shared one scope -- that's no longer
+          # true now that the legs are split.
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }},mode=max
 
@@ -490,7 +533,14 @@ jobs:
           IMG="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}"
           AMD64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-amd64")"
           ARM64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-arm64")"
+          # The per-leg label on each platform manifest's config is not
+          # readable from the index itself (imagetools inspect --raw on the
+          # tag shows no revision without resolving a child manifest and
+          # pulling its config blob per platform). Task 4's resolver reads
+          # org.opencontainers.image.revision to pick the digest to promote,
+          # so it also needs to be an index-level annotation.
           docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
             -t "$IMG:sha-${{ steps.shortsha.outputs.sha }}" \
             -t "$IMG:latest" \
             "$IMG@$AMD64_DIGEST" \

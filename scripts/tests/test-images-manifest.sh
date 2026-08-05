@@ -233,6 +233,64 @@ assert_every_matrix_image_has_a_manifest_row() {
   fi
 }
 
+# build-push and merge each carry their own full copy of the 28-image list
+# (merge needs it to gate its own steps and to know which digest artifacts
+# to look for; build-push needs path/dockerfile/rooted too, which merge
+# doesn't). Nothing at the YAML level keeps the two in sync -- add an image
+# to build-push and forget merge, and the per-arch digests push while no
+# manifest list is ever created and no built-image marker is ever written
+# for it. notify-infra still dispatches (the other images' markers exist),
+# so the run is green with the new image silently unpublished: the same
+# fail-green shape as the build-push/merge needs: mismatch, one level down.
+#
+# Same guard-and-.catch() treatment as the other workflow-parsing cases
+# above, for the same reason: an unguarded regex index here would be the
+# identical vacuous-pass trap on a structural build-publish.yml change.
+assert_merge_matrix_images_match_build_push_matrix() {
+  local output rc
+  output="$(node -e '
+    import("node:fs").then(fs => {
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+
+      const buildPushMatch = wf.match(/\n  build-push:\n[\s\S]*?include:\n([\s\S]*?)\n {4}steps:/)
+      if (!buildPushMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const mergeMatch = wf.match(/\n  merge:\n[\s\S]*?include:\n([\s\S]*?)\n {4}steps:/)
+      if (!mergeMatch) {
+        console.log(`PARSE_ERROR: could not find the merge matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+
+      const namesOf = section => [...section.matchAll(/- image:\s*(\S+)/g)].map(x => x[1])
+      const buildPushNames = namesOf(buildPushMatch[1]).sort()
+      const mergeNames = namesOf(mergeMatch[1]).sort()
+
+      const missingFromMerge = buildPushNames.filter(n => !mergeNames.includes(n))
+      const extraInMerge = mergeNames.filter(n => !buildPushNames.includes(n))
+      const problems = []
+      if (buildPushNames.join(",") !== mergeNames.join(",")) {
+        if (missingFromMerge.length) problems.push(`missing from merge: ${missingFromMerge.join("|")}`)
+        if (extraInMerge.length) problems.push(`extra in merge (or a duplicate): ${extraInMerge.join("|")}`)
+        if (!missingFromMerge.length && !extraInMerge.length) problems.push("same names, different multiset (a duplicate is masking a missing entry)")
+      }
+      console.log(problems.join(";"))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "merge/build-push matrix comparison failed: $output"
+  elif [ -z "$output" ]; then
+    pass "merge's matrix image list matches build-push's exactly"
+  else
+    fail "merge and build-push matrix image lists disagree: $output"
+  fi
+}
+
 # Portable across BSD grep (macOS, rejects -P) and GNU grep (conflicting
 # matchers with -E -P together): sort both lists and diff with comm instead of
 # depending on a PCRE lookahead inside a single grep invocation. The old
@@ -260,6 +318,7 @@ assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_unpublished_images_are_exactly_the_known_three
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
+assert_merge_matrix_images_match_build_push_matrix
 assert_every_defined_case_is_invoked
 
 exit $FAIL
