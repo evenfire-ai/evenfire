@@ -201,4 +201,20 @@ describe('evenfire deep-link router', () => {
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
     expect(harness.handleSandboxUiDeepLink).not.toHaveBeenCalled()
   })
+
+  it('drops setup and environment links with missing or empty required parameters', () => {
+    const harness = createHarness()
+    harness.setRendererReady(true)
+
+    harness.router.handle('evenfire://desktop-environment')
+    harness.router.handle('evenfire://desktop-environment?externalRestApiBaseUrl=')
+    harness.router.handle('evenfire://desktop-setup?authorizationToken=token-1')
+    harness.router.handle('evenfire://desktop-setup?email=user%40example.test')
+    harness.router.handle('evenfire://desktop-setup?email=&authorizationToken=token-1')
+    harness.router.handle('evenfire://desktop-setup?email=user%40example.test&authorizationToken=')
+
+    expect(harness.sent).toEqual([])
+    expect(harness.focusWindow).not.toHaveBeenCalled()
+    expect(harness.requestMainWindow).not.toHaveBeenCalled()
+  })
 })
