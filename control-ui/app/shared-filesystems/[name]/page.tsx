@@ -4,7 +4,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { useAuth } from '../../../components/AuthContext'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
 import { CreatePageHeader } from '../../../components/CreatePageHeader'
@@ -28,7 +27,6 @@ import {
   sfsOpenOrDownload,
   sfsUpload,
 } from '../../../lib/api'
-import { buildControlUiLoginPath, getCurrentControlUiPath } from '../../../lib/authRedirect'
 
 const DELETE_ENTRY_REFRESH_DELAY_MS = 800
 const DELETE_ENTRY_REFRESH_ATTEMPTS = 4
@@ -51,7 +49,6 @@ const FILE_COLUMNS: TableHeaderColumn[] = [
 export default function SharedFileSystemDetailsPage() {
   const params = useParams<{ name: string }>()
   const router = useRouter()
-  const { authState } = useAuth()
   const { showToast } = useToast()
 
   const sfsName = decodeURIComponent(params.name || '')
@@ -133,22 +130,12 @@ export default function SharedFileSystemDetailsPage() {
   )
 
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadMeta()
-    }
-  }, [authState.isLoggedIn, authState.isLoading, loadMeta])
+    void loadMeta()
+  }, [loadMeta])
 
   useEffect(() => {
-    if (!authState.isLoading && !authState.isLoggedIn) {
-      router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
-    }
-  }, [authState.isLoading, authState.isLoggedIn, router])
-
-  useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadEntries()
-    }
-  }, [authState.isLoggedIn, authState.isLoading, loadEntries])
+    void loadEntries()
+  }, [loadEntries])
 
   function joinPath(parent: string, child: string): string {
     if (!parent) return child
@@ -329,7 +316,7 @@ export default function SharedFileSystemDetailsPage() {
     }
   }
 
-  if (authState.isLoading) {
+  if (entriesLoading && !meta) {
     return (
       <DashboardLayout isDetailPage>
         <CreateFlowPanel
@@ -339,6 +326,7 @@ export default function SharedFileSystemDetailsPage() {
               icon={<IconFolder />}
               title={sfsName || 'Agent Files'}
               backLabel="Back to Agent Files"
+              backDisabled
               onBack={() => router.push(CONTROL_ROUTES.agentFiles.root)}
             />
           }
@@ -356,6 +344,22 @@ export default function SharedFileSystemDetailsPage() {
                   />
                 ))}
               </div>
+              <div className="cu-shared-files-detail__actions">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--toolbar"
+                  aria-label="Refreshing files"
+                  disabled
+                >
+                  <IconRefresh className="cu-spin" width={18} height={18} />
+                </button>
+                <button type="button" className="cu-btn cu-btn--ghost cu-btn--sm" disabled>
+                  New folder
+                </button>
+                <button type="button" className="cu-btn cu-btn--primary cu-btn--sm" disabled>
+                  Upload file
+                </button>
+              </div>
             </div>
             <div className="cu-table-wrap">
               <table className="cu-table">
@@ -371,10 +375,6 @@ export default function SharedFileSystemDetailsPage() {
         </div>
       </DashboardLayout>
     )
-  }
-
-  if (!authState.isLoggedIn) {
-    return null
   }
 
   const phase = meta?.status?.phase

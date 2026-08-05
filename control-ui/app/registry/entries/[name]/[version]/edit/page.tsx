@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -142,9 +143,12 @@ export default function EditRegistryEntryPage() {
           }
         >
           {loading ? (
-            <div className="cu-create-content cu-registry-edit-form">
-              <div className="cu-muted">Loading entry…</div>
-            </div>
+            <FormSectionsSkeleton
+              className="cu-registry-edit-form"
+              label="Marketplace entry"
+              primaryActionLabel="Save changes"
+              sections={3}
+            />
           ) : loadError ? (
             <div className="cu-create-content cu-registry-edit-form">
               <div className="cu-banner cu-banner--error">{loadError}</div>

@@ -19,6 +19,16 @@ export default function RegistryEntryDetailLoading() {
             backLabel="Back to Marketplace"
             backDisabled
             onBack={() => undefined}
+            titleActions={
+              <>
+                <button type="button" className="cu-btn cu-btn--primary cu-btn--sm" disabled>
+                  Install
+                </button>
+                <button type="button" className="cu-btn cu-btn--sm" disabled>
+                  Actions
+                </button>
+              </>
+            }
           />
         }
       >

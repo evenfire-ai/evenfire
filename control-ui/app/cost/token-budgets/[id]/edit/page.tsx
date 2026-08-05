@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -97,9 +98,12 @@ export default function EditTokenBudgetPage() {
           }
         >
           {loading ? (
-            <div className="cu-tb-form">
-              <div className="cu-create-content">Loading budget...</div>
-            </div>
+            <FormSectionsSkeleton
+              className="cu-tb-form"
+              label="Token budget"
+              primaryActionLabel="Save budget"
+              sections={3}
+            />
           ) : loadError ? (
             <div className="cu-tb-form">
               <div className="cu-banner cu-banner--error" role="alert">

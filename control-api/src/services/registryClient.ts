@@ -7,6 +7,12 @@
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
 import { resolveMachineCreds } from './registryConnectionDb.js'
+import {
+  isRegistryIdentityCacheGenerationCurrent,
+  withCurrentRegistryIdentity,
+} from './registryIdentityCache.js'
+
+export { invalidateRegistryIdentityCaches } from './registryIdentityCache.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
@@ -33,12 +39,32 @@ function isTransientFetchError(err: unknown): boolean {
   return err.name === 'AbortError' || err.name === 'TimeoutError'
 }
 
+/**
+ * Registry origin/gateway is unreachable (network refusal, timeout, or an
+ * upstream HTTP 5xx). A clean, user-safe error the global handler forwards as a
+ * 503 so the marketplace shows a clear message instead of a raw 500.
+ */
+export class RegistryUnavailableError extends Error {
+  readonly status = 503
+  readonly code = 'registry_unavailable'
+  constructor(
+    message = 'The registry is currently unavailable. Check the connection and try again.'
+  ) {
+    super(message)
+    this.name = 'RegistryUnavailableError'
+  }
+}
+
+function staleRegistryIdentityError(): RegistryUnavailableError {
+  return new RegistryUnavailableError('The registry identity changed. Please try again.')
+}
+
 // ── OAuth2 client_credentials token cache ────────────────────────────────────
 // control-api is one-per-cluster; a single cached token serves the whole
 // process. Refreshed ~30s before expiry so we never hit 401 from expiry in
 // the steady state. On a real 401 (e.g. registry key rotation), authedFetch
 // evicts the cache and retries once.
-let cached: { token: string; expiresAt: number } | null = null
+let cached: { token: string; expiresAt: number; generation: number } | null = null
 
 // ── Catalog cache (declared here so __resetTokenCacheForTests can clear it;
 // populated/consumed by withReadThroughCache below). ─────────────────────────
@@ -61,19 +87,33 @@ const CATALOG_CACHE_KEYS = {
 interface CacheEntry<T> {
   value: T
   ts: number
+  generation: number
 }
 
 const swrCache = new Map<string, CacheEntry<unknown>>()
+const pendingSWRReads = new Map<string, { generation: number; promise: Promise<unknown> }>()
 
 export function __resetTokenCacheForTests(): void {
   cached = null
   swrCache.clear()
+  pendingSWRReads.clear()
 }
 
 export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string> {
+  return withCurrentRegistryIdentity(
+    generation => mintTokenForGeneration(generation, envOverride),
+    { staleError: staleRegistryIdentityError }
+  )
+}
+
+async function mintTokenForGeneration(
+  cacheGeneration: number,
+  envOverride?: NodeJS.ProcessEnv
+): Promise<string> {
   const env = envOverride ?? process.env
   const now = Date.now()
-  if (cached && now < cached.expiresAt - 30_000) return cached.token
+  if (cached && cached.generation === cacheGeneration && now < cached.expiresAt - 30_000)
+    return cached.token
 
   // An explicit override is a test-only path and remains fully env-driven. In
   // production, credentials MUST come from the mode-aware resolver: managed
@@ -134,8 +174,13 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
     throw new Error(`registry credential rejected: ${res.status} ${body}`)
   }
   const json = (await res.json()) as { access_token: string; expires_in: number }
-  cached = { token: json.access_token, expiresAt: now + json.expires_in * 1000 }
-  return cached.token
+  const next = {
+    token: json.access_token,
+    expiresAt: now + json.expires_in * 1000,
+    generation: cacheGeneration,
+  }
+  if (isRegistryIdentityCacheGenerationCurrent(cacheGeneration)) cached = next
+  return next.token
 }
 
 interface RegistrySearchParams {
@@ -244,22 +289,6 @@ async function authedFetch(
   return attempt(isGet)
 }
 
-/**
- * Registry origin/gateway is unreachable (network refusal, timeout, or an
- * upstream HTTP 5xx). A clean, user-safe error the global handler forwards as a
- * 503 so the marketplace shows a clear message instead of a raw 500.
- */
-export class RegistryUnavailableError extends Error {
-  readonly status = 503
-  readonly code = 'registry_unavailable'
-  constructor(
-    message = 'The registry is currently unavailable. Check the connection and try again.'
-  ) {
-    super(message)
-    this.name = 'RegistryUnavailableError'
-  }
-}
-
 async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
@@ -350,32 +379,50 @@ function buildQuery(params: Record<string, string | number | undefined | null>):
  *   caller 500s.
  */
 async function withReadThroughCache<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const hit = swrCache.get(key) as CacheEntry<T> | undefined
-  if (hit && Date.now() - hit.ts <= CATALOG_CACHE_TTL_MS) {
-    return hit.value
-  }
-  try {
-    const value = await fetcher()
-    swrCache.set(key, { value, ts: Date.now() })
-    return value
-  } catch (err) {
-    const cachedEntry = swrCache.get(key) as CacheEntry<T> | undefined
-    if (cachedEntry) {
-      const ageMs = Date.now() - cachedEntry.ts
-      logger.warn(
-        {
-          event: 'registry_stale_while_error',
-          key,
-          ageMs,
-          fresh: ageMs <= STALE_WHILE_ERROR_TTL_MS,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'registry read failed; serving last-good cached value'
-      )
-      return cachedEntry.value
-    }
-    throw err
-  }
+  return withCurrentRegistryIdentity(
+    generation => {
+      const hit = swrCache.get(key) as CacheEntry<T> | undefined
+      if (hit?.generation === generation && Date.now() - hit.ts <= CATALOG_CACHE_TTL_MS) {
+        return Promise.resolve(hit.value)
+      }
+      const pending = pendingSWRReads.get(key)
+      if (pending?.generation === generation) return pending.promise as Promise<T>
+
+      const promise = fetcher()
+        .then(value => {
+          if (isRegistryIdentityCacheGenerationCurrent(generation)) {
+            swrCache.set(key, { value, ts: Date.now(), generation })
+          }
+          return value
+        })
+        .catch(err => {
+          if (!isRegistryIdentityCacheGenerationCurrent(generation)) throw err
+          const cachedEntry = swrCache.get(key) as CacheEntry<T> | undefined
+          if (cachedEntry?.generation === generation) {
+            const ageMs = Date.now() - cachedEntry.ts
+            logger.warn(
+              {
+                event: 'registry_stale_while_error',
+                key,
+                ageMs,
+                fresh: ageMs <= STALE_WHILE_ERROR_TTL_MS,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              'registry read failed; serving last-good cached value'
+            )
+            return cachedEntry.value
+          }
+          throw err
+        })
+        .finally(() => {
+          if (pendingSWRReads.get(key)?.promise === promise) pendingSWRReads.delete(key)
+        })
+
+      pendingSWRReads.set(key, { generation, promise })
+      return promise
+    },
+    { staleError: staleRegistryIdentityError }
+  )
 }
 
 /**
@@ -385,7 +432,10 @@ async function withReadThroughCache<T>(key: string, fetcher: () => Promise<T>): 
  * peers still converge within CATALOG_CACHE_TTL_MS.
  */
 function invalidateCatalogCaches(): void {
-  for (const key of Object.values(CATALOG_CACHE_KEYS)) swrCache.delete(key)
+  for (const key of Object.values(CATALOG_CACHE_KEYS)) {
+    swrCache.delete(key)
+    pendingSWRReads.delete(key)
+  }
 }
 
 /** True for the default marketplace catalog landing query (limit:200, no filters). */
@@ -658,9 +708,11 @@ export async function listOrgEntries(
 }
 
 // ── Publish scope (who is this control-api, and where do its publishes land) ──
-// Resolved once from the registry's /whoami (the registry maps our machine
-// OAuth client to its bound org / curator status). control-api is one-per-deploy
-// so this is static for the process lifetime — hence the module-level cache.
+// Resolved from the registry's /whoami (the registry maps our machine OAuth
+// client to its bound org / curator status). The module-level cache is scoped to
+// the current registry identity generation and is invalidated when the local
+// registry connection row or credentials change.
+const PUBLISH_SCOPE_CACHE_TTL_MS = CATALOG_CACHE_TTL_MS
 
 export interface PublishScope {
   curator: boolean
@@ -668,7 +720,8 @@ export interface PublishScope {
   scope: string | null
 }
 
-let _scopeCache: PublishScope | null = null
+let _scopeCache: { generation: number; scope: PublishScope; ts: number } | null = null
+let _scopePending: { generation: number; promise: Promise<PublishScope> } | null = null
 
 export async function whoami(): Promise<{
   clientId?: string
@@ -680,21 +733,50 @@ export async function whoami(): Promise<{
 }
 
 export async function resolvePublishScope(opts?: { force?: boolean }): Promise<PublishScope> {
-  if (_scopeCache && !opts?.force) return _scopeCache
-  const w = await whoami()
-  _scopeCache = {
-    curator: w.curator,
-    orgName: w.orgName,
-    // Curator publishes stay unscoped (the registry maps them to @clerum).
-    // Org-bound clients MUST scope to their own org or the registry 400s
-    // (scope_required), so we derive the @<org> prefix here.
-    scope: w.curator || !w.orgName ? null : `@${w.orgName}`,
-  }
-  return _scopeCache
+  return withCurrentRegistryIdentity(
+    generation => {
+      if (
+        _scopeCache &&
+        _scopeCache.generation === generation &&
+        Date.now() - _scopeCache.ts < PUBLISH_SCOPE_CACHE_TTL_MS &&
+        !opts?.force
+      )
+        return Promise.resolve(_scopeCache.scope)
+      const pending =
+        !opts?.force && _scopePending?.generation === generation ? _scopePending : null
+      if (pending) return pending.promise
+
+      const promise = whoami().then(w => {
+        const scope = {
+          curator: w.curator,
+          orgName: w.orgName,
+          // Curator publishes stay unscoped (the registry maps them to @clerum).
+          // Org-bound clients MUST scope to their own org or the registry 400s
+          // (scope_required), so we derive the @<org> prefix here.
+          scope: w.curator || !w.orgName ? null : `@${w.orgName}`,
+        }
+        if (isRegistryIdentityCacheGenerationCurrent(generation)) {
+          _scopeCache = { generation, scope, ts: Date.now() }
+        }
+        return scope
+      })
+      if (!opts?.force) {
+        _scopePending = { generation, promise }
+        void promise
+          .finally(() => {
+            if (_scopePending?.promise === promise) _scopePending = null
+          })
+          .catch(() => undefined)
+      }
+      return promise
+    },
+    { staleError: staleRegistryIdentityError }
+  )
 }
 
 export function __resetScopeCacheForTests(): void {
   _scopeCache = null
+  _scopePending = null
 }
 
 /**
