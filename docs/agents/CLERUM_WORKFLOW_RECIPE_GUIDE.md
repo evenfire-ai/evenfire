@@ -1913,7 +1913,7 @@ Required keys (recipe stays degraded until these exist):
                           your provider's base URL (e.g. https://api.z.ai/api/coding/paas/v4
                           for ZAI).
   openai-api-key        — API key for the base URL above.
-  openai-model          — Model name (e.g. gpt-4o, glm-4.7).
+  openai-model          — Model name (e.g. gpt-5.4-mini, glm-5.1).
 
 Optional keys (recipe runs without them; add later to enable the
 integration — the workload picks them up via a debounced rolling restart):

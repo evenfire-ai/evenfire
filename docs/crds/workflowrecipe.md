@@ -1035,7 +1035,7 @@ The **default LLM configuration** for every agentic (`instruction`) step. Steps 
 
 | Field                 | Type   | Required | Description                                                                                                      |
 | --------------------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                 |
+| `model`               | string | No\*     | LLM model name (e.g. `gpt-5.4-mini`, `claude-sonnet-4-6`).                                                       |
 | `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`.                                                                      |
 | `secretRef.name`      | string | No       | Secret holding the API key.                                                                                      |
 | `secretRef.namespace` | string | No       | Secret namespace.                                                                                                |
