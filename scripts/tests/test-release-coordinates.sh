@@ -590,6 +590,50 @@ assert_every_defined_case_is_invoked() {
   fi
 }
 
+assert_floor_above_version_is_rejected_before_any_write() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  ( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t --minimum-desktop-version 0.7.0 >/dev/null 2>&1 )
+  local pkg; pkg="$(node -e 'console.log(require(process.argv[1]).version)' "$d/desktop-app/package.json")"
+
+  # The delegated updater rejects floor > desktopVersion. Discovering that AFTER
+  # the coordinate loop has written package.json leaves the tree half-cut, so
+  # the range check has to happen up front.
+  if [ "$pkg" = "0.5.0" ]; then
+    pass "a floor above the release version is rejected before any coordinate is written"
+  else
+    fail "desktop-app/package.json was written to $pkg despite an impossible floor"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_half_cut_release_can_be_completed_by_rerunning() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # Force the manifest write to fail AFTER package.json has been written.
+  chmod -w "$d/external-rest-api/src/releaseManifest.ts"
+  ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t >/dev/null 2>&1 )
+  chmod +w "$d/external-rest-api/src/releaseManifest.ts"
+
+  # Re-running the SAME command must work. The monotonic guard compares against
+  # the last COMMITTED version, not the value the failed run left on disk --
+  # otherwise the remediation both this script and validate-release-tag.mjs
+  # print is a dead end ("not greater than the current desktop version").
+  ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t >/dev/null 2>&1 )
+  local dv min; dv="$(manifest_field "$d" desktopVersion)"; min="$(manifest_field "$d" minimumDesktopVersion)"
+  if [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ]; then
+    pass "re-running a half-cut release completes it and leaves the floor alone"
+  else
+    fail "after re-run desktopVersion=$dv minimumDesktopVersion=$min; expected 0.6.0 / 0.1.252"
+  fi
+  rm -rf "$d"
+}
+
 assert_floor_is_not_dragged_by_a_desktop_bump
 assert_floor_above_desktop_is_rejected
 assert_explicit_minimum_flag_is_honoured
@@ -610,6 +654,8 @@ assert_floor_non_semver_is_rejected_by_the_checker
 assert_explicit_release_id_is_rejected_when_local_or_empty
 assert_counter_mismatch_is_rejected_by_the_checker
 assert_unhandled_assert_kind_fails_closed
+assert_floor_above_version_is_rejected_before_any_write
+assert_a_half_cut_release_can_be_completed_by_rerunning
 assert_every_coordinate_has_a_case
 assert_every_defined_case_is_invoked
 

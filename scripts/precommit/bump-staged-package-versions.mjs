@@ -122,7 +122,10 @@ function readIndexedPackageVersion(pkg) {
   }
 }
 
-const stagedFilesResult = run('git', ['diff', '--cached', '--name-only', '--diff-filter=ACMR'])
+// D is included deliberately: a commit whose only change is a deletion still
+// changes the package's content, and omitting it let two different trees
+// report the same version with nothing at release time able to notice.
+const stagedFilesResult = run('git', ['diff', '--cached', '--name-only', '--diff-filter=ACDMR'])
 
 if (stagedFilesResult.status !== 0) {
   exitWithError(

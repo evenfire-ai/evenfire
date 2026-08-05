@@ -497,6 +497,33 @@ EOF
   rm -rf "$d"
 }
 
+assert_a_deletion_only_change_still_bumps_the_counter() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  # Add a file and commit the resulting bump, so the deletion below is the only
+  # staged change in its own commit.
+  ( cd "$d" \
+    && echo "export const foo = 1" > external-rest-api/src/foo.ts \
+    && git add external-rest-api/src/foo.ts \
+    && node scripts/precommit/bump-staged-package-versions.mjs >/dev/null 2>&1 \
+    && git -c user.email=t@t -c user.name=t commit -q --no-verify -m add )
+  local after_add; after_add="$(version_of "$d")"
+
+  ( cd "$d" && git rm -q external-rest-api/src/foo.ts \
+    && node scripts/precommit/bump-staged-package-versions.mjs >/dev/null 2>&1 )
+  local after_del; after_del="$(version_of "$d")"
+
+  # A deletion changes the package's content as surely as an addition does.
+  # With --diff-filter=ACMR (no D) the deletion was invisible, so two different
+  # trees reported the same version and the release-time counter check could
+  # not see it: both sides agreed by construction.
+  if [ "$after_add" = "0.1.61" ] && [ "$after_del" = "0.1.62" ]; then
+    pass "a deletion-only staged change still bumps the counter"
+  else
+    fail "after_add=$after_add after_delete=$after_del; expected 0.1.61 then 0.1.62"
+  fi
+  rm -rf "$d"
+}
+
 assert_release_manifest_does_not_bump
 assert_other_source_still_bumps
 assert_a_counter_bump_resyncs_the_manifest
@@ -510,5 +537,6 @@ assert_unstaged_package_json_drift_is_not_leaked_into_the_manifest
 assert_unrelated_unstaged_package_json_blocks_a_real_resync
 assert_a_self_concealing_manifest_edit_cannot_suppress_the_resync
 assert_a_corrupted_committed_package_json_is_refused_not_crashed
+assert_a_deletion_only_change_still_bumps_the_counter
 
 exit $FAIL
