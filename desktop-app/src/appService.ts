@@ -42,6 +42,7 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  LoginBackendHint,
   PasswordLoginResult,
   PendingApprovalLite,
   PendingWorkflowApproval,
@@ -72,6 +73,11 @@ import {
 // bounded-and-once for that operation (issue #791). control-api intersects the
 // requested scopes against the caller's grants before issuance, so requesting
 // the wake scope never widens a caller who was not granted it.
+// Upper bound for a single backend-reachability probe used by
+// `diagnoseLoginBackend`. Kept short so a post-login-failure diagnosis never
+// makes the failure feel slower than it already did.
+const BACKEND_PROBE_TIMEOUT_MS = 1500
+
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
@@ -818,6 +824,59 @@ export class AppService {
     await this.resolveRuntimeConfigIfNeeded()
 
     return this.completePasswordLogin(normalizedEmail, password)
+  }
+
+  /**
+   * After a login failure, decide whether to offer a one-click "switch to
+   * Localhost and retry". Returns a hint ONLY when all hold:
+   *   - the active runtime profile is NOT already localhost,
+   *   - a local Evenfire external-rest-api answers `/health`, and
+   *   - the active backend does NOT answer `/health` (i.e. the failure looks
+   *     like "pointed at the wrong/dead backend", not a bad password against a
+   *     healthy one).
+   * Self-contained (reads current runtime state + probes reachability), so it
+   * never second-guesses a reachable backend and needs no detail from the
+   * thrown login error. Best-effort and time-bounded — a slow network yields
+   * `null`, never a slower login.
+   */
+  async diagnoseLoginBackend(): Promise<LoginBackendHint | null> {
+    hydrateDesktopRuntimeConfig()
+    const state = getDesktopRuntimeConfigState()
+    if (state.isLocalhost) return null
+
+    const localhostOption = state.options.find(option => option.source === 'localhost')
+    if (!localhostOption?.externalRestApiBaseUrl) return null
+
+    const activeOption = state.options.find(option => option.id === state.activeOptionId) ?? null
+    const activeBaseUrl = activeOption?.externalRestApiBaseUrl || config.externalRestApiBaseUrl
+    // Nothing to switch to if we're already pointed at the localhost origin.
+    if (activeBaseUrl === localhostOption.externalRestApiBaseUrl) return null
+
+    const [localhostReachable, activeReachable] = await Promise.all([
+      this.probeBackendHealthy(localhostOption.externalRestApiBaseUrl),
+      this.probeBackendHealthy(activeBaseUrl),
+    ])
+    if (!localhostReachable || activeReachable) return null
+
+    return {
+      targetOptionId: localhostOption.id,
+      targetLabel: localhostOption.label,
+      activeLabel: activeOption?.label || config.appName || activeBaseUrl,
+    }
+  }
+
+  /** True iff `<baseUrl>/health` returns `{ status: 'ok' }` within the probe bound. */
+  private async probeBackendHealthy(baseUrl: string): Promise<boolean> {
+    if (!baseUrl?.trim()) return false
+    try {
+      const result = await this.authClient.healthAt(
+        baseUrl,
+        AbortSignal.timeout(BACKEND_PROBE_TIMEOUT_MS)
+      )
+      return result?.status === 'ok'
+    } catch {
+      return false
+    }
   }
 
   private async resolveRuntimeConfigIfNeeded(): Promise<void> {

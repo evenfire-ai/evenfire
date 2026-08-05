@@ -176,6 +176,10 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
+  ipcMain.handle('auth:diagnoseLoginBackend', async event => {
+    assertTrustedSender(event)
+    return service.diagnoseLoginBackend()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
