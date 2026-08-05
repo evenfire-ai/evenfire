@@ -4,7 +4,7 @@ FAIL=0
 
 # Tests for the release-cut scripts:
 #   scripts/release/update-desktop-release-manifest.mjs  (floor decoupling)
-#   scripts/release/prepare-release.mjs                  (the one writer)
+#   scripts/release/prepare-release.mjs                  (the one writer, added by a later task)
 #   scripts/release/validate-release-tag.mjs             (the checker)
 #
 # Each case builds a throwaway git repo containing only the files the script
