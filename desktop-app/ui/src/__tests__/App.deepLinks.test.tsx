@@ -712,6 +712,80 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
 
+  it('does not override a manual team switch while a cross-team app link is retrying', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+    liveTeamId = 'team-c'
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
+    const retryNoise = currentController.pushToast.mock.calls.filter(
+      ([message, tone]) =>
+        message === 'Linked App is still starting up. This link will retry shortly.' &&
+        tone === 'info'
+    )
+    expect(retryNoise).toHaveLength(1)
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('you switched teams'),
+      'error'
+    )
+    expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    expect(liveTeamId).toBe('team-c')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000)
+      await Promise.resolve()
+    })
+    expect(liveTeamId).toBe('team-c')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
   it('retries a transient team-context failure and opens without duplicate mounts', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'

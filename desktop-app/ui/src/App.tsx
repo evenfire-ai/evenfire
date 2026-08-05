@@ -80,6 +80,9 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
   'UND_ERR_SOCKET',
 ])
 
+const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
+  'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'Unknown error')
 }
@@ -595,9 +598,30 @@ export function App() {
       let switchedTeam = Boolean(
         restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
       )
+      const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
+        if (
+          restoreTeamId &&
+          pending.retryCount &&
+          pending.link.teamId &&
+          currentTeamId !== pending.link.teamId
+        ) {
+          sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          clearSandboxUiDeepLinkProcessing(pending.link.id)
+          const next = failPendingSandboxUiDeepLink(
+            pendingSandboxUiDeepLinksRef.current,
+            pending.link.id,
+            SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE
+          )
+          setPendingSandboxUiDeepLinkState(next)
+          vm.pushToast(
+            `Could not open app link: ${SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE}`,
+            'error'
+          )
+          return
+        }
+        if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
             const didSwitchTeam = await vm.handleEnsureTeamContext({
@@ -712,6 +736,7 @@ export function App() {
     activeSandboxUiApp,
     bootSplashLoading,
     closeActiveSandboxUiEmbedForHandoff,
+    clearSandboxUiDeepLinkProcessing,
     deferSandboxUiDeepLink,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
@@ -723,6 +748,7 @@ export function App() {
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
     vm.pushToast,
+    setPendingSandboxUiDeepLinkState,
   ])
 
   React.useEffect(() => {
