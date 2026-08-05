@@ -118,6 +118,9 @@ async function main(): Promise<void> {
   // to certify there, and the server's fail-closed default would otherwise pin
   // /ready at 503 forever (R3-B1). See resolveProviderAuthoritativeFn.
   const providerAuthoritativeFn = resolveProviderAuthoritativeFn(watcher)
+  // Desktop status gates on Host inventory authority alone (not full readiness).
+  // Dev (no watcher) leaves it undefined → the server default fails closed.
+  const hostAuthoritativeFn = watcher ? () => watcher.isHostInventoryAuthoritative() : undefined
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -155,7 +158,8 @@ async function main(): Promise<void> {
     config.port,
     hostReconciler,
     hasDesktopFn,
-    providerAuthoritativeFn
+    providerAuthoritativeFn,
+    hostAuthoritativeFn
   )
   await server.start()
 

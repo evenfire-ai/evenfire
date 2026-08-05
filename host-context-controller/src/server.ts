@@ -19,6 +19,7 @@ export class ContextMapperServer {
   private hostReconciler: HostReconciler | null
   private hasDesktopFn: ((hostRef: string) => boolean) | null
   private providerAuthoritativeFn: () => boolean
+  private hostAuthoritativeFn: () => boolean
   private ready = false
 
   constructor(
@@ -29,13 +30,31 @@ export class ContextMapperServer {
     // Fails closed. /ready is the assertion that no stale allow is live, and a
     // caller that omits this gate gets no type error, so the default must
     // withhold readiness rather than grant it.
-    providerAuthoritativeFn: () => boolean = () => false
+    providerAuthoritativeFn: () => boolean = () => false,
+    // Desktop status needs ONLY Host inventory authority, not the full
+    // readiness inventory. Fails closed like providerAuthoritativeFn: a caller
+    // that omits it gets a 503 on desktop rather than a wrong 200 'inactive'.
+    hostAuthoritativeFn: () => boolean = () => false
   ) {
     this.provider = provider
     this.port = port
     this.hostReconciler = hostReconciler ?? null
     this.hasDesktopFn = hasDesktopFn ?? null
     this.providerAuthoritativeFn = providerAuthoritativeFn
+    this.hostAuthoritativeFn = hostAuthoritativeFn
+  }
+
+  /**
+   * Host inventory authority, fail-closed on error — the desktop route's only
+   * authority gate. Same shape as the provider check in getReadinessState().
+   */
+  private safeHostAuthoritative(): boolean {
+    try {
+      return this.hostAuthoritativeFn()
+    } catch (err) {
+      console.error('[Server] Host authority check failed:', err)
+      return false
+    }
   }
 
   /**
@@ -117,6 +136,25 @@ export class ContextMapperServer {
       return
     }
 
+    // Desktop status: Host inventory is the ONLY authority this route needs, so
+    // it is gated here — ABOVE the blanket readiness gate — on Host authority
+    // alone. A degraded McpServer/Context lane must NOT 503 desktop, and a
+    // degraded Host lane must 503 it (never answer 200 'inactive' from a stale
+    // cache). See the E3 design note's endpoint→authority matrix.
+    if (req.method === 'GET' && url.pathname.startsWith('/api/v1/desktop/')) {
+      if (!this.ready || !this.safeHostAuthoritative()) {
+        this.sendJson(res, 503, {
+          error: 'Service Unavailable',
+          message: 'Host inventory is not authoritative',
+        })
+        return
+      }
+      if (!this.checkDesktopAuth(req, res)) return
+      const hostRef = url.pathname.replace('/api/v1/desktop/', '')
+      await this.handleDesktopStatus(res, hostRef)
+      return
+    }
+
     const readiness = this.getReadinessState()
     if (!readiness.ready) {
       this.sendJson(res, 503, {
@@ -147,14 +185,6 @@ export class ContextMapperServer {
     ) {
       const serverName = url.pathname.replace('/api/v1/mcpservers/', '').replace('/auth', '')
       await this.handleGetAuth(req, res, serverName)
-      return
-    }
-
-    // Desktop status (requires service token)
-    if (req.method === 'GET' && url.pathname.startsWith('/api/v1/desktop/')) {
-      if (!this.checkDesktopAuth(req, res)) return
-      const hostRef = url.pathname.replace('/api/v1/desktop/', '')
-      await this.handleDesktopStatus(res, hostRef)
       return
     }
 

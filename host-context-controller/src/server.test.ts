@@ -206,3 +206,82 @@ describe('ContextMapperServer readiness', () => {
     expect(JSON.parse(response.body)).toEqual({ status: 'starting', ready: false })
   })
 })
+
+describe('ContextMapperServer desktop status authority', () => {
+  let server: ContextMapperServer | null = null
+
+  // A Host reconciler that reports a running desktop, so the only thing that can
+  // withhold a 200 is the Host-authority gate under test.
+  const runningReconciler = {
+    getStatus: () => ({ deployed: true, ready: true, message: '' }),
+    hasDesktop: () => true,
+  } as unknown as ConstructorParameters<typeof ContextMapperServer>[2]
+  const hasDesktopFn = () => true
+
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+    vi.restoreAllMocks()
+  })
+
+  it('serves desktop status on Host authority alone even when the provider inventory is not authoritative', async () => {
+    // The heart of H1: desktop needs only Host authority. A degraded
+    // McpServer/Context lane (providerAuthoritative=false) must NOT 503 desktop,
+    // while /api/v1/mcpservers still 503s on the same server.
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      runningReconciler,
+      hasDesktopFn,
+      () => false, // provider inventory NOT authoritative
+      () => true // Host inventory authoritative
+    )
+    server.setReady(true)
+
+    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    expect(desktop.statusCode).toBe(200)
+    expect(JSON.parse(desktop.body)).toEqual({ status: 'running', hostRef: 'host-a' })
+
+    const mcpservers = await invoke(server, '/api/v1/mcpservers')
+    expect(mcpservers.statusCode).toBe(503)
+  })
+
+  it('fails desktop closed (503, never 200 inactive) when Host inventory is not authoritative', async () => {
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      runningReconciler,
+      hasDesktopFn,
+      () => true, // provider authoritative — must not rescue desktop
+      () => false // Host inventory NOT authoritative
+    )
+    server.setReady(true)
+
+    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    expect(desktop.statusCode).toBe(503)
+    expect(JSON.parse(desktop.body)).toEqual({
+      error: 'Service Unavailable',
+      message: 'Host inventory is not authoritative',
+    })
+  })
+
+  it('fails desktop closed when no Host-authority gate is wired (default)', async () => {
+    // Omitting the 6th arg must default to fail-closed, exactly like the
+    // provider gate — no type error catches the omission.
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      runningReconciler,
+      hasDesktopFn,
+      () => true
+    )
+    server.setReady(true)
+
+    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    expect(desktop.statusCode).toBe(503)
+    expect(JSON.parse(desktop.body)).toEqual({
+      error: 'Service Unavailable',
+      message: 'Host inventory is not authoritative',
+    })
+  })
+})
