@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // The release coordinates: every place in the tree that must agree with the
 // release tag. One writer (prepare-release.mjs) and one checker
 // (validate-release-tag.mjs) both import this list, so a coordinate cannot be
@@ -9,10 +8,11 @@
 //   equals   - must equal the release version (build inputs, declarations)
 //   floor    - a compatibility floor; must be <= the version, moves only on request
 //   counter  - a per-service counter; must equal ITS OWN package.json, not the version
-//   pointer  - names an artifact; equality here, existence checked by release-images.yml
+//   pointer  - names an artifact; equality here, plus existence checking once a
+//              release-images.yml workflow exists (it does not exist in this repo yet)
 //
-// Workstream D appends the ghcr component pointer row. Do not add it before
-// deploy/components/ghcr-images/kustomization.yaml exists.
+// A future workstream would append the ghcr component pointer row. Do not add
+// it before deploy/components/ghcr-images/kustomization.yaml exists.
 import fs from 'node:fs'
 import path from 'node:path'
 

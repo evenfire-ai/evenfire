@@ -516,6 +516,43 @@ assert_counter_mismatch_is_rejected_by_the_checker() {
   rm -rf "$d"
 }
 
+assert_unhandled_assert_kind_fails_closed() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # Append an 8th coordinate whose assert kind ('pointer') the checker does
+  # not implement, carrying a deliberately garbage value that would never
+  # agree with anything. If an unrecognized assert kind falls through every
+  # branch instead of failing closed, this coordinate is never actually
+  # checked and the tree still reports success -- the exact bug this case
+  # guards against.
+  node -e '
+    const fs = require("fs")
+    const p = process.argv[1]
+    let s = fs.readFileSync(p, "utf8")
+    const marker = "export function readCounterPackage"
+    if (!s.includes(marker)) throw new Error("marker not found")
+    s = s.replace(
+      marker,
+      "COORDINATES.push({\n" +
+        "  name: \"test-only-pointer-coordinate\",\n" +
+        "  assert: \"pointer\",\n" +
+        "  read: () => \"garbage-value-that-is-never-checked\",\n" +
+        "})\n\n" +
+        marker
+    )
+    fs.writeFileSync(p, s)
+  ' "$d/scripts/release/release-coordinates.mjs"
+
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag passed with an unhandled assert kind ('pointer') on a coordinate"
+  else
+    pass "validate-release-tag fails closed on an unhandled assert kind instead of skipping it silently"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_coordinate_has_a_case() {
   local declared cases
   declared="$(node -e '
@@ -572,6 +609,7 @@ assert_floor_above_release_version_is_rejected_by_the_checker
 assert_floor_non_semver_is_rejected_by_the_checker
 assert_explicit_release_id_is_rejected_when_local_or_empty
 assert_counter_mismatch_is_rejected_by_the_checker
+assert_unhandled_assert_kind_fails_closed
 assert_every_coordinate_has_a_case
 assert_every_defined_case_is_invoked
 

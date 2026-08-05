@@ -74,7 +74,8 @@ function renderManifest(manifest) {
 
 export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null, 2)
     .replace(/"([^"]+)":/g, '$1:')
-    .replace(/: "([^"]*)"/g, ": '$1'")}
+    .replace(/: "([^"]*)"/g, ": '$1'")
+    .replace(/\n}$/, ',\n}')}
 `
 }
 
@@ -99,98 +100,116 @@ function validate(manifest, versions, options = {}) {
   }
 }
 
-const previousRef = argValue('--previous')
-const releaseId = argValue('--release-id') || 'local'
-const minimumDesktopVersion = argValue('--minimum-desktop-version')
-const validateOnly = process.argv.includes('--validate-only')
-const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
+function main() {
+  const previousRef = argValue('--previous')
+  const releaseId = argValue('--release-id') || 'local'
+  const minimumDesktopVersion = argValue('--minimum-desktop-version')
+  const validateOnly = process.argv.includes('--validate-only')
+  const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
 
-const versions = currentVersions()
-const manifestAtHead = currentManifest()
-if (validateOnly) {
-  if (!manifestAtHead) {
-    throw new Error(`${MANIFEST_PATH} does not contain a releaseManifest export`)
+  const versions = currentVersions()
+  const manifestAtHead = currentManifest()
+  if (validateOnly) {
+    if (!manifestAtHead) {
+      throw new Error(`${MANIFEST_PATH} does not contain a releaseManifest export`)
+    }
+    validate(manifestAtHead, versions, { deferDesktopRelease })
+    console.log(JSON.stringify(manifestAtHead, null, 2))
+    process.exit(0)
   }
-  validate(manifestAtHead, versions, { deferDesktopRelease })
-  console.log(JSON.stringify(manifestAtHead, null, 2))
-  process.exit(0)
-}
 
-let previous = previousManifest(previousRef)
+  let previous = previousManifest(previousRef)
 
-// HEAD's floor always outranks one read via --previous: HEAD reflects the
-// most recent operator decision. Never synthesize a floor from
-// desktopVersion -- if nothing readable carries a floor, the operator must
-// say so explicitly.
-const inherited = manifestAtHead?.minimumDesktopVersion || previous?.minimumDesktopVersion
+  // HEAD's floor always outranks one read via --previous: HEAD reflects the
+  // most recent operator decision. Never synthesize a floor from
+  // desktopVersion -- if nothing readable carries a floor, the operator must
+  // say so explicitly.
+  const inherited = manifestAtHead?.minimumDesktopVersion || previous?.minimumDesktopVersion
 
-if (!inherited && !minimumDesktopVersion) {
-  throw new Error(
-    'no minimumDesktopVersion could be read; pass ' +
-      '--minimum-desktop-version explicitly rather than ' +
-      'defaulting it to desktopVersion'
-  )
-}
-
-if (!previous) {
-  previous = {
-    releaseId,
-    externalRestApiVersion: versions.externalRestApiVersion,
-    rpcProxyVersion: versions.rpcProxyVersion,
-    desktopVersion: versions.desktopVersion,
-    minimumDesktopVersion: inherited || minimumDesktopVersion,
+  if (!inherited && !minimumDesktopVersion) {
+    throw new Error(
+      'no minimumDesktopVersion could be read; pass ' +
+        '--minimum-desktop-version explicitly rather than ' +
+        'defaulting it to desktopVersion'
+    )
   }
-}
-const prevVersions = previousVersions(previousRef)
 
-const next = { ...previous, releaseId }
-let changed = false
+  if (!previous) {
+    previous = {
+      releaseId,
+      externalRestApiVersion: versions.externalRestApiVersion,
+      rpcProxyVersion: versions.rpcProxyVersion,
+      desktopVersion: versions.desktopVersion,
+      minimumDesktopVersion: inherited || minimumDesktopVersion,
+    }
+  }
+  const prevVersions = previousVersions(previousRef)
 
-for (const field of ['externalRestApiVersion', 'rpcProxyVersion']) {
+  const next = { ...previous, releaseId }
+  let changed = false
+
+  for (const field of ['externalRestApiVersion', 'rpcProxyVersion']) {
+    if (
+      !prevVersions[field] ||
+      prevVersions[field] !== versions[field] ||
+      next[field] !== versions[field]
+    ) {
+      next[field] = versions[field]
+      changed = true
+    }
+  }
+
   if (
-    !prevVersions[field] ||
-    prevVersions[field] !== versions[field] ||
-    next[field] !== versions[field]
+    !deferDesktopRelease &&
+    (!prevVersions.desktopVersion ||
+      prevVersions.desktopVersion !== versions.desktopVersion ||
+      next.desktopVersion !== versions.desktopVersion)
   ) {
-    next[field] = versions[field]
+    next.desktopVersion = versions.desktopVersion
     changed = true
   }
+
+  // The floor is a compatibility control, not a version. It moves ONLY when the
+  // operator asks. Advancing it with every release would show "update required"
+  // to every user of the previous release. See appService.ts:840.
+  //
+  // `previous` may carry a floor copied from an old --previous ref; always
+  // re-apply `inherited` (HEAD-first) before letting an explicit flag win, so
+  // a floor already raised on HEAD is never silently reverted.
+  if (inherited && next.minimumDesktopVersion !== inherited) {
+    next.minimumDesktopVersion = inherited
+    changed = true
+  }
+  if (minimumDesktopVersion) {
+    next.minimumDesktopVersion = minimumDesktopVersion
+    changed = true
+  }
+
+  if (!changed && manifestAtHead) {
+    Object.assign(next, manifestAtHead)
+  }
+
+  validate(next, versions, { deferDesktopRelease })
+
+  if (!validateOnly) {
+    fs.writeFileSync(path.join(ROOT, MANIFEST_PATH), renderManifest(next))
+  }
+
+  console.log(JSON.stringify(next, null, 2))
 }
 
-if (
-  !deferDesktopRelease &&
-  (!prevVersions.desktopVersion ||
-    prevVersions.desktopVersion !== versions.desktopVersion ||
-    next.desktopVersion !== versions.desktopVersion)
-) {
-  next.desktopVersion = versions.desktopVersion
-  changed = true
+try {
+  main()
+} catch (error) {
+  // Matches validate-release-version-bumps.mjs's ::error:: style so a
+  // contributor sees an actionable GitHub annotation instead of a raw stack
+  // trace on the ci-public.yml step. The underlying detail is preserved
+  // verbatim in the annotation; the remediation line is appended separately.
+  console.error(`::error::${error.message}`)
+  console.error(
+    `Fix ${MANIFEST_PATH} so it agrees with the current package.json versions (or pass the ` +
+      `correct --release-id / --minimum-desktop-version flags), then re-run ` +
+      '`node scripts/release/update-desktop-release-manifest.mjs`.'
+  )
+  process.exit(1)
 }
-
-// The floor is a compatibility control, not a version. It moves ONLY when the
-// operator asks. Advancing it with every release would show "update required"
-// to every user of the previous release. See appService.ts:840.
-//
-// `previous` may carry a floor copied from an old --previous ref; always
-// re-apply `inherited` (HEAD-first) before letting an explicit flag win, so
-// a floor already raised on HEAD is never silently reverted.
-if (inherited && next.minimumDesktopVersion !== inherited) {
-  next.minimumDesktopVersion = inherited
-  changed = true
-}
-if (minimumDesktopVersion) {
-  next.minimumDesktopVersion = minimumDesktopVersion
-  changed = true
-}
-
-if (!changed && manifestAtHead) {
-  Object.assign(next, manifestAtHead)
-}
-
-validate(next, versions, { deferDesktopRelease })
-
-if (!validateOnly) {
-  fs.writeFileSync(path.join(ROOT, MANIFEST_PATH), renderManifest(next))
-}
-
-console.log(JSON.stringify(next, null, 2))

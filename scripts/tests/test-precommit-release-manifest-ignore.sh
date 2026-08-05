@@ -143,19 +143,28 @@ assert_desktop_version_not_touched_by_counter_resync() {
     && node scripts/precommit/bump-staged-package-versions.mjs >/dev/null 2>&1 )
   status=$?
 
-  local manifest_desktop manifest_ers
+  local manifest_desktop manifest_ers manifest_min
   manifest_desktop="$(manifest_field "$d" desktopVersion)"
   manifest_ers="$(manifest_field "$d" externalRestApiVersion)"
+  manifest_min="$(manifest_field "$d" minimumDesktopVersion)"
 
   # Assert the re-sync actually ran and succeeded (exit 0, ers moved), not
   # just that desktopVersion happens to be untouched -- a dead hook, or one
   # missing --defer-desktop-release entirely (which makes the updater's own
   # validate() reject 0.1.252 != 0.1.333 and exit nonzero), would ALSO leave
   # desktopVersion untouched, but only because the re-sync never completed.
-  if [ "$status" -eq 0 ] && [ "$manifest_ers" = "0.1.61" ] && [ "$manifest_desktop" = "0.1.252" ]; then
-    pass "a counter re-sync succeeds and never touches desktopVersion, even though desktop-app/package.json is ahead"
+  #
+  # minimumDesktopVersion is asserted explicitly here too, not just implied
+  # by desktopVersion staying put: this is the invariant the whole
+  # workstream protects (a floor that ever equals desktopVersion force-
+  # updates every existing desktop install), and the pre-commit path is the
+  # one most likely to run on an ordinary service PR, so it must guard the
+  # floor directly rather than by inference.
+  if [ "$status" -eq 0 ] && [ "$manifest_ers" = "0.1.61" ] && [ "$manifest_desktop" = "0.1.252" ] \
+    && [ "$manifest_min" = "0.1.252" ]; then
+    pass "a counter re-sync succeeds and never touches desktopVersion or minimumDesktopVersion, even though desktop-app/package.json is ahead"
   else
-    fail "status=$status externalRestApiVersion=$manifest_ers desktopVersion=$manifest_desktop; expected 0 / 0.1.61 / 0.1.252"
+    fail "status=$status externalRestApiVersion=$manifest_ers desktopVersion=$manifest_desktop minimumDesktopVersion=$manifest_min; expected 0 / 0.1.61 / 0.1.252 / 0.1.252"
   fi
   rm -rf "$d"
 }

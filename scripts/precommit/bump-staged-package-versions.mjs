@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { packageRoots } from '../prettier/paths.mjs'
+import { parseManifest } from '../release/release-coordinates.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const sortedPackageRoots = [...packageRoots].sort((a, b) => b.length - a.length)
@@ -97,11 +98,6 @@ function bumpPatchVersion(version) {
 
   const [, major, minor, patch, prerelease = '', build = ''] = match
   return `${major}.${minor}.${Number(patch) + 1}${prerelease}${build}`
-}
-
-function readManifestField(source, field) {
-  const match = source.match(new RegExp(`\\n {2}${field}: '([^']*)'`))
-  return match ? match[1] : null
 }
 
 // Reads a counter package's version out of the INDEX (git's staged content),
@@ -260,9 +256,22 @@ if (relevantCounterPackages.length > 0) {
     )
   }
 
+  let manifest
+
+  try {
+    manifest = parseManifest(manifestSource)
+  } catch (error) {
+    exitWithError(
+      `The pre-commit hook (scripts/precommit/bump-staged-package-versions.mjs) could not parse ` +
+        `${MANIFEST_PATH} to check whether it needs re-syncing after a version bump: ${error.message}\n` +
+        `Restore the file (e.g. \`git checkout HEAD -- ${MANIFEST_PATH}\`) or regenerate it with ` +
+        `\`node scripts/release/update-desktop-release-manifest.mjs\`, then retry the commit.`
+    )
+  }
+
   const outOfSyncPackages = relevantCounterPackages.filter(pkg => {
     const currentVersion = readIndexedPackageVersion(pkg)
-    const manifestVersion = readManifestField(manifestSource, MANIFEST_FIELD_BY_PACKAGE[pkg])
+    const manifestVersion = manifest ? manifest[MANIFEST_FIELD_BY_PACKAGE[pkg]] : undefined
     return currentVersion && currentVersion !== manifestVersion
   })
 
@@ -289,7 +298,7 @@ if (relevantCounterPackages.length > 0) {
     // is absent, which would ship in a customer-facing manifest. Carry the
     // existing value through instead of fabricating one: a counter bump is
     // not a release.
-    const releaseId = readManifestField(manifestSource, 'releaseId')
+    const releaseId = manifest ? manifest.releaseId : undefined
 
     if (!releaseId) {
       exitWithError(
