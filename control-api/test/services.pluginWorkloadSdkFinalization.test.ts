@@ -125,6 +125,10 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     const sql = db.query.mock.calls.map(([statement]: [string]) => statement).join('\n')
     expect(sql).toContain('plugin_workload_sdk_spend_outcomes')
     expect(sql).toContain('usage_request_id')
+    const spendLookup = db.query.mock.calls.find(([statement]: [string]) =>
+      statement.includes('FROM plugin_workload_sdk_spend_outcomes')
+    )
+    expect(spendLookup?.[0]).not.toMatch(/FOR UPDATE/i)
   })
 
   it('persists an explicit unknown spend outcome without inventing token counts', async () => {

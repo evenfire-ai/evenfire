@@ -215,8 +215,7 @@ export async function finalizePromptBridgeInTransaction(
             attempt_generation, attempt_index, target_ref, provider, model,
             credential_slot, host_ref, outcome, input_tokens, output_tokens
        FROM plugin_workload_sdk_spend_outcomes
-      WHERE provider_attempt_id = $1
-      FOR UPDATE`,
+      WHERE provider_attempt_id = $1`,
     [input.providerAttemptId]
   )
   const existing = existingResult.rows[0] as SpendOutcomeRow | undefined
