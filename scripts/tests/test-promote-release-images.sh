@@ -63,20 +63,37 @@ write_broken_manifest() {
 JSON
 }
 
-# make_stub <dir> <revision>
+# A manifest that PARSES successfully but publishes nothing. This is the
+# "succeeded, but shipped zero images" trap, distinct from write_broken_manifest
+# above ("failed to even parse"): both must be loud failures, but only the
+# empty-list guard (not the command-substitution fix) catches this one.
+write_empty_manifest() {
+  cat > "$1/deploy/images.json" <<'JSON'
+{
+  "images": []
+}
+JSON
+}
+
+# make_stub <dir> <revision> [manifests_json]
+# manifests_json defaults to a real amd64+arm64 pair; pass a single-entry
+# array to simulate a non-multi-arch (amd64-only) index for the arch-guard
+# case below.
 make_stub() {
-  mkdir -p "$1/bin"
-  cat > "$1/bin/crane" <<STUB
+  local dir=$1 revision=$2
+  local manifests=${3:-'[{"platform":{"architecture":"amd64"}},{"platform":{"architecture":"arm64"}}]'}
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/crane" <<STUB
 #!/usr/bin/env bash
-COPY_LOG="$1/copy-log"
+COPY_LOG="$dir/copy-log"
 case "\$1" in
   digest)   echo "sha256:widgetdigest00000000000000000000000000000000000000000000000000" ;;
-  manifest) echo '{"annotations":{"org.opencontainers.image.revision":"$2"},"manifests":[{"platform":{"architecture":"amd64"}},{"platform":{"architecture":"arm64"}}]}' ;;
+  manifest) echo '{"annotations":{"org.opencontainers.image.revision":"$revision"},"manifests":$manifests}' ;;
   copy)     echo "\$2 \$3" >> "\$COPY_LOG"; echo "copied \$2 -> \$3" ;;
   *)        exit 1 ;;
 esac
 STUB
-  chmod +x "$1/bin/crane"
+  chmod +x "$dir/bin/crane"
 }
 
 assert_a_broken_image_manifest_fails_loudly_not_silently() {
@@ -87,15 +104,21 @@ assert_a_broken_image_manifest_fails_loudly_not_silently() {
   # This is the reviewer's exact repro: images-manifest.mjs's load() throws
   # at import time. `mapfile -t IMAGES < <(...)` used to hide that failure
   # from `set -e` entirely -- the run printed a Node stack trace, exited 0,
-  # and promoted nothing. It must now exit nonzero and print no promotion
-  # line.
+  # and promoted nothing.
+  #
+  # Message-shaped, not rc-shaped: an rc-only check (plus "no promotion
+  # line") is satisfied by ANY failure anywhere in the script -- proven by
+  # inserting a bare `exit 1` at the top of the driver, which left this case
+  # passing while the driver did nothing resembling the actual guard. This
+  # must name the specific reason, the same pattern that caught the masking
+  # bug in the sibling resolver harness ("ancestor" / "revision annotation").
   local out rc
   out="$( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=true RELEASE_REF=v0.1.0 \
         bash scripts/release/promote-release-images.sh 2>&1 )" && rc=0 || rc=1
-  if [ "$rc" -ne 0 ] && ! grep -qE 'would promote|^promoted ' <<< "$out"; then
-    pass "a broken image manifest fails the release loudly instead of silently promoting nothing"
+  if [ "$rc" -ne 0 ] && grep -q 'could not load the published image list' <<< "$out"; then
+    pass "a broken image manifest fails the release loudly with a named reason, not silently"
   else
-    fail "expected a nonzero exit and no promotion line; got rc=$rc out='$out'"
+    fail "expected the 'could not load the published image list' message; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -144,6 +167,70 @@ assert_the_real_promotion_copies_to_the_v_prefixed_tag() {
   rm -rf "$d"
 }
 
+assert_an_empty_image_list_fails_loudly() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  local head; head="$( cd "$d" && git rev-parse HEAD )"
+  make_stub "$d" "$head"
+  write_empty_manifest "$d"
+  # Distinct from the broken-manifest case above: images-manifest.mjs's
+  # load() does not throw here (an empty `images` array is valid), so the
+  # command-substitution fix alone would let this through with IMAGES_TSV
+  # empty. Only the separate non-empty check catches it. Checked by message,
+  # not rc, for the same reason as the broken-manifest case: without this
+  # guard, an empty list still happens to exit nonzero (mapfile on an empty
+  # here-string yields one empty row, which the resolver then rejects for
+  # missing --image) -- but with the WRONG message, so an rc-only assertion
+  # would pass against either the real guard or that coincidence.
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=true RELEASE_REF=v0.1.0 \
+        bash scripts/release/promote-release-images.sh 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -q 'the published image list is empty' <<< "$out"; then
+    pass "an empty published-image list fails the release loudly instead of silently promoting nothing"
+  else
+    fail "expected the 'published image list is empty' message; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_stable_does_not_move_for_a_pre_release() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  ( cd "$d" && git tag v0.1.0-rc1 )
+  local head; head="$( cd "$d" && git rev-parse HEAD )"
+  make_stub "$d" "$head"
+  ( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=false RELEASE_REF=v0.1.0-rc1 \
+        bash scripts/release/promote-release-images.sh >/dev/null 2>&1 )
+  local log; log="$(cat "$d/copy-log" 2>/dev/null || echo '')"
+  # The strict-semver gate (MOVE_STABLE) exists precisely so a pre-release
+  # cannot re-point :stable, the tag the docs tell people to use. This is the
+  # negative counterpart to assert_the_real_promotion_copies_to_the_v_prefixed_tag
+  # above, which checks :stable DOES move for a strict release -- together
+  # they bracket the gate in both directions.
+  if grep -q 'ghcr.io/evenfire-ai/widget:v0.1.0-rc1$' <<< "$log" && ! grep -q ':stable$' <<< "$log"; then
+    pass "a pre-release tag is promoted without moving :stable"
+  else
+    fail "expected a version-tag copy but no :stable copy for a pre-release; got copy-log '$log'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_single_arch_index_is_rejected() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  local head; head="$( cd "$d" && git rev-parse HEAD )"
+  # amd64 only: the failure mode this entire workstream exists to eliminate
+  # is a single-platform copy silently promoted as if it were the multi-arch
+  # index the pipeline is supposed to guarantee.
+  make_stub "$d" "$head" '[{"platform":{"architecture":"amd64"}}]'
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=true RELEASE_REF=v0.1.0 \
+        bash scripts/release/promote-release-images.sh 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -q 'expected amd64,arm64' <<< "$out"; then
+    pass "a single-arch index is rejected instead of promoted"
+  else
+    fail "expected a nonzero exit naming 'expected amd64,arm64'; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists -- same pattern as
   # test-resolve-release-images.sh and test-release-coordinates.sh.
@@ -162,6 +249,9 @@ assert_every_defined_case_is_invoked() {
 assert_a_broken_image_manifest_fails_loudly_not_silently
 assert_a_healthy_manifest_still_dry_run_promotes
 assert_the_real_promotion_copies_to_the_v_prefixed_tag
+assert_an_empty_image_list_fails_loudly
+assert_stable_does_not_move_for_a_pre_release
+assert_a_single_arch_index_is_rejected
 assert_every_defined_case_is_invoked
 
 exit $FAIL
