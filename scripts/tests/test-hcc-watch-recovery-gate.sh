@@ -500,6 +500,18 @@ marker_bindings=(
 
   "$MCP_READINESS_GATE" '[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []'
   "$HCC_NETWORK_POLICY_RECONCILER" 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join('
+
+  "$MCP_READINESS_GATE" "NETPOL_INITIAL_FAILED_MARKER='Initial NetworkPolicy background reconciliation failed:'"
+  "$HCC_K8S_CLIENT" 'Initial NetworkPolicy background reconciliation failed:'
+
+  "$MCP_READINESS_GATE" "NETPOL_ADDITIVE_FAILED_MARKER='Initial NetworkPolicy post-certification additive reconciliation failed:'"
+  "$HCC_K8S_CLIENT" 'Initial NetworkPolicy post-certification additive reconciliation failed:'
+
+  "$MCP_READINESS_GATE" "NETPOL_RETRY_SCHEDULED_MARKER='Scheduling initial NetworkPolicy background convergence retry'"
+  "$HCC_K8S_CLIENT" 'Scheduling initial ${lane} background convergence retry'
+
+  "$MCP_READINESS_GATE" "NETPOL_CONTEXT_FAILED_MARKER='NetworkPolicy reconciliation failed for context '"
+  "$HCC_K8S_CLIENT" 'NetworkPolicy reconciliation failed for context ${context.name}:'
 )
 marker_drift=""
 marker_binding_count=0
@@ -527,7 +539,7 @@ done
 # unset. Assert the arity explicitly rather than relying on the pair count to
 # happen to notice.
 if [ $((${#marker_bindings[@]} % 4)) -eq 0 ] &&
-  [ "$marker_binding_count" -eq 31 ] &&
+  [ "$marker_binding_count" -eq 35 ] &&
   [ -z "$marker_drift" ]; then
   pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
 else
@@ -620,6 +632,60 @@ if (
   pass "successful ready probe clears stale failure diagnostics"
 else
   fail "successful ready probe retains a misleading prior diagnostic"
+fi
+
+# H6 gate-fix mutation (E4): the clean-window NetworkPolicy negative must FAIL
+# against an injection-window log (moving it inside the injected window would
+# false-fail — the scoping is load-bearing), PASS against a clean log, and fail
+# closed when kubectl errors. The gate itself can't run (minikube churn), so
+# this statically pins the predicate.
+clean_window_netpol_negatives_function="$(
+  sed -n '/^clean_window_netpol_log_negatives_hold() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+clean_window_marker_defs="$(grep -E "^NETPOL_[A-Z_]+_MARKER='" "$MCP_READINESS_GATE")"
+run_clean_window_negative_case() (
+  local mode=$1
+  CONTEXT_NAME=alpha
+  HCC_NS=control-plane
+  eval "$clean_window_marker_defs"
+  case $mode in
+    injected)
+      kctl() {
+        printf '%s\n' \
+          '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed: dns timeout' \
+          '[K8s] Scheduling initial NetworkPolicy background convergence retry 1 in 5000ms'
+      } ;;
+    clean) kctl() { printf '%s\n' '[K8s] NetworkPolicy convergence certified'; } ;;
+    api-error) kctl() { return 1; } ;;
+  esac
+  eval "$clean_window_netpol_negatives_function"
+  clean_window_netpol_log_negatives_hold hcc-pod
+)
+if ! run_clean_window_negative_case injected &&
+  run_clean_window_negative_case clean &&
+  ! run_clean_window_negative_case api-error; then
+  pass "clean-window NetworkPolicy negative fails inside the injected window, passes clean, and fails closed"
+else
+  fail "clean-window NetworkPolicy negative does not distinguish injected-window failures or fails open"
+fi
+
+# Static ordering fence: a clean-window negative invocation must exist in the
+# MAIN BODY (after `trap cleanup EXIT`) and before the DNS mutation. cleanup()
+# is defined earlier in the file than the mutation but runs on EXIT, so a plain
+# "first line < mutation line" test would be satisfied by the cleanup-window
+# invocation alone; excluding everything at or before the trap line pins the
+# pre-injection (window A) invocation specifically.
+trap_line="$(grep -n '^trap cleanup EXIT' "$MCP_READINESS_GATE" | head -1 | cut -d: -f1)"
+dns_mutation_line="$(grep -n '^HCC_MUTATED=1' "$MCP_READINESS_GATE" | head -1 | cut -d: -f1)"
+body_clean_window_negative_line="$(
+  grep -n 'clean_window_netpol_log_negatives_hold "' "$MCP_READINESS_GATE" |
+    awk -F: -v t="${trap_line:-0}" -v m="${dns_mutation_line:-0}" \
+      '$1 > t && $1 < m { print $1; exit }'
+)"
+if [ -n "$body_clean_window_negative_line" ]; then
+  pass "clean-window NetworkPolicy negative runs in the body before the DNS fault injection"
+else
+  fail "clean-window NetworkPolicy negative is missing from the pre-injection body window"
 fi
 if (
   NEW_HCC_POD=hcc-pod

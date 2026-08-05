@@ -103,6 +103,18 @@ HCC_GATE_FINALIZATION_FAILURE=""
 HCC_READY_PROBE_DIAGNOSTIC=""
 BASELINE_POLICY_SNAPSHOT=""
 
+# Clean-window negative markers. Consumed ONLY while the DNS fault injection is
+# NOT applied (pre-injection pre-checks, post-restore cleanup): under the
+# injection the additive NetworkPolicy lane legitimately fails and schedules
+# retries, so these negatives false-fail inside the injected window (removed
+# there by 1abcfb1/15997353/e7064a7f). Inventoried in
+# scripts/tests/test-hcc-watch-recovery-gate.sh marker_bindings.
+NETPOL_INITIAL_FAILED_MARKER='Initial NetworkPolicy background reconciliation failed:'
+NETPOL_ADDITIVE_FAILED_MARKER='Initial NetworkPolicy post-certification additive reconciliation failed:'
+NETPOL_RETRY_SCHEDULED_MARKER='Scheduling initial NetworkPolicy background convergence retry'
+NETPOL_CONTEXT_FAILED_MARKER='NetworkPolicy reconciliation failed for context '
+clean_window_checks_run=0
+
 [[ "$MCP_FLEET_SIZE" =~ ^[0-9]+$ ]] && [ "$MCP_FLEET_SIZE" -gt 10 ] &&
   [ "$MCP_FLEET_SIZE" -le 24 ] || {
   echo "E2E_HCC_MCP_FLEET_SIZE must be an integer from 11 through 24; got ${MCP_FLEET_SIZE}." >&2
@@ -472,6 +484,31 @@ external_egress_policy_absent() {
       -o name 2>/dev/null
   )" || return 1
   [ -z "$policies" ]
+}
+
+clean_window_netpol_log_negatives_hold() {
+  # Family 1, fail-closed snapshot: read ONE authoritative log snapshot so a
+  # kubectl logs failure cannot make the negative assertions pass vacuously.
+  local pod=$1 logs
+  [ -n "$pod" ] || return 1
+  logs="$(kctl logs "pod/${pod}" -n "$HCC_NS" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  ! grep -Fq "$NETPOL_INITIAL_FAILED_MARKER" <<<"$logs" &&
+    ! grep -Fq "$NETPOL_ADDITIVE_FAILED_MARKER" <<<"$logs" &&
+    ! grep -Fq "$NETPOL_RETRY_SCHEDULED_MARKER" <<<"$logs" &&
+    ! grep -Fq "${NETPOL_CONTEXT_FAILED_MARKER}${CONTEXT_NAME}:" <<<"$logs"
+}
+
+clean_window_runtime_and_ready_absent() {
+  # Family 3, clean-window form. fixture_runtime_and_ready_absent requires the
+  # McpServer object to EXIST (mcpserver_current_ready_absent fails on a missing
+  # object); in clean windows the fixture may not exist at all, which is the
+  # strongest form of absence. An API error still fails closed.
+  fixture_runtime_absent || return 1
+  if ! resource_absent mcpserver "$MCP_NAME" "$MCP_NS"; then
+    mcpserver_current_ready_absent "$MCP_NAME" || return 1
+  fi
+  external_egress_policy_absent
 }
 
 fixture_runtime_converged_with_protocol() {
@@ -1018,6 +1055,7 @@ EOF
 
 cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1 fixture_inputs_removed=1 restore_patch
+  local clean_window_pod
   trap - EXIT
   set +e
 
@@ -1088,12 +1126,40 @@ cleanup() {
     fi
     wait_until 60 "all HCC MCP readiness suite resources to disappear" \
       suite_resources_absent >/dev/null 2>&1 || cleanup_failed=1
+
+    # Clean window B: DNS restored and fixture inputs gone. The restored pod is
+    # new (scale-0 preceded the restore), so its log is scoped to this window.
+    clean_window_pod="$(running_hcc_pod)"
+    if [ -n "$clean_window_pod" ] &&
+      clean_window_netpol_log_negatives_hold "$clean_window_pod"; then
+      clean_window_checks_run=$((clean_window_checks_run + 1))
+    else
+      fail "post-restore clean-window NetworkPolicy log negatives did not hold"
+      cleanup_failed=1
+    fi
+    if fixture_mcp_runtime_absent; then
+      clean_window_checks_run=$((clean_window_checks_run + 1))
+    else
+      fail "post-restore fixture runtime or external-egress policy survived"
+      cleanup_failed=1
+    fi
+    if clean_window_runtime_and_ready_absent; then
+      clean_window_checks_run=$((clean_window_checks_run + 1))
+    else
+      fail "post-restore McpServer Ready status or external-egress policy survived"
+      cleanup_failed=1
+    fi
   else
     cleanup_failed=1
   fi
 
   if ! finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok"; then
     cleanup_failed=1
+  fi
+
+  if [ "$status" = 0 ]; then
+    [ "${clean_window_checks_run:-0}" -gt 0 ] ||
+      die "no clean-window negative checks ran (clean_window_checks_run=0)"
   fi
 
   if [ "$cleanup_failed" -ne 0 ]; then
@@ -1121,6 +1187,22 @@ suite_resources_absent ||
 acquire_hcc_watch_gate_lock ||
   die "another disruptive HCC gate owns context ${E2E_KUBECONTEXT}"
 ok "branch helper, profile, exact HEAD/fingerprint/gate, and exclusive HCC lock verified"
+
+# Clean window A: the DNS fault injection is not applied yet. The branch-deployed
+# HCC must show a clean NetworkPolicy lane and zero fixture residue before the
+# gate mutates anything.
+clean_window_pod="$(running_hcc_pod)" && [ -n "$clean_window_pod" ] ||
+  die "no Running HCC pod before fault injection"
+clean_window_netpol_log_negatives_hold "$clean_window_pod" ||
+  die "pre-injection HCC logs already contain NetworkPolicy-lane failure or retry markers"
+clean_window_checks_run=$((clean_window_checks_run + 1))
+fixture_mcp_runtime_absent ||
+  die "pre-injection fixture runtime or external-egress policy already exists"
+clean_window_checks_run=$((clean_window_checks_run + 1))
+clean_window_runtime_and_ready_absent ||
+  die "pre-injection McpServer Ready status or external-egress policy already exists"
+clean_window_checks_run=$((clean_window_checks_run + 1))
+ok "all three clean-window negative families hold before DNS fault injection"
 
 ORIGINAL_REPLICAS="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.replicas}')"
@@ -1351,6 +1433,9 @@ DNS_BLOCKER_IP="$(kctl get service "$DNS_BLOCKER_NAME" -n "$HCC_NS" \
   -o jsonpath='{.spec.clusterIP}')"
 [ -n "$DNS_BLOCKER_IP" ] || die "DNS blocker Service has no ClusterIP"
 ok "isolated DNS hold proxy is ready and forwards non-fixture UDP/TCP queries to CoreDNS"
+
+[ "${clean_window_checks_run:-0}" -ge 3 ] ||
+  die "pre-injection clean-window negatives did not run before the DNS mutation"
 
 HCC_MUTATED=1
 dns_patch="$(jq -cn --arg nameserver "$DNS_BLOCKER_IP" '
