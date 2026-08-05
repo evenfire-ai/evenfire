@@ -66,23 +66,36 @@ rollout_namespace_deployments() {
 assert_workflow_gateway_prompt_bridge_finalization_route() {
   local deployment="nginx-workflow-approval-gateway"
   local namespace="control-plane"
-  local pod
+  local candidate deletion ready pod_count=0
 
   if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
     log "ERROR: ${namespace}/${deployment} is absent; refusing Plugin Workload SDK gate"
     return 1
   fi
 
-  pod="$(${KC} get pods -n "${namespace}" -l app="${deployment}" \
-    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [[ -z "${pod}" ]]; then
-    log "ERROR: ${namespace}/${deployment} has no Running pod; refusing Plugin Workload SDK gate"
-    return 1
-  fi
+  # A rollout can leave an old pod in Running/Terminating briefly. Do not
+  # inspect the first pod returned by the API: that made the previous guard
+  # race a healthy new ReplicaSet and reject a valid deployment. Only inspect
+  # Ready, non-terminating pods, and require the route in every active pod.
+  while IFS= read -r candidate; do
+    [[ -z "${candidate}" ]] && continue
+    deletion="$(${KC} get pod "${candidate}" -n "${namespace}" \
+      -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+    [[ -n "${deletion}" ]] && continue
+    ready="$(${KC} get pod "${candidate}" -n "${namespace}" \
+      -o jsonpath='{.status.containerStatuses[?(@.name=="nginx")].ready}' 2>/dev/null || true)"
+    [[ "${ready}" == "true" ]] || continue
+    pod_count=$((pod_count + 1))
+    if ! ${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1 | \
+      grep -Fq 'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'; then
+      log "ERROR: active ${namespace}/${candidate} does not serve the SDK finalization route; refusing gate"
+      return 1
+    fi
+  done < <(${KC} get pods -n "${namespace}" -l app="${deployment}" \
+    --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 
-  if ! ${KC} exec -n "${namespace}" "${pod}" -c nginx -- nginx -T 2>&1 | \
-    grep -Fq 'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'; then
-    log "ERROR: running ${namespace}/${deployment} does not serve the SDK finalization route; refusing gate"
+  if [[ "${pod_count}" == "0" ]]; then
+    log "ERROR: ${namespace}/${deployment} has no Ready non-terminating pod; refusing Plugin Workload SDK gate"
     return 1
   fi
   log "Workflow gateway serves the SDK promptBridge finalization route"

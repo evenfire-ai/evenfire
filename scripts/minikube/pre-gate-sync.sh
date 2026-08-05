@@ -390,6 +390,7 @@ else
   log "No cluster sync required before ${GATE_NAME}"
   assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
+  rollout_if_present control-plane nginx-workflow-approval-gateway
   assert_workflow_gateway_prompt_bridge_finalization_route
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true
 fi
