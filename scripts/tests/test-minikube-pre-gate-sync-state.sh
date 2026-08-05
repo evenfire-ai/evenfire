@@ -120,10 +120,19 @@ fi
 if contains 'nginx.conf is mounted through a subPath' &&
    contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
    contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
-   contains 'rollout_if_present control-plane nginx-workflow-approval-gateway'; then
+   contains 'rollout_if_present control-plane nginx-workflow-approval-gateway' &&
+   contains 'assert_workflow_gateway_prompt_bridge_finalization_route'; then
   pass "pre-gate sync refreshes the subPath-mounted workflow gateway after deployment changes"
 else
   fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
+fi
+
+if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&
+   runtime_contains 'nginx -T' &&
+   runtime_contains 'invocations/[^/]+/finalize'; then
+  pass "pre-gate sync fails closed when the running gateway lacks SDK finalization"
+else
+  fail "pre-gate sync does not verify the running SDK finalization route"
 fi
 
 if contains 'fingerprint_dir packages/workflow-runtime-core' &&

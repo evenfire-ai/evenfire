@@ -358,6 +358,8 @@ if [[ "${cluster_changed}" == "true" ]]; then
     rollout_if_present control-plane nginx-workflow-approval-gateway
   fi
 
+  assert_workflow_gateway_prompt_bridge_finalization_route
+
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui
@@ -388,5 +390,6 @@ else
   log "No cluster sync required before ${GATE_NAME}"
   assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
+  assert_workflow_gateway_prompt_bridge_finalization_route
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true
 fi

@@ -59,6 +59,35 @@ rollout_namespace_deployments() {
   done <<<"${names}"
 }
 
+# The workflow gateway mounts nginx.conf through a subPath, so a ConfigMap can
+# be updated while a running pod continues serving the previous route table.
+# The manifest-level test prevents omission in source; this runtime assertion
+# prevents a stale or partially applied profile from being used for an SDK gate.
+assert_workflow_gateway_prompt_bridge_finalization_route() {
+  local deployment="nginx-workflow-approval-gateway"
+  local namespace="control-plane"
+  local pod
+
+  if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
+    log "ERROR: ${namespace}/${deployment} is absent; refusing Plugin Workload SDK gate"
+    return 1
+  fi
+
+  pod="$(${KC} get pods -n "${namespace}" -l app="${deployment}" \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -z "${pod}" ]]; then
+    log "ERROR: ${namespace}/${deployment} has no Running pod; refusing Plugin Workload SDK gate"
+    return 1
+  fi
+
+  if ! ${KC} exec -n "${namespace}" "${pod}" -c nginx -- nginx -T 2>&1 | \
+    grep -Fq 'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'; then
+    log "ERROR: running ${namespace}/${deployment} does not serve the SDK finalization route; refusing gate"
+    return 1
+  fi
+  log "Workflow gateway serves the SDK promptBridge finalization route"
+}
+
 gate_needs_registry() {
   [[ "${GATE_NAME}" == *registry* || "${GATE_NAME}" == *marketplace* || "${GATE_NAME}" == *plugin-workload-sdk* ]]
 }
