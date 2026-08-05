@@ -2,6 +2,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { SEMVER_RE, compareVersions, parseManifest } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
 const MANIFEST_PATH = 'external-rest-api/src/releaseManifest.ts'
@@ -30,16 +31,6 @@ function gitShow(ref, filePath) {
   } catch {
     return ''
   }
-}
-
-function parseManifest(raw) {
-  const match = raw.match(/export const releaseManifest: ReleaseManifest = (\{[\s\S]*?\n\})/)
-  if (!match) return null
-  const normalized = match[1]
-    .replace(/([{,]\s*)([a-zA-Z][a-zA-Z0-9]*):/g, '$1"$2":')
-    .replace(/'/g, '"')
-    .replace(/,\s*}/g, '}')
-  return JSON.parse(normalized)
 }
 
 function currentManifest() {
@@ -85,25 +76,6 @@ export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null,
     .replace(/"([^"]+)":/g, '$1:')
     .replace(/: "([^"]*)"/g, ": '$1'")}
 `
-}
-
-const SEMVER_RE = /^\d+\.\d+\.\d+$/
-
-// Numeric MAJOR.MINOR.PATCH comparison. Deliberately matches the semantics of
-// compareSemverLike in desktop-app/src/appService.ts:177, which is what the
-// update gate at :840 evaluates at runtime. No prerelease handling on either
-// side, so the two cannot disagree.
-//
-// TEMPORARY: Task 5 creates scripts/release/release-coordinates.mjs and
-// replaces this local definition with an import from it. It lives here now
-// only because that module does not exist yet.
-function compareVersions(a, b) {
-  const pa = a.split('.').map(Number)
-  const pb = b.split('.').map(Number)
-  for (let i = 0; i < 3; i += 1) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1
-  }
-  return 0
 }
 
 function validate(manifest, versions, options = {}) {

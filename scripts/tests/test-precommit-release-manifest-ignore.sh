@@ -31,6 +31,7 @@ make_repo() {
   cp "$REPO_ROOT/scripts/precommit/bump-staged-package-versions.mjs" "$d/scripts/precommit/"
   cp "$REPO_ROOT/scripts/prettier/paths.mjs" "$d/scripts/prettier/"
   cp "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" "$d/scripts/release/"
+  cp "$REPO_ROOT/scripts/release/release-coordinates.mjs" "$d/scripts/release/"
   printf '{\n  "name": "external-rest-api",\n  "version": "0.1.60"\n}\n' \
     > "$d/external-rest-api/package.json"
   printf '{\n  "name": "rpc-proxy",\n  "version": "0.1.51"\n}\n' \

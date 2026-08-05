@@ -240,11 +240,339 @@ assert_ordering_check_fails_against_unpatched_script() {
   rm -rf "$d"
 }
 
+assert_prepare_release_writes_every_coordinate() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  if ( cd "$d" && node scripts/release/prepare-release.mjs \
+        --version 0.6.0 --release-id test-1111111 >/dev/null 2>&1 ); then
+    local pv lv dv min
+    pv="$(grep '"version"' "$d/desktop-app/package.json" | sed 's/.*: "\(.*\)".*/\1/')"
+    lv="$(node -e 'const j=require(process.argv[1]);console.log(j.version,j.packages[""].version)' "$d/desktop-app/package-lock.json")"
+    dv="$(manifest_field "$d" desktopVersion)"
+    min="$(manifest_field "$d" minimumDesktopVersion)"
+    if [ "$pv" = "0.6.0" ] && [ "$lv" = "0.6.0 0.6.0" ] && [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ]; then
+      pass "prepare-release writes package.json, both lockfile sites, and the manifest"
+    else
+      fail "coordinates after prepare-release: pkg=$pv lock='$lv' manifest=$dv floor=$min"
+    fi
+  else
+    fail "prepare-release.mjs exited non-zero"
+  fi
+  rm -rf "$d"
+}
+
+assert_prepare_release_leaves_a_same_string_dependency_alone() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  node -e '
+    const fs = require("fs"), p = process.argv[1]
+    const j = JSON.parse(fs.readFileSync(p, "utf8"))
+    j.dependencies = { "some-dep": "0.5.0" }
+    fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
+  ' "$d/desktop-app/package.json"
+
+  ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t >/dev/null 2>&1 )
+  local dep; dep="$(node -e 'console.log(require(process.argv[1]).dependencies["some-dep"])' "$d/desktop-app/package.json")"
+  if [ "$dep" = "0.5.0" ]; then
+    pass "a dependency pinned to the old version string is untouched"
+  else
+    fail "dependency pin was rewritten to $dep"
+  fi
+  rm -rf "$d"
+}
+
+assert_prepare_release_rejects_a_non_greater_version() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.5.0 --release-id t >/dev/null 2>&1 ); then
+    fail "prepare-release accepted a version not greater than current"
+  else
+    pass "prepare-release rejects a version not greater than current"
+  fi
+  rm -rf "$d"
+}
+
+assert_prepare_release_rejects_a_bad_version_shape() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6 --release-id t >/dev/null 2>&1 ); then
+    fail "prepare-release accepted a non MAJOR.MINOR.PATCH version"
+  else
+    pass "prepare-release rejects a non MAJOR.MINOR.PATCH version"
+  fi
+  rm -rf "$d"
+}
+
+assert_release_id_is_never_local() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "prepare-release ran without --release-id"
+  else
+    pass "prepare-release requires an explicit --release-id"
+  fi
+  rm -rf "$d"
+}
+
+assert_validate_release_tag_catches_each_coordinate() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  if ! ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag rejected a coherent tree"
+    rm -rf "$d"; return
+  fi
+
+  # This breaks a single `equals` coordinate (desktop-app/package.json) and
+  # confirms the checker catches it. The other assertion kinds -- floor,
+  # explicit, counter -- get their own dedicated negative cases below
+  # (assert_floor_above_release_version_is_rejected_by_the_checker,
+  # assert_floor_non_semver_is_rejected_by_the_checker,
+  # assert_explicit_release_id_is_rejected_when_local_or_empty,
+  # assert_counter_mismatch_is_rejected_by_the_checker), not by looping here.
+  local broke_all=1
+  node -e '
+    const fs=require("fs"),p=process.argv[1]
+    const j=JSON.parse(fs.readFileSync(p,"utf8")); j.version="0.6.1"
+    fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n")
+  ' "$d/desktop-app/package.json"
+  ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ) && broke_all=0
+
+  if [ "$broke_all" = "1" ]; then
+    pass "validate-release-tag catches a disagreeing coordinate"
+  else
+    fail "validate-release-tag passed with desktop-app/package.json at 0.6.1"
+  fi
+  rm -rf "$d"
+}
+
+assert_validate_release_tag_rejects_a_renamed_manifest_export() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/desktop-app" "$d/external-rest-api/src" "$d/rpc-proxy"
+  printf '{\n  "name": "desktop-app",\n  "version": "0.6.0"\n}\n' > "$d/desktop-app/package.json"
+  printf '{\n  "name": "desktop-app",\n  "version": "0.6.0",\n  "packages": {\n    "": {\n      "version": "0.6.0"\n    }\n  }\n}\n' > "$d/desktop-app/package-lock.json"
+  printf '{\n  "name": "external-rest-api",\n  "version": "0.1.60"\n}\n' > "$d/external-rest-api/package.json"
+  printf '{\n  "name": "rpc-proxy",\n  "version": "0.1.51"\n}\n' > "$d/rpc-proxy/package.json"
+  # The export is renamed but the field values are otherwise coherent with
+  # the release. A field-by-field regex over the whole file would still find
+  # these lines and pass; manifestField must instead fail to find the
+  # `releaseManifest` export at all, so every manifest coordinate reads as
+  # empty and the checker rejects the tree.
+  cat > "$d/external-rest-api/src/releaseManifest.ts" <<'EOF'
+export type ReleaseManifest = {
+  releaseId: string
+  externalRestApiVersion: string
+  rpcProxyVersion: string
+  desktopVersion: string
+  minimumDesktopVersion: string
+}
+
+export const releaseManifestRENAMED: ReleaseManifest = {
+  releaseId: 'fixture-0000000',
+  externalRestApiVersion: '0.1.60',
+  rpcProxyVersion: '0.1.51',
+  desktopVersion: '0.6.0',
+  minimumDesktopVersion: '0.1.252',
+}
+EOF
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag passed against a renamed releaseManifest export"
+  else
+    pass "validate-release-tag rejects a manifest whose export is renamed"
+  fi
+  rm -rf "$d"
+}
+
+assert_validate_release_tag_ignores_a_decoy_object() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/desktop-app" "$d/external-rest-api/src" "$d/rpc-proxy"
+  printf '{\n  "name": "desktop-app",\n  "version": "0.6.0"\n}\n' > "$d/desktop-app/package.json"
+  printf '{\n  "name": "desktop-app",\n  "version": "0.6.0",\n  "packages": {\n    "": {\n      "version": "0.6.0"\n    }\n  }\n}\n' > "$d/desktop-app/package-lock.json"
+  printf '{\n  "name": "external-rest-api",\n  "version": "0.1.60"\n}\n' > "$d/external-rest-api/package.json"
+  printf '{\n  "name": "rpc-proxy",\n  "version": "0.1.51"\n}\n' > "$d/rpc-proxy/package.json"
+  # A decoy object with the SAME field names sits above the real export and
+  # carries values that would pass. The real `releaseManifest` export below
+  # it carries values that must fail. A field-by-field regex over the whole
+  # file matches the decoy's lines first (they appear first) and passes; the
+  # checker must read the actual `releaseManifest` export instead.
+  cat > "$d/external-rest-api/src/releaseManifest.ts" <<'EOF'
+export type ReleaseManifest = {
+  releaseId: string
+  externalRestApiVersion: string
+  rpcProxyVersion: string
+  desktopVersion: string
+  minimumDesktopVersion: string
+}
+
+const decoy = {
+  releaseId: 'decoy-0000000',
+  externalRestApiVersion: '0.1.60',
+  rpcProxyVersion: '0.1.51',
+  desktopVersion: '0.6.0',
+  minimumDesktopVersion: '0.1.252',
+}
+
+export const releaseManifest: ReleaseManifest = {
+  releaseId: 'wrong-0000000',
+  externalRestApiVersion: '9.9.9',
+  rpcProxyVersion: '9.9.9',
+  desktopVersion: '9.9.9',
+  minimumDesktopVersion: '9.9.9',
+}
+EOF
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag passed by reading a decoy object instead of the real export"
+  else
+    pass "validate-release-tag reads the real releaseManifest export, not a decoy placed above it"
+  fi
+  rm -rf "$d"
+}
+
+assert_floor_is_checked_as_a_ceiling_not_an_equality() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    pass "a floor below the release version is accepted, not required to equal it"
+  else
+    fail "validate-release-tag required minimumDesktopVersion to equal the version"
+  fi
+  rm -rf "$d"
+}
+
+assert_floor_above_release_version_is_rejected_by_the_checker() {
+  local d; d="$(mktemp -d)"
+  # Floor 0.9.9 is ABOVE the release version 0.6.0 -- the dangerous
+  # direction. This whole workstream exists because a wrong floor
+  # force-updates every existing desktop install; the checker must catch
+  # this before the tag, not just accept a floor that happens to be low.
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.9.9 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag accepted a floor (0.9.9) above the release version (0.6.0)"
+  else
+    pass "validate-release-tag rejects a floor above the release version"
+  fi
+  rm -rf "$d"
+}
+
+assert_floor_non_semver_is_rejected_by_the_checker() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag accepted a non MAJOR.MINOR.PATCH floor (0.1)"
+  else
+    pass "validate-release-tag rejects a non MAJOR.MINOR.PATCH floor"
+  fi
+  rm -rf "$d"
+}
+
+assert_explicit_release_id_is_rejected_when_local_or_empty() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  local manifest="$d/external-rest-api/src/releaseManifest.ts"
+
+  sed -i.bak "s/releaseId: 'fixture-0000000'/releaseId: 'local'/" "$manifest"
+  local local_rejected=0
+  ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ) || local_rejected=1
+
+  sed -i.bak "s/releaseId: 'local'/releaseId: ''/" "$manifest"
+  local empty_rejected=0
+  ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ) || empty_rejected=1
+
+  if [ "$local_rejected" = "1" ] && [ "$empty_rejected" = "1" ]; then
+    pass "validate-release-tag rejects releaseId of 'local' and of an empty string"
+  else
+    fail "expected both 'local' and empty releaseId rejected (local_rejected=$local_rejected empty_rejected=$empty_rejected)"
+  fi
+  rm -rf "$d"
+}
+
+assert_counter_mismatch_is_rejected_by_the_checker() {
+  local d; d="$(mktemp -d)"
+  # manifest externalRestApiVersion (0.1.61) disagrees with
+  # external-rest-api/package.json (0.1.60) -- checked against the counter's
+  # OWN package, not the release version.
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.61 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
+    fail "validate-release-tag accepted externalRestApiVersion disagreeing with external-rest-api/package.json"
+  else
+    pass "validate-release-tag rejects a counter that disagrees with its own package.json"
+  fi
+  rm -rf "$d"
+}
+
+assert_every_coordinate_has_a_case() {
+  local declared cases
+  declared="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/release-coordinates.mjs")
+      .then(m => console.log(m.COORDINATES.length))
+  ')"
+  # Count DEFINITIONS only. A bare "^assert_" also counts every invocation in
+  # the call block at the bottom, which roughly doubles the number and makes
+  # this check pass no matter what.
+  cases="$(grep -cE '^assert_[a-z_]+\(\) \{' "$REPO_ROOT/scripts/tests/test-release-coordinates.sh")"
+  if [ "$cases" -ge "$declared" ]; then
+    pass "each declared coordinate has at least one case ($declared coordinates, $cases assertions)"
+  else
+    fail "$declared coordinates declared but only $cases assertions"
+  fi
+}
+
+# Guards against the opposite failure mode from assert_every_coordinate_has_a_case:
+# a case can be DEFINED (so it counts toward that check) and still never be
+# CALLED from the block below, which makes it permanently dead -- the suite
+# prints all-PASS while the dead case never runs. A stated PASS-count in a
+# plan document is a description, not a source of truth; this check compares
+# against what the file itself defines and calls, so it can't go stale that
+# way.
+assert_every_defined_case_is_invoked() {
+  local defined invoked missing
+  defined="$(grep -oE '^assert_[a-z_]+\(\) \{' "$REPO_ROOT/scripts/tests/test-release-coordinates.sh" \
+    | sed -E 's/\(\) \{$//' | sort -u)"
+  invoked="$(grep -oE '^assert_[a-z_]+$' "$REPO_ROOT/scripts/tests/test-release-coordinates.sh" | sort -u)"
+  missing="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$invoked"))"
+  if [ -z "$missing" ]; then
+    pass "every defined assert_ case is invoked in the call block"
+  else
+    fail "defined but never invoked: $(printf '%s ' $missing)"
+  fi
+}
+
 assert_floor_is_not_dragged_by_a_desktop_bump
 assert_floor_above_desktop_is_rejected
 assert_explicit_minimum_flag_is_honoured
 assert_unreadable_manifest_does_not_synthesize_a_floor
 assert_previous_ref_does_not_revert_a_raised_floor
 assert_ordering_check_fails_against_unpatched_script
+assert_prepare_release_writes_every_coordinate
+assert_prepare_release_leaves_a_same_string_dependency_alone
+assert_prepare_release_rejects_a_non_greater_version
+assert_prepare_release_rejects_a_bad_version_shape
+assert_release_id_is_never_local
+assert_validate_release_tag_catches_each_coordinate
+assert_validate_release_tag_rejects_a_renamed_manifest_export
+assert_validate_release_tag_ignores_a_decoy_object
+assert_floor_is_checked_as_a_ceiling_not_an_equality
+assert_floor_above_release_version_is_rejected_by_the_checker
+assert_floor_non_semver_is_rejected_by_the_checker
+assert_explicit_release_id_is_rejected_when_local_or_empty
+assert_counter_mismatch_is_rejected_by_the_checker
+assert_every_coordinate_has_a_case
+assert_every_defined_case_is_invoked
 
 exit $FAIL
