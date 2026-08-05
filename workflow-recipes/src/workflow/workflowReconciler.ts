@@ -1138,13 +1138,20 @@ export class WorkflowReconciler {
     networkPolicyNames: string[],
     options: PluginWorkloadSdkCleanupOptions = {}
   ): Promise<void> {
-    const checks: Array<Promise<unknown>> = [
-      this.deps.coreApi.readNamespacedSecret({
-        name: buildPluginWorkloadSdkTokenSecretName(recipeName),
-        namespace,
-      }),
-      ...networkPolicyNames.map(name =>
-        this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    // Keep the API calls lazy until every precondition (notably pod deletion)
+    // has completed. Starting a read and then awaiting the pod poll leaves a
+    // rejection from an already-absent object temporarily unhandled; Node can
+    // terminate the controller before the later Promise.allSettled observes it.
+    // Lazy checks preserve the fail-closed rule while making teardown safe for
+    // the normal idempotent 404 path.
+    const checks: Array<() => Promise<unknown>> = [
+      () =>
+        this.deps.coreApi.readNamespacedSecret({
+          name: buildPluginWorkloadSdkTokenSecretName(recipeName),
+          namespace,
+        }),
+      ...networkPolicyNames.map(
+        name => () => this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
       ),
     ]
     if (!options.preserveWorkflowRuntime) {
@@ -1160,29 +1167,34 @@ export class WorkflowReconciler {
       if (!podGone)
         throw new Error(`Plugin Workload SDK pod for ${recipeName} still exists after teardown`)
       checks.push(
-        this.deps.coreApi.readNamespacedSecret({
-          name: `wf-${recipeName}-mcp-host-runtime-tokens`,
-          namespace,
-        }),
-        this.deps.coreApi.readNamespacedService({
-          name: buildMcpHostServiceName(recipeName),
-          namespace,
-        }),
-        this.deps.coreApi.readNamespacedEndpoints({
-          name: buildMcpHostServiceName(recipeName),
-          namespace,
-        }),
-        this.deps.networkingApi.listNamespacedNetworkPolicy({
-          namespace,
-          labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
-        }),
-        this.deps.networkingApi.listNamespacedNetworkPolicy({
-          namespace: this.deps.config.mcpServerNamespace,
-          labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
-        })
+        () =>
+          this.deps.coreApi.readNamespacedSecret({
+            name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+            namespace,
+          }),
+        () =>
+          this.deps.coreApi.readNamespacedService({
+            name: buildMcpHostServiceName(recipeName),
+            namespace,
+          }),
+        () =>
+          this.deps.coreApi.readNamespacedEndpoints({
+            name: buildMcpHostServiceName(recipeName),
+            namespace,
+          }),
+        () =>
+          this.deps.networkingApi.listNamespacedNetworkPolicy({
+            namespace,
+            labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+          }),
+        () =>
+          this.deps.networkingApi.listNamespacedNetworkPolicy({
+            namespace: this.deps.config.mcpServerNamespace,
+            labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+          })
       )
     }
-    const results = await Promise.allSettled(checks)
+    const results = await Promise.allSettled(checks.map(check => check()))
     const unexpected = results.find(result => {
       if (result.status !== 'fulfilled') return false
       const value = result.value as { items?: unknown[] } | undefined

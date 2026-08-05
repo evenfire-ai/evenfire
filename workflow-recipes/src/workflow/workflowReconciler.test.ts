@@ -1649,6 +1649,28 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
   })
 
+  it('defers absence reads until pod deletion completes so 404s cannot become unhandled rejections', async () => {
+    const events: string[] = []
+    crashRecoveryMocks.waitForPodDeletion.mockImplementationOnce(async () => {
+      events.push('wait-start')
+      await Promise.resolve()
+      events.push('wait-end')
+      return true
+    })
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(async () => {
+      events.push('network-policy-read')
+      throw { code: 404 }
+    })
+
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(reconciler.cleanupPluginWorkloadSdk('sdk-only')).resolves.toBeUndefined()
+
+    expect(events.indexOf('wait-start')).toBeGreaterThanOrEqual(0)
+    expect(events.indexOf('wait-end')).toBeGreaterThan(events.indexOf('wait-start'))
+    expect(events.indexOf('network-policy-read')).toBeGreaterThan(events.indexOf('wait-end'))
+  })
+
   it('removes only SDK-owned authority from a hybrid workflow runtime', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
 
