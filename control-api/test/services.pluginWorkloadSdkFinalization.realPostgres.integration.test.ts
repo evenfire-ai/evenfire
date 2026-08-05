@@ -26,6 +26,17 @@ async function commit(client: PoolClient): Promise<void> {
   await client.query('COMMIT')
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(value => {
+    resolve = value
+  })
+  return { promise, resolve }
+}
+
 describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () => {
   const database = `control_api_sdk_finalization_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -180,41 +191,88 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     }
   })
 
-  it('serializes concurrent identical finalizers without a unique-violation response', async () => {
+  it('deterministically re-reads the sweeper outcome after ON CONFLICT', async () => {
     const seedClient = await dbPool.connect()
-    const firstClient = await dbPool.connect()
-    const secondClient = await dbPool.connect()
+    const sweeperClient = await dbPool.connect()
+    const finalizerClient = await dbPool.connect()
     try {
       await begin(seedClient)
-      const input = await seedAttempt(seedClient)
+      const input = await seedAttempt(seedClient, {
+        status: 'provider_unavailable',
+        leaseExpired: true,
+      })
       await commit(seedClient)
-      await Promise.all([begin(firstClient), begin(secondClient)])
-      const firstPromise = finalizePromptBridgeInTransaction(input, firstClient)
-      const secondPromise = finalizePromptBridgeInTransaction(input, secondClient)
-      const winner = await Promise.race([
-        firstPromise.then(result => ({ slot: 'first' as const, result })),
-        secondPromise.then(result => ({ slot: 'second' as const, result })),
-      ])
-      if (winner.slot === 'first') {
-        await commit(firstClient)
-      } else {
-        await commit(secondClient)
+
+      await begin(sweeperClient)
+      // The sweeper writes its immutable outcome but keeps the transaction
+      // open. The finalizer therefore cannot see the row in its first
+      // READ COMMITTED ledger lookup, while the invocation row remains locked.
+      await failStaleInvocationsInTransaction(1, sweeperClient)
+
+      const initialLedgerRead = deferred<void>()
+      const releaseInitialLedgerRead = deferred<void>()
+      let ledgerReadCount = 0
+      let conflictInsertRowCount: number | null = null
+      const finalizerDb = {
+        query: async (statement: string, values?: unknown[]) => {
+          const result = await finalizerClient.query(statement, values)
+          const isLedgerRead =
+            /^\s*SELECT/i.test(statement) &&
+            /FROM plugin_workload_sdk_spend_outcomes/i.test(statement)
+          if (isLedgerRead) {
+            ledgerReadCount += 1
+            if (ledgerReadCount === 1 && result.rows.length === 0) {
+              initialLedgerRead.resolve()
+              await releaseInitialLedgerRead.promise
+            }
+          }
+          if (
+            /INSERT INTO plugin_workload_sdk_spend_outcomes/i.test(statement) &&
+            /ON CONFLICT \(provider_attempt_id\) DO NOTHING/i.test(statement)
+          ) {
+            conflictInsertRowCount = result.rowCount
+          }
+          return result
+        },
       }
-      const first = winner.slot === 'first' ? winner.result : await firstPromise
-      const second = winner.slot === 'second' ? winner.result : await secondPromise
-      if (winner.slot === 'first') await commit(secondClient)
-      else await commit(firstClient)
-      const results = [first, second]
-      expect(results.map(result => result.outcome)).toEqual(['unknown', 'unknown'])
-      expect(results.filter(result => result.idempotent)).toHaveLength(1)
+
+      await begin(finalizerClient)
+      const finalizationPromise = finalizePromptBridgeInTransaction(input, finalizerDb)
+
+      // This barrier proves the finalizer completed its initial empty read
+      // before the sweeper commits. Releasing it earlier would let the first
+      // read observe the committed outcome and bypass the ON CONFLICT branch.
+      await initialLedgerRead.promise
+      await commit(sweeperClient)
+      releaseInitialLedgerRead.resolve()
+
+      const result = await finalizationPromise
+      await commit(finalizerClient)
+
+      expect(result).toMatchObject({
+        status: 'provider_unavailable',
+        outcome: 'unknown',
+        idempotent: true,
+        usageAccepted: false,
+      })
+      expect(ledgerReadCount).toBe(2)
+      expect(conflictInsertRowCount).toBe(0)
+
+      const count = await dbPool.query(
+        `SELECT count(*)::int AS count
+           FROM plugin_workload_sdk_spend_outcomes
+          WHERE provider_attempt_id = $1`,
+        [input.providerAttemptId]
+      )
+      expect(count.rows[0]?.count).toBe(1)
     } finally {
       await Promise.all([
-        firstClient.query('ROLLBACK').catch(() => undefined),
-        secondClient.query('ROLLBACK').catch(() => undefined),
+        sweeperClient.query('ROLLBACK').catch(() => undefined),
+        finalizerClient.query('ROLLBACK').catch(() => undefined),
       ])
       seedClient.release()
-      firstClient.release()
-      secondClient.release()
+      sweeperClient.release()
+      finalizerClient.release()
     }
   })
 
