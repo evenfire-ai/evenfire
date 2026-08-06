@@ -66,6 +66,7 @@ function ControllerHarness() {
       <div data-testid="booting">{String(vm.booting)}</div>
       <div data-testid="busy">{String(vm.busy)}</div>
       <div data-testid="nav-item">{vm.navItem}</div>
+      <div data-testid="identity-provider-count">{vm.identityProviders.length}</div>
       {vm.toasts.map(toast => (
         <div
           key={toast.id}
@@ -86,6 +87,14 @@ function ControllerHarness() {
       </button>
       <button type="button" onClick={() => void vm.handlePasswordLogin()}>
         Login
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void vm.handleMicrosoftIdentityProviderLogin(vm.identityProviders[0]?.id || '')
+        }
+      >
+        Login with Microsoft
       </button>
       <button type="button" onClick={() => vm.handleNavSelect('workflows')}>
         Open workflows
@@ -157,6 +166,31 @@ describe('useWorkspaceController', () => {
 
     await waitFor(() => expect(screen.getByTestId('busy').textContent).toBe('false'))
     await waitFor(() => expect(screen.getByTestId('nav-item').textContent).toBe('workflows'))
+  })
+
+  it('exposes Microsoft identity providers and login actions through the coordinator', async () => {
+    const clerum = installClerumHarness({
+      identityProviders: [
+        {
+          id: 'microsoft-connection-1',
+          provider: 'microsoft',
+          displayName: 'Example Microsoft',
+        },
+      ],
+    })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(clerum.getIdentityProviders).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByTestId('identity-provider-count').textContent).toBe('1'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Login with Microsoft' }))
+
+    await waitFor(() =>
+      expect(clerum.startMicrosoftIdentityProviderLogin).toHaveBeenCalledWith(
+        'microsoft-connection-1'
+      )
+    )
   })
 
   it('checks desktop release status before authenticated workspace hydration finishes', async () => {

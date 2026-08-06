@@ -10,6 +10,7 @@ export type AuthState = {
 export type AuthContextValue = {
   authState: AuthState
   login: (email: string, password: string) => Promise<PasswordLoginResponse>
+  completeIdentityProviderLogin: (code: string) => Promise<PasswordLoginResponse>
   logout: () => void
   checkAuth: () => Promise<void>
 }

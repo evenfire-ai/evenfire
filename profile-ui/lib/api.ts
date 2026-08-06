@@ -14,6 +14,10 @@ import type {
   PasswordLoginResponse,
 } from '../app/types/api'
 import type {
+  IdentityProviderListResponse,
+  PublicIdentityProviderConnection,
+} from '../app/types/identityProviders'
+import type {
   Channels,
   ManageableTeam,
   ManagedMember,
@@ -28,6 +32,7 @@ import type {
 export type { InvitationPreview } from '../app/types/api'
 
 let globalHandleAuthError: (() => void) | null = null
+const IDENTITY_PROVIDER_FLOW_BINDING_KEY = 'evenfireIdentityProviderFlowBinding'
 
 type ApiRequestOptions = {
   silentUnauthorized?: boolean
@@ -175,6 +180,55 @@ export async function loginWithPassword(
   clearToken()
   return (await res.json()) as PasswordLoginResponse
 }
+
+export async function getIdentityProviders(): Promise<IdentityProviderListResponse> {
+  return apiGet('/api/v1/auth/providers') as Promise<IdentityProviderListResponse>
+}
+
+export async function startMicrosoftIdentityProviderLogin(input: {
+  connectionId: string
+  flow: 'profile_login' | 'invitation_link'
+  returnUrl: string
+  invitationToken?: string
+}): Promise<{ authorizeUrl: string }> {
+  const bytes = new Uint8Array(32)
+  window.crypto.getRandomValues(bytes)
+  const flowBinding = btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+  window.sessionStorage.setItem(IDENTITY_PROVIDER_FLOW_BINDING_KEY, flowBinding)
+  try {
+    return (await apiSend('POST', '/api/v1/auth/providers/microsoft/start', {
+      ...input,
+      flowBinding,
+    })) as { authorizeUrl: string }
+  } catch (error) {
+    if (window.sessionStorage.getItem(IDENTITY_PROVIDER_FLOW_BINDING_KEY) === flowBinding) {
+      window.sessionStorage.removeItem(IDENTITY_PROVIDER_FLOW_BINDING_KEY)
+    }
+    throw error
+  }
+}
+
+export async function exchangeIdentityProviderLoginCode(
+  code: string
+): Promise<PasswordLoginResponse> {
+  const flowBinding = window.sessionStorage.getItem(IDENTITY_PROVIDER_FLOW_BINDING_KEY) || ''
+  if (!flowBinding) throw new Error('Microsoft sign-in was not started in this browser tab.')
+  try {
+    const response = (await apiSend('POST', '/api/v1/auth/providers/exchange', {
+      code,
+      flowBinding,
+    })) as PasswordLoginResponse
+    clearToken()
+    return response
+  } finally {
+    window.sessionStorage.removeItem(IDENTITY_PROVIDER_FLOW_BINDING_KEY)
+  }
+}
+
+export type { PublicIdentityProviderConnection }
 
 export async function logoutProfileUI(): Promise<void> {
   try {

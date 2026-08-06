@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import Image from 'next/image'
 import { Button } from '@components/Button'
 import { FormField } from '@components/FormField'
 import { TextInput } from '@components/TextInput'
@@ -17,6 +18,7 @@ import {
   acceptInvitation,
   getEvenfireDownloadUrl,
   setupInvitationPasswordWithToken,
+  startMicrosoftIdentityProviderLogin,
 } from '@lib/api'
 import {
   buildInvitationHeading,
@@ -32,6 +34,13 @@ function statusForInvitation(invitation: InvitationPreview): string {
     return invitation.status === 'accepted'
       ? 'Your password has been updated.'
       : 'Set a new password for your Evenfire account.'
+  }
+  if (
+    invitation.identityProvider === 'microsoft' &&
+    invitation.status === 'accepted' &&
+    !invitation.identityProviderLinked
+  ) {
+    return 'Connect your Microsoft work or school account to finish joining Evenfire.'
   }
   const teamNames =
     Array.isArray(invitation.teams) && invitation.teams.length > 0
@@ -81,7 +90,8 @@ export function InvitationClient({
   const [now, setNow] = useState(() => Date.now())
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
+  const [usePasswordInstead, setUsePasswordInstead] = useState(false)
+  const [submitting, setSubmitting] = useState<'accept' | 'password' | 'provider' | null>(null)
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -110,6 +120,7 @@ export function InvitationClient({
 
   const downloadUrl = getEvenfireDownloadUrl()
   const isPasswordReset = invitation?.purpose === 'password_reset'
+  const isMicrosoftInvitation = invitation?.identityProvider === 'microsoft'
   const teamLabel = invitation
     ? buildInvitationTeamsLabel(invitation.teams, invitation.teamName)
     : ''
@@ -218,6 +229,28 @@ export function InvitationClient({
     }
   }
 
+  async function handleMicrosoftConnect() {
+    if (!invitation?.identityProviderConnectionId || busy || actionInFlightRef.current) return
+    actionInFlightRef.current = true
+    setSubmitting('provider')
+    setError('')
+    try {
+      const callbackUrl = new URL('/auth/provider-callback', window.location.origin)
+      callbackUrl.searchParams.set('next', `/invitations/${encodeURIComponent(invitationToken)}`)
+      const response = await startMicrosoftIdentityProviderLogin({
+        connectionId: invitation.identityProviderConnectionId,
+        flow: 'invitation_link',
+        invitationToken,
+        returnUrl: callbackUrl.toString(),
+      })
+      window.location.assign(response.authorizeUrl)
+    } catch (nextError) {
+      actionInFlightRef.current = false
+      setSubmitting(null)
+      setError(nextError instanceof Error ? nextError.message : 'Microsoft connection failed')
+    }
+  }
+
   function handlePasswordAction(
     event: MouseEvent<HTMLButtonElement> | PointerEvent<HTMLButtonElement>
   ) {
@@ -292,8 +325,33 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? null : (isPasswordReset && invitation.status === 'pending') ||
-          (invitation.status === 'accepted' && invitation.passwordPending) ? (
+        {!invitation ? null : isMicrosoftInvitation &&
+          invitation.status === 'accepted' &&
+          !invitation.identityProviderLinked &&
+          !usePasswordInstead ? (
+          <div className="stack">
+            <Button
+              type="button"
+              className="cu-provider-login__button"
+              disabled={busy}
+              onClick={() => void handleMicrosoftConnect()}
+            >
+              <Image src="/brand/microsoft.svg" alt="" width={21} height={21} aria-hidden="true" />
+              {submitting === 'provider' ? 'Opening Microsoft...' : 'Connect with Microsoft'}
+            </Button>
+            <button
+              type="button"
+              className="text-link cu-auth-secondary-action"
+              disabled={busy}
+              onClick={() => setUsePasswordInstead(true)}
+            >
+              Use password instead
+            </button>
+          </div>
+        ) : (isPasswordReset && invitation.status === 'pending') ||
+          (invitation.status === 'accepted' &&
+            invitation.passwordPending &&
+            (!isMicrosoftInvitation || usePasswordInstead)) ? (
           <div className="stack">
             <div className="form-card">
               <strong>{isPasswordReset ? 'Set a new password' : 'Set your password'}</strong>
@@ -338,6 +396,16 @@ export function InvitationClient({
                 isPasswordReset ? 'Reset password' : 'Set password and continue'
               )}
             </Button>
+            {isMicrosoftInvitation ? (
+              <button
+                type="button"
+                className="text-link cu-auth-secondary-action"
+                disabled={busy}
+                onClick={() => setUsePasswordInstead(false)}
+              >
+                Use Microsoft instead
+              </button>
+            ) : null}
           </div>
         ) : invitation.status === 'accepted' ? (
           <div className="stack">

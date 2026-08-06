@@ -259,6 +259,48 @@ code {
   color: var(--cu-text-muted);
 }
 
+.cu-provider-login,
+.cu-auth-secondary-actions {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-provider-login__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-provider-login__button img {
+  flex: 0 0 auto;
+}
+
+.cu-auth-secondary-action {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cu-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8em;
+}
+
+.cu-auth-secondary-action:hover:not(:disabled) {
+  color: var(--cu-link-hover);
+}
+
+.cu-provider-callback {
+  display: grid;
+  justify-items: start;
+  gap: var(--cu-space-3);
+}
+
+.cu-provider-callback > * {
+  margin: 0;
+}
+
 .cu-field {
   display: flex;
   flex-direction: column;

@@ -185,6 +185,18 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0067_llm_runtime_access_profiles'
     )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0090_identity_provider_connections'
+    )
+    expect(secondVersions.rows.map(row => row.version)).not.toContain(
+      '0069_identity_provider_setup_sessions'
+    )
+    expect(secondVersions.rows.map(row => row.version)).not.toContain(
+      '0070_identity_provider_login_flow_binding'
+    )
+    expect(secondVersions.rows.map(row => row.version)).not.toContain(
+      '0071_identity_provider_runtime_access'
+    )
 
     await dbPool.query(`
       DELETE FROM schema_migrations
@@ -270,6 +282,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           'infrastructure_cost_daily_components',
           'infrastructure_price_snapshots',
           'infrastructure_telemetry_events',
+          'identity_provider_connections',
+          'identity_provider_identities',
+          'identity_provider_login_codes',
+          'identity_provider_oauth_states',
+          'identity_provider_setup_sessions',
+          'identity_provider_team_mappings',
+          'invitation_agents',
           'llm_allowed_models',
           'llm_allowed_models_audit',
           'llm_catalog_sync_runs',
@@ -287,10 +306,17 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'governed_approval_prompt_history',
       'governed_event_stream',
       'governed_run_attribution_bindings',
+      'identity_provider_connections',
+      'identity_provider_identities',
+      'identity_provider_login_codes',
+      'identity_provider_oauth_states',
+      'identity_provider_setup_sessions',
+      'identity_provider_team_mappings',
       'infrastructure_cost_daily',
       'infrastructure_cost_daily_components',
       'infrastructure_price_snapshots',
       'infrastructure_telemetry_events',
+      'invitation_agents',
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
@@ -383,6 +409,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'infrastructure_cost_daily_components',
       'infrastructure_price_snapshots',
       'infrastructure_telemetry_events',
+      'identity_provider_connections',
+      'identity_provider_identities',
+      'identity_provider_login_codes',
+      'identity_provider_oauth_states',
+      'identity_provider_setup_sessions',
+      'identity_provider_team_mappings',
+      'invitation_agents',
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
@@ -399,6 +432,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       infrastructure_cost_daily_components: ['SELECT'],
       infrastructure_price_snapshots: ['SELECT'],
       infrastructure_telemetry_events: ['INSERT', 'SELECT'],
+      identity_provider_connections: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      identity_provider_identities: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      identity_provider_login_codes: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      identity_provider_oauth_states: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      identity_provider_setup_sessions: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      identity_provider_team_mappings: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      invitation_agents: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],

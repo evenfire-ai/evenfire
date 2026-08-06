@@ -18,6 +18,7 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  IdentityProviderConnection,
   MessageToolStep,
   PasswordLoginResult,
   PendingApprovalLite,
@@ -58,6 +59,13 @@ declare global {
         saveRuntimeConfig: (config: DesktopRuntimeConfig) => Promise<DesktopRuntimeConfigState>
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
+        getIdentityProviders: () => Promise<{ items: IdentityProviderConnection[] }>
+        startMicrosoftIdentityProviderLogin: (
+          connectionId: string
+        ) => Promise<{ authorizeUrl: string }>
+        completeIdentityProviderLogin: (code: string) => Promise<SessionState>
+        consumeIdentityProviderLoginCode: () => Promise<string | null>
+        onIdentityProviderLoginCode: (callback: () => void) => () => void
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>

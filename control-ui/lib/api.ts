@@ -1,5 +1,13 @@
 'use client'
 
+import type {
+  IdentityProviderConnection,
+  MicrosoftDirectoryResponse,
+  MicrosoftIdentityProviderSetup,
+  MicrosoftIdentityProviderSetupDraft,
+  MicrosoftIdentityProviderSetupResponse,
+  MicrosoftImportExecutionResult,
+} from './identityProviders.types'
 import {
   DEFAULT_MCP_SERVER_SECRET_NAMESPACE,
   DEFAULT_SANDBOX_SECRET_NAMESPACE,
@@ -268,6 +276,125 @@ export async function apiSend(
     throw formatApiError(res, text)
   }
   return parseJsonResponse(res)
+}
+
+export async function getIdentityProviderConnections() {
+  return apiGet('/api/v1/admin/identity-provider-connections') as Promise<{
+    callbackUrl: string
+    appName: string
+    items: IdentityProviderConnection[]
+  }>
+}
+
+export async function getActiveMicrosoftIdentityProviderSetup() {
+  return apiGet(
+    '/api/v1/admin/identity-provider-setups/microsoft/active'
+  ) as Promise<MicrosoftIdentityProviderSetupResponse>
+}
+
+export async function createMicrosoftIdentityProviderSetup(
+  input: {
+    connectionId?: string
+    currentStep?: number
+    draft?: MicrosoftIdentityProviderSetupDraft
+    replaceActive?: boolean
+  } = {}
+) {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/identity-provider-setups/microsoft',
+    input
+  ) as Promise<MicrosoftIdentityProviderSetupResponse>
+}
+
+export async function updateMicrosoftIdentityProviderSetup(
+  setupId: string,
+  input: { currentStep?: number; draft?: MicrosoftIdentityProviderSetupDraft }
+) {
+  return apiSend(
+    'PATCH',
+    `/api/v1/admin/identity-provider-setups/${encodeURIComponent(setupId)}`,
+    input
+  ) as Promise<{ setup: MicrosoftIdentityProviderSetup }>
+}
+
+export async function saveMicrosoftIdentityProviderSetupSecret(
+  setupId: string,
+  clientSecret: string
+) {
+  return apiSend(
+    'PUT',
+    `/api/v1/admin/identity-provider-setups/${encodeURIComponent(setupId)}/client-secret`,
+    { clientSecret }
+  ) as Promise<{ setup: MicrosoftIdentityProviderSetup }>
+}
+
+export async function authorizeMicrosoftIdentityProviderSetup(setupId: string, returnUrl: string) {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/identity-provider-setups/${encodeURIComponent(setupId)}/microsoft/authorize`,
+    { returnUrl }
+  ) as Promise<{ connection: IdentityProviderConnection; authorizeUrl: string }>
+}
+
+export async function executeMicrosoftIdentityProviderSetup(setupId: string) {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/identity-provider-setups/${encodeURIComponent(setupId)}/execute`
+  ) as Promise<MicrosoftImportExecutionResult>
+}
+
+export async function createMicrosoftIdentityProviderConnection(input: {
+  displayName: string
+  tenantId: string
+  clientId: string
+  clientSecret: string
+  returnUrl: string
+}) {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/identity-provider-connections/microsoft',
+    input
+  ) as Promise<{
+    connection: IdentityProviderConnection
+    authorizeUrl: string
+  }>
+}
+
+export async function disconnectIdentityProviderConnection(connectionId: string) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/identity-provider-connections/${encodeURIComponent(connectionId)}`
+  ) as Promise<{ disconnected: boolean }>
+}
+
+export async function updateMicrosoftIdentityProviderConnection(
+  connectionId: string,
+  input: {
+    displayName: string
+    tenantId: string
+    clientId: string
+    clientSecret?: string
+    clientSecretExpiresAt?: string | null
+    allowMemberLogin: boolean
+    returnUrl?: string
+  }
+) {
+  return apiSend(
+    'PATCH',
+    `/api/v1/admin/identity-provider-connections/${encodeURIComponent(connectionId)}`,
+    input
+  ) as Promise<{
+    connection: IdentityProviderConnection
+    requiresAuthorization: boolean
+    authorizeUrl?: string
+  }>
+}
+
+export async function getMicrosoftIdentityProviderDirectory(connectionId: string) {
+  return apiGet(
+    `/api/v1/admin/identity-provider-connections/${encodeURIComponent(connectionId)}/directory`
+  ) as Promise<MicrosoftDirectoryResponse>
 }
 
 // ── Global File System operator delegation (grant/share) ────────────────────
@@ -924,6 +1051,7 @@ export type AdminUserContext = {
   picture: string | null
   displayName: string | null
   channels: AdminUserChannels
+  emailManagedByIdentityProvider: boolean
 }
 
 export async function getAdminUsers(q = '') {

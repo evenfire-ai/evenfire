@@ -12,6 +12,10 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import {
+  startIdentityProviderOAuthCleanup,
+  stopIdentityProviderOAuthCleanup,
+} from './services/identityProviderOAuthCleanupCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
@@ -69,6 +73,7 @@ async function main(): Promise<void> {
   startPluginWorkloadSdkMaintenanceCron()
   startRateLimiterCleanup(config.approvalRlCleanupIntervalMs)
   startAdminRevokedTokenCleanup(config.adminRevokedTokenCleanupIntervalMs)
+  startIdentityProviderOAuthCleanup(config.identityProviderOAuthCleanupIntervalMs)
   startUsageRollupCron({
     fiveMinIntervalMs: config.usageRollup5MinIntervalMs,
     hourlyIntervalMs: config.usageRollupHourlyIntervalMs,
@@ -168,6 +173,7 @@ main().catch(error => {
   stopWorkflowApprovalNotificationDeliveryWorker()
   stopRateLimiterCleanup()
   stopAdminRevokedTokenCleanup()
+  stopIdentityProviderOAuthCleanup()
   stopUsageRollupCron()
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()

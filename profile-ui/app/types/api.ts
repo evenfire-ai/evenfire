@@ -13,6 +13,9 @@ export type InvitationPreview = {
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  identityProvider: 'microsoft' | null
+  identityProviderConnectionId: string | null
+  identityProviderLinked: boolean
 }
 
 export type AcceptInvitationResponse = {
@@ -28,6 +31,9 @@ export type AcceptInvitationResponse = {
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  identityProvider: 'microsoft' | null
+  identityProviderConnectionId: string | null
+  identityProviderLinked: boolean
   email: string
 }
 

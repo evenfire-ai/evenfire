@@ -7,6 +7,7 @@ import { createAdminControlAdminsRouter } from './controlAdmins.js'
 import { createAdminHostArtifactsRouter } from './hostArtifacts.js'
 import { createAdminHostEnvRouter } from './hostEnv.js'
 import { createAdminHostsOverviewRouter } from './hostsOverview.js'
+import { createAdminIdentityProvidersRouter } from './identityProviders.js'
 import { createAdminLlmModelsRouter } from './llmModels.js'
 import { createAdminLlmPricesRouter } from './llmPrices.js'
 import { createAdminOutputsRouter } from './outputs.js'
@@ -27,6 +28,7 @@ import { createAdminUsersRouter } from './users.js'
 export function createAdminRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createAdminHostsOverviewRouter(gateway))
+  router.use(createAdminIdentityProvidersRouter(gateway))
   router.use(createAdminControlAdminsRouter())
   router.use(createAdminHostArtifactsRouter(gateway))
   router.use(createAdminHostEnvRouter(gateway))

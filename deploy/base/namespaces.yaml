@@ -1,6 +1,23 @@
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: auth-ingress
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: auth-ingress
+    # Public OAuth callback edge. It should stay a plain non-root HTTP proxy
+    # with no Kubernetes API token and no writable root filesystem.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: channels
   labels:
     app.kubernetes.io/name: clerum

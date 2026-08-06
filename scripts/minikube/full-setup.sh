@@ -882,6 +882,11 @@ log "Re-applying generated ConfigMaps (control-api-public-key, clerum-wrc-public
 bash "${SCRIPT_DIR}/generate-keys.sh" --apply
 ok "Generated ConfigMaps re-applied after kustomize deploy"
 
+log "Synchronizing the public OAuth callback base with the active profile port..."
+MINIKUBE_PROFILE="${PROFILE}" \
+  bash "${SCRIPT_DIR}/sync-auth-callback-base-url.sh"
+ok "OAuth callback base synchronized"
+
 # 6i. Force rollout restart when images were rebuilt.
 # ----------------------------------------------------------------------
 # `kubectl apply -k` only triggers a new ReplicaSet when the Deployment
@@ -909,6 +914,7 @@ if [ "$SKIP_BUILD" = false ]; then
     "control-plane:control-ui"
     "control-plane:host-context-controller"
     "control-plane:workflow-recipes"
+    "auth-ingress:auth-proxy"
     "mcp-host:chatllm"
     "mcp-server:mcp-proxy"
     "profiles:external-rest-api"
@@ -920,6 +926,7 @@ if [ "$SKIP_BUILD" = false ]; then
       "control-plane:control-api"
       "control-plane:host-context-controller"
       "control-plane:workflow-recipes"
+      "auth-ingress:auth-proxy"
       "mcp-host:chatllm"
       "mcp-server:mcp-proxy"
       "profiles:external-rest-api"
@@ -1010,6 +1017,7 @@ step_header 8 $TOTAL_STEPS "Wait + Auto-Recovery"
 CORE_DEPLOYS=(
   "control-plane:control-api"
   "control-plane:host-context-controller"
+  "auth-ingress:auth-proxy"
   "profiles:external-rest-api"
   "rpc-proxy:rpc-proxy"
   "mcp-host:chatllm"

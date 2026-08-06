@@ -122,6 +122,13 @@ export const CONTROL_ROUTES = {
     root: '/settings',
     ui: '/settings/ui',
     withFocus: (focus: string) => withQuery('/settings', { focus }),
+    account: '/settings/account',
+    accountWith: (query?: ControlRouteQuery) => withQuery('/settings/account', query),
+    integrations: '/settings/integrations/microsoft',
+    microsoft: '/settings/integrations/microsoft',
+    microsoftConnect: (query?: ControlRouteQuery) =>
+      withQuery('/settings/integrations/microsoft/connect', query),
+    google: '/settings/integrations/google',
   },
   agentFiles: {
     root: '/agent-files',

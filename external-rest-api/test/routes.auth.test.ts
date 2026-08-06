@@ -9,7 +9,14 @@ const authServiceMock = vi.hoisted(() => ({
   loginWithPassword: vi.fn(),
 }))
 
+const identityProviderServiceMock = vi.hoisted(() => ({
+  exchangeIdentityProviderLogin: vi.fn(),
+  listIdentityProviders: vi.fn(),
+  startMicrosoftIdentityProviderLogin: vi.fn(),
+}))
+
 vi.mock('../src/services/authService.js', () => authServiceMock)
+vi.mock('../src/services/identityProvidersService.js', () => identityProviderServiceMock)
 
 function buildApp() {
   const app = express()
@@ -96,5 +103,108 @@ describe('routes/auth password-login', () => {
     expect(res.body.token).toBe('desktop-session-jwt')
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+  })
+})
+
+describe('routes/auth Microsoft identity provider', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('fails closed when a browser start request has no Origin header', async () => {
+    const response = await request(buildApp())
+      .post('/api/v1/auth/providers/microsoft/start')
+      .set('x-forwarded-for', '198.51.100.10')
+      .send({
+        connectionId: 'connection-1',
+        flow: 'profile_login',
+        flowBinding: 'a'.repeat(43),
+        returnUrl: 'http://localhost:3001/auth/provider-callback',
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_return_url' })
+    expect(identityProviderServiceMock.startMicrosoftIdentityProviderLogin).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed browser return URL as a client error', async () => {
+    const response = await request(buildApp())
+      .post('/api/v1/auth/providers/microsoft/start')
+      .set('origin', 'http://localhost:3001')
+      .set('x-forwarded-for', '198.51.100.11')
+      .send({
+        connectionId: 'connection-1',
+        flow: 'profile_login',
+        flowBinding: 'b'.repeat(43),
+        returnUrl: 'not a URL',
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_return_url' })
+  })
+
+  it('passes the initiating client binding through start and exchange', async () => {
+    identityProviderServiceMock.startMicrosoftIdentityProviderLogin.mockResolvedValueOnce({
+      authorizeUrl: 'https://login.microsoftonline.com/authorize',
+    })
+    identityProviderServiceMock.exchangeIdentityProviderLogin.mockResolvedValueOnce({
+      token: 'desktop-session-jwt',
+      me: { id: 'user-1' },
+    })
+    const binding = 'c'.repeat(43)
+
+    await request(buildApp())
+      .post('/api/v1/auth/providers/microsoft/start')
+      .set('origin', 'http://localhost:3001')
+      .set('x-forwarded-for', '198.51.100.12')
+      .send({
+        connectionId: 'connection-1',
+        flow: 'profile_login',
+        flowBinding: binding,
+        returnUrl: 'http://localhost:3001/auth/provider-callback',
+      })
+      .expect(200)
+
+    await request(buildApp())
+      .post('/api/v1/auth/providers/exchange')
+      .set('x-forwarded-for', '198.51.100.13')
+      .send({ code: 'login-code', flowBinding: binding })
+      .expect(200)
+
+    expect(identityProviderServiceMock.startMicrosoftIdentityProviderLogin).toHaveBeenCalledWith(
+      expect.objectContaining({ flowBinding: binding })
+    )
+    expect(identityProviderServiceMock.exchangeIdentityProviderLogin).toHaveBeenCalledWith(
+      'login-code',
+      binding
+    )
+  })
+
+  it('rate-limits repeated Microsoft login start requests from one client', async () => {
+    identityProviderServiceMock.startMicrosoftIdentityProviderLogin.mockResolvedValue({
+      authorizeUrl: 'https://login.microsoftonline.com/authorize',
+    })
+    const requestBody = {
+      connectionId: 'connection-1',
+      flow: 'profile_login',
+      flowBinding: 'd'.repeat(43),
+      returnUrl: 'http://localhost:3001/auth/provider-callback',
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await request(buildApp())
+        .post('/api/v1/auth/providers/microsoft/start')
+        .set('origin', 'http://localhost:3001')
+        .set('x-forwarded-for', '198.51.100.20')
+        .send(requestBody)
+        .expect(200)
+    }
+
+    await request(buildApp())
+      .post('/api/v1/auth/providers/microsoft/start')
+      .set('origin', 'http://localhost:3001')
+      .set('x-forwarded-for', '198.51.100.20')
+      .send(requestBody)
+      .expect(429)
   })
 })

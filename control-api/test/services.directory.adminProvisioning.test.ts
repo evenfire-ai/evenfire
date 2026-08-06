@@ -19,6 +19,7 @@ describe('ensureDefaultTeamAndGrants', () => {
     const query = vi.fn()
     query
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT admin team → none
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // advisory team-name lock
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 }) // INSERT teams
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT team_members
       .mockResolvedValue({ rows: [], rowCount: 1 }) // grants
@@ -77,6 +78,7 @@ describe('provisionAdminDesktopWorkspace', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE users password
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT admin team → none
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // advisory team-name lock
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 }) // INSERT teams
       .mockResolvedValue({ rows: [], rowCount: 1 }) // membership + grants
 
@@ -159,6 +161,7 @@ describe('provisionAdminDesktopWorkspace', () => {
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 }) // INSERT users
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT admin team → none (no password UPDATE consumed)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // advisory team-name lock
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 }) // INSERT teams
       .mockResolvedValue({ rows: [], rowCount: 1 }) // membership + grants
 

@@ -3,6 +3,7 @@ import type {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  IdentityProviderConnection,
   SessionMe,
 } from '../../../src/types'
 import type { Tone } from '../uiTypes'
@@ -19,6 +20,8 @@ export interface AuthContextValue {
   desktopSetupAuthorizationToken: string
   desktopSetupStarted: boolean
   desktopEnvironmentSetupComplete: boolean
+  identityProviders: IdentityProviderConnection[]
+  identityProvidersLoading: boolean
   runtimeConfigSetupName: string
   runtimeConfigSetupExternalRestApiBaseUrl: string
   runtimeConfigSetupRpcProxyBaseUrl: string
@@ -47,6 +50,7 @@ export interface AuthContextValue {
   ) => void
   loadSession: (options?: { preserveNav?: boolean }) => Promise<void>
   handlePasswordLogin: () => Promise<void>
+  handleMicrosoftIdentityProviderLogin: (connectionId: string) => Promise<void>
   handleStartDesktopSetup: () => Promise<void>
   handleCompleteDesktopSetup: () => Promise<void>
   handleSaveRuntimeConfig: (

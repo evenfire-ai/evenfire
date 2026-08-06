@@ -743,7 +743,7 @@ STUB
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Using control-api image for migration: example/control-api:test"* ]] && \
      [[ "$out" == *"Verifying DB-first schema in control-postgres"* ]] && \
-     [[ "$(grep -c '^--context=fake-context exec -i deployment/control-postgres -n control-plane -- sh -lc psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -At$' "$log_file" || true)" -ge 15 ]] && \
+     [[ "$(grep -c '^--context=fake-context exec -i deployment/control-postgres -n control-plane -- sh -lc psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -At$' "$log_file" || true)" -ge 16 ]] && \
      grep -q "0016_workflow_trigger_shared_foundation" "$log_file" && \
      grep -q "0061_governed_run_trace_schema_foundation" "$log_file" && \
      grep -q "0062_governed_trace_runtime_roles" "$log_file" && \
@@ -752,6 +752,7 @@ STUB
      grep -q "0065_governed_session_replay_and_prompt_history" "$log_file" && \
      grep -q "0066_governed_trace_target_principal_projection" "$log_file" && \
      grep -q "0067_llm_runtime_access_profiles" "$log_file" && \
+     grep -q "0090_identity_provider_connections" "$log_file" && \
      grep -q "table_name = 'governed_event_stream'" "$log_file" && \
      grep -q "table_name = 'administrative_events'" "$log_file" && \
      grep -q "column_name = 'tenant_id'" "$log_file" && \
@@ -1466,7 +1467,10 @@ assert_control_api_runtime_access_contract_is_exact() {
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" == "80" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ "$relation_count" == "87" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+     grep -qx $'identity_provider_connections\tlegacy_dml' "$profile_file" && \
+     grep -qx $'identity_provider_setup_sessions\tlegacy_dml' "$profile_file" && \
+     grep -qx $'invitation_agents\tlegacy_dml' "$profile_file" && \
      grep -qx $'llm_allowed_models\tlegacy_dml' "$profile_file" && \
      grep -qx $'member_registration_credentials\tupsert' "$profile_file" && \
      grep -qx $'llm_allowed_models_audit\tappend' "$profile_file" && \

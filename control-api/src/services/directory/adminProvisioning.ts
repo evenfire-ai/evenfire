@@ -5,6 +5,7 @@ import {
   appendControlApiPermissionEventsInTransaction,
 } from '../tracing/controlApiPermissionEvents.js'
 import type { InvitationTeamAssignment } from './membership.js'
+import { TeamNameConflictError, createTeamWithDb } from './teams.js'
 import { type TeamRole, normalizeTeamRoleInput } from './types.js'
 
 const logger = rootLogger.child({ module: 'admin-provisioning' })
@@ -35,10 +36,24 @@ export async function ensureDefaultTeamAndGrants(
   )
   let teamId = (owned.rows[0] as { id: string } | undefined)?.id
   if (!teamId) {
-    const created = await db.query(`INSERT INTO teams(name) VALUES($1) RETURNING id`, [
-      `${displayName} team`,
-    ])
-    teamId = (created.rows[0] as { id: string }).id
+    const preferredName = `${displayName} team`
+    try {
+      teamId = (await createTeamWithDb(db, preferredName)).id
+    } catch (error) {
+      if (!(error instanceof TeamNameConflictError)) throw error
+      const fallbackName = `${preferredName} ${userId.slice(0, 8)}`
+      try {
+        teamId = (await createTeamWithDb(db, fallbackName)).id
+      } catch (fallbackError) {
+        if (!(fallbackError instanceof TeamNameConflictError)) throw fallbackError
+        const existing = await db.query(
+          `SELECT id FROM teams WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1)) LIMIT 1`,
+          [fallbackName]
+        )
+        teamId = (existing.rows[0] as { id?: string } | undefined)?.id
+        if (!teamId) throw fallbackError
+      }
+    }
     await db.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
        VALUES($1, $2, 'admin', 'active')

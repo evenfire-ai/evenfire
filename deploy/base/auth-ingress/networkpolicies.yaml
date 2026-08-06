@@ -1,0 +1,100 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-auth-ingress
+  namespace: auth-ingress
+  labels:
+    clerum.io/managed-by: auth-ingress
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress-auth-ingress
+  namespace: auth-ingress
+  labels:
+    clerum.io/managed-by: auth-ingress
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-public-ingress-auth-proxy
+  namespace: auth-ingress
+  labels:
+    clerum.io/managed-by: auth-ingress
+    clerum.io/policy-type: public-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: auth-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+          podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - { port: 8096, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape-auth-proxy
+  namespace: auth-ingress
+  labels:
+    clerum.io/managed-by: auth-ingress
+    clerum.io/policy-type: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: auth-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { port: 9090, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-auth-proxy-egress-control-api
+  namespace: auth-ingress
+  labels:
+    clerum.io/managed-by: auth-ingress
+    clerum.io/policy-type: control-api-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: auth-proxy
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - { port: 8090, protocol: TCP }

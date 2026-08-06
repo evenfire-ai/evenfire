@@ -15,11 +15,13 @@ export {
   adminDeleteTeam,
   createTeam,
   createTeamForUser,
+  createTeamWithDb,
   getCurrentTeam,
   getTeamById,
   listAllTeams,
   listTeams,
   renameTeam,
+  TeamNameConflictError,
 } from './teams.js'
 
 export {
@@ -30,6 +32,7 @@ export {
   addMemberToTeam,
   createPasswordSetupInvitationForUser,
   createInvitation,
+  createDeferredInvitationForTeams,
   createInvitationForTeams,
   createSilentInvitationForTeams,
   createManagedInvitationForUser,
@@ -48,6 +51,7 @@ export {
   revokeManagedInvitationForUser,
   revokePendingInvitation,
   findMembership,
+  activateDeferredInvitation,
   getMe,
   listMembers,
   listPendingInvitations,

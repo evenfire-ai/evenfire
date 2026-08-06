@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: auth-proxy
+  namespace: auth-ingress
+  labels:
+    app: auth-proxy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-proxy-config
+  namespace: auth-ingress
+  labels:
+    app: auth-proxy
+data:
+  AUTH_PROXY_HTTP_PORT: '8096'
+  AUTH_PROXY_METRICS_PORT: '9090'
+  AUTH_PROXY_CONTROL_API_BASE_URL: http://control-api.control-plane.svc.cluster.local:8090/api/v1
+  AUTH_PROXY_CONTROL_API_SERVICE_NAME: auth-proxy
+  AUTH_PROXY_UPSTREAM_TIMEOUT_MS: '30000'
+  AUTH_PROXY_MAX_RESPONSE_BYTES: '1048576'
+---
+# Service-token Secret. The value is mirrored into
+# control-api-internal-tokens.CONTROL_API_INTERNAL_SERVICE_TOKENS by
+# deploy/scripts/apply-inter-service-tokens.sh.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: auth-proxy-secrets
+  namespace: auth-ingress
+  labels:
+    app: auth-proxy
+type: Opaque
+stringData:
+  AUTH_PROXY_CONTROL_API_SERVICE_TOKEN: replace-with-real-auth-proxy-token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-proxy
+  namespace: auth-ingress
+  labels:
+    app: auth-proxy
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: auth-proxy
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: auth-proxy
+    spec:
+      serviceAccountName: auth-proxy
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: auth-proxy
+          image: clerum/auth-proxy:0.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: auth-proxy-config
+            - secretRef:
+                name: auth-proxy-secrets
+          ports:
+            - name: http
+              containerPort: 8096
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 4
+            periodSeconds: 8
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 8
+            periodSeconds: 12
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-proxy
+  namespace: auth-ingress
+  labels:
+    app: auth-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: auth-proxy
+  ports:
+    - name: http
+      port: 8096
+      protocol: TCP
+      targetPort: http
+    - name: metrics
+      port: 9090
+      protocol: TCP
+      targetPort: metrics

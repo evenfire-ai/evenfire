@@ -1,6 +1,12 @@
-import { pool, withTransaction } from '../../db.js'
-import type { DbClient } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import type { AdminDeleteTeamResult, TeamRole } from './types.js'
+
+export class TeamNameConflictError extends Error {
+  constructor(name: string) {
+    super(`A team named "${name}" already exists`)
+    this.name = 'TeamNameConflictError'
+  }
+}
 
 export async function listTeams(userId: string, currentTeamId: string) {
   const result = await pool.query(
@@ -66,9 +72,33 @@ export async function getCurrentTeam(
   return (result.rows[0] as { id: string; name: string; role: TeamRole } | undefined) || null
 }
 
+export async function createTeamWithDb(db: Pick<DbClient, 'query'>, name: string) {
+  const normalizedName = name.trim()
+  // Acquire the transaction-scoped lock in its own statement. PostgreSQL takes
+  // a READ COMMITTED snapshot at the start of each statement, so combining the
+  // lock and existence check in one CTE can retain a snapshot from before a
+  // concurrent creator commits.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext('team-name:' || LOWER(BTRIM($1))))`, [
+    normalizedName,
+  ])
+  const team = await db.query(
+    `INSERT INTO teams(name)
+     SELECT $1
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM teams
+         WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
+      )
+     RETURNING id, name`,
+    [normalizedName]
+  )
+  const created = team.rows[0] as { id: string; name: string } | undefined
+  if (!created) throw new TeamNameConflictError(normalizedName)
+  return created
+}
+
 export async function createTeam(name: string) {
-  const team = await pool.query(`INSERT INTO teams(name) VALUES($1) RETURNING id, name`, [name])
-  return team.rows[0] as { id: string; name: string }
+  return withTransaction(db => createTeamWithDb(db, name))
 }
 
 export async function createTeamForUser(userId: string | undefined, name: string) {
@@ -86,14 +116,30 @@ export async function createTeamForUser(userId: string | undefined, name: string
 }
 
 export async function renameTeam(teamId: string, name: string) {
-  const updated = await pool.query(
-    `UPDATE teams
-        SET name = $2
-      WHERE id = $1
-    RETURNING id, name`,
-    [teamId, name]
-  )
-  return (updated.rows[0] as { id: string; name: string } | undefined) || null
+  const normalizedName = name.trim()
+  return withTransaction(async db => {
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext('team-name:' || LOWER(BTRIM($1))))`, [
+      normalizedName,
+    ])
+    const updated = await db.query(
+      `UPDATE teams
+          SET name = $2
+        WHERE teams.id = $1
+          AND NOT EXISTS (
+            SELECT 1
+              FROM teams existing
+             WHERE existing.id <> $1
+               AND LOWER(BTRIM(existing.name)) = LOWER(BTRIM($2))
+          )
+      RETURNING id, name`,
+      [teamId, normalizedName]
+    )
+    const renamed = updated.rows[0] as { id: string; name: string } | undefined
+    if (renamed) return renamed
+    const target = await db.query(`SELECT id FROM teams WHERE id = $1 LIMIT 1`, [teamId])
+    if ((target.rowCount ?? 0) > 0) throw new TeamNameConflictError(normalizedName)
+    return null
+  })
 }
 
 /**

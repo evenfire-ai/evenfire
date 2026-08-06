@@ -879,6 +879,10 @@ verify_db_migration_state() {
     "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0070_member_registration_runtime_delete_revoke');"
 
   assert_db_query_true \
+    "identity provider connections migration was not recorded" \
+    "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0090_identity_provider_connections');"
+
+  assert_db_query_true \
     "governed_event_stream.tenant_id is missing or incompatible after the tracing migrations" \
     "SELECT EXISTS (
        SELECT 1

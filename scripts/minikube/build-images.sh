@@ -256,6 +256,7 @@ fi
 # row in deploy/images.json (via localRef()) -- scripts/tests/test-images-
 # manifest.sh enforces it.
 ALL_IMAGES=(
+  "clerum/auth-proxy:test"
   "clerum/host-context-controller:test"
   "clerum/workflow-recipes:test"
   "clerum/workflow-coordinator:test"
@@ -510,6 +511,10 @@ build_image "external-rest-api" \
 build_image "rpc-proxy" \
   "${PROJECT_DIR}/rpc-proxy" \
   "clerum/rpc-proxy:test"
+
+build_image "auth-proxy" \
+  "${PROJECT_DIR}/auth-proxy" \
+  "clerum/auth-proxy:test"
 
 build_image "webhook-proxy" \
   "${PROJECT_DIR}/webhook-proxy" \

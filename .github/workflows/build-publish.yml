@@ -61,6 +61,7 @@ jobs:
     if: github.repository == 'evenfire-ai/evenfire'
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}
+      auth-proxy: ${{ steps.filter.outputs.auth-proxy }}
       channel-reader: ${{ steps.filter.outputs.channel-reader }}
       workflow-approval-request-reader: ${{ steps.filter.outputs.workflow-approval-request-reader }}
       control-api: ${{ steps.filter.outputs.control-api }}
@@ -113,6 +114,8 @@ jobs:
         with:
           base: ${{ github.event.before }}
           filters: |
+            auth-proxy:
+              - 'auth-proxy/**'
             channel-reader:
               - 'channel-reader/**'
             workflow-approval-request-reader:
@@ -186,7 +189,7 @@ jobs:
       matrix:
         # `image` must be a real dimension here, not just a key inside each
         # `include` entry. `arch` is the only *other* dimension, so the base
-        # cross-product is arch x image = 2 x 28 = 56 combinations; each
+        # cross-product is arch x image = 2 x 29 = 58 combinations; each
         # `include` entry below (keyed by `image`) then merges its
         # path/dockerfile/rooted/changed fields onto only the 2 combinations
         # (one per arch) that share its `image` value. Drop the `image:`
@@ -196,6 +199,7 @@ jobs:
         # whichever image's fields were declared last in the list.
         arch: [amd64, arm64]
         image:
+          - auth-proxy
           - channel-reader
           - workflow-approval-request-reader
           - control-api
@@ -225,6 +229,9 @@ jobs:
           - webhook-gateway
           - webhook-proxy
         include:
+          - image: auth-proxy
+            path: auth-proxy
+            changed: ${{ needs.detect.outputs.auth-proxy }}
           - image: channel-reader
             path: channel-reader
             changed: ${{ needs.detect.outputs.channel-reader }}
@@ -441,6 +448,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - image: auth-proxy
+            changed: ${{ needs.detect.outputs.auth-proxy }}
           - image: channel-reader
             changed: ${{ needs.detect.outputs.channel-reader }}
           - image: workflow-approval-request-reader

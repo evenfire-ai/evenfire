@@ -64,6 +64,10 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
           .json({ error: 'email_already_exists', message: 'A user with this email already exists' })
         return
       }
+      if (code === 'identity_provider_email_locked') {
+        res.status(409).json({ error: 'identity_provider_email_locked' })
+        return
+      }
       next(error)
     }
   })
@@ -223,6 +227,10 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
       const code = (error as { code?: string } | null)?.code
       if (code === '23505') {
         res.status(409).json({ error: 'email_already_exists' })
+        return
+      }
+      if (code === 'identity_provider_email_locked') {
+        res.status(409).json({ error: 'identity_provider_email_locked' })
         return
       }
       next(error)

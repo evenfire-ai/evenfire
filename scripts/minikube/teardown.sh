@@ -40,7 +40,7 @@ if ! $KC cluster-info &>/dev/null; then
   exit 1
 fi
 
-NAMESPACES=(control-plane mcp-host mcp-server sandbox-recipes rpc-proxy profiles channels registry)
+NAMESPACES=(control-plane mcp-host mcp-server sandbox-recipes rpc-proxy auth-ingress profiles channels registry)
 
 # ---- Delete CRD instances -------------------------------------------
 echo -e "\n${BOLD}=== Delete CRD Instances ===${NC}"
@@ -85,6 +85,11 @@ $KC delete deployment rpc-proxy -n rpc-proxy 2>/dev/null || true
 $KC delete service rpc-proxy -n rpc-proxy 2>/dev/null || true
 ok "rpc-proxy workloads"
 
+# auth-ingress
+$KC delete deployment auth-proxy -n auth-ingress 2>/dev/null || true
+$KC delete service auth-proxy -n auth-ingress 2>/dev/null || true
+ok "auth-ingress workloads"
+
 # channels
 for name in clerum-channel-reader mailpit; do
   $KC delete deployment "$name" -n channels 2>/dev/null || true
@@ -118,6 +123,7 @@ $KC delete secret inter-service-tokens -n control-plane 2>/dev/null || true
 $KC delete secret clerum-channel-reader-credentials -n channels 2>/dev/null || true
 $KC delete secret external-rest-api-secrets -n profiles 2>/dev/null || true
 $KC delete secret rpc-proxy-secrets -n rpc-proxy 2>/dev/null || true
+$KC delete secret auth-proxy-secrets -n auth-ingress 2>/dev/null || true
 $KC delete secret registry-api-secrets -n registry 2>/dev/null || true
 $KC delete secret registry-postgres -n registry 2>/dev/null || true
 $KC delete secret search-api-keys -n mcp-server 2>/dev/null || true
@@ -141,6 +147,7 @@ $KC delete configmap clerum-model-secret-mapping -n mcp-host 2>/dev/null || true
 $KC delete configmap clerum-model-secret-mapping -n control-plane 2>/dev/null || true
 $KC delete configmap clerum-channel-reader-config -n channels 2>/dev/null || true
 $KC delete configmap rpc-proxy-config -n rpc-proxy 2>/dev/null || true
+$KC delete configmap auth-proxy-config -n auth-ingress 2>/dev/null || true
 $KC delete configmap registry-api-config -n registry 2>/dev/null || true
 $KC delete configmap profile-control-funnel-nginx -n profiles 2>/dev/null || true
 $KC delete configmap clerum-wrc-public-key -n sandbox-recipes 2>/dev/null || true

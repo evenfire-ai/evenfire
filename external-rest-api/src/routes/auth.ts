@@ -8,6 +8,11 @@ import {
   loginWithPassword,
   requestPasswordReset,
 } from '../services/authService.js'
+import {
+  exchangeIdentityProviderLogin,
+  listIdentityProviders,
+  startMicrosoftIdentityProviderLogin,
+} from '../services/identityProvidersService.js'
 import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
 
 const googleClient = new OAuth2Client(config.googleClientId)
@@ -20,6 +25,14 @@ const passwordResetRateLimit = createRateLimiter({
       .toLowerCase()
     return email || req.socket.remoteAddress || 'unknown'
   },
+})
+const identityProviderStartRateLimit = createRateLimiter({
+  windowMs: 60_000,
+  maxRequests: 20,
+})
+const identityProviderExchangeRateLimit = createRateLimiter({
+  windowMs: 60_000,
+  maxRequests: 30,
 })
 
 function isControlApiStatus(error: unknown, status: number): error is ControlApiError {
@@ -74,6 +87,80 @@ async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
 
 export function createAuthRouter(): Router {
   const router = Router()
+
+  router.get('/auth/providers', async (_req, res, next) => {
+    try {
+      res.status(200).json(await listIdentityProviders())
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  router.post(
+    '/auth/providers/microsoft/start',
+    identityProviderStartRateLimit,
+    async (req, res, next) => {
+      try {
+        const flow = String(req.body?.flow || '')
+        if (!['profile_login', 'desktop_login', 'invitation_link'].includes(flow)) {
+          res.status(400).json({ error: 'invalid_identity_provider_flow' })
+          return
+        }
+        let returnUrl = String(req.body?.returnUrl || '').trim()
+        if (flow === 'desktop_login') {
+          returnUrl = 'evenfire://auth/microsoft/callback'
+        } else {
+          let parsedReturnUrl: URL
+          try {
+            parsedReturnUrl = new URL(returnUrl)
+          } catch {
+            res.status(400).json({ error: 'invalid_return_url' })
+            return
+          }
+          const allowedOrigins = config.corsOrigin === '*' ? [] : config.corsOrigin
+          const requestOrigin = String(req.get('origin') || '').trim()
+          if (
+            !['http:', 'https:'].includes(parsedReturnUrl.protocol) ||
+            !requestOrigin ||
+            parsedReturnUrl.origin !== requestOrigin ||
+            (allowedOrigins.length > 0 && !allowedOrigins.includes(parsedReturnUrl.origin))
+          ) {
+            res.status(400).json({ error: 'invalid_return_url' })
+            return
+          }
+        }
+        res.status(200).json(
+          await startMicrosoftIdentityProviderLogin({
+            connectionId: String(req.body?.connectionId || ''),
+            flow: flow as 'profile_login' | 'desktop_login' | 'invitation_link',
+            returnUrl,
+            invitationToken: String(req.body?.invitationToken || ''),
+            flowBinding: String(req.body?.flowBinding || ''),
+          })
+        )
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  router.post(
+    '/auth/providers/exchange',
+    identityProviderExchangeRateLimit,
+    async (req, res, next) => {
+      try {
+        const code = String(req.body?.code || '').trim()
+        const flowBinding = String(req.body?.flowBinding || '').trim()
+        if (!code || !flowBinding) {
+          res.status(400).json({ error: 'code and flowBinding are required' })
+          return
+        }
+        sendLoginResponse(req, res, await exchangeIdentityProviderLogin(code, flowBinding))
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
 
   router.post('/auth/google', async (req, res, next) => {
     try {

@@ -4,6 +4,7 @@ import { createExternalAuthRouter } from './auth.js'
 import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js'
 import { createExternalDirectoryRouter } from './directory.js'
 import { createExternalGfsRouter } from './gfs.js'
+import { createExternalIdentityProvidersRouter } from './identityProviders.js'
 import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
@@ -17,6 +18,7 @@ import { createExternalWorkflowsRouter } from './workflows/index.js'
 export function createExternalRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createExternalAuthRouter(gateway))
+  router.use(createExternalIdentityProvidersRouter())
   router.use(createExternalUsersRouter(gateway))
   router.use(createExternalTeamsRouter(gateway))
   router.use(createExternalInvitationsRouter())

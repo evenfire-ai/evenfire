@@ -5,6 +5,7 @@ import {
   DesktopReleasePolicy,
   ExternalChannelAccount,
   ExternalChannelTarget,
+  IdentityProviderConnection,
   LoginResult,
   PendingWorkflowApproval,
   RpcScope,
@@ -293,6 +294,37 @@ export class AuthClient {
   async passwordLogin(email: string, password: string): Promise<LoginResult> {
     return requestJson<LoginResult>('POST', url('/api/v1/auth/password-login'), {
       body: { email, password },
+    })
+  }
+
+  async listIdentityProviders(): Promise<{ items: IdentityProviderConnection[] }> {
+    return requestJson<{ items: IdentityProviderConnection[] }>(
+      'GET',
+      url('/api/v1/auth/providers')
+    )
+  }
+
+  async startMicrosoftIdentityProviderLogin(
+    connectionId: string,
+    flowBinding: string
+  ): Promise<{ authorizeUrl: string }> {
+    return requestJson<{ authorizeUrl: string }>(
+      'POST',
+      url('/api/v1/auth/providers/microsoft/start'),
+      {
+        body: {
+          connectionId,
+          flow: 'desktop_login',
+          returnUrl: 'evenfire://auth/microsoft/callback',
+          flowBinding,
+        },
+      }
+    )
+  }
+
+  async exchangeIdentityProviderLoginCode(code: string, flowBinding: string): Promise<LoginResult> {
+    return requestJson<LoginResult>('POST', url('/api/v1/auth/providers/exchange'), {
+      body: { code, flowBinding },
     })
   }
 

@@ -52,9 +52,7 @@ function createDeferred<T>(): Deferred<T> {
 }
 
 function createSessionState(authenticated: boolean, me = HARNESS_ME) {
-  return authenticated
-    ? { authenticated: true, me }
-    : { authenticated: false, me: null }
+  return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
 }
 
 function createCatalog(agentNames: string[]) {
@@ -110,12 +108,16 @@ export interface AppControllerClerumOptions {
   desktopReleaseStatus?: typeof DEFAULT_DESKTOP_RELEASE_STATUS
   /** Payload for `team.directory` / `team.initialDirectory` / `team.list`. */
   teamDirectory?: { items: unknown[]; currentTeamId: string }
+  /** Organization identity providers exposed before login. */
+  identityProviders?: Array<{ id: string; provider: 'microsoft'; displayName: string }>
 }
 
 export interface AppControllerClerumHandle {
   getDependenciesHealth: Fn
   getSessionState: Fn
   passwordLogin: Fn
+  getIdentityProviders: Fn
+  startMicrosoftIdentityProviderLogin: Fn
   getDesktopReleaseStatus: Fn
   teamDirectory: Fn
   switchTeam: Fn
@@ -162,6 +164,8 @@ export function extendMockClerumForAppController(
     authenticated = true
     return createSessionState(true, sessionMe)
   })
+  const getIdentityProviders = vi.fn(async () => ({ items: options.identityProviders ?? [] }))
+  const startMicrosoftIdentityProviderLogin = vi.fn(async () => ({ authorizeUrl: '' }))
   const getDesktopReleaseStatus = vi.fn(
     async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS
   )
@@ -201,6 +205,11 @@ export function extendMockClerumForAppController(
       getDesktopReleaseStatus,
       openDesktopRelease: vi.fn(async () => undefined),
       passwordLogin,
+      getIdentityProviders,
+      startMicrosoftIdentityProviderLogin,
+      completeIdentityProviderLogin: vi.fn(async () => createSessionState(false)),
+      consumeIdentityProviderLoginCode: vi.fn(async () => null),
+      onIdentityProviderLoginCode: vi.fn(() => () => undefined),
       logout: vi.fn(async () => undefined),
       onDesktopSetupToken: vi.fn(() => () => undefined),
       onDesktopEnvironmentSetup: vi.fn(() => () => undefined),
@@ -275,6 +284,8 @@ export function extendMockClerumForAppController(
     getDependenciesHealth,
     getSessionState,
     passwordLogin,
+    getIdentityProviders,
+    startMicrosoftIdentityProviderLogin,
     getDesktopReleaseStatus,
     teamDirectory,
     switchTeam,

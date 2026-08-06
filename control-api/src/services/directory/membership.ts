@@ -30,6 +30,12 @@ type InvitationRow = {
   accepted_at: Date | null
   accepted_user_id: string | null
   team_name: string | null
+  identity_provider: string | null
+  identity_provider_connection_id: string | null
+  identity_provider_subject: string | null
+  identity_provider_upn: string | null
+  identity_provider_linked_at: Date | null
+  identity_provider_available?: boolean
 }
 
 export type InvitationPurpose = 'member_invitation' | 'password_reset' | 'admin_desktop_access'
@@ -58,12 +64,19 @@ type InvitationWithTeams = {
   teams: InvitationTeamRow[]
 }
 
-type InvitationForTeamsInput = {
+export type InvitationForTeamsInput = {
   inviteeName: string
   email: string
   teamAssignments?: readonly InvitationTeamAssignment[]
   purpose?: InvitationPurpose
   fallbackRole?: InviteRole
+  identityProvider?: {
+    provider: string
+    connectionId: string
+    subject?: string
+    userPrincipalName?: string
+    agentNames?: readonly string[]
+  }
 }
 
 function normalizeInvitationPurpose(purpose?: InvitationPurpose): InvitationPurpose {
@@ -78,7 +91,15 @@ async function getInvitationRecordByToken(
 ): Promise<InvitationRow | null> {
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
-            i.accepted_user_id,
+            i.accepted_user_id, i.identity_provider, i.identity_provider_connection_id,
+            i.identity_provider_subject, i.identity_provider_upn, i.identity_provider_linked_at,
+            EXISTS (
+              SELECT 1 FROM identity_provider_connections ipc
+               WHERE ipc.id = i.identity_provider_connection_id
+                 AND ipc.status = 'connected'
+                 AND ipc.allow_member_login = TRUE
+                 AND (ipc.client_secret_expires_at IS NULL OR ipc.client_secret_expires_at > NOW())
+            ) AS identity_provider_available,
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
@@ -126,7 +147,15 @@ async function getInvitationRecordByTokenOrId(
 
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
-            i.accepted_user_id,
+            i.accepted_user_id, i.identity_provider, i.identity_provider_connection_id,
+            i.identity_provider_subject, i.identity_provider_upn, i.identity_provider_linked_at,
+            EXISTS (
+              SELECT 1 FROM identity_provider_connections ipc
+               WHERE ipc.id = i.identity_provider_connection_id
+                 AND ipc.status = 'connected'
+                 AND ipc.allow_member_login = TRUE
+                 AND (ipc.client_secret_expires_at IS NULL OR ipc.client_secret_expires_at > NOW())
+            ) AS identity_provider_available,
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
@@ -149,7 +178,15 @@ async function getInvitationRecordById(
 
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
-            i.accepted_user_id,
+            i.accepted_user_id, i.identity_provider, i.identity_provider_connection_id,
+            i.identity_provider_subject, i.identity_provider_upn, i.identity_provider_linked_at,
+            EXISTS (
+              SELECT 1 FROM identity_provider_connections ipc
+               WHERE ipc.id = i.identity_provider_connection_id
+                 AND ipc.status = 'connected'
+                 AND ipc.allow_member_login = TRUE
+                 AND (ipc.client_secret_expires_at IS NULL OR ipc.client_secret_expires_at > NOW())
+            ) AS identity_provider_available,
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
@@ -308,15 +345,24 @@ async function applyInvitationMemberships(
   userId: string
 ): Promise<InvitationTeamRow[]> {
   const teams = await loadInvitationTeams(db, invitation.id, invitation)
-  if (teams.length === 0) return teams
+  if (teams.length > 0) {
+    await db.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
+         FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
+       ON CONFLICT (team_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
+      [JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))), userId]
+    )
+  }
 
   await db.query(
-    `INSERT INTO team_members(team_id, user_id, role, status)
-     SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
-       FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
-     ON CONFLICT (team_id, user_id)
-     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
-    [JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))), userId]
+    `INSERT INTO user_agents(user_id, agent_name)
+     SELECT $1::uuid, ia.agent_name
+       FROM invitation_agents ia
+      WHERE ia.invitation_id = $2::uuid
+     ON CONFLICT (user_id, agent_name) DO NOTHING`,
+    [userId, invitation.id]
   )
 
   return teams
@@ -358,6 +404,9 @@ function invitationResponse(
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  identityProvider: string | null
+  identityProviderConnectionId: string | null
+  identityProviderLinked: boolean
 } {
   const primaryTeam = teams[0] || null
   return {
@@ -376,7 +425,14 @@ function invitationResponse(
     expiresAt: invitation.expires_at.toISOString(),
     acceptedAt: invitation.accepted_at ? invitation.accepted_at.toISOString() : null,
     userId: invitation.accepted_user_id || user?.id || null,
-    passwordPending: !user?.password_hash,
+    passwordPending: !user?.password_hash && !invitation.identity_provider_linked_at,
+    identityProvider:
+      invitation.identity_provider_available === false ? null : invitation.identity_provider,
+    identityProviderConnectionId:
+      invitation.identity_provider_available === false
+        ? null
+        : invitation.identity_provider_connection_id,
+    identityProviderLinked: Boolean(invitation.identity_provider_linked_at),
   }
 }
 
@@ -601,9 +657,19 @@ async function insertInvitationForTeams(
   const purpose = normalizeInvitationPurpose(input.purpose)
   const invited = await db.query(
     `WITH inserted AS (
-       INSERT INTO invitations(team_id, invitee_name, email, role, token, status, purpose, expires_at)
-       VALUES($1, $2, $3, $4, gen_random_uuid()::text, $5, $6, NOW() + ($7::text || ' hours')::interval)
-       RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at, expires_at, accepted_at, accepted_user_id
+       INSERT INTO invitations(
+         team_id, invitee_name, email, role, token, status, purpose, expires_at,
+         identity_provider, identity_provider_connection_id, identity_provider_subject,
+         identity_provider_upn
+       )
+       VALUES(
+         $1, $2, $3, $4, gen_random_uuid()::text, $5, $6,
+         NOW() + ($7::text || ' hours')::interval, $8, $9, $10, $11
+       )
+       RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at,
+                 expires_at, accepted_at, accepted_user_id, identity_provider,
+                 identity_provider_connection_id, identity_provider_subject,
+                 identity_provider_upn, identity_provider_linked_at
      )
      SELECT inserted.id,
             inserted.team_id,
@@ -617,6 +683,11 @@ async function insertInvitationForTeams(
             inserted.expires_at,
             inserted.accepted_at,
             inserted.accepted_user_id,
+            inserted.identity_provider,
+            inserted.identity_provider_connection_id,
+            inserted.identity_provider_subject,
+            inserted.identity_provider_upn,
+            inserted.identity_provider_linked_at,
             t.name AS team_name
        FROM inserted
   LEFT JOIN teams t ON t.id = inserted.team_id`,
@@ -628,10 +699,25 @@ async function insertInvitationForTeams(
       input.status,
       purpose,
       String(INVITATION_TTL_HOURS),
+      input.identityProvider?.provider || null,
+      input.identityProvider?.connectionId || null,
+      input.identityProvider?.subject || null,
+      input.identityProvider?.userPrincipalName || null,
     ]
   )
   const invitation = invited.rows[0] as InvitationRow
   await insertInvitationTeams(db, invitation.id, normalizedAssignments)
+  const agentNames = Array.from(
+    new Set((input.identityProvider?.agentNames || []).map(String).map(value => value.trim()))
+  ).filter(Boolean)
+  if (agentNames.length > 0) {
+    await db.query(
+      `INSERT INTO invitation_agents(invitation_id, agent_name)
+       SELECT $1::uuid, unnest($2::text[])
+       ON CONFLICT (invitation_id, agent_name) DO NOTHING`,
+      [invitation.id, agentNames]
+    )
+  }
   return {
     invitation,
     teams: await loadInvitationTeams(db, invitation.id, invitation),
@@ -651,19 +737,46 @@ function invitationForTeamsResponse(invitation: InvitationRow, teams: Invitation
 
 async function createInvitationForTeamsRecord(
   input: InvitationForTeamsInput,
-  options: { sendEmail: boolean }
+  options: { delivery: 'send' | 'deferred' | 'none' }
 ) {
   cleanupStaleDraftInvitations().catch(() => undefined)
   const purpose = normalizeInvitationPurpose(input.purpose)
+  let identityProvider = input.identityProvider
+  if (!identityProvider && purpose === 'member_invitation') {
+    const email = input.email.trim().toLowerCase()
+    const domain = email.split('@')[1] || ''
+    if (domain) {
+      const eligible = await pool.query(
+        `SELECT id
+           FROM identity_provider_connections
+          WHERE status = 'connected'
+            AND allow_member_login = TRUE
+            AND (client_secret_expires_at IS NULL OR client_secret_expires_at > NOW())
+            AND $1 = ANY(allowed_email_domains)
+          ORDER BY connected_at DESC NULLS LAST
+          LIMIT 1`,
+        [domain]
+      )
+      const connectionId = String((eligible.rows[0] as { id?: string } | undefined)?.id || '')
+      if (connectionId) {
+        identityProvider = {
+          provider: 'microsoft',
+          connectionId,
+          userPrincipalName: email,
+        }
+      }
+    }
+  }
   const inserted = await withTransaction(async db =>
     insertInvitationForTeams(db, {
       ...input,
+      identityProvider,
       purpose,
-      status: options.sendEmail ? 'draft' : 'pending',
+      status: options.delivery === 'none' ? 'pending' : 'draft',
     })
   )
 
-  if (!options.sendEmail) {
+  if (options.delivery !== 'send') {
     return invitationForTeamsResponse(inserted.invitation, inserted.teams)
   }
 
@@ -686,7 +799,10 @@ async function createInvitationForTeamsRecord(
         SET status = 'pending'
       WHERE id = $1
         AND status = 'draft'
-      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at, expires_at, accepted_at, accepted_user_id`,
+      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at,
+                expires_at, accepted_at, accepted_user_id, identity_provider,
+                identity_provider_connection_id, identity_provider_subject,
+                identity_provider_upn, identity_provider_linked_at`,
     [inserted.invitation.id]
   )
   const pending = activated.rows[0] as InvitationRow | undefined
@@ -725,8 +841,9 @@ export async function createInvitationForTeams(input: {
   teamAssignments?: readonly InvitationTeamAssignment[]
   purpose?: InvitationPurpose
   fallbackRole?: InviteRole
+  identityProvider?: InvitationForTeamsInput['identityProvider']
 }) {
-  return createInvitationForTeamsRecord(input, { sendEmail: true })
+  return createInvitationForTeamsRecord(input, { delivery: 'send' })
 }
 
 export async function createSilentInvitationForTeams(input: {
@@ -736,7 +853,23 @@ export async function createSilentInvitationForTeams(input: {
   fallbackRole?: InviteRole
   purpose?: InvitationPurpose
 }) {
-  return createInvitationForTeamsRecord(input, { sendEmail: false })
+  return createInvitationForTeamsRecord(input, { delivery: 'none' })
+}
+
+export async function createDeferredInvitationForTeams(input: InvitationForTeamsInput) {
+  return createInvitationForTeamsRecord(input, { delivery: 'deferred' })
+}
+
+export async function activateDeferredInvitation(invitationId: string) {
+  const result = await pool.query(
+    `UPDATE invitations
+        SET status = 'pending'
+      WHERE id = $1
+        AND status = 'draft'
+    RETURNING id`,
+    [invitationId]
+  )
+  return (result.rowCount ?? 0) > 0
 }
 
 export async function getPendingMemberInvitationForEmail(email: string) {

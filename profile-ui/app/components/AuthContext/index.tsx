@@ -11,6 +11,7 @@ import React, {
 } from 'react'
 import {
   clearToken,
+  exchangeIdentityProviderLoginCode,
   getMe,
   isSilentApiError,
   loginWithPassword,
@@ -104,6 +105,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const completeIdentityProviderLogin = useCallback(async (code: string) => {
+    try {
+      const result = await exchangeIdentityProviderLoginCode(code)
+      const current = await getMe().catch(() => meFromPasswordLoginResponse(result.me))
+      sessionExpiredHandledRef.current = false
+      setAuthState({ isLoggedIn: true, isLoading: false, me: current })
+      return result
+    } catch (error) {
+      clearToken()
+      setAuthState({ isLoggedIn: false, isLoading: false, me: null })
+      throw error
+    }
+  }, [])
+
   const logout = useCallback(() => {
     sessionExpiredHandledRef.current = false
     resetProfileAccessCache(authState.me?.id)
@@ -112,8 +127,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [authState.me?.id])
 
   const value = useMemo(
-    () => ({ authState, login, logout, checkAuth }),
-    [authState, checkAuth, login, logout]
+    () => ({ authState, login, completeIdentityProviderLogin, logout, checkAuth }),
+    [authState, checkAuth, completeIdentityProviderLogin, login, logout]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
