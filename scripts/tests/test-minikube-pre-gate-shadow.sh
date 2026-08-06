@@ -115,6 +115,14 @@ prepare_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
+  # patches/k8s-api-ip.yaml is GENERATED and gitignored (the overlay commits
+  # only the .template), so whether the developer's tree has one is incidental.
+  # Materialise it deterministically: by the time anything renders, `make
+  # minikube-setup` / `make minikube-deploy-all` have written it. Its absence is
+  # its own case (assert_a_render_copy_without_the_generated_patch_...), which
+  # deletes this file again.
+  cp "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
+    "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
   cat > "$d/repo/scripts/minikube/build-images.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'build-images %s\n' "$*" >>"${TEST_LOG_FILE:?}"
@@ -812,6 +820,71 @@ assert_an_overridden_tag_renders_from_a_copy_carrying_that_tag() {
   rm -rf "$d"
 }
 
+# The copy has to carry the GENERATED patch, not just the committed files.
+# overlays/minikube-ghcr renders `resources: ../minikube`, which patches with
+# patches/k8s-api-ip.yaml -- gitignored, written by minikube-detect-k8s-api-ip.sh.
+assert_a_render_copy_carries_the_generated_api_ip_patch() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_manifest "$d" '{"generated":"g1","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  out="$(bash "$d/repo/scripts/minikube/image-mode.sh" --render-dir 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+     && [ -d "$out" ] \
+     && [ -f "${out}/../minikube/patches/k8s-api-ip.yaml" ]; then
+    pass "the tag-override render copy carries the generated k8s-api-ip.yaml"
+  else
+    fail "expected the copy to carry patches/k8s-api-ip.yaml; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# Reproduced before the fix: a fresh clone plus
+# `MINIKUBE_IMAGE_TAG=latest make minikube-setup` generated the patch only into
+# the setup's own mktemp copy, so the next pre-gate rendered a copy without one
+# and kustomize failed with `evalsymlink failure on <temp>/patches/
+# k8s-api-ip.yaml: no such file or directory` -- a path inside a temp dir, and
+# no remedy. Fail before the copy is handed out, naming the file in the
+# developer's tree and the command that writes it.
+assert_a_render_copy_without_the_generated_api_ip_patch_fails_with_a_remedy() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_manifest "$d" '{"generated":"g1","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  rm -f "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+  out="$(bash "$d/repo/scripts/minikube/image-mode.sh" --render-dir 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml" <<< "$out" \
+     && grep -Fq 'deploy/scripts/minikube-detect-k8s-api-ip.sh' <<< "$out" \
+     && ! grep -q 'evalsymlink' <<< "$out"; then
+    pass "a copy missing the generated patch fails naming the file and how to regenerate it"
+  else
+    fail "expected a named, actionable failure; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# The pinned path renders the committed overlay in place, so it must NOT be
+# gated on the generated patch: kustomize is what reports a missing patch there,
+# and only the copy can be silently built without one.
+assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_manifest "$d" '{"generated":"g1","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  rm -f "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+  out="$(bash "$d/repo/scripts/minikube/image-mode.sh" --render-dir 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$out" = "$d/repo/deploy/overlays/minikube-ghcr" ]; then
+    pass "the pinned render dir resolves without the generated patch"
+  else
+    fail "expected the committed ghcr overlay; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # A mode that is neither ghcr nor local is a typo, and guessing one silently
 # picks a cluster shape.
 assert_an_unknown_image_source_is_rejected() {
@@ -914,6 +987,9 @@ assert_a_re_acquisition_forces_a_full_resync
 assert_make_deploy_all_renders_the_mode_aware_overlay
 assert_the_render_dir_resolver_follows_the_recorded_mode
 assert_an_overridden_tag_renders_from_a_copy_carrying_that_tag
+assert_a_render_copy_carries_the_generated_api_ip_patch
+assert_a_render_copy_without_the_generated_api_ip_patch_fails_with_a_remedy
+assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch
 assert_an_unknown_image_source_is_rejected
 assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse

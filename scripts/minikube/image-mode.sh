@@ -187,7 +187,7 @@ image_mode_images_generated_at() {
 # project dir and the tag so repeated runs reuse one location instead of
 # leaking a new mktemp -d every time.
 image_mode_override_render_dir() {
-  local project_dir="$1" tag="$2" key root component rewritten
+  local project_dir="$1" tag="$2" key root component rewritten patch
   key="$(printf '%s' "$project_dir" | shasum | awk '{print $1}')"
   root="${TMPDIR:-/tmp}/clerum-image-tag-override/${key}-${tag}"
   rm -rf "$root"
@@ -199,6 +199,21 @@ image_mode_override_render_dir() {
   component="${root}/deploy/components/ghcr-images/kustomization.yaml"
   if [ ! -f "$component" ]; then
     printf 'image-mode: ghcr component missing from the deploy copy at %s\n' "$component" >&2
+    return 1
+  fi
+  # overlays/minikube-ghcr renders `resources: ../minikube`, which patches with
+  # patches/k8s-api-ip.yaml -- a GENERATED, gitignored file (the overlay commits
+  # only the .template). Copying a tree that has never had one produces a render
+  # dir that fails inside kustomize with
+  #   evalsymlink failure on '<temp dir>/.../patches/k8s-api-ip.yaml'
+  # which names a path in a temp directory and tells the operator nothing about
+  # what to do. Fail here instead, naming the file in THEIR tree and the command
+  # that writes it.
+  patch="${root}/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+  if [ ! -f "$patch" ]; then
+    printf 'image-mode: %s/deploy/overlays/minikube/patches/k8s-api-ip.yaml has not been generated, so the MINIKUBE_IMAGE_TAG=%s render copy would not render.\n' \
+      "$project_dir" "$tag" >&2
+    printf 'image-mode: generate it with: CONTEXT=<minikube-profile> deploy/scripts/minikube-detect-k8s-api-ip.sh (make minikube-setup and make minikube-deploy-all both do this)\n' >&2
     return 1
   fi
   # -i.bak plus rm keeps this portable across BSD and GNU sed; `sed -i ''` is a

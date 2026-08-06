@@ -842,6 +842,22 @@ fi
 # 6b. Deploy via kustomize
 log "Refreshing minikube K8s API endpoint CIDRs..."
 CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+# patches/k8s-api-ip.yaml is GENERATED and gitignored -- overlays/minikube
+# commits only the .template -- and overlays/minikube-ghcr renders ../minikube,
+# which patches with it.
+#
+# With MINIKUBE_IMAGE_TAG set, ACTIVE_MINIKUBE_KUSTOMIZE_DIR is the mktemp COPY
+# (apply_image_tag_override), so the line above writes the patch THERE and the
+# working tree never gets one. Every later consumer renders from the working
+# tree, or from image-mode.sh's own fresh copy of it: the next
+# `make minikube-pre-gate-sync` renders the control-api migration overlay
+# BEFORE `make minikube-deploy-all` regenerates the patch, and kustomize dies
+# with an evalsymlink error naming a file nothing ever wrote. Generate it in the
+# working tree too whenever the active dir is not the working tree.
+PROJECT_MINIKUBE_KUSTOMIZE_DIR="${PROJECT_DIR}/deploy/overlays/minikube"
+if [ "$ACTIVE_MINIKUBE_KUSTOMIZE_DIR" != "$PROJECT_MINIKUBE_KUSTOMIZE_DIR" ]; then
+  CONTEXT="${PROFILE}" OVERLAY_DIR="${PROJECT_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+fi
 ok "Minikube K8s API CIDRs refreshed"
 
 # Upgrade path: stage the additive reader credential before the full overlay

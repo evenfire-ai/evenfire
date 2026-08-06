@@ -611,6 +611,120 @@ assert_the_tag_origin_distinguishes_pin_from_override() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# The GENERATED k8s-api-ip.yaml under a tag override
+# ---------------------------------------------------------------------------
+#
+# patches/k8s-api-ip.yaml is generated and gitignored; overlays/minikube commits
+# only the .template, and overlays/minikube-ghcr renders `../minikube`, which
+# patches with it. With MINIKUBE_IMAGE_TAG set, ACTIVE_MINIKUBE_KUSTOMIZE_DIR is
+# the mktemp copy, so Step 6b used to write the patch ONLY there and the working
+# tree never got one. The next `make minikube-pre-gate-sync` renders a FRESH
+# copy of ${PROJECT_DIR}/deploy (image-mode.sh) for the control-api migration,
+# BEFORE `make minikube-deploy-all` regenerates the patch, and kustomize dies on
+# `evalsymlink failure on .../patches/k8s-api-ip.yaml`.
+#
+# These cases run the REAL Step 6b block and the REAL
+# deploy/scripts/minikube-detect-k8s-api-ip.sh against a stubbed kubectl, then
+# assert on the FILES that appear on disk and on how many times the detector
+# ran. Inverting the condition (or wrapping it in `if false && ...`) changes
+# both, so neither assertion survives a semantic mutation.
+extract_full_setup_k8s_api_ip_block() {
+  awk '
+    /Refreshing minikube K8s API endpoint CIDRs/ { cap = 1 }
+    cap { print }
+    cap && /Minikube K8s API CIDRs refreshed/ { exit }
+  ' "$1"
+}
+
+# A throwaway PROJECT_DIR carrying the real detector and the real patch
+# template, plus a kubectl stub that answers the one endpoint read the detector
+# makes and logs every call so invocations can be counted.
+prepare_k8s_api_ip_repo() {
+  local d=$1
+  mkdir -p "$d/bin" "$d/project/deploy/scripts" "$d/project/deploy/overlays/minikube/patches"
+  cp "$REPO_ROOT/deploy/scripts/minikube-detect-k8s-api-ip.sh" "$d/project/deploy/scripts/"
+  cp "$REPO_ROOT/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
+    "$d/project/deploy/overlays/minikube/patches/"
+  cat > "$d/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf 'kubectl %s\n' "$*" >>"${TEST_LOG_FILE:?}"
+case "$*" in
+  *"get endpoints kubernetes"*) echo "10.11.12.13"; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/kubectl"
+}
+
+# The mktemp copy apply_image_tag_override would have produced.
+prepare_k8s_api_ip_override_copy() {
+  local d=$1
+  mkdir -p "$d/override/deploy/overlays/minikube/patches"
+  cp "$REPO_ROOT/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
+    "$d/override/deploy/overlays/minikube/patches/"
+}
+
+run_k8s_api_ip_block() {
+  local d=$1 active=$2 script
+  script="$d/step6b.sh"
+  {
+    printf 'set -euo pipefail\n'
+    printf 'log() { printf "LOG:%%s\\n" "$*"; }\n'
+    printf 'ok() { printf "OK:%%s\\n" "$*"; }\n'
+    printf 'PROFILE="clerum-test"\n'
+    printf 'PROJECT_DIR=%q\n' "$d/project"
+    printf 'ACTIVE_MINIKUBE_KUSTOMIZE_DIR=%q\n' "$active"
+    extract_full_setup_k8s_api_ip_block "$REPO_ROOT/scripts/minikube/full-setup.sh"
+  } > "$script"
+  PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" bash "$script" 2>&1
+}
+
+assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree() {
+  local d out rc calls problems=""
+  d="$(mktemp -d)"
+  prepare_k8s_api_ip_repo "$d"
+  prepare_k8s_api_ip_override_copy "$d"
+  out="$(run_k8s_api_ip_block "$d" "$d/override/deploy/overlays/minikube")"
+  rc=$?
+  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
+  grep -q '10.11.12.13/32' "$d/override/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
+    || problems+="the render copy did not get the generated patch; "
+  # The whole point: the working tree gets one too, so image-mode.sh's copy and
+  # the pre-gate migration render both find it.
+  grep -q '10.11.12.13/32' "$d/project/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
+    || problems+="the working tree did not get the generated patch; "
+  [ "$calls" = "2" ] || problems+="detector ran ${calls} time(s), expected 2; "
+  if [ -z "$problems" ]; then
+    pass "a tag override generates k8s-api-ip.yaml in the render copy AND in the working tree"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# The complement, so the fix cannot be "always run it twice": with no override
+# the active kustomize dir IS the working tree, and one generation is enough.
+assert_the_unoverridden_path_generates_the_api_ip_patch_once() {
+  local d out rc calls problems=""
+  d="$(mktemp -d)"
+  prepare_k8s_api_ip_repo "$d"
+  out="$(run_k8s_api_ip_block "$d" "$d/project/deploy/overlays/minikube")"
+  rc=$?
+  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
+  grep -q '10.11.12.13/32' "$d/project/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
+    || problems+="the working tree did not get the generated patch; "
+  [ "$calls" = "1" ] || problems+="detector ran ${calls} time(s), expected 1; "
+  if [ -z "$problems" ]; then
+    pass "the unoverridden path generates k8s-api-ip.yaml exactly once, in the working tree"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
 assert_every_defined_case_is_invoked() {
@@ -649,6 +763,8 @@ assert_the_tag_override_copy_is_a_whole_deploy_tree_with_the_new_tag
 assert_the_skip_build_staleness_advice_is_mode_aware
 assert_the_banner_prints_the_image_source_tag_and_origin
 assert_the_tag_origin_distinguishes_pin_from_override
+assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
+assert_the_unoverridden_path_generates_the_api_ip_patch_once
 assert_every_defined_case_is_invoked
 
 exit $FAIL
