@@ -2286,6 +2286,188 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
   `)
 }
 
+/**
+ * Reconcile all Plugin Workload SDK contracts that were edited in-place after
+ * their migrations had already run on long-lived databases. This is one
+ * forward-only migration on purpose: re-running 0080 would relabel legitimate
+ * v2 terminal invocations and re-running 0081 would not repair existing
+ * constraints created from its earlier body.
+ */
+async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+    RETURNS BOOLEAN
+    LANGUAGE sql
+    IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+      SELECT CASE
+        WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+        ELSE jsonb_typeof(value) = 'object'
+         AND octet_length(value::text) <= 16384
+         AND value ?& ARRAY[
+           'request_ref', 'provider', 'model', 'source_kind',
+           'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+           'cache_tokens_reported'
+         ]
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_object_keys(value) AS key_name
+            WHERE key_name NOT IN (
+              'request_ref', 'provider', 'model', 'source_kind',
+              'input_tokens', 'output_tokens', 'cache_read_tokens',
+              'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
+            )
+         )
+         AND jsonb_typeof(value->'request_ref') = 'string'
+         AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+         AND jsonb_typeof(value->'provider') = 'string'
+         AND jsonb_typeof(value->'model') = 'string'
+         AND jsonb_typeof(value->'source_kind') = 'string'
+         AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
+         AND jsonb_typeof(value->'input_tokens') = 'number'
+         AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'output_tokens') = 'number'
+         AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+         AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+         AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+         AND (
+           NOT (value ? 'iteration')
+           OR (
+             jsonb_typeof(value->'iteration') = 'number'
+             AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+           )
+         )
+         AND (
+           NOT (value ? 'prompt_bridge')
+           OR (
+             jsonb_typeof(value->'prompt_bridge') = 'object'
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value->'prompt_bridge') AS key_name
+                WHERE key_name NOT IN (
+                  'invocation_id', 'attempt_generation', 'target_ref',
+                  'fallback_used', 'attempt_count', 'provider_attempt_id',
+                  'provider_attempt_index'
+                )
+             )
+             AND value->'prompt_bridge' ?& ARRAY[
+               'invocation_id', 'attempt_generation', 'target_ref',
+               'fallback_used', 'attempt_count', 'provider_attempt_id',
+               'provider_attempt_index'
+             ]
+             AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+             AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-4]$'
+             AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+             AND char_length(value->'prompt_bridge'->>'target_ref') BETWEEN 1 AND 256
+             AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
+             AND (value->'prompt_bridge'->>'attempt_count') ~ '^[1-4]$'
+           )
+         )
+      END;
+    $$;
+
+    ALTER FUNCTION governed_trace_safe_metadata(JSONB)
+      SET search_path = pg_catalog, public;
+    ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      SET search_path = pg_catalog, public;
+
+    REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    REVOKE ALL ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB)
+      TO control_api_runtime, trace_maintenance_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      TO control_api_runtime;
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      ALTER COLUMN contract_version SET DEFAULT 1;
+
+    DO $$
+    DECLARE ambiguous_count INTEGER;
+    BEGIN
+      SELECT COUNT(*)
+        INTO ambiguous_count
+        FROM plugin_workload_sdk_invocations invocations
+       WHERE invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+      IF ambiguous_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % v2 invocations without leases with a physical provider attempt',
+          ambiguous_count;
+      END IF;
+    END
+    $$;
+
+    CREATE TEMP TABLE plugin_workload_sdk_runtime_reconciled_invocations (
+      invocation_id UUID PRIMARY KEY,
+      attempt_generation INTEGER NOT NULL
+    ) ON COMMIT DROP;
+
+    INSERT INTO plugin_workload_sdk_runtime_reconciled_invocations (invocation_id, attempt_generation)
+    SELECT id, attempt_generation
+      FROM plugin_workload_sdk_invocations
+     WHERE contract_version = 2
+       AND status = 'in_progress'
+       AND lease_expires_at IS NULL;
+
+    UPDATE plugin_workload_sdk_invocations
+       SET contract_version = 1,
+           status = 'failed',
+           authorization_decision = CASE
+             WHEN authorization_decision = 'authorized' THEN 'migration_interrupted'
+             ELSE authorization_decision
+           END,
+           updated_at = now(),
+           completed_at = COALESCE(completed_at, now()),
+           lease_expires_at = NULL
+     WHERE id IN (
+       SELECT invocation_id
+         FROM plugin_workload_sdk_runtime_reconciled_invocations
+     );
+
+    UPDATE plugin_workload_sdk_invocation_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status = 'in_progress';
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_invocations_v2_lease_check;
+    ALTER TABLE plugin_workload_sdk_invocations
+      ADD CONSTRAINT plugin_workload_sdk_invocations_v2_lease_check
+      CHECK (
+        contract_version = 1
+        OR status <> 'in_progress'
+        OR lease_expires_at IS NOT NULL
+      );
+
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_provider_attempts_status_check;
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
+      CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped'));
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5143,6 +5325,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',
     apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess,
+  },
+  {
+    version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
+    apply: reconcilePluginWorkloadSdkRuntimeContracts,
   },
 ]
 
