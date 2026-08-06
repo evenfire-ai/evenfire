@@ -31,7 +31,6 @@ const REGISTRY_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'version', label: 'Version' },
   { key: 'visibility', label: 'Visibility' },
-  { key: 'downloads', label: 'Downloads' },
   { key: 'install', align: 'right', ariaLabel: 'Installation' },
   { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
 ]
@@ -409,7 +408,6 @@ export default function RegistryCatalog() {
                             <span className="cu-muted">—</span>
                           )}
                         </td>
-                        <td>{entry.downloads}</td>
                         <td
                           className="cu-table__cell-actions cu-marketplace-action-cell"
                           onClick={event => event.stopPropagation()}

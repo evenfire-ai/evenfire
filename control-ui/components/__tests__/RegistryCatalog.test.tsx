@@ -156,14 +156,14 @@ describe('RegistryCatalog tabs and columns', () => {
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    for (const heading of ['Name', 'Version', 'Visibility', 'Downloads']) {
+    for (const heading of ['Name', 'Version', 'Visibility']) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
     for (const actionHeading of ['Installation', 'Edit or remove']) {
       expect(screen.getByRole('columnheader', { name: actionHeading })).toBeInTheDocument()
     }
     expect(screen.queryByRole('columnheader', { name: 'View details' })).not.toBeInTheDocument()
-    for (const removed of ['Type', 'Category', 'Trust', 'Quality']) {
+    for (const removed of ['Type', 'Category', 'Trust', 'Quality', 'Downloads']) {
       expect(screen.queryByRole('columnheader', { name: removed })).not.toBeInTheDocument()
     }
   })

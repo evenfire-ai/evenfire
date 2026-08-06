@@ -2375,7 +2375,7 @@ textarea.cu-input {
 }
 
 .cu-marketplace-table {
-  min-width: 68rem;
+  min-width: 60rem;
   --cu-expandable-inset-left: calc(3rem + 0.85rem);
   --cu-expandable-inset-right: 4.75rem;
 }
@@ -2391,24 +2391,17 @@ textarea.cu-input {
 }
 
 .cu-marketplace-table th:nth-child(4),
-.cu-marketplace-table td:nth-child(4),
+.cu-marketplace-table td:nth-child(4) {
+  width: 8rem;
+}
+
 .cu-marketplace-table th:nth-child(5),
 .cu-marketplace-table td:nth-child(5) {
-  width: 8rem;
+  width: 7rem;
 }
 
 .cu-marketplace-table th:nth-child(6),
 .cu-marketplace-table td:nth-child(6) {
-  width: 7rem;
-}
-
-.cu-marketplace-table th:nth-child(7),
-.cu-marketplace-table td:nth-child(7) {
-  width: 5.25rem;
-}
-
-.cu-marketplace-table th:nth-child(8),
-.cu-marketplace-table td:nth-child(8) {
   width: 4.75rem;
 }
 
@@ -2430,16 +2423,16 @@ textarea.cu-input {
   padding-left: 0.15rem;
 }
 
-.cu-marketplace-table td:nth-child(7) {
+.cu-marketplace-table td:nth-child(5) {
   text-align: center;
 }
 
-.cu-marketplace-table td:nth-child(7) .cu-btn {
+.cu-marketplace-table td:nth-child(5) .cu-btn {
   max-width: 100%;
   padding-inline: var(--cu-space-1);
 }
 
-.cu-marketplace-table td:nth-child(8) {
+.cu-marketplace-table td:nth-child(6) {
   text-align: left;
 }
 
