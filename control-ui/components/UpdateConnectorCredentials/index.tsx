@@ -51,6 +51,18 @@ export const ROLLOUT_INCOMPLETE_REASON = 'RolloutIncomplete'
 // excluded. 5s comfortably covers ordinary NTP drift.
 export const CLOCK_SKEW_TOLERANCE_MS = 5_000
 
+// The aggregate validation alert's id. Rejected inputs point at it through
+// `aria-describedby`, so a screen reader announces WHY a field is invalid from
+// the field itself instead of only when the operator happens to reach the
+// banner at the bottom of the form.
+const VALIDATION_ERROR_ID = 'mcp-cred-validation-error'
+
+/** Stable per-key input id, shared by the label's `htmlFor` and the
+ *  post-submit focus lookup. */
+function inputId(secretKey: string): string {
+  return `mcp-cred-${secretKey}`
+}
+
 function buildConfirmMessage(secretName: string, affected: string[] | null): string {
   if (affected === null) {
     return `This rotates the credential value(s) you entered in Secret "${secretName}" and restarts any connector that references it.`
@@ -90,6 +102,11 @@ export function UpdateConnectorCredentials({
 
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [validationError, setValidationError] = useState('')
+  // The secretKeys the last submit rejected. Drives per-input `aria-invalid` /
+  // `aria-describedby`, so the aggregate alert is not the ONLY way to learn
+  // which fields are wrong — assistive technology gets the association on the
+  // control itself.
+  const [invalidKeys, setInvalidKeys] = useState<string[]>([])
   // Best-effort preview of "who restarts", shown in the pre-save confirm
   // dialog (requisito 5). The authoritative list only exists after the PUT
   // (Fase 1 regla 9) — this mirrors the server's own
@@ -303,6 +320,25 @@ export function UpdateConnectorCredentials({
   function updateField(secretKey: string, value: string) {
     setDraft(prev => ({ ...prev, [secretKey]: value }))
     if (validationError) setValidationError('')
+    // The alert the inputs point at is about to disappear, so the association
+    // has to go with it — a dangling aria-describedby is worse than none.
+    if (invalidKeys.length > 0) setInvalidKeys([])
+  }
+
+  /** Rejects a submit: shows the aggregate alert, marks the offending inputs,
+   *  and moves focus to the first one so the repair is reachable without
+   *  hunting for it. `keys` may be empty (rotate mode's "at least one" rule
+   *  blames no single field); focus then lands on the first input. */
+  function rejectSubmit(message: string, keys: string[]) {
+    setValidationError(message)
+    setInvalidKeys(keys)
+    const focusKey = keys[0] ?? envSecret!.keys[0]?.secretKey
+    if (!focusKey) return
+    // The inputs already exist and their ids are deterministic, so a lookup is
+    // enough — TextInput is a plain function component under React 18 and does
+    // not forward a ref.
+    const target = document.getElementById(inputId(focusKey))
+    if (target instanceof HTMLElement) target.focus()
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -322,14 +358,17 @@ export function UpdateConnectorCredentials({
         .map(k => k.secretKey)
         .filter(secretKey => !(data[secretKey] && data[secretKey].trim()))
       if (missing.length > 0) {
-        setValidationError(`Enter every credential value. Missing: ${missing.join(', ')}.`)
+        rejectSubmit(`Enter every credential value. Missing: ${missing.join(', ')}.`, missing)
         return
       }
     } else if (Object.keys(data).length === 0) {
-      setValidationError('Enter at least one credential value to rotate.')
+      // No single field is at fault here — the rule is "at least one" — so
+      // nothing is marked invalid; focus just returns to the top of the form.
+      rejectSubmit('Enter at least one credential value to rotate.', [])
       return
     }
     setValidationError('')
+    setInvalidKeys([])
 
     const confirmed = await confirm(
       mode === 'set'
@@ -504,23 +543,46 @@ export function UpdateConnectorCredentials({
         </table>
       </div>
 
-      <form className="cu-form-stack" onSubmit={handleSubmit}>
-        {envSecret.keys.map(k => (
-          <Field key={k.secretKey} htmlFor={`mcp-cred-${k.secretKey}`} label={k.secretKey}>
-            <TextInput
-              id={`mcp-cred-${k.secretKey}`}
-              type="password"
-              autoComplete="new-password"
-              placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
-              value={draft[k.secretKey] || ''}
-              onChange={e => updateField(k.secretKey, e.target.value)}
-              disabled={busy}
-            />
-          </Field>
-        ))}
+      {/* `noValidate`: the browser's own required-field bubble would fire
+          before handleSubmit and replace the aggregate message that actually
+          NAMES the missing keys. The `required` attributes below are kept for
+          their programmatic semantics (assistive technology reads the required
+          state regardless of novalidate); the enforcement stays ours. */}
+      <form className="cu-form-stack" onSubmit={handleSubmit} noValidate>
+        {envSecret.keys.map(k => {
+          const isInvalid = invalidKeys.includes(k.secretKey)
+          return (
+            <Field
+              key={k.secretKey}
+              htmlFor={inputId(k.secretKey)}
+              label={k.secretKey}
+              required={mode === 'set'}
+            >
+              <TextInput
+                id={inputId(k.secretKey)}
+                type="password"
+                autoComplete="new-password"
+                placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
+                value={draft[k.secretKey] || ''}
+                onChange={e => updateField(k.secretKey, e.target.value)}
+                disabled={busy}
+                // Set mode creates the Secret in one shot: HCC answers
+                // SecretMissingKey for any key left out, so every declared key
+                // really is mandatory. In rotate mode a blank field means
+                // "keep the current value", and marking it required would be a
+                // lie the screen reader would repeat on every field.
+                required={mode === 'set'}
+                aria-required={mode === 'set' || undefined}
+                invalid={isInvalid}
+                aria-invalid={isInvalid || undefined}
+                aria-describedby={isInvalid ? VALIDATION_ERROR_ID : undefined}
+              />
+            </Field>
+          )
+        })}
 
         {validationError ? (
-          <div className="cu-banner cu-banner--error" role="alert">
+          <div className="cu-banner cu-banner--error" role="alert" id={VALIDATION_ERROR_ID}>
             {validationError}
           </div>
         ) : null}

@@ -116,10 +116,13 @@ async function submitRotation(keys: Record<string, string>) {
 
 /** Fills `keys` (secretKey -> value), submits, and confirms the set-mode
  *  dialog — draining the microtask chain in between so callers land on a
- *  settled `phase`. */
+ *  settled `phase`.
+ *
+ *  `exact: false` because set mode marks every Field `required`, which appends
+ *  the visual " *" to the label. */
 async function submitSet(keys: Record<string, string>) {
   for (const [secretKey, value] of Object.entries(keys)) {
-    fireEvent.change(screen.getByLabelText(secretKey), { target: { value } })
+    fireEvent.change(screen.getByLabelText(secretKey, { exact: false }), { target: { value } })
   }
   fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
   const dialog = screen.getByRole('alertdialog')
@@ -854,7 +857,9 @@ describe('UpdateConnectorCredentials — set mode', () => {
     await renderPanel(ENV_SECRET, 'set')
 
     // Only one of the two declared keys filled.
-    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'secret-value' } })
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'secret-value' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
     await flush()
 
@@ -863,6 +868,90 @@ describe('UpdateConnectorCredentials — set mode', () => {
     ).toBeInTheDocument()
     // No confirm dialog, so nothing was sent.
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})
+
+// ─── R1-L1: requiredness and validation must be programmatic ───────────────
+//
+// Set mode used to signal "every key is mandatory" only through a `Required`
+// placeholder and one aggregate alert at the bottom of the form. A screen
+// reader user could not tell which inputs were required before submitting, nor
+// which ones were rejected afterwards, and focus stayed wherever it was.
+describe('UpdateConnectorCredentials — required semantics and validation', () => {
+  it('marks every input required in set mode, and none of them in rotate mode', async () => {
+    const { unmount } = await renderPanel(ENV_SECRET, 'set')
+    for (const key of ENV_SECRET.keys) {
+      const input = screen.getByLabelText(key.secretKey, { exact: false })
+      expect(input).toBeRequired()
+      expect(input).toHaveAttribute('aria-required', 'true')
+    }
+    unmount()
+
+    // Rotate mode: a blank field means "keep the current value", so requiring
+    // it would be a lie.
+    await renderPanel(ENV_SECRET, 'rotate')
+    for (const key of ENV_SECRET.keys) {
+      const input = screen.getByLabelText(key.secretKey)
+      expect(input).not.toBeRequired()
+      expect(input).not.toHaveAttribute('aria-required', 'true')
+    }
+  })
+
+  it('flags only the missing inputs, points them at the error, and focuses the first one', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // Fill the SECOND declared key only, so the first one is the missing one
+    // and "focus the first invalid input" cannot pass by focusing field #1 by
+    // accident.
+    fireEvent.change(screen.getByLabelText('workspace-id', { exact: false }), {
+      target: { value: 'w-value' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const missing = screen.getByLabelText('api-key', { exact: false })
+    const filled = screen.getByLabelText('workspace-id', { exact: false })
+    const alert = screen.getByRole('alert')
+
+    expect(missing).toHaveAttribute('aria-invalid', 'true')
+    expect(filled).not.toHaveAttribute('aria-invalid', 'true')
+    // The alert that names the missing keys is programmatically associated with
+    // the input that caused it.
+    expect(alert).toHaveAttribute('id')
+    expect(missing.getAttribute('aria-describedby')).toContain(alert.getAttribute('id'))
+    expect(filled).not.toHaveAttribute('aria-describedby')
+    // ...and the operator is put on the field they have to repair.
+    expect(missing).toHaveFocus()
+  })
+
+  it('clears the invalid state as soon as the operator types into the flagged input', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+    expect(screen.getByLabelText('api-key', { exact: false })).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    )
+
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'a-value' },
+    })
+
+    const repaired = screen.getByLabelText('api-key', { exact: false })
+    expect(repaired).not.toHaveAttribute('aria-invalid', 'true')
+    expect(repaired).not.toHaveAttribute('aria-describedby')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('focuses the first input when a rotate submit carries no values at all', async () => {
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    await flush()
+
+    expect(screen.getByText('Enter at least one credential value to rotate.')).toBeInTheDocument()
+    expect(screen.getByLabelText('api-key')).toHaveFocus()
   })
 })
 
