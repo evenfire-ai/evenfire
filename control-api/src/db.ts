@@ -7,9 +7,22 @@ import {
 import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkAttemptLedgerColumns,
+  addPluginWorkloadSdkJitCredentialTicketColumns,
+  addPluginWorkloadSdkNotExecutedSpendOutcome,
+  addPluginWorkloadSdkPolicyReviewProvenance,
+  addPluginWorkloadSdkPromptTargetPolicyColumns,
+  addPluginWorkloadSdkProtocolAndRevocation,
+  addPluginWorkloadSdkProviderAttemptLedger,
   addPluginWorkloadSdkProviderColumn,
+  addPluginWorkloadSdkRevocationEpoch,
+  addPluginWorkloadSdkRuntimeAccess,
+  addPluginWorkloadSdkSpendOutcomeLedger,
+  addPluginWorkloadSdkUsageSourceKind,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
+  relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  repairPluginWorkloadSdkLegacyGrantPolicies,
 } from './services/pluginWorkloadSdkSchema.js'
 import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
 
@@ -1334,7 +1347,7 @@ async function applyWorkflowRecipeAllowedTeamsAuditSchema(db: DbClient): Promise
 async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
   await db.query(`
     DO $$ BEGIN
-      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown');
+      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown','plugin_workload_sdk');
     EXCEPTION WHEN duplicate_object THEN NULL;
     END $$;
 
@@ -1374,6 +1387,8 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_events (llm_secret_name, ts) WHERE llm_secret_name IS NOT NULL;
     ALTER TABLE usage_events
       ADD COLUMN IF NOT EXISTS team_id TEXT;
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
     CREATE INDEX IF NOT EXISTS usage_events_team_id_ts_idx
       ON usage_events (team_id, ts) WHERE team_id IS NOT NULL;
 
@@ -1493,6 +1508,14 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_daily (team_id, bucket) WHERE team_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS usage_daily_recipe_idx
       ON usage_daily (recipe_name, bucket) WHERE recipe_name IS NOT NULL;
+  `)
+}
+
+/** Adds bounded promptBridge target attribution to the raw usage ledger. */
+async function addPromptBridgeUsageMetadataColumn(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
   `)
 }
 
@@ -3018,14 +3041,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'iteration'
+                  'cache_write_tokens', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
              AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'source_kind') = 'string'
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
@@ -3040,6 +3063,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -4313,7 +4354,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'cache_tokens_reported', 'iteration'
+                  'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
@@ -4321,7 +4362,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
              AND jsonb_typeof(value->'source_kind') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
              AND jsonb_typeof(value->'output_tokens') = 'number'
@@ -4336,6 +4377,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -5023,6 +5082,62 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
           TO gfs_controller, gfs_controller_reader;
       `)
     },
+  },
+  {
+    version: '0075_plugin_workload_sdk_prompt_target_policy',
+    apply: addPluginWorkloadSdkPromptTargetPolicyColumns,
+  },
+  {
+    version: '0076_plugin_workload_sdk_jit_credential_tickets',
+    apply: addPluginWorkloadSdkJitCredentialTicketColumns,
+  },
+  {
+    version: '0077_plugin_workload_sdk_usage_attribution',
+    apply: addPromptBridgeUsageMetadataColumn,
+  },
+  {
+    version: '0078_plugin_workload_sdk_attempt_ledger',
+    apply: addPluginWorkloadSdkAttemptLedgerColumns,
+  },
+  {
+    version: '0079_plugin_workload_sdk_usage_source_kind',
+    apply: addPluginWorkloadSdkUsageSourceKind,
+  },
+  {
+    version: '0080_plugin_workload_sdk_protocol_revocation',
+    apply: addPluginWorkloadSdkProtocolAndRevocation,
+  },
+  {
+    version: '0081_plugin_workload_sdk_provider_attempt_ledger',
+    apply: addPluginWorkloadSdkProviderAttemptLedger,
+  },
+  {
+    version: '0082_plugin_workload_sdk_revocation_epoch',
+    apply: addPluginWorkloadSdkRevocationEpoch,
+  },
+  {
+    version: '0083_plugin_workload_sdk_runtime_access',
+    apply: addPluginWorkloadSdkRuntimeAccess,
+  },
+  {
+    version: '0084_plugin_workload_sdk_spend_outcome_ledger',
+    apply: addPluginWorkloadSdkSpendOutcomeLedger,
+  },
+  {
+    version: '0085_plugin_workload_sdk_spend_outcome_host_ref_nullable',
+    apply: relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  },
+  {
+    version: '0086_plugin_workload_sdk_legacy_policy_repair',
+    apply: repairPluginWorkloadSdkLegacyGrantPolicies,
+  },
+  {
+    version: '0087_plugin_workload_sdk_not_executed_spend_outcome',
+    apply: addPluginWorkloadSdkNotExecutedSpendOutcome,
+  },
+  {
+    version: '0088_plugin_workload_sdk_policy_review_provenance',
+    apply: addPluginWorkloadSdkPolicyReviewProvenance,
   },
 ]
 

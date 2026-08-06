@@ -1,13 +1,20 @@
 /**
- * Model Config Handler — WRC-side Secret Broker for model hot-swap.
+ * Model Config Handler — WRC-side Secret Broker for workflow model hot-swap.
  *
  * The coordinator sends { provider, model, stepId } (never apiKey).
  * WRC resolves the API key from K8s Secrets and forwards to mcp_host.
  *
- * Security invariant: model credentials travel only on the WRC→mcp_host
- * configure request and are never returned to the coordinator.
+ * Security invariant: workflow model credentials travel only on the WRC→mcp_host
+ * configure request and are never returned to the coordinator. Plugin Workload
+ * SDK bootstrap is identity-only; its prompt credentials stay behind the
+ * per-attempt broker.
  */
-import { isLlmProviderId } from '@clerum/llm-providers'
+import {
+  PROVIDER_CREDENTIAL_SLOTS,
+  isCredentialSlotOwnedByProvider,
+  isLlmProviderId,
+  isRunnableLlmModelId,
+} from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -49,6 +56,13 @@ export interface ConfigureModelResult {
   body: Record<string, unknown>
 }
 
+export interface PluginSdkCredentialTarget {
+  targetRef: string
+  provider: string
+  model: string
+  credentialSlot: string
+}
+
 /**
  * Result of a presence-aware ConfigMap read. Distinguishes "the CM does not
  * exist" (404) from "the CM exists but its `data` is empty/omitted" — a
@@ -75,6 +89,16 @@ export interface McpHostClient {
     endpoint: string,
     token: string,
     body: Record<string, unknown>
+  ): Promise<{ status: number; body: Record<string, unknown> }>
+  /** Publish only the public provider/model bootstrap identity for SDK mode. */
+  configurePluginWorkloadSdkBootstrap?(
+    endpoint: string,
+    token: string,
+    body: {
+      capabilityFamily?: 'promptBridge' | 'clientNotifications'
+      provider?: string
+      model?: string
+    }
   ): Promise<{ status: number; body: Record<string, unknown> }>
 }
 
@@ -149,7 +173,7 @@ function parseAllowedModels(raw: string | undefined, provider: string): Set<stri
       entry &&
       typeof entry === 'object' &&
       typeof (entry as { model?: unknown }).model === 'string' &&
-      (entry as { model: string }).model.length > 0
+      isRunnableLlmModelId((entry as { model: string }).model)
     ) {
       allowed.add((entry as { model: string }).model)
     }
@@ -163,6 +187,188 @@ export class ModelConfigHandler {
     private readonly mcpHost: McpHostClient,
     private readonly objectStorage?: ObjectStorageReader
   ) {}
+
+  /**
+   * Publish an SDK host's public bootstrap binding without resolving a Secret.
+   * Prompt credentials are resolved by the per-attempt broker instead; using
+   * the normal workflow `handle()` path here would load and forward a provider
+   * key into the eager mcp-host.
+   */
+  async configurePluginWorkloadSdkBootstrap(
+    provider: string | undefined,
+    model: string | undefined,
+    mcpHostEndpoint: string,
+    wrcConfigureToken: string,
+    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge'
+  ): Promise<ConfigureModelResult> {
+    if (
+      capabilityFamily === 'promptBridge' &&
+      (!provider || !model || !isLlmProviderId(provider) || !isRunnableLlmModelId(model))
+    ) {
+      return { status: 400, body: { error: 'Invalid Plugin Workload SDK bootstrap target' } }
+    }
+    if (!this.mcpHost.configurePluginWorkloadSdkBootstrap) {
+      return { status: 503, body: { error: 'Plugin Workload SDK bootstrap unavailable' } }
+    }
+    try {
+      const result = await this.mcpHost.configurePluginWorkloadSdkBootstrap(
+        mcpHostEndpoint,
+        wrcConfigureToken,
+        {
+          ...(capabilityFamily === 'clientNotifications' ? { capabilityFamily } : {}),
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
+        }
+      )
+      if (result.status >= 400) {
+        return { status: 502, body: { error: 'mcp_host bootstrap failed' } }
+      }
+      const familyProofValid =
+        capabilityFamily === 'clientNotifications'
+          ? result.body.capabilityFamily === 'clientNotifications' &&
+            typeof result.body.policyReady === 'boolean' &&
+            typeof result.body.policyState === 'string'
+          : isBootstrapIdentityProof(result.body)
+      if (
+        result.body.configured !== true ||
+        result.body.ready !== true ||
+        result.body.contractVersion !== 2 ||
+        (capabilityFamily === 'clientNotifications'
+          ? result.body.capabilityFamily !== capabilityFamily
+          : result.body.capabilityFamily !== undefined &&
+            result.body.capabilityFamily !== capabilityFamily) ||
+        (capabilityFamily === 'promptBridge' &&
+          (result.body.provider !== provider || result.body.model !== model)) ||
+        !familyProofValid
+      ) {
+        return {
+          status: 502,
+          body: { error: 'mcp_host bootstrap identity is not Plugin Workload SDK v2' },
+        }
+      }
+      const policyProof = capabilityFamily === 'promptBridge' && isBootstrapPolicyProof(result.body)
+      return {
+        status: 202,
+        body: {
+          configured: true,
+          ready: true,
+          provider,
+          model,
+          contractVersion: 2,
+          capabilityFamily,
+          ...(typeof result.body.policyReady === 'boolean'
+            ? { policyReady: result.body.policyReady }
+            : {}),
+          ...(typeof result.body.policyState === 'string'
+            ? { policyState: result.body.policyState }
+            : {}),
+          ...(typeof result.body.policyReason === 'string'
+            ? { policyReason: result.body.policyReason }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyReady === 'boolean'
+            ? { clientNotificationsPolicyReady: result.body.clientNotificationsPolicyReady }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyState === 'string'
+            ? { clientNotificationsPolicyState: result.body.clientNotificationsPolicyState }
+            : {}),
+          ...(typeof result.body.clientNotificationsPolicyReason === 'string'
+            ? { clientNotificationsPolicyReason: result.body.clientNotificationsPolicyReason }
+            : {}),
+          ...(policyProof
+            ? {
+                policyRevision: result.body.policyRevision,
+                policyHash: result.body.policyHash,
+                defaultTargetRef: result.body.defaultTargetRef,
+                defaultProvider: result.body.defaultProvider,
+                defaultModel: result.body.defaultModel,
+              }
+            : {}),
+        },
+      }
+    } catch {
+      return { status: 502, body: { error: 'mcp_host bootstrap unreachable' } }
+    }
+  }
+
+  /**
+   * Resolve exactly one ticket-authorized Plugin Workload SDK target. Unlike
+   * workflow `/configure`, this path has no degraded mode and never skips a
+   * missing slot: configuration failures are terminal for the current attempt.
+   */
+  async resolvePluginSdkCredential(
+    target: PluginSdkCredentialTarget
+  ): Promise<ConfigureModelResult> {
+    const SECRET_KEY_PATTERN = /^[A-Za-z0-9._-]{1,253}$/
+    if (
+      !isLlmProviderId(target.provider) ||
+      !isRunnableLlmModelId(target.model) ||
+      !SECRET_KEY_PATTERN.test(target.credentialSlot)
+    ) {
+      return { status: 400, body: { error: 'Invalid credential target' } }
+    }
+
+    const slots = PROVIDER_CREDENTIAL_SLOTS[target.provider]
+    const singleSlotProvider = slots.length === 1 && slots[0].multiline !== true
+    if (!isCredentialSlotOwnedByProvider(target.provider, target.credentialSlot)) {
+      return { status: 400, body: { error: 'Invalid credential target' } }
+    }
+
+    // SDK prompt targets are reviewed operator policy. Absence of the global
+    // allowlist must fail closed here; workflow degraded-mode semantics do not
+    // apply to a cross-provider SDK request.
+    const allowlistCm = await this.k8s.readConfigMapWithPresence(
+      CONFIGMAP_NAMESPACE,
+      ALLOWLIST_CONFIGMAP_NAME
+    )
+    if (!allowlistCm.exists) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const allowed = parseAllowedModels(allowlistCm.data[target.provider], target.provider)
+    if (!allowed.has(target.model)) {
+      return { status: 403, body: { error: 'Provider target is not enabled' } }
+    }
+
+    const configMap = await this.k8s.readConfigMap(CONFIGMAP_NAMESPACE, CONFIGMAP_NAME)
+    if (!configMap) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const mapping = configMap[target.provider] ?? configMap[`${target.provider}__${target.model}`]
+    if (!mapping) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const slash = mapping.indexOf('/')
+    if (slash <= 0 || slash === mapping.length - 1) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+    const secretName = mapping.slice(0, slash)
+    const secret = await this.k8s.readSecret(CONFIGMAP_NAMESPACE, secretName)
+    if (!secret) {
+      return { status: 503, body: { error: 'Provider configuration unavailable' } }
+    }
+
+    const credentials: Record<string, string> = {}
+    for (const [index, slot] of slots.entries()) {
+      const sourceKey = singleSlotProvider && index === 0 ? target.credentialSlot : slot.dataKey
+      const value = Object.prototype.hasOwnProperty.call(secret, sourceKey)
+        ? secret[sourceKey]
+        : undefined
+      if (typeof value !== 'string' || value.length === 0) {
+        return { status: 503, body: { error: 'Provider configuration unavailable' } }
+      }
+      credentials[slot.dataKey] = value
+    }
+
+    return {
+      status: 200,
+      body: {
+        provider: target.provider,
+        model: target.model,
+        credentialSlot: target.credentialSlot,
+        credentials,
+        llmSecretName: secretName,
+      },
+    }
+  }
 
   async handle(
     req: ConfigureModelRequest,
@@ -425,4 +631,34 @@ export class ModelConfigHandler {
     }
     return resolved
   }
+}
+
+function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
+  return (
+    body.configured === true &&
+    body.ready === true &&
+    body.contractVersion === 2 &&
+    typeof body.provider === 'string' &&
+    body.provider.length > 0 &&
+    typeof body.model === 'string' &&
+    body.model.length > 0
+  )
+}
+
+function isBootstrapPolicyProof(body: Record<string, unknown>): boolean {
+  return (
+    isBootstrapIdentityProof(body) &&
+    Number.isSafeInteger(body.policyRevision) &&
+    Number(body.policyRevision) >= 1 &&
+    typeof body.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(body.policyHash) &&
+    typeof body.defaultTargetRef === 'string' &&
+    body.defaultTargetRef.length > 0 &&
+    typeof body.defaultProvider === 'string' &&
+    body.defaultProvider.length > 0 &&
+    typeof body.defaultModel === 'string' &&
+    body.defaultModel.length > 0 &&
+    body.defaultProvider === body.provider &&
+    body.defaultModel === body.model
+  )
 }

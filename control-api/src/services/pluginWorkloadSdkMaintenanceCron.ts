@@ -2,6 +2,7 @@ import { rootLogger } from '../observability/logger.js'
 import { pluginWorkloadSdkMaintenanceRunsTotal } from '../observability/metrics.js'
 import {
   failStaleInvocations,
+  getPromptBridgeAttemptLeaseSeconds,
   prunePluginWorkloadSdkExpiredIdempotency,
 } from './pluginWorkloadSdkDb.js'
 
@@ -12,9 +13,6 @@ import {
 //   2. Idempotency pruning: terminal invocation rows older than the 24h
 //      TTL are deleted so their keys become reusable in a new period.
 
-/** Default mcp-host PLUGIN_WORKLOAD_SDK_PROMPT_TIMEOUT_SECONDS is 120. */
-const STALE_INVOCATION_TIMEOUT_SECONDS = 150
-
 let intervalHandle: ReturnType<typeof setInterval> | null = null
 
 export function startPluginWorkloadSdkMaintenanceCron(intervalMs = 60_000): void {
@@ -22,7 +20,7 @@ export function startPluginWorkloadSdkMaintenanceCron(intervalMs = 60_000): void
 
   intervalHandle = setInterval(async () => {
     try {
-      const failed = await failStaleInvocations(STALE_INVOCATION_TIMEOUT_SECONDS)
+      const failed = await failStaleInvocations(getPromptBridgeAttemptLeaseSeconds())
       const pruned = await prunePluginWorkloadSdkExpiredIdempotency()
       if (failed > 0 || pruned > 0) {
         rootLogger.info(

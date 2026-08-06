@@ -17,8 +17,8 @@ import {
 // starting state and there is no carryover between tests.
 
 test('optional QA recorder: Desktop auth and session journey — sign-in screen', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
@@ -63,8 +63,8 @@ test('optional QA recorder: Desktop auth and session journey — sign-in screen'
 })
 
 test('optional QA recorder: Desktop auth and session journey — authenticated shell', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
@@ -108,8 +108,8 @@ test('optional QA recorder: Desktop auth and session journey — authenticated s
 })
 
 test('optional QA recorder: Desktop auth and session journey — logout', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined

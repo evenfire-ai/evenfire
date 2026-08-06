@@ -414,6 +414,26 @@ describe('Pod Factory', () => {
     })
   })
 
+  describe('buildMcpHostPod Plugin SDK broker wiring', () => {
+    it('injects the real WRC endpoint into the mcp-host', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        agent,
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { mountWorkflowOutput: false, pluginWorkloadSdkEnabled: true }
+      )
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'CLERUM_WRC_URL',
+        value: 'http://wrc:8082',
+      })
+    })
+  })
+
   describe('buildMcpHostPod', () => {
     const pod = buildMcpHostPod(
       'my-wf',
@@ -450,6 +470,43 @@ describe('Pod Factory', () => {
     it('sets CLERUM_WORKFLOW_ENABLED=true', () => {
       const env = pod.spec!.containers![0].env!.find(e => e.name === 'CLERUM_WORKFLOW_ENABLED')
       expect(env!.value).toBe('true')
+    })
+
+    it('derives a non-workflow process contract for sdk-only eager hosts', () => {
+      const sdkOnlyPod = buildMcpHostPod(
+        'sdk-only',
+        agent,
+        config,
+        'sdk-only',
+        'sandbox-recipes',
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          pluginWorkloadSdkEnabled: true,
+          pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        }
+      )
+      const env = sdkOnlyPod.spec!.containers![0].env!
+      expect(env.find(e => e.name === 'CLERUM_WORKFLOW_ENABLED')?.value).toBe('false')
+      expect(env.find(e => e.name === 'PLUGIN_WORKLOAD_SDK_RUNTIME_MODE')?.value).toBe('sdk-only')
+    })
+
+    it('rejects sdk-only mode when the SDK runtime is not enabled', () => {
+      expect(() =>
+        buildMcpHostPod(
+          'sdk-only',
+          agent,
+          config,
+          'sdk-only',
+          'sandbox-recipes',
+          undefined,
+          undefined,
+          undefined,
+          { mountWorkflowOutput: false, pluginWorkloadSdkRuntimeMode: 'sdk-only' }
+        )
+      ).toThrow(/sdk-only mcp-host runtime requires pluginWorkloadSdkEnabled=true/)
     })
 
     it('binds workflow identity env used by mcp-host artifact JWT checks', () => {

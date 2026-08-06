@@ -75,6 +75,11 @@ import {
 } from './mcp/authoritativeFleet'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
+import {
+  configurePluginWorkloadSdkBootstrapIdentity,
+  resolvePluginWorkloadSdkBootstrapCapabilityFamily,
+} from './pluginWorkloadSdk/bootstrapIdentity'
+import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
 import { getDisplayName, sanitizeError } from './progress/intentExtraction'
@@ -83,6 +88,7 @@ import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
+import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
   HostActivityEvent,
   HostActivitySnapshotResponse,
@@ -192,6 +198,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
+let pluginWorkloadSdkBootstrapServer: PluginWorkloadSdkBootstrapServer | null = null
 let usageReporter: UsageReporter | null = null
 let governedRunReporter: GovernedRunReporter | null = null
 
@@ -2565,6 +2572,7 @@ async function shutdown(signal: string): Promise<void> {
   spilloverStorage?.stopGc()
   await mcpClosePromise
   await mcpFleetCoordinator.drainForShutdown()
+  await pluginWorkloadSdkBootstrapServer?.stop()
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
@@ -2735,6 +2743,91 @@ async function startProductionMode(): Promise<void> {
 }
 
 /**
+ * Start the dedicated stepless Plugin Workload SDK runtime. This is neither a
+ * WorkflowService nor a standalone Host: port 8080 exposes only health and the
+ * WRC-authenticated public bootstrap identity, while port 8099 serves the
+ * workload SDK. Prompt credentials remain behind the per-attempt WRC broker.
+ */
+async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
+  if (!config.pluginWorkloadSdkEnabled || config.pluginWorkloadSdkRuntimeMode !== 'sdk-only') {
+    throw new Error(
+      'sdk-only runtime requires PLUGIN_WORKLOAD_SDK_ENABLED=true and PLUGIN_WORKLOAD_SDK_RUNTIME_MODE=sdk-only'
+    )
+  }
+
+  console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
+
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) {
+    throw new Error(
+      'sdk-only runtime requires MCP_HOST_RUNTIME_ACCESS_TOKEN, MCP_HOST_RUNTIME_REFRESH_TOKEN and MCP_HOST_GATEWAY_URL'
+    )
+  }
+  startRuntimeAuthProactiveRefresh(runtimeAuth)
+
+  if (!usageReporter) {
+    const auth = runtimeAuth
+    usageReporter = new UsageReporter({
+      baseUrl: auth.baseUrl,
+      getAccessToken: () => auth.accessToken,
+      refreshOnUnauthorized: () => refreshWithRecovery(auth),
+    })
+  }
+
+  let bootstrapContext: { provider: LlmProvider; defaultModel: string } | null = null
+  pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
+    getLlmContext: () => bootstrapContext,
+    usageReporter,
+  })
+  if (!pluginWorkloadSdkServer) {
+    throw new Error('sdk-only runtime activation gate rejected the Plugin Workload SDK server')
+  }
+
+  await pluginWorkloadSdkServer.start()
+  pluginWorkloadSdkBootstrapServer = new PluginWorkloadSdkBootstrapServer({
+    port: config.serverPort,
+    configure: request =>
+      configurePluginWorkloadSdkBootstrapIdentity(request, {
+        capabilityFamily: resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+          config.pluginWorkloadSdkCapabilities
+        ),
+        onConfigured: context => {
+          bootstrapContext = context
+        },
+        verify: async (provider, model) => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+          } catch {
+            return null
+          }
+        },
+        verifyClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
+          } catch {
+            return null
+          }
+        },
+      }),
+  })
+  try {
+    // Kubernetes readiness becomes reachable only after the SDK listener and
+    // the bootstrap surface are both bound, preventing a Ready-but-unusable Pod.
+    await pluginWorkloadSdkBootstrapServer.start()
+  } catch (err) {
+    await pluginWorkloadSdkServer.stop()
+    pluginWorkloadSdkServer = null
+    throw err
+  }
+
+  console.log('[Main] SDK-only mcp-host ready — waiting for WRC identity bootstrap')
+  process.once('SIGTERM', () => shutdown('SIGTERM'))
+  process.once('SIGINT', () => shutdown('SIGINT'))
+}
+
+/**
  * Main entry point.
  */
 async function main(): Promise<void> {
@@ -2751,9 +2844,13 @@ async function main(): Promise<void> {
     )
     process.exit(1)
   }
-  if (config.enableAuth && config.workflowEnabled && !config.wrcPublicKey) {
+  if (
+    config.enableAuth &&
+    (config.runtimeKind === 'workflow' || config.runtimeKind === 'sdk-only') &&
+    !config.wrcPublicKey
+  ) {
     console.error(
-      '[Main] FATAL: enableAuth=true in workflow mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start'
+      `[Main] FATAL: enableAuth=true in ${config.runtimeKind} mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start`
     )
     process.exit(1)
   }
@@ -2805,7 +2902,7 @@ async function main(): Promise<void> {
 
   // Workflow approval: if workflow mode is active, all three approval env vars must be set.
   // Without them, steps that require approval cannot request gating from control-api.
-  if (config.workflowEnabled) {
+  if (config.runtimeKind === 'workflow') {
     const missingApprovalVars: string[] = []
     if (!config.mcpHostRuntimeAccessToken) missingApprovalVars.push('MCP_HOST_RUNTIME_ACCESS_TOKEN')
     if (!config.mcpHostRuntimeRefreshToken)
@@ -2822,119 +2919,140 @@ async function main(): Promise<void> {
     }
   }
 
-  // M-11: Workflow mode — skip standalone initialization entirely.
-  // The WRC will configure this Pod via POST /configure (apiKey, soul, model).
-  if (config.workflowEnabled) {
-    console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
+  // M-11: Workflow mode — dispatch keeps the existing workflow startup
+  // contract isolated from the stepless SDK-only runtime.
+  await dispatchMcpHostRuntime(config.runtimeKind, {
+    sdkOnly: startPluginWorkloadSdkOnlyMode,
+    workflow: async () => {
+      console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
 
-    const { WorkflowService } = await import('./workflow/workflowService')
-    const { McpClient } = await import('./mcp/client')
+      const { WorkflowService } = await import('./workflow/workflowService')
+      const { McpClient } = await import('./mcp/client')
 
-    rpcServer = new RPCServer(config.serverPort)
+      rpcServer = new RPCServer(config.serverPort)
 
-    // Inject a real HTTP MCP client factory so steps that declare mcpServers can
-    // actually connect to them. Without this, WorkflowService uses a default factory
-    // that always throws "No MCP client factory configured" (bug fix).
-    const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
-      const info = {
-        name: server.name,
-        contextRef: '',
-        transport: { type: 'streamableHttp' as const, url: server.url },
-        enabled: true,
-        status: { deployed: true, ready: true },
-      } as McpServerInfo
-      const client = new McpClient(info, server.authToken)
-      return {
-        connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
-          client.connect(options),
-        listTools: async (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
-          (await client.listTools(options)).map(t => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          })),
-        callTool: async (
-          toolName: string,
-          args: Record<string, unknown>,
-          options?: { timeoutMs?: number; signal?: AbortSignal }
-        ) => {
-          const raw = await client.callTool(toolName, args, options)
-          return raw as { content: unknown; isError?: boolean }
-        },
-        disconnect: () => client.disconnect(),
+      // Inject a real HTTP MCP client factory so steps that declare mcpServers can
+      // actually connect to them. Without this, WorkflowService uses a default factory
+      // that always throws "No MCP client factory configured" (bug fix).
+      const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
+        const info = {
+          name: server.name,
+          contextRef: '',
+          transport: { type: 'streamableHttp' as const, url: server.url },
+          enabled: true,
+          status: { deployed: true, ready: true },
+        } as McpServerInfo
+        const client = new McpClient(info, server.authToken)
+        return {
+          connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+            client.connect(options),
+          listTools: async (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+            (await client.listTools(options)).map(t => ({
+              name: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+            })),
+          callTool: async (
+            toolName: string,
+            args: Record<string, unknown>,
+            options?: { timeoutMs?: number; signal?: AbortSignal }
+          ) => {
+            const raw = await client.callTool(toolName, args, options)
+            return raw as { content: unknown; isError?: boolean }
+          },
+          disconnect: () => client.disconnect(),
+        }
       }
-    }
 
-    // Build the shared runtime auth once so WorkflowService and any
-    // subsequent UsageReporter wiring share the refreshed access token.
-    if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
-    if (runtimeAuth) startRuntimeAuthProactiveRefresh(runtimeAuth)
+      // Build the shared runtime auth once so WorkflowService and any
+      // subsequent UsageReporter wiring share the refreshed access token.
+      if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+      if (runtimeAuth) startRuntimeAuthProactiveRefresh(runtimeAuth)
 
-    // Wire a UsageReporter for workflow mode so each LLM round-trip in
-    // executeStep ships an LlmUsageEvent (source_kind='workflow') to
-    // control-api. Without this the recipe's spend stays local to the
-    // step response and never lands in usage_events / the dashboard.
-    if (runtimeAuth && !usageReporter) {
-      const auth = runtimeAuth
-      usageReporter = new UsageReporter({
-        baseUrl: auth.baseUrl,
-        getAccessToken: () => auth.accessToken,
-        refreshOnUnauthorized: () => refreshWithRecovery(auth),
+      // Wire a UsageReporter for workflow mode so each LLM round-trip in
+      // executeStep ships an LlmUsageEvent (source_kind='workflow') to
+      // control-api. Without this the recipe's spend stays local to the
+      // step response and never lands in usage_events / the dashboard.
+      if (runtimeAuth && !usageReporter) {
+        const auth = runtimeAuth
+        usageReporter = new UsageReporter({
+          baseUrl: auth.baseUrl,
+          getAccessToken: () => auth.accessToken,
+          refreshOnUnauthorized: () => refreshWithRecovery(auth),
+        })
+      }
+
+      // Plugin Workload SDK LLM binding: a push-style holder updated by
+      // WorkflowService.configure() — never a public getter, so the apiKey
+      // stays unreachable through the service's public API surface.
+      let pluginSdkLlmContext: {
+        provider: LlmProvider
+        defaultModel: string
+      } | null = null
+
+      const workflowService = new WorkflowService(config.workflowRecipeName, {
+        mcpClientFactory,
+        runtimeAuth,
+        usageReporter,
+        onLlmConfigured: context => {
+          pluginSdkLlmContext = context
+        },
+        onPluginWorkloadSdkBootstrapConfigured: context => {
+          pluginSdkLlmContext = context
+        },
+        verifyPluginWorkloadSdkBootstrapV2: async (provider, model) => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+          } catch {
+            return null
+          }
+        },
+        verifyPluginWorkloadSdkClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
+          } catch {
+            return null
+          }
+        },
       })
-    }
+      rpcServer.setWorkflowService(workflowService)
+      wireWorkflowApprovalRuntimeRoutes(rpcServer, {
+        providerMessageAuthorization: handleProviderMessageAuthorization,
+        providerWorkflowApprovalDecision: handleProviderWorkflowApprovalDecision,
+        providerWorkflowApprovalResolve: handleProviderWorkflowApprovalResolve,
+        workflowApprovalNotificationClaim: handleWorkflowApprovalNotificationClaim,
+        workflowApprovalNotificationTerminal: handleWorkflowApprovalNotificationTerminal,
+        workflowApprovalMediumEnrollment: handleWorkflowApprovalMediumEnrollment,
+        telegramWorkflowApprovalVerification: handleTelegramWorkflowApprovalVerification,
+      })
+      await rpcServer.start()
 
-    // Plugin Workload SDK LLM binding: a push-style holder updated by
-    // WorkflowService.configure() — never a public getter, so the apiKey
-    // stays unreachable through the service's public API surface.
-    let pluginSdkLlmContext: {
-      keys: ApiKeys
-      provider: LlmProvider
-      defaultModel: string
-    } | null = null
+      // Plugin Workload SDK: only recipe-bound mcp-hosts inside
+      // sandbox-recipes pass the triple activation gate; everyone else logs
+      // the structured reason and continues without the SDK. The LLM binding
+      // comes from WorkflowService (POST /configure delivers the API key).
+      pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
+        getLlmContext: () => pluginSdkLlmContext,
+        usageReporter,
+      })
+      if (pluginWorkloadSdkServer) {
+        await pluginWorkloadSdkServer.start()
+      }
 
-    const workflowService = new WorkflowService(config.workflowRecipeName, {
-      mcpClientFactory,
-      runtimeAuth,
-      usageReporter,
-      onLlmConfigured: context => {
-        pluginSdkLlmContext = context
-      },
-    })
-    rpcServer.setWorkflowService(workflowService)
-    wireWorkflowApprovalRuntimeRoutes(rpcServer, {
-      providerMessageAuthorization: handleProviderMessageAuthorization,
-      providerWorkflowApprovalDecision: handleProviderWorkflowApprovalDecision,
-      providerWorkflowApprovalResolve: handleProviderWorkflowApprovalResolve,
-      workflowApprovalNotificationClaim: handleWorkflowApprovalNotificationClaim,
-      workflowApprovalNotificationTerminal: handleWorkflowApprovalNotificationTerminal,
-      workflowApprovalMediumEnrollment: handleWorkflowApprovalMediumEnrollment,
-      telegramWorkflowApprovalVerification: handleTelegramWorkflowApprovalVerification,
-    })
-    await rpcServer.start()
-
-    // Plugin Workload SDK: only recipe-bound mcp-hosts inside
-    // sandbox-recipes pass the triple activation gate; everyone else logs
-    // the structured reason and continues without the SDK. The LLM binding
-    // comes from WorkflowService (POST /configure delivers the API key).
-    pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
-      getLlmContext: () => pluginSdkLlmContext,
-      usageReporter,
-    })
-    if (pluginWorkloadSdkServer) {
-      await pluginWorkloadSdkServer.start()
-    }
-
-    console.log('[Main] Workflow mcp-host ready — waiting for /configure from WRC')
-    process.once('SIGTERM', () => shutdown('SIGTERM'))
-    process.once('SIGINT', () => shutdown('SIGINT'))
-    return
-  }
-
-  if (config.devMode) {
-    await startDevMode()
-  } else {
-    await startProductionMode()
-  }
+      console.log('[Main] Workflow mcp-host ready — waiting for /configure from WRC')
+      process.once('SIGTERM', () => shutdown('SIGTERM'))
+      process.once('SIGINT', () => shutdown('SIGINT'))
+    },
+    standalone: async () => {
+      if (config.devMode) {
+        await startDevMode()
+      } else {
+        await startProductionMode()
+      }
+    },
+  })
 }
 
 // Run main only when this module is the executable entry point. Keeping imports

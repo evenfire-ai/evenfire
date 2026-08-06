@@ -13,10 +13,9 @@
  * Source of truth: STAGE-1-CRD-TWO-POD-FOUNDATION.md §4.7
  */
 import { NextFunction, Request, Response, Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import * as fs from 'fs'
-import { importSPKI, jwtVerify } from 'jose'
 import * as path from 'path'
-import { config } from '../config'
 import {
   ArtifactPathError,
   type OpenedArtifactFile,
@@ -25,146 +24,50 @@ import {
   resolveExistingArtifactFile,
 } from './artifactPaths'
 import { getOutputDir } from './internalTools'
-import { ConfigureRequest, ExecuteStepRequest } from './types'
+import { ConfigureRequest, ExecuteStepRequest, PluginWorkloadSdkBootstrapRequest } from './types'
+import { requireWorkflowAuth, validateWorkflowBinding, workflowClaims } from './workflowAuth'
 import { WorkflowService } from './workflowService'
 
-// ─── V1 fix: JWT auth middleware for workflow endpoints ──────────────────
-// Workflow tokens are signed by WRC (iss: clerum-wrc, aud: mcp-host) using
-// the WRC private key. This is separate from the general mcp-host auth tokens
-// (iss: control-api) — different signer, different trust boundary.
-
-interface WorkflowTokenClaims {
-  sub: 'wrc' | 'coordinator'
-  recipeName: string
-  recipeNamespace?: string
-  runId?: string
-  artifactName?: string
-  scopes: string[]
-}
-
-// SEC-04 fix: cache the imported SPKI key to avoid per-request PEM parsing.
-// Cache is keyed to PEM value so key rotation (Secret update + Pod restart) is handled.
-let cachedPublicKey: Awaited<ReturnType<typeof importSPKI>> | null = null
-let cachedPem = ''
-
-async function verifyWorkflowToken(token: string): Promise<WorkflowTokenClaims> {
-  const publicKeyPem = config.wrcPublicKey
-  if (!publicKeyPem) throw new Error('WRC public key not configured')
-
-  if (!cachedPublicKey || cachedPem !== publicKeyPem) {
-    cachedPublicKey = await importSPKI(publicKeyPem, 'RS256')
-    cachedPem = publicKeyPem
-  }
-  const { payload } = await jwtVerify(token, cachedPublicKey, {
-    algorithms: ['RS256'],
-    issuer: 'clerum-wrc',
-    audience: 'mcp-host',
-  })
-
-  if (
-    typeof payload.sub !== 'string' ||
-    !Array.isArray(payload['scopes']) ||
-    typeof payload['recipeName'] !== 'string'
-  ) {
-    throw new Error('Invalid workflow token claims')
-  }
-
-  return {
-    sub: payload.sub as 'wrc' | 'coordinator',
-    recipeName: payload['recipeName'] as string,
-    recipeNamespace:
-      typeof payload['recipeNamespace'] === 'string'
-        ? (payload['recipeNamespace'] as string)
-        : undefined,
-    runId: typeof payload['runId'] === 'string' ? (payload['runId'] as string) : undefined,
-    artifactName:
-      typeof payload['artifactName'] === 'string' ? (payload['artifactName'] as string) : undefined,
-    scopes: payload['scopes'] as string[],
-  }
-}
-
-// Supported workflow scopes, all emitted exclusively by WRC (iss: clerum-wrc).
-// The middleware itself is generic — any string is accepted — but this list
-// documents the authoritative vocabulary and lets reviewers grep for callers.
-//
-//   configure       - POST /configure    (sub: wrc,         long-lived Secret)
-//   execute         - POST /execute      (sub: coordinator, per-step token)
-//   mode_read       - GET  /mode         (sub: *,           read-only)
-//   health:read     - GET  /runtime/*    (sub: *,           read-only)
-//   kill_switch:write - POST /kill-switch (sub: wrc)
-//   status_read     - GET  /status       (sub: *)
-//   artifact_read   - GET  /artifacts/:  (sub: wrc, 60s TTL)
-//   artifact_delete - DELETE /artifacts  (sub: wrc,         60s TTL, cleanup)
-function requireWorkflowAuth(requiredScope: string) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!config.enableAuth) {
-      next()
-      return
-    }
-
-    const header = req.headers.authorization
-    if (!header?.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'Missing workflow auth token' })
-      return
-    }
-
-    verifyWorkflowToken(header.slice(7))
-      .then(claims => {
-        if (!claims.scopes.includes(requiredScope)) {
-          res.status(403).json({ error: `Missing scope: ${requiredScope}` })
-          return
-        }
-        ;(req as Request & { workflowClaims: WorkflowTokenClaims }).workflowClaims = claims
-        next()
-      })
-      .catch(() => {
-        res.status(401).json({ error: 'Invalid workflow token' })
-      })
-  }
-}
-
-function workflowClaims(req: Request): WorkflowTokenClaims | undefined {
-  return (req as Request & { workflowClaims?: WorkflowTokenClaims }).workflowClaims
-}
-
-function validateWorkflowBinding(
-  req: Request,
-  res: Response,
-  options: { expectedSub?: WorkflowTokenClaims['sub'] } = {}
-): WorkflowTokenClaims | null {
-  if (!config.enableAuth) return workflowClaims(req) ?? ({} as WorkflowTokenClaims)
-
-  const claims = workflowClaims(req)
-  const expectedRecipe = process.env.CLERUM_WORKFLOW_RECIPE ?? ''
-  const expectedNamespace = process.env.CLERUM_WORKFLOW_NAMESPACE ?? ''
-  if (!claims) {
-    res.status(401).json({ error: 'Missing workflow auth token' })
-    return null
-  }
-  if (!expectedRecipe) {
-    res.status(500).json({ error: 'Workflow recipe not configured' })
-    return null
-  }
-  if (!expectedNamespace) {
-    res.status(500).json({ error: 'Workflow namespace not configured' })
-    return null
-  }
-  if (options.expectedSub && claims.sub !== options.expectedSub) {
-    res.status(403).json({ error: `Endpoint requires sub: ${options.expectedSub}` })
-    return null
-  }
-  if (claims.recipeName !== expectedRecipe) {
-    res.status(403).json({ error: 'recipeName mismatch' })
-    return null
-  }
-  if (claims.recipeNamespace !== expectedNamespace) {
-    res.status(403).json({ error: 'recipeNamespace mismatch' })
-    return null
-  }
-  return claims
-}
-
 const EXECUTE_HEARTBEAT_MS = 15_000
+const WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS = 60_000
+const WORKFLOW_CONTROL_RATE_LIMIT_MAX = 60
+const WORKFLOW_CONTROL_RATE_LIMIT_MAX_BUCKETS = 10_000
+const workflowControlRateLimitBuckets = new Map<string, { windowStart: number; count: number }>()
+
+/**
+ * Bound WRC-only control operations (including SDK bootstrap) per recipe.
+ * Authentication runs first, so the bucket key is server-verified JWT
+ * identity rather than a request header or body field. The unauthenticated
+ * key is retained only for the local auth-disabled mode and remains bounded.
+ */
+function workflowControlRateLimit(req: Request, res: Response, next: NextFunction): void {
+  const claims = workflowClaims(req)
+  const key = claims
+    ? `workflow-control:${claims.recipeNamespace}/${claims.recipeName}:${claims.sub}`
+    : 'workflow-control:unauthenticated'
+  const now = Date.now()
+  const existing = workflowControlRateLimitBuckets.get(key)
+  const bucket =
+    existing && now - existing.windowStart < WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS
+      ? existing
+      : { windowStart: now, count: 0 }
+  if (bucket.count >= WORKFLOW_CONTROL_RATE_LIMIT_MAX) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((bucket.windowStart + WORKFLOW_CONTROL_RATE_LIMIT_WINDOW_MS - now) / 1000)
+    )
+    res.setHeader('Retry-After', String(retryAfterSeconds))
+    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+    return
+  }
+  bucket.count += 1
+  workflowControlRateLimitBuckets.set(key, bucket)
+  if (workflowControlRateLimitBuckets.size > WORKFLOW_CONTROL_RATE_LIMIT_MAX_BUCKETS) {
+    const oldest = workflowControlRateLimitBuckets.keys().next().value
+    if (typeof oldest === 'string') workflowControlRateLimitBuckets.delete(oldest)
+  }
+  next()
+}
 
 function writeSse(res: Response, event: string, data: unknown): void {
   res.write(`event: ${event}\n`)
@@ -191,6 +94,21 @@ function startExecuteStream(res: Response): ReturnType<typeof setInterval> {
 
 export function createWorkflowRouter(service: WorkflowService): Router {
   const router = Router()
+
+  // Protect the boundary before JWT verification. The outer server already
+  // bounds request bodies; the recipe/principal limiter remains a separate
+  // control-plane guard, while this high-ceiling IP bucket prevents
+  // unauthenticated floods from making token verification the expensive
+  // denial path.
+  router.use(
+    rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      message: { error: 'Too Many Requests', retryable: true },
+    })
+  )
 
   // POST /execute — execute a single step (requires scope: execute, sub: coordinator)
   router.post('/execute', requireWorkflowAuth('execute'), async (req: Request, res: Response) => {
@@ -235,6 +153,38 @@ export function createWorkflowRouter(service: WorkflowService): Router {
     const result = service.configure(body)
     res.json(result)
   })
+
+  // POST /plugin-workload-sdk/bootstrap — publish only the public
+  // provider/model binding for a stepless SDK host. No API key is accepted or
+  // resolved here; prompt credentials are brokered per attempt by WRC.
+  router.post(
+    '/plugin-workload-sdk/bootstrap',
+    requireWorkflowAuth('configure'),
+    workflowControlRateLimit,
+    async (req: Request, res: Response) => {
+      if (!validateWorkflowBinding(req, res, { expectedSub: 'wrc' })) return
+      const raw = req.body as PluginWorkloadSdkBootstrapRequest
+      // Deliberately project the request to the identity-only contract. Any
+      // apiKey/secret-shaped field supplied by a caller is ignored before the
+      // service boundary and can never reach the SDK context holder.
+      const body: PluginWorkloadSdkBootstrapRequest = {
+        capabilityFamily: raw?.capabilityFamily,
+        provider: raw?.provider,
+        model: raw?.model,
+      }
+      try {
+        const result = await service.configurePluginWorkloadSdkBootstrap(body)
+        res.status(result.configured ? 200 : result.ready === false ? 503 : 400).json(result)
+      } catch {
+        res.status(503).json({
+          configured: false,
+          ready: false,
+          contractVersion: 2,
+          message: 'Plugin Workload SDK identity bootstrap contract is not ready',
+        })
+      }
+    }
+  )
 
   // GET /mode — workflow mode status (requires valid workflow token)
   router.get('/mode', requireWorkflowAuth('mode_read'), (req: Request, res: Response) => {
