@@ -436,6 +436,7 @@ no edits.
 | `agents.read`, `contexts.read`, `mcp.read` | 10         | 120      |
 | `gfs.list`                                 | 30         | 600      |
 | `gfs.read`                                 | 20         | 300      |
+| `gfs.open`                                 | 6          | 60       |
 | `theme.read`                               | 60         | 600      |
 | `notifications.notify`                     | 2          | 20       |
 
@@ -503,17 +504,20 @@ Branches worth covering, because each is a state a real user will hit:
 
 ## 12. Troubleshooting
 
-| Symptom                                                       | Cause                                                                | Fix                                                    |
-| ------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------ |
-| `window.clerum.sdk` is undefined                              | Older Desktop, or not running inside the Desktop                     | Feature-detect and degrade.                            |
-| Every call returns `permission_denied`, no modal ever appears | The user denied earlier this session, or your prompt budget is spent | Reopen the plugin. Batch your asks.                    |
-| The modal never appears and the call hangs, then denies       | Desktop window is not focused                                        | The prompt parks until focus, then times out at 120 s. |
-| `invalid_request` on a call that "looks right"                | An unexpected param key. Validators reject unknown keys outright     | Check the params table for that capability.            |
-| Image never renders, no console error                         | You converted the `dataUrl` to a `blob:` URL                         | Assign `dataUrl` straight to `img.src`.                |
-| `not_found` on a `gfs://` link that exists                    | The user cannot see it — deliberately indistinguishable from absent  | Ask them to check their access in Files.               |
-| `rate_limited` right after boot                               | Polling in a `useEffect` without deps, or per-render fetches         | Fetch on boot and on events.                           |
-| Notification never appears                                    | The user is looking at your plugin                                   | Check `reason: 'suppressed'`; not an error.            |
-| Identity works but your backend rejects the user              | You sent the SDK identity to your backend and trusted it             | Use `X-Clerum-User` server-side.                       |
+| Symptom                                                       | Cause                                                                    | Fix                                                                                      |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `window.clerum.sdk` is undefined                              | Older Desktop, or not running inside the Desktop                         | Feature-detect and degrade.                                                              |
+| Every call returns `permission_denied`, no modal ever appears | The user denied earlier this session, or your prompt budget is spent     | Reopen the plugin. Batch your asks.                                                      |
+| The modal never appears and the call hangs, then denies       | Desktop window is not focused                                            | The prompt parks until focus, then times out at 120 s.                                   |
+| `invalid_request` on a call that "looks right"                | An unexpected param key. Validators reject unknown keys outright         | Check the params table for that capability.                                              |
+| A `gfs://` link does nothing when clicked                     | An older Desktop build, where every non-http scheme was dropped silently | Feature-detect `window.clerum.gfs.open`; fall back to `gfs.read` and render it yourself. |
+| `gfs.open` returns `rate_limited`                             | It is budgeted at 6/min, the tightest in the SDK                         | Do not wire it to hover, scroll, or a render loop.                                       |
+| Your plugin looks frozen right after `gfs.open`               | The embed is hidden while the preview is up                              | Expected. It comes back on close; do not fire it mid-animation.                          |
+| Image never renders, no console error                         | You converted the `dataUrl` to a `blob:` URL                             | Assign `dataUrl` straight to `img.src`.                                                  |
+| `not_found` on a `gfs://` link that exists                    | The user cannot see it — deliberately indistinguishable from absent      | Ask them to check their access in Files.                                                 |
+| `rate_limited` right after boot                               | Polling in a `useEffect` without deps, or per-render fetches             | Fetch on boot and on events.                                                             |
+| Notification never appears                                    | The user is looking at your plugin                                       | Check `reason: 'suppressed'`; not an error.                                              |
+| Identity works but your backend rejects the user              | You sent the SDK identity to your backend and trusted it                 | Use `X-Clerum-User` server-side.                                                         |
 
 ---
 
