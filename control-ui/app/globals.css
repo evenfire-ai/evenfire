@@ -1458,6 +1458,14 @@ textarea.cu-input {
   width: max-content;
 }
 
+.cu-kebab__menu--portal {
+  position: fixed;
+  right: auto;
+  z-index: 60;
+  width: max-content;
+  max-width: calc(100vw - 1rem);
+}
+
 .cu-kebab__item {
   width: 100%;
   display: flex;
@@ -1663,6 +1671,10 @@ textarea.cu-input {
 
 .cu-tabs--tight {
   margin: 0 0 1rem;
+}
+
+.cu-marketplace-tabs {
+  margin-inline-start: 1rem;
 }
 
 .cu-table-wrap {
@@ -6085,6 +6097,10 @@ textarea.cu-input {
   border-radius: var(--cu-radius-sm);
   background: var(--cu-surface);
   box-shadow: var(--cu-shadow);
+}
+
+.cu-image-reference-combobox .cu-selection-dropdown__option {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .cu-selection-dropdown--inline .cu-selection-dropdown__menu {

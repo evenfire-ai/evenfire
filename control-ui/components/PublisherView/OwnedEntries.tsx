@@ -301,24 +301,20 @@ export function OwnedEntries({
                     >
                       <div className="cu-table-actions">
                         {renderInstall(e)}
-                        {isPrivate ? (
-                          canShare ? (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              aria-haspopup="dialog"
-                              aria-expanded={isGranting}
-                              onClick={event =>
-                                setGrantTarget({ entryName: e.name, opener: event.currentTarget })
-                              }
-                            >
-                              Share access
-                            </Button>
-                          ) : null
-                        ) : (
-                          <span className="cu-muted-note--compact">Public — no grant needed</span>
-                        )}
+                        {isPrivate && canShare ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-haspopup="dialog"
+                            aria-expanded={isGranting}
+                            onClick={event =>
+                              setGrantTarget({ entryName: e.name, opener: event.currentTarget })
+                            }
+                          >
+                            Share access
+                          </Button>
+                        ) : null}
                         <RowActionsMenu
                           ariaLabel={`Actions for ${e.name} v${e.version}`}
                           actions={rowActions}

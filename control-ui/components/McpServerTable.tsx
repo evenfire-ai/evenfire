@@ -4,8 +4,6 @@ import React, { Fragment, useMemo, useState } from 'react'
 import type {
   ConnectorAccessSummary,
   ConnectorContextBinding,
-  ConnectorContextShareTarget,
-  ConnectorContextShareTargets,
   McpServerStatus,
   McpServerTableProps,
 } from './McpServerTable.types'
@@ -113,7 +111,6 @@ export function McpServerTable({
   items,
   accessByConnectorKey,
   contexts = [],
-  shareTargets,
   onOpenContext,
   onAddToContexts,
   onRemoveFromContext,
@@ -132,11 +129,6 @@ export function McpServerTable({
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
-  const [sharePicker, setSharePicker] = useState<{
-    key: string
-    kind: 'agents' | 'teams' | 'members'
-  } | null>(null)
-  const [selectedShareTargetIds, setSelectedShareTargetIds] = useState<string[]>([])
   const rows = useMemo(
     () =>
       items.map(item => {
@@ -209,23 +201,6 @@ export function McpServerTable({
     if (updatingContextMembershipKey) return
     setSelectedContextNamesToAdd([])
     setServerKeyAddingContexts(null)
-  }
-
-  function openSharePicker(key: string, kind: 'agents' | 'teams' | 'members') {
-    setSelectedShareTargetIds([])
-    setSharePicker({ key, kind })
-  }
-
-  function closeSharePicker() {
-    if (updatingContextMembershipKey) return
-    setSelectedShareTargetIds([])
-    setSharePicker(null)
-  }
-
-  function shareTargetDescription(target: ConnectorContextShareTarget): string {
-    const agentLabel =
-      target.affectedAgentCount === 1 ? '1 agent' : `${target.affectedAgentCount} agents`
-    return `Context: ${target.contextName} · ${agentLabel} affected`
   }
 
   const isInitialLoad = loading && items.length === 0
@@ -316,7 +291,6 @@ export function McpServerTable({
                 const expanded = expandedKeys.has(key)
                 const contextRef = spec.contextRef || ''
                 const assignedContexts = contextsForConnector(name)
-                const assignedContextNames = new Set(assignedContexts.map(context => context.name))
                 const contextMembershipBusy = updatingContextMembershipKey === key
                 return (
                   <Fragment key={key}>
@@ -475,61 +449,6 @@ export function McpServerTable({
                                   </div>
                                 </div>
                               ) : null}
-                              {onAddToContexts && shareTargets ? (
-                                <div className="cu-expandable-field cu-expandable-field--wide">
-                                  <span className="cu-expandable-field__label">
-                                    Share connector
-                                  </span>
-                                  <div className="cu-context-connector-bindings">
-                                    <p className="cu-muted cu-context-connector-bindings__hint">
-                                      Select an agent, team, or member. The connector is added to
-                                      the Context they use; other agents in that Context also gain
-                                      access.
-                                    </p>
-                                    <div className="cu-table-actions">
-                                      <button
-                                        type="button"
-                                        className="cu-btn cu-btn--secondary cu-btn--sm"
-                                        disabled={
-                                          contextMembershipBusy ||
-                                          !shareTargets.agents.some(
-                                            target => !assignedContextNames.has(target.contextName)
-                                          )
-                                        }
-                                        onClick={() => openSharePicker(key, 'agents')}
-                                      >
-                                        Add agents
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="cu-btn cu-btn--secondary cu-btn--sm"
-                                        disabled={
-                                          contextMembershipBusy ||
-                                          !shareTargets.teams.some(
-                                            target => !assignedContextNames.has(target.contextName)
-                                          )
-                                        }
-                                        onClick={() => openSharePicker(key, 'teams')}
-                                      >
-                                        Add teams
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="cu-btn cu-btn--secondary cu-btn--sm"
-                                        disabled={
-                                          contextMembershipBusy ||
-                                          !shareTargets.members.some(
-                                            target => !assignedContextNames.has(target.contextName)
-                                          )
-                                        }
-                                        onClick={() => openSharePicker(key, 'members')}
-                                      >
-                                        Add members
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : null}
                               <div className="cu-expandable-field cu-expandable-field--wide">
                                 <span className="cu-expandable-field__label">Access</span>
                                 <AccessSummary summary={accessByConnectorKey?.[key]} />
@@ -661,145 +580,6 @@ export function McpServerTable({
                       disabled={busy || selectedContextNamesToAdd.length === 0}
                     >
                       {selectedContextNamesToAdd.length > 1 ? 'Add to contexts' : 'Add to context'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )
-          })()
-        : null}
-      {sharePicker
-        ? (() => {
-            const row = rows.find(candidate => candidate.key === sharePicker.key)
-            if (!row || !onAddToContexts || !shareTargets) return null
-            const assignedNames = new Set(
-              contextsForConnector(row.name).map(context => context.name)
-            )
-            const targets = shareTargets[sharePicker.kind].filter(
-              target => !assignedNames.has(target.contextName)
-            )
-            const targetById = new Map(targets.map(target => [target.id, target] as const))
-            const contextNames = Array.from(
-              new Set(
-                selectedShareTargetIds
-                  .map(targetId => targetById.get(targetId)?.contextName)
-                  .filter((contextName): contextName is string => Boolean(contextName))
-              )
-            )
-            const affectedAgents = contextNames.reduce(
-              (count, contextName) =>
-                count +
-                (targets.find(target => target.contextName === contextName)?.affectedAgentCount ??
-                  0),
-              0
-            )
-            const busy = updatingContextMembershipKey === row.key
-            const labels = {
-              agents: { singular: 'agent', plural: 'agents', title: 'Add connector to agents' },
-              teams: { singular: 'team', plural: 'teams', title: 'Add connector through teams' },
-              members: {
-                singular: 'member',
-                plural: 'members',
-                title: 'Add connector through members',
-              },
-            }[sharePicker.kind]
-            return (
-              <div
-                style={{
-                  position: 'fixed',
-                  inset: 0,
-                  background: 'rgba(0, 0, 0, 0.6)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  zIndex: 1000,
-                  padding: '1rem',
-                }}
-                role="presentation"
-                onClick={event => {
-                  if (event.target === event.currentTarget && !busy) closeSharePicker()
-                }}
-              >
-                <div
-                  className="cu-modal-panel cu-modal-panel--selection"
-                  role="dialog"
-                  aria-labelledby="add-connector-share-title"
-                  onClick={event => event.stopPropagation()}
-                >
-                  <div className="cu-modal-panel__head">
-                    <strong
-                      id="add-connector-share-title"
-                      style={{ fontSize: '1rem', lineHeight: 1.35 }}
-                    >
-                      {labels.title}
-                    </strong>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--ghost"
-                      onClick={closeSharePicker}
-                      disabled={busy}
-                      aria-label="Close"
-                    >
-                      <IconX width={18} height={18} />
-                    </button>
-                  </div>
-
-                  <div className="cu-field">
-                    <label htmlFor="connector-share-picker">
-                      {labels.plural.charAt(0).toUpperCase() + labels.plural.slice(1)}
-                    </label>
-                    <SelectionDropdown
-                      id="connector-share-picker"
-                      inline
-                      value={selectedShareTargetIds}
-                      onChange={setSelectedShareTargetIds}
-                      options={targets.map(target => ({
-                        value: target.id,
-                        label: target.label,
-                        description: shareTargetDescription(target),
-                      }))}
-                      placeholder={`Select ${labels.plural}`}
-                      searchPlaceholder={`Search ${labels.plural}...`}
-                      selectionLabel={`Selected ${labels.plural}`}
-                      emptyLabel={`No ${labels.plural} with an available Context.`}
-                      disabled={busy}
-                    />
-                  </div>
-
-                  {contextNames.length > 0 ? (
-                    <p className="cu-form-section__description">
-                      This adds the connector to{' '}
-                      {contextNames.length === 1 ? 'Context' : 'Contexts'}{' '}
-                      <strong>{contextNames.join(', ')}</strong>. Approximately {affectedAgents}{' '}
-                      agent
-                      {affectedAgents === 1 ? '' : 's'} will gain access through those Contexts.
-                    </p>
-                  ) : null}
-
-                  <div className="cu-modal-panel__foot">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={closeSharePicker}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        if (contextNames.length === 0) return
-                        await onAddToContexts(
-                          { namespace: row.namespace, name: row.name },
-                          contextNames
-                        )
-                        setSelectedShareTargetIds([])
-                        setSharePicker(null)
-                      }}
-                      disabled={busy || contextNames.length === 0}
-                    >
-                      Grant access to {contextNames.length === 1 ? labels.singular : labels.plural}
                     </button>
                   </div>
                 </div>

@@ -291,47 +291,4 @@ describe('McpServerTable — context membership', () => {
     expect(screen.getByText('Contexts')).toBeInTheDocument()
     expect(screen.getByText('No available contexts.')).not.toBeInTheDocument()
   })
-
-  it('offers agent sharing with the agent Context and affected-agent impact visible', () => {
-    const onAddToContexts = vi.fn().mockResolvedValue(undefined)
-    const items = [makeItem({ name: 'airtable-server' })]
-    render(
-      <McpServerTable
-        items={items}
-        contexts={[{ name: 'research', mcpServers: [] }]}
-        shareTargets={{
-          agents: [
-            {
-              id: 'research-agent',
-              label: 'Research Agent',
-              contextName: 'research',
-              affectedAgentCount: 3,
-            },
-          ],
-          teams: [],
-          members: [],
-        }}
-        onAddToContexts={onAddToContexts}
-        onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
-
-    expect(screen.getByRole('dialog', { name: 'Add connector to agents' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Research Agent' })).toHaveTextContent(
-      'Context: research · 3 agents affected'
-    )
-
-    fireEvent.click(screen.getByRole('option', { name: 'Research Agent' }))
-    expect(screen.getByText(/This adds the connector to Context research/)).toBeInTheDocument()
-    expect(screen.getByText(/Approximately 3 agents will gain access/)).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access to agent' }))
-    expect(onAddToContexts).toHaveBeenCalledWith(
-      { namespace: 'mcp-server', name: 'airtable-server' },
-      ['research']
-    )
-  })
 })

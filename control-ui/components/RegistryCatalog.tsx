@@ -273,12 +273,11 @@ export default function RegistryCatalog() {
       ) : null}
       {connectBanner}
       <div className="cu-card cu-card--viewport-fill cu-section-card">
-        <MarketplaceTabs active="connectors" />
         <TablePanelHeader
           title={
             <>
               <IconStore />
-              Connectors
+              Marketplace
             </>
           }
           subtitle="Discover and install connectors from the Marketplace."
@@ -334,6 +333,7 @@ export default function RegistryCatalog() {
             </>
           }
         />
+        <MarketplaceTabs active="connectors" />
 
         <div className="cu-table-wrap cu-marketplace-table-wrap">
           <table className="cu-table cu-table--header-band cu-expandable-table cu-marketplace-table">

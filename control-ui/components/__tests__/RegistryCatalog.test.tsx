@@ -137,8 +137,8 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(await screen.findByText('brave-search')).toBeInTheDocument()
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
-    // Panel title is "Connectors" (the "Marketplace" tab labels the section); no count.
-    expect(screen.getByText('Connectors')).toBeInTheDocument()
+    // Panel title is "Marketplace" (the "Connectors" tab selects its catalog); no count.
+    expect(screen.getByText('Marketplace')).toBeInTheDocument()
     expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 
@@ -168,16 +168,28 @@ describe('RegistryCatalog tabs and columns', () => {
     }
   })
 
-  it('shows the top-level Marketplace tab, no public Plugins tab', async () => {
+  it('shows the top-level Connectors tab, no public Plugins tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    expect(screen.getByRole('tab', { name: 'Marketplace' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Connectors' })).toHaveAttribute(
       'href',
       '/marketplace/connectors'
     )
     expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
+  })
+
+  it('places Marketplace navigation below the panel header', async () => {
+    mockApiSuccess()
+    render(<RegistryCatalog />)
+    await screen.findByText('brave-search')
+
+    const header = screen.getByText('Marketplace')
+    const connectorsTab = screen.getByRole('tab', { name: 'Connectors' })
+    expect(header.compareDocumentPosition(connectorsTab) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
   })
 
   it('links entry names to their shareable detail routes', async () => {

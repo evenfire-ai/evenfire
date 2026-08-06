@@ -19,6 +19,7 @@ vi.mock('../../lib/api', () => ({
   getContext: vi.fn().mockResolvedValue({
     spec: { contextId: 'context1', mcpServers: [] },
   }),
+  listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
   updateContext: vi.fn().mockResolvedValue({}),
 }))
 
@@ -86,6 +87,29 @@ describe('CreateMcpServerForm — render', () => {
 
     expect(screen.getByRole('option', { name: 'context1' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'research' })).toBeInTheDocument()
+  })
+
+  it('selects an organization image and fills its full registry coordinate', async () => {
+    vi.mocked(api.listOrgImages).mockResolvedValueOnce({
+      org: 'evenfire-dev',
+      images: [
+        {
+          name: 'todoist-mcp-server',
+          visibility: 'private',
+          createdAt: '2026-08-05',
+          tags: ['1.0.0'],
+        },
+      ],
+    })
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+
+    const imageField = await screen.findByRole('combobox')
+    fireEvent.focus(imageField)
+    fireEvent.click(screen.getByRole('option', { name: 'todoist-mcp-server:1.0.0' }))
+
+    expect(
+      screen.getByDisplayValue('registry.evenfire.ai/evenfire-dev/todoist-mcp-server:1.0.0')
+    ).toBeInTheDocument()
   })
 
   it('uses two connector steps', () => {

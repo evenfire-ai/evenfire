@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
@@ -13,12 +13,14 @@ import {
   deleteMcpSecret,
   getContext,
   getContexts,
+  listOrgImages,
   updateContext,
 } from '@/lib/api'
-import type { EnvSecretKeyMapping, EnvVar } from '@/lib/api'
+import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
 import type { EgressEditorStatus } from '@/lib/egressModel'
 import { EgressEditor } from '../EgressEditor'
+import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
@@ -36,6 +38,103 @@ const STEP_DETAILS = [
     subtitle: 'Add environment variables and optional Secret-backed credentials.',
   },
 ] as const
+
+type OrgImageOption = {
+  value: string
+  label: string
+  description: string
+}
+
+function ImageReferenceCombobox({
+  disabled,
+  onChange,
+  options,
+  value,
+}: {
+  disabled: boolean
+  onChange: (value: string) => void
+  options: OrgImageOption[]
+  value: string
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const matchingOptions = useMemo(() => {
+    const query = value.trim().toLowerCase()
+    if (!query) return options
+    return options.filter(option =>
+      [option.label, option.description].some(candidate => candidate.toLowerCase().includes(query))
+    )
+  }, [options, value])
+
+  useEffect(() => {
+    if (!open) return
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  return (
+    <div className="cu-selection-dropdown cu-image-reference-combobox" ref={rootRef}>
+      <TextInput
+        aria-autocomplete="list"
+        aria-controls="organization-image-options"
+        aria-expanded={open && matchingOptions.length > 0}
+        aria-haspopup="listbox"
+        monospace
+        onChange={event => {
+          onChange(event.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        placeholder="us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest"
+        disabled={disabled}
+        role="combobox"
+        value={value}
+      />
+      {open && matchingOptions.length > 0 ? (
+        <div className="cu-selection-dropdown__menu">
+          <div
+            className="cu-selection-dropdown__list"
+            id="organization-image-options"
+            role="listbox"
+          >
+            {matchingOptions.map(option => (
+              <button
+                key={option.value}
+                type="button"
+                className="cu-selection-dropdown__option"
+                role="option"
+                aria-label={option.label}
+                aria-selected={option.value === value}
+                data-selected={option.value === value ? 'true' : undefined}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}
+              >
+                <span className="cu-selection-dropdown__option-copy">
+                  <span className="cu-selection-dropdown__option-label">{option.label}</span>
+                  <span className="cu-selection-dropdown__option-description">
+                    {option.description}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function parseCommaSeparated(input: string): string[] {
   if (!input.trim()) return []
@@ -78,6 +177,8 @@ export function CreateMcpServerForm({
   const [contexts, setContexts] = useState<Array<{ name: string }>>([])
   const [contextsLoading, setContextsLoading] = useState(true)
   const [contextsError, setContextsError] = useState('')
+  const [orgImages, setOrgImages] = useState<OrgImage[]>([])
+  const [orgImageScope, setOrgImageScope] = useState('')
   const [managed, setManaged] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -119,6 +220,26 @@ export function CreateMcpServerForm({
     () => contexts.map(context => ({ value: context.name, label: context.name })),
     [contexts]
   )
+  const orgImageOptions = useMemo<OrgImageOption[]>(() => {
+    if (!orgImageScope) return []
+
+    return orgImages.flatMap(orgImage => {
+      const tags = orgImage.tags ?? []
+      if (tags.length === 0) {
+        const coordinate = `${DEFAULT_REGISTRY_HOST}/${orgImageScope.replace(/^@/, '')}/${orgImage.name}`
+        return [{ value: coordinate, label: orgImage.name, description: coordinate }]
+      }
+      return tags.map(tag => {
+        const coordinate = buildImageCoordinate(
+          DEFAULT_REGISTRY_HOST,
+          orgImageScope,
+          orgImage.name,
+          tag
+        )
+        return { value: coordinate, label: `${orgImage.name}:${tag}`, description: coordinate }
+      })
+    })
+  }, [orgImageScope, orgImages])
 
   useEffect(() => {
     let cancelled = false
@@ -143,6 +264,29 @@ export function CreateMcpServerForm({
       })
       .finally(() => {
         if (!cancelled) setContextsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    listOrgImages()
+      .then(result => {
+        if (cancelled) return
+        setOrgImageScope(result.org)
+        setOrgImages(result.images ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) {
+          // Image selection is a convenience. Creating a connector with a
+          // manual image coordinate must still work if registry listing is off.
+          setOrgImageScope('')
+          setOrgImages([])
+        }
       })
 
     return () => {
@@ -414,12 +558,15 @@ export function CreateMcpServerForm({
                 />
               </Field>
 
-              <Field description="Container image for the connector." label="Image" required>
-                <TextInput
-                  monospace
-                  onChange={event => setImage(event.target.value)}
-                  placeholder="us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest"
+              <Field
+                description="Choose one of your organization’s images or enter another container image URL."
+                label="Image"
+                required
+              >
+                <ImageReferenceCombobox
                   disabled={submitting}
+                  onChange={setImage}
+                  options={orgImageOptions}
                   value={image}
                 />
               </Field>

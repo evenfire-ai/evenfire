@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useConfirmDialog } from '../../components/ConfirmDialog'
@@ -10,7 +10,6 @@ import type {
   ConnectorAccessPrincipal,
   ConnectorAccessSummary,
   ConnectorAccessSummaryMap,
-  ConnectorContextShareTargets,
 } from '../../components/McpServerTable.types'
 import { useToast } from '../../components/Toast'
 import {
@@ -121,11 +120,7 @@ export default function McpServersPage() {
   const [error, setError] = useState('')
   const [mcpServers, setMcpServers] = useState<McpServerResource[]>([])
   const [contexts, setContexts] = useState<ContextResource[]>([])
-  const [hosts, setHosts] = useState<HostResource[]>([])
   const [accessByConnectorKey, setAccessByConnectorKey] = useState<ConnectorAccessSummaryMap>({})
-  const [accessByContextName, setAccessByContextName] = useState<
-    Record<string, ConnectorAccessSummary>
-  >({})
   const [accessWarning, setAccessWarning] = useState('')
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
   const [updatingContextMembershipKey, setUpdatingContextMembershipKey] = useState<string | null>(
@@ -162,7 +157,6 @@ export default function McpServersPage() {
       const accessByContext = new Map(
         accessResults.map(([contextRef, [summary]]) => [contextRef, summary] as const)
       )
-      const nextAccessByContextName = Object.fromEntries(accessByContext)
       const accessLoadFailed = accessResults.some(([, [, failed]]) => failed)
       if (accessLoadFailed) {
         setAccessWarning(
@@ -196,9 +190,7 @@ export default function McpServersPage() {
       )
       setMcpServers(connectors)
       setContexts(nextContexts)
-      setHosts(hosts)
       setAccessByConnectorKey(nextAccessByConnectorKey)
-      setAccessByContextName(nextAccessByContextName)
     } catch (e) {
       if (isSilentApiError(e)) return
       setError(e instanceof Error ? e.message : 'Failed to load connectors')
@@ -249,53 +241,6 @@ export default function McpServersPage() {
       sharedFileSystems: context.spec?.sharedFileSystems ?? [],
     }
   }
-
-  const shareTargets = useMemo<ConnectorContextShareTargets>(() => {
-    const agentCountByContext = new Map<string, number>()
-    for (const host of hosts) {
-      const contextName = getContextRef(host)
-      if (contextName) {
-        agentCountByContext.set(contextName, (agentCountByContext.get(contextName) ?? 0) + 1)
-      }
-    }
-    const affectedAgentCount = (contextName: string) => agentCountByContext.get(contextName) ?? 0
-
-    return {
-      agents: hosts
-        .map(host => {
-          const name = resourceName(host)
-          const contextName = getContextRef(host)
-          return contextName
-            ? {
-                id: name,
-                label: name,
-                contextName,
-                affectedAgentCount: affectedAgentCount(contextName),
-              }
-            : null
-        })
-        .filter(
-          (target): target is ConnectorContextShareTargets['agents'][number] => target !== null
-        )
-        .sort((a, b) => a.label.localeCompare(b.label)),
-      teams: Object.entries(accessByContextName).flatMap(([contextName, access]) =>
-        access.teams.map(team => ({
-          id: `${team.id}:${contextName}`,
-          label: team.label,
-          contextName,
-          affectedAgentCount: affectedAgentCount(contextName),
-        }))
-      ),
-      members: Object.entries(accessByContextName).flatMap(([contextName, access]) =>
-        access.users.map(user => ({
-          id: `${user.id}:${contextName}`,
-          label: user.label,
-          contextName,
-          affectedAgentCount: affectedAgentCount(contextName),
-        }))
-      ),
-    }
-  }, [accessByContextName, hosts])
 
   async function addConnectorToContexts(
     server: { name: string; namespace: string },
@@ -391,7 +336,6 @@ export default function McpServersPage() {
             mcpServers: context.spec?.mcpServers ?? [],
           }))
           .filter(context => context.name)}
-        shareTargets={shareTargets}
         onOpenContext={handleOpenContext}
         onAddToContexts={addConnectorToContexts}
         onRemoveFromContext={removeConnectorFromContext}
