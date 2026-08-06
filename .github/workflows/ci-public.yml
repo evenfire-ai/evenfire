@@ -363,6 +363,9 @@ jobs:
       - name: Test the ghcr render guard
         run: bash scripts/tests/test-ghcr-render-guard.sh
 
+      - name: Test the minikube image puller
+        run: bash scripts/tests/test-minikube-pull-images.sh
+
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh
 
