@@ -129,7 +129,8 @@ case "$IMAGE_SOURCE" in
   *) echo "Unknown IMAGE_SOURCE: '${IMAGE_SOURCE}' (expected: ghcr | local)" >&2; exit 1 ;;
 esac
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
-GHCR_COMPONENT="${PROJECT_DIR}/deploy/components/ghcr-images/kustomization.yaml"
+# The committed pin is NOT read here. resolve_ghcr_tag below delegates to
+# image-mode.sh, which owns that read along with the recorded-tag precedence.
 
 # Written by this script's manifest writer and by pull-images.sh; read back by
 # --verify-only. Declared here, not next to the writer at the bottom, because
@@ -163,20 +164,21 @@ if [ "${MINIKUBE_SEED_PROFILE:-}" = "e2e" ]; then
   INCLUDE_E2E_FIXTURES=true
 fi
 
-# The effective ghcr tag: MINIKUBE_IMAGE_TAG if set (a render-time operator
-# lever), otherwise the committed pin, which is the single source of truth.
+# The effective ghcr tag: the explicit MINIKUBE_IMAGE_TAG override, else the tag
+# the last acquisition RECORDED for this cluster, else the committed pin.
+#
+# The recorded tag is not optional here. It is the imageSource bug above with a
+# different field: `MINIKUBE_IMAGE_TAG=latest make minikube-setup` is the
+# documented bootstrap while no release tag exists on ghcr, and the NEXT shell
+# has no such variable. Resolving the committed pin there reported
+# "23 of 23 images missing!" against a cluster holding every :latest ref, and
+# told the operator to pull a tag that is not published at all.
+#
+# image_mode_tag applies exactly that precedence and is the resolver
+# pre-gate-sync.sh already uses; a second copy of the precedence in this file is
+# what let the two disagree, so this delegates instead of reimplementing it.
 resolve_ghcr_tag() {
-  if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
-    printf '%s' "$MINIKUBE_IMAGE_TAG"
-    return 0
-  fi
-  [ -f "$GHCR_COMPONENT" ] || { echo "ghcr component not found at ${GHCR_COMPONENT}" >&2; exit 1; }
-  local tags
-  tags="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$GHCR_COMPONENT" | sort -u)"
-  [ -n "$tags" ] || { echo "no newTag: line in ${GHCR_COMPONENT}" >&2; exit 1; }
-  [ "$(printf '%s\n' "$tags" | wc -l | tr -d ' ')" = "1" ] \
-    || { echo "mixed newTag values in ${GHCR_COMPONENT}: $(printf '%s ' $tags)" >&2; exit 1; }
-  printf '%s' "$tags"
+  image_mode_tag "$PROJECT_DIR"
 }
 
 for arg in "$@"; do
@@ -450,7 +452,27 @@ if [ "$VERIFY_ONLY" = true ]; then
 
   GHCR_TAG=""
   if [ "$IMAGE_SOURCE" = ghcr ]; then
-    GHCR_TAG="$(resolve_ghcr_tag)"
+    if ! GHCR_TAG="$(resolve_ghcr_tag)"; then
+      err "could not resolve the ghcr tag this cluster runs"
+      exit 1
+    fi
+    # A tagless ref (ghcr.io/evenfire-ai/control-api:) matches nothing in the
+    # daemon, so an empty resolution would report every image missing rather
+    # than reporting that the resolution failed.
+    if [ -z "$GHCR_TAG" ]; then
+      err "resolved an empty ghcr tag; refusing to verify tagless image refs"
+      exit 1
+    fi
+    # Same shape as VERIFY_SOURCE_ORIGIN above: the operator has to be able to
+    # tell a recorded coordinate from the committed pin when the answer surprises
+    # them.
+    VERIFY_TAG_ORIGIN="deploy/components/ghcr-images (the committed pin)"
+    if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
+      VERIFY_TAG_ORIGIN="the MINIKUBE_IMAGE_TAG environment variable"
+    elif [ -n "$(recorded_image_tag)" ]; then
+      VERIFY_TAG_ORIGIN="deploy/minikube/.image-manifest.json"
+    fi
+    log "tag ${GHCR_TAG} from ${VERIFY_TAG_ORIGIN}"
     if [ "$INCLUDE_E2E_FIXTURES" = false ]; then
       log "excluding the E2E-only fixtures; 'make minikube-setup-e2e' builds them (SEED_PROFILE=e2e to check them)"
     fi

@@ -44,11 +44,15 @@ all_local_refs() {
     }).catch(e => { console.error(e.message); process.exit(1) })'
 }
 
-all_ghcr_refs() {
+all_ghcr_refs_at_tag() {
   node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
-      for (const i of m.pullInGhcrMode()) console.log(`ghcr.io/evenfire-ai/${i.name}:'"$PIN_TAG"'`)
-    }).catch(e => { console.error(e.message); process.exit(1) })'
+      for (const i of m.pullInGhcrMode()) console.log(`ghcr.io/evenfire-ai/${i.name}:${process.argv[1]}`)
+    }).catch(e => { console.error(e.message); process.exit(1) })' "$1"
+}
+
+all_ghcr_refs() {
+  all_ghcr_refs_at_tag "$PIN_TAG"
 }
 
 # The payload the stubbed `minikube image ls --format=json` serves. Each ref is
@@ -111,12 +115,18 @@ prepare_repo() {
 }
 
 # $2 is the newline-separated set of refs the stubbed daemon holds.
+#
+# MINIKUBE_IMAGE_TAG is passed EXPLICITLY, defaulting to empty, so a value
+# exported in the developer's shell (the documented `MINIKUBE_IMAGE_TAG=latest`
+# bootstrap leaves one behind) cannot make a case pass for the wrong reason.
+# Cases that want the override set TEST_IMAGE_TAG.
 run_verify() {
   local d=$1 present=$2; shift 2
   write_present_json "$d/present.json" "$present"
   PATH="$d/bin:$PATH" \
   TEST_LOG_FILE="$d/ops.log" \
   TEST_PRESENT_JSON="$d/present.json" \
+  MINIKUBE_IMAGE_TAG="${TEST_IMAGE_TAG:-}" \
     bash "$d/repo/scripts/minikube/build-images.sh" --verify-only "$@" 2>&1
 }
 
@@ -336,6 +346,129 @@ assert_an_only_build_carries_the_recorded_mode_forward() {
 }
 
 # ---------------------------------------------------------------------------
+# The recorded TAG, not only the recorded mode
+# ---------------------------------------------------------------------------
+#
+# The imageSource fix left imageTag resolving from MINIKUBE_IMAGE_TAG or the
+# committed pin only. `MINIKUBE_IMAGE_TAG=latest make minikube-setup` is the
+# documented bootstrap (no release tag is published yet), and the NEXT shell has
+# no such variable: `make minikube-verify-images` then resolved the pin and
+# reported "23 of 23 images missing!" on a cluster holding every :latest ref,
+# advising a pull of a tag that is 404 on ghcr.
+#
+# Every case below declares the daemon's contents at ONE tag, so resolving the
+# other one fails it. That is what makes them survive a semantic mutation:
+# swapping the precedence changes which refs are looked up, not just which
+# identifier is read.
+
+assert_the_recorded_tag_is_verified_when_the_shell_has_no_override() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  # The daemon holds ONLY :latest -- exactly what the bootstrap pull put there.
+  out="$(run_verify "$d" "$(all_ghcr_refs_at_tag latest)")"; rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -q 'ghcr\.io/evenfire-ai/control-api:latest' <<< "$out" \
+     && ! grep -q "ghcr\.io/evenfire-ai/control-api:${PIN_TAG}" <<< "$out" \
+     && grep -q 'All .* images present' <<< "$out"; then
+    pass "the recorded imageTag is verified when the shell carries no MINIKUBE_IMAGE_TAG"
+  else
+    fail "expected a clean verify against :latest refs; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The override is a render-time operator lever and must still win: a developer
+# who exports a tag is asking to look at THAT release, not at the last one the
+# cluster acquired.
+assert_an_explicit_tag_override_still_beats_the_recorded_tag() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  # The daemon holds ONLY v9.9.9, so honouring the recorded 'latest' fails here.
+  out="$(TEST_IMAGE_TAG=v9.9.9 run_verify "$d" "$(all_ghcr_refs_at_tag v9.9.9)")"; rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -q 'ghcr\.io/evenfire-ai/control-api:v9\.9\.9' <<< "$out" \
+     && ! grep -q 'control-api:latest' <<< "$out"; then
+    pass "an explicit MINIKUBE_IMAGE_TAG still outranks the recorded tag"
+  else
+    fail "expected the v9.9.9 override to be verified; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Nothing recorded a tag (a cluster pulled at the pin, or a manifest predating
+# the key), so the committed pin is the only coordinate left.
+assert_the_committed_pin_is_the_fallback_when_no_tag_is_recorded() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
+  out="$(run_verify "$d" "$(all_ghcr_refs_at_tag "$PIN_TAG")")"; rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -q "ghcr\.io/evenfire-ai/control-api:${PIN_TAG}" <<< "$out" \
+     && grep -q 'All .* images present' <<< "$out"; then
+    pass "the committed pin is used when the manifest records no imageTag"
+  else
+    fail "expected the pin ${PIN_TAG} to be verified; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The remedy is part of the diagnostic. "make minikube-pull-images (tag
+# v0.6.0)" on a cluster running :latest sends the operator at a 404.
+assert_the_pull_remedy_names_the_tag_the_cluster_actually_runs() {
+  local d out rc present
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  present="$(all_ghcr_refs_at_tag latest | grep -v '^ghcr.io/evenfire-ai/control-api:latest$')"
+  out="$(run_verify "$d" "$present")"; rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -q 'MISSING: ghcr\.io/evenfire-ai/control-api:latest' <<< "$out" \
+     && grep -q 'tag latest' <<< "$out" \
+     && ! grep -q "tag ${PIN_TAG}" <<< "$out"; then
+    pass "the pull remedy names the recorded tag, not the committed pin"
+  else
+    fail "expected a remedy naming 'latest'; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Where the tag came from is printed, so an operator who disagrees with the
+# answer can see which of the three inputs produced it.
+assert_the_tag_origin_is_reported() {
+  local d recorded pinned overridden problems=""
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  recorded="$(run_verify "$d" "$(all_ghcr_refs_at_tag latest)")"
+  overridden="$(TEST_IMAGE_TAG=v9.9.9 run_verify "$d" "$(all_ghcr_refs_at_tag v9.9.9)")"
+  write_recorded_manifest "$d" \
+    '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
+  pinned="$(run_verify "$d" "$(all_ghcr_refs_at_tag "$PIN_TAG")")"
+  grep -q 'tag latest from deploy/minikube/.image-manifest.json' <<< "$recorded" \
+    || problems+="recorded tag origin not reported; "
+  grep -q 'tag v9.9.9 from the MINIKUBE_IMAGE_TAG environment variable' <<< "$overridden" \
+    || problems+="override origin not reported; "
+  grep -q "tag ${PIN_TAG} from deploy/components/ghcr-images" <<< "$pinned" \
+    || problems+="pin origin not reported; "
+  if [ -z "$problems" ]; then
+    pass "the verify banner names the tag and where it came from"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# ---------------------------------------------------------------------------
 # FINDING B -- the E2E-only fixtures
 # ---------------------------------------------------------------------------
 
@@ -533,6 +666,11 @@ assert_a_pulled_cluster_is_told_to_pull_at_the_named_tag
 assert_the_puller_records_ghcr_and_the_verifier_reads_it_back
 assert_a_full_build_records_local_and_the_verifier_reads_it_back
 assert_an_only_build_carries_the_recorded_mode_forward
+assert_the_recorded_tag_is_verified_when_the_shell_has_no_override
+assert_an_explicit_tag_override_still_beats_the_recorded_tag
+assert_the_committed_pin_is_the_fallback_when_no_tag_is_recorded
+assert_the_pull_remedy_names_the_tag_the_cluster_actually_runs
+assert_the_tag_origin_is_reported
 assert_the_default_ghcr_verify_passes_without_the_e2e_fixtures
 assert_the_verify_set_never_demands_a_registry_distributed_mcp_server
 assert_the_e2e_seed_profile_puts_the_fixtures_back
