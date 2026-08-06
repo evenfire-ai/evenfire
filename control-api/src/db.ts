@@ -8,6 +8,7 @@ import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
+  addPluginWorkloadSdkCredentialTicketRuntimeAccess,
   addPluginWorkloadSdkJitCredentialTicketColumns,
   addPluginWorkloadSdkNotExecutedSpendOutcome,
   addPluginWorkloadSdkPolicyReviewProvenance,
@@ -5138,6 +5139,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0088_plugin_workload_sdk_policy_review_provenance',
     apply: addPluginWorkloadSdkPolicyReviewProvenance,
+  },
+  {
+    version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',
+    apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess,
   },
 ]
 

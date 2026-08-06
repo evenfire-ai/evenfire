@@ -545,6 +545,25 @@ export async function addPluginWorkloadSdkRuntimeAccess(db: DbClient): Promise<v
 }
 
 /**
+ * Reconciles the JIT credential-ticket table created after the original
+ * runtime-role migration. Existing clusters never received the broad 0062
+ * table grant for this relation, so rebuild its exact legacy-DML envelope in a
+ * forward-only migration. Revoking first also removes any accidental table
+ * privileges beyond the explicit runtime contract; repeated application is a
+ * no-op at the privilege boundary.
+ */
+export async function addPluginWorkloadSdkCredentialTicketRuntimeAccess(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    REVOKE ALL PRIVILEGES ON TABLE plugin_workload_sdk_credential_ticket_jtis
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE plugin_workload_sdk_credential_ticket_jtis
+      TO control_api_runtime;
+  `)
+}
+
+/**
  * Durable spend outcome for a physical promptBridge attempt.  The provider
  * attempt ledger prevents a second execution, while this table preserves the
  * accounting truth when the provider response is known only to have possibly
