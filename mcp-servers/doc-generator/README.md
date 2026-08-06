@@ -27,7 +27,9 @@ No API keys or secrets are required.
 docker build -t doc-generator-mcp:latest .
 ```
 
-Multi-stage `node:24-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. `scripts/minikube/build-images.sh` builds it into minikube as `clerum/doc-generator-mcp:v1`. It is not currently in the `.github/workflows/build-publish.yml` publish matrix.
+Multi-stage `node:24-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. That command is the only way this image comes into being: build it yourself and push it wherever your cluster pulls from.
+
+This image is not part of the repo's image system. It has no row in `deploy/images.json`, no entry in the `.github/workflows/build-publish.yml` publish matrix, and no `ghcr.io/evenfire-ai/doc-generator-mcp` to pull — nothing ever pushed one. Minikube setup neither builds it nor pulls it. Its sibling MCP servers (`airtable-mcp-server`, `web-search-mcp`, `playwright-server`) are published to ghcr, which is what lets the evenfire registry install them on demand; this one was never published, so the row was removed rather than left pointing at an image obtainable nowhere.
 
 ## Deployment
 
@@ -35,4 +37,4 @@ This directory has no `mcpserver.yaml` or NetworkPolicy — there is no ready-ma
 
 ## Status
 
-Available; built for local minikube use by `scripts/minikube/build-images.sh` and type-checked by `scripts/build-preflight.sh`. No test suite yet (unlike `airtable/` and `mongodb/`) and not yet referenced by user-facing docs.
+Source only. The workspace package (`@clerum/doc-generator-mcp`) is type-checked by `scripts/build-preflight.sh` and formatted through `scripts/prettier/paths.mjs`, but no image is built, published, or deployed from it. No test suite yet (unlike `airtable/` and `mongodb/`) and not yet referenced by user-facing docs.

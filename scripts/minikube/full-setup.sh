@@ -21,6 +21,11 @@
 #   MINIKUBE_RECREATE_PROFILE=true     Allow destructive profile recreation only
 #   CONFIRM_PROFILE=<profile>          when it matches the exact target profile.
 #   BRANCH_PROFILE_DEPLOY_DIR=<dir>     Optional branch-profile deploy cache root.
+#   IMAGE_SOURCE=ghcr|local            ghcr (default) pulls published images;
+#                                      local builds all of them from source.
+#   MINIKUBE_IMAGE_TAG=<tag>           Render-time override of the committed
+#                                      ghcr pin. Never committed. Use `latest`
+#                                      before a release tag exists.
 #
 # Loads .env from project root if present (API keys, credentials).
 # ======================================================================
@@ -125,6 +130,24 @@ case "${SKIP_UIS}" in
   *) SKIP_UIS=false ;;
 esac
 
+# ghcr (default): pull published ghcr.io/evenfire-ai images and render the
+# -ghcr overlays. local: build every image from source, today's behaviour.
+#
+# This is what an ACQUIRING run would do. A --skip-build run acquires nothing,
+# so it re-resolves the mode from what the cluster actually holds -- see the
+# image_mode_source block after the flag loop.
+IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
+case "$IMAGE_SOURCE" in
+  ghcr|local) ;;
+  *) err "Unknown IMAGE_SOURCE: '${IMAGE_SOURCE}' (expected: ghcr | local)"; exit 1 ;;
+esac
+export IMAGE_SOURCE
+# A render-time override of the committed pin, NEVER committed. It exists for
+# two real needs the pin alone cannot serve: exercising the pull path before a
+# release tag exists (MINIKUBE_IMAGE_TAG=latest) and recovering from a bad
+# release forward (MINIKUBE_IMAGE_TAG=v0.6.1). See apply_image_tag_override.
+export MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}"
+
 # Rebuild the DB from scratch by default (RESET_DB=true above) so a stale
 # control-postgres volume from an older build cannot drift from the current
 # schema/grant contract: the migration gate enforces an exact runtime-access
@@ -186,6 +209,14 @@ Environment:
   BRANCH_PROFILE_DEPLOY_DIR
                          Optional deploy cache root; when set, kustomize uses
                          <dir>/overlays/minikube instead of PROJECT_DIR/deploy
+  IMAGE_SOURCE           ghcr (default) pulls published ghcr.io/evenfire-ai
+                         images; local builds every image from source. Ignored
+                         with --skip-build, which acquires nothing and so
+                         follows what the cluster already holds
+  MINIKUBE_IMAGE_TAG     Render-time override applied to a temp copy of deploy/
+                         and never committed. Without it the tag is whatever the
+                         last acquisition recorded, else the committed pin. Use
+                         'latest' before a release tag exists
 
   Loads .env from project root if present. Supported variables:
     OPENAI_API_KEY, CLAUDE_API_KEY, ZAI_API_KEY, BAILIAN_API_KEY
@@ -225,6 +256,39 @@ case "${SEED_PROFILE}" in
   *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
 esac
 
+# ── The mode follows the cluster on a run that acquires nothing ────────
+#
+# THE OVERLAY MUST FOLLOW THE IMAGES ON THE NODE, NOT THIS SHELL. --skip-build
+# re-deploys WITHOUT pulling or building anything, so the only truthful source
+# for "which images does this cluster run" is what the last acquisition
+# recorded. Taking IMAGE_SOURCE instead rendered the -ghcr overlays over a
+# locally built cluster -- every Deployment then names a ghcr ref nothing ever
+# pulled, i.e. cluster-wide ImagePullBackOff -- and the mirror image (clerum/*
+# refs over a pulled cluster) is the same bug with the operands swapped. It is
+# not a rare path: `make minikube-setup` ALWAYS passes IMAGE_SOURCE (the
+# Makefile defaults it to ghcr), so the environment can never be read as "the
+# operator asked for this".
+#
+# On an ACQUIRING run the environment still decides, because that run is about
+# to rewrite the record -- otherwise `make minikube-setup-local` over a pulled
+# cluster could never switch a cluster back to local builds.
+#
+# image_mode_source falls back to the environment when nothing is recorded, so
+# the FIRST run on a fresh cluster is unchanged; this is the same resolver
+# `make minikube-deploy-all` and `build-images.sh --verify-only` already use.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+if [ "$SKIP_BUILD" = true ]; then
+  RECORDED_IMAGE_SOURCE="$(image_mode_source "$PROJECT_DIR")" || exit 1
+  if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
+    warn "This cluster's images were acquired as IMAGE_SOURCE=${RECORDED_IMAGE_SOURCE} (deploy/minikube/.image-manifest.json)."
+    warn "--skip-build acquires nothing, so the overlay follows the cluster, not IMAGE_SOURCE=${IMAGE_SOURCE}."
+    warn "To change the mode, re-run WITHOUT --skip-build so the images are actually re-acquired."
+    IMAGE_SOURCE="$RECORDED_IMAGE_SOURCE"
+    export IMAGE_SOURCE
+  fi
+fi
+
 # ── Load .env ──────────────────────────────────────────────────────────
 # Worktrees resolve through git-common-dir to the primary checkout. Dotenv is
 # parsed as data (never sourced as shell code), and admin aliases use the
@@ -244,12 +308,122 @@ export ADMIN_PASSWORD
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
 TOTAL_STEPS=12
+# MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
+#
+# A stdout filter cannot do this: the overlay is rendered from a DIRECTORY at
+# four independent sites (`kubectl apply -k` at Step 6b, two
+# `kubectl kustomize | apply -f -` calls, and run-control-api-db-migration.sh,
+# which takes --overlay and extracts the control-api image from the render).
+# `kustomize edit set image` is not available either -- everything here uses
+# `kubectl kustomize`, and kubectl has no `edit` subcommand, so it would mean a
+# new prerequisite. Mutating the committed component in place would make this
+# operator lever a SECOND WRITER of the release coordinate, which is exactly
+# what the one-writer rule forbids.
+#
+# So: copy deploy/ to a temp dir, rewrite the component's newTag THERE, and
+# point the existing BRANCH_PROFILE_DEPLOY_DIR hook at the copy. The whole tree
+# must move because `resources: ../minikube` and
+# deploy/scripts/minikube-detect-k8s-api-ip.sh both resolve relative to that
+# root.
+apply_image_tag_override() {
+  [ "$IMAGE_SOURCE" = ghcr ] || return 0
+  [ -n "$MINIKUBE_IMAGE_TAG" ] || return 0
+
+  local src override_root
+  src="${BRANCH_PROFILE_DEPLOY_DIR:-${PROJECT_DIR}/deploy}"
+  override_root="$(mktemp -d)"
+  cp -R "$src" "${override_root}/deploy"
+
+  local component="${override_root}/deploy/components/ghcr-images/kustomization.yaml"
+  [ -f "$component" ] || { err "ghcr component not found in the deploy copy at ${component}"; exit 1; }
+
+  # In-place on the COPY only. -i.bak plus rm keeps this portable across BSD
+  # and GNU sed; `sed -i ''` is a BSD-only spelling that GNU sed rejects.
+  sed -i.bak "s|^\([[:space:]]*newTag:[[:space:]]*\).*$|\1${MINIKUBE_IMAGE_TAG}|" "$component"
+  rm -f "${component}.bak"
+
+  local rewritten
+  rewritten="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$component" | sort -u)"
+  [ "$rewritten" = "$MINIKUBE_IMAGE_TAG" ] \
+    || { err "tag override did not apply cleanly: copy now carries '${rewritten}', expected '${MINIKUBE_IMAGE_TAG}'"; exit 1; }
+
+  export BRANCH_PROFILE_DEPLOY_DIR="${override_root}/deploy"
+}
+apply_image_tag_override
+
 ACTIVE_MINIKUBE_DEPLOY_DIR="${BRANCH_PROFILE_DEPLOY_DIR:-${PROJECT_DIR}/deploy}"
+# The kustomize dir is where the generated k8s-api-ip.yaml lands and where
+# patches/k8s-api-ip.yaml.template lives. It NEVER moves; only the render dir
+# switches between the plain and the -ghcr overlay.
 ACTIVE_MINIKUBE_KUSTOMIZE_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube"
-ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}"
-if [ "$SKIP_UIS" = true ]; then
-  ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis"
+if [ "$IMAGE_SOURCE" = ghcr ]; then
+  if [ "$SKIP_UIS" = true ]; then
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis-ghcr"
+  else
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-ghcr"
+  fi
+else
+  if [ "$SKIP_UIS" = true ]; then
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis"
+  else
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}"
+  fi
 fi
+
+# The effective tag and where it came from, for the banner and for every error
+# message that has to tell an operator what to change.
+#
+# Reading the committed pin here ignored the tag the cluster actually holds: on
+# the documented `MINIKUBE_IMAGE_TAG=latest make minikube-setup` bootstrap, any
+# LATER run (which has no such variable) reported and acted on v0.6.0 against a
+# cluster running :latest. image_mode_ghcr_tag applies override -> recorded ->
+# pin, the same precedence pull-images.sh and build-images.sh --verify-only
+# use; the `= ghcr` branch above is this file's mode gate, which is why the
+# ungated ghcr resolver is the right one to call.
+#
+# The pin is read from PROJECT_DIR, not ACTIVE_MINIKUBE_DEPLOY_DIR: the two
+# differ only when MINIKUBE_IMAGE_TAG rewrote a copy, and that override already
+# wins ahead of any pin.
+EFFECTIVE_IMAGE_TAG=""
+TAG_ORIGIN=""
+if [ "$IMAGE_SOURCE" = ghcr ]; then
+  EFFECTIVE_IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
+  TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
+  # Never continue on an empty tag: every ref built from it would be tagless,
+  # and the banner would confidently print nothing at all.
+  if [ -z "$EFFECTIVE_IMAGE_TAG" ] || [ -z "$TAG_ORIGIN" ]; then
+    err "could not resolve the ghcr image tag (tag='${EFFECTIVE_IMAGE_TAG}' origin='${TAG_ORIGIN}')"
+    err "Set MINIKUBE_IMAGE_TAG=<tag>, or fix deploy/components/ghcr-images/kustomization.yaml."
+    exit 1
+  fi
+fi
+
+print_image_source_banner() {
+  echo ""
+  echo -e "${BOLD}================================================================${NC}"
+  if [ "$IMAGE_SOURCE" = ghcr ]; then
+    echo -e "${BOLD}  Images: PULLED from ghcr.io/evenfire-ai${NC}"
+    echo -e "  tag:    ${EFFECTIVE_IMAGE_TAG}"
+    echo -e "  origin: ${TAG_ORIGIN}"
+    echo -e "  build locally instead with: ${BOLD}make minikube-setup-local${NC}"
+  else
+    echo -e "${BOLD}  Images: BUILT LOCALLY from source (IMAGE_SOURCE=local)${NC}"
+    echo -e "  This is the slow path. The default pulls published images."
+  fi
+  echo -e "  render: ${ACTIVE_MINIKUBE_RENDER_DIR#${ACTIVE_MINIKUBE_DEPLOY_DIR}/}"
+  echo -e "${BOLD}================================================================${NC}"
+}
+print_image_source_banner
+
+# Test seam: everything above resolves configuration only, with no cluster or
+# network call. `MINIKUBE_FULL_SETUP_CONFIG_ONLY=true` stops here so
+# scripts/tests/test-minikube-full-setup.sh can read the resolved values
+# without a cluster. It must stay immediately after the resolution block and
+# before the first minikube call.
+if [ "${MINIKUBE_FULL_SETUP_CONFIG_ONLY:-false}" = "true" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 MINIKUBE_START_SCRIPT="${MINIKUBE_START_SCRIPT:-${SCRIPT_DIR}/start.sh}"
 
 minikube_status_snapshot() {
@@ -594,7 +768,10 @@ fi
 step_header 5 $TOTAL_STEPS "Build Images"
 
 if [ "$SKIP_BUILD" = true ]; then
-  # Even with --skip-build, warn if local code is newer than images
+  # Even with --skip-build, warn if local code is newer than the images the
+  # cluster will run. The ADVICE has to branch on the mode: "rebuild" is wrong
+  # in ghcr mode, where nothing was built and rebuilding is precisely what the
+  # default path exists to avoid.
   LAST_BUILD_MARKER="deploy/minikube/.image-manifest.json"
   if [ -f "$LAST_BUILD_MARKER" ]; then
     NEWEST_SRC=$(find \
@@ -607,15 +784,68 @@ if [ "$SKIP_BUILD" = true ]; then
       control-ui/lib \
       -type f -newer "$LAST_BUILD_MARKER" 2>/dev/null | head -1 || true)
     if [ -n "$NEWEST_SRC" ]; then
-      warn "Source files changed since last image build (e.g., $NEWEST_SRC)."
-      warn "Images may be STALE. Run without --skip-build to rebuild."
+      if [ "$IMAGE_SOURCE" = ghcr ]; then
+        warn "Local source is newer than the pulled images (e.g., $NEWEST_SRC)."
+        warn "This cluster runs RELEASE images (${EFFECTIVE_IMAGE_TAG}); your local edits are NOT in them."
+        warn "To test local edits: 'make minikube-pre-gate-sync' shadow-builds only the changed"
+        warn "services over the release tag, or 'make minikube-setup-local' builds everything."
+      else
+        warn "Source files changed since last image build (e.g., $NEWEST_SRC)."
+        warn "Images may be STALE. Run without --skip-build to rebuild."
+      fi
     else
-      log "Skipping image build (--skip-build). No source changes detected since last build."
+      log "Skipping image acquisition (--skip-build). No source changes detected."
     fi
   else
-    warn "No image manifest found — images may never have been built."
-    warn "Run without --skip-build if pods show ImagePullBackOff or model-config-failed."
+    if [ "$IMAGE_SOURCE" = ghcr ]; then
+      warn "No image manifest found — images may never have been pulled."
+      warn "Run without --skip-build, or 'make minikube-pull-images', if pods show ImagePullBackOff."
+    else
+      warn "No image manifest found — images may never have been built."
+      warn "Run without --skip-build if pods show ImagePullBackOff or model-config-failed."
+    fi
   fi
+elif [ "$IMAGE_SOURCE" = ghcr ]; then
+  # ORDER MATTERS. build-images.sh regenerates
+  # deploy/minikube/.image-manifest.json on EVERY invocation, including
+  # --only= runs (its header comment claims otherwise; the code at the bottom
+  # of the script is unconditional). So every build-images.sh call has to come
+  # BEFORE the pull, or it clobbers the puller's manifest -- the one file the
+  # --skip-build staleness check reads -- with a mostly-NOT_BUILT map. (The
+  # `imageSource` key survives that clobber either way: an --only= run carries
+  # the recorded value forward rather than claiming the cluster is local.)
+  #
+  # No clerum image build runs on this path, so nothing else pulls the public
+  # third-party images (postgres, redis, nginx, ...) into the daemon.
+  log "Loading public base images (postgres, redis, nginx, ...) into minikube..."
+  bash "${SCRIPT_DIR}/build-images.sh" --public-only
+  ok "Public base images loaded"
+
+  # No local build runs on this path any more. The published:false images
+  # (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) have no ghcr
+  # counterpart, and both are now built only by the path that actually needs
+  # them: `make minikube-setup-e2e`.
+
+  log "Pulling published images (${EFFECTIVE_IMAGE_TAG}) into minikube..."
+  # --skip-uis is forwarded for the same reason the local build path passes it:
+  # the -no-uis-ghcr overlay DELETES the control-ui and profile-ui Deployments,
+  # so pulling them spends ~470 MiB of transfer and disk on images no pod will
+  # ever reference.
+  PULL_IMAGE_ARGS=()
+  if [ "$SKIP_UIS" = true ]; then
+    PULL_IMAGE_ARGS+=(--skip-uis)
+  fi
+  # `${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}`: expanding an EMPTY array as
+  # `"${arr[@]}"` is an unbound-variable abort under `set -u` in bash 3.2, which
+  # is what /bin/bash on macOS still is.
+  #
+  # `${MINIKUBE_MULTI_NODE:-false}`, not `$MINIKUBE_MULTI_NODE`: this script
+  # never assigns that variable (every other use site defaults it inline), so
+  # the bare form is an unbound-variable abort under `set -u` on the default
+  # single-node path.
+  MINIKUBE_PROFILE="$PROFILE" MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
+    bash "${SCRIPT_DIR}/pull-images.sh" ${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}
+  ok "All published images pulled"
 else
   log "Building and loading images into minikube..."
   BUILD_IMAGE_ARGS=(--skip-public)
@@ -677,6 +907,22 @@ fi
 # 6b. Deploy via kustomize
 log "Refreshing minikube K8s API endpoint CIDRs..."
 CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+# patches/k8s-api-ip.yaml is GENERATED and gitignored -- overlays/minikube
+# commits only the .template -- and overlays/minikube-ghcr renders ../minikube,
+# which patches with it.
+#
+# With MINIKUBE_IMAGE_TAG set, ACTIVE_MINIKUBE_KUSTOMIZE_DIR is the mktemp COPY
+# (apply_image_tag_override), so the line above writes the patch THERE and the
+# working tree never gets one. Every later consumer renders from the working
+# tree, or from image-mode.sh's own fresh copy of it: the next
+# `make minikube-pre-gate-sync` renders the control-api migration overlay
+# BEFORE `make minikube-deploy-all` regenerates the patch, and kustomize dies
+# with an evalsymlink error naming a file nothing ever wrote. Generate it in the
+# working tree too whenever the active dir is not the working tree.
+PROJECT_MINIKUBE_KUSTOMIZE_DIR="${PROJECT_DIR}/deploy/overlays/minikube"
+if [ "$ACTIVE_MINIKUBE_KUSTOMIZE_DIR" != "$PROJECT_MINIKUBE_KUSTOMIZE_DIR" ]; then
+  CONTEXT="${PROFILE}" OVERLAY_DIR="${PROJECT_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+fi
 ok "Minikube K8s API CIDRs refreshed"
 
 # Upgrade path: stage the additive reader credential before the full overlay
@@ -774,6 +1020,20 @@ ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
 # instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
 # so its non-empty mcpServers list wins over the empty default.
 if [ "$SEED_PROFILE" = "e2e" ]; then
+  # airtable-server.yaml names the LOCAL ref clerum/airtable-mcp-server:test,
+  # and this directory is applied with `kubectl apply -f` -- outside kustomize,
+  # so the ghcr component never rewrites it -- while HCC forces
+  # imagePullPolicy=IfNotPresent on minikube. That ref must therefore already
+  # be in the daemon, and minikube setup no longer acquires it: the registry
+  # distributes MCP servers and installs them on demand, so airtable-mcp-server
+  # is deployed_to_minikube:false and is neither built nor pulled by default.
+  # Build it here, gated on the one branch that consumes it, rather than paying
+  # for it on every setup.
+  log "Building the optional Airtable MCP image for the E2E demo instance..."
+  MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true \
+    bash "${SCRIPT_DIR}/build-images.sh" --only=airtable-mcp-server
+  ok "airtable-mcp-server built"
+
   log "Applying E2E demo MCP server instances..."
   $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
   ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"
