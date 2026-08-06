@@ -1156,7 +1156,13 @@ else
     err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
     exit 1
   else
-    warn "Test user seed encountered errors — check output above"
+    # The e2e gates depend on these fixtures; a partial seed produces broken
+    # journeys downstream. Previously this only warned and let setup exit 0 over
+    # a failed Step 10, hiding the breakage until a later gate failed. Fail loud
+    # here instead. Setup is idempotent: re-run after fixing the underlying
+    # error, e.g. `full-setup.sh --seed-profile=e2e --skip-build --keep-db`.
+    err "Test user seed failed under SEED_PROFILE=e2e — aborting. The e2e fixtures are incomplete and downstream gates would fail. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+    exit 1
   fi
 fi
 
