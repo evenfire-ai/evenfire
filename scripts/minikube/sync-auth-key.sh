@@ -136,7 +136,16 @@ sync_gfs() {
   if "${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null | grep -q .; then
     log "Restarting gfsc (${GFS_DEPLOY_SELECTOR}) after auth key drift"
     "${KCTL[@]}" rollout restart deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" >/dev/null
-    "${KCTL[@]}" rollout status deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" --timeout=90s || true
+    # Wait per-deployment (writer AND reader) with an independent budget each, and
+    # fail loud. A single label-wide `rollout status ... --timeout=90s || true`
+    # shared the budget across both deployments and swallowed the result: the
+    # writer's init-container chown starved the reader, and `|| true` hid that the
+    # reader never became Ready, so the failure resurfaced 60-150s later in
+    # verify-gfs. A genuinely stuck gfsc now fails here, named, instead of masked.
+    local d
+    for d in $("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name); do
+      "${KCTL[@]}" rollout status "${d}" -n "${GFS_NAMESPACE}" --timeout=180s
+    done
   else
     log "No gfsc deployments exist yet; auth key is synced for future pods"
   fi
