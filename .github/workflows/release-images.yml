@@ -1,0 +1,66 @@
+name: Release images
+
+# Promotes dev-proven digests to a release tag. Never rebuilds -- prod promotes
+# what dev proved, per the rule build-publish.yml states in its own header.
+#
+# Prerequisite: no image carries an org.opencontainers.image.revision
+# annotation until build-publish.yml has run at least once with
+# build_all=true on dev (that's what the merge step writes it from). Until
+# that first full-matrix run happens, this workflow will correctly refuse
+# every image rather than promote one it cannot verify.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Ref to rehearse against (dry run, promotes nothing)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote images
+    runs-on: ubuntu-latest
+    # Forks cannot write to ghcr.io/evenfire-ai/*, and a fork's v* tag would
+    # otherwise produce a red run against a namespace it does not own.
+    if: github.repository == 'evenfire-ai/evenfire'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # resolve-release-images.mjs runs `git merge-base --is-ancestor` and
+          # `git diff` against a commit that may be far back on dev. A shallow
+          # checkout has neither.
+          fetch-depth: 0
+
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          VER=v0.20.2
+          # sudo on the extract, matching ci-public.yml's precedent for
+          # installing a binary into /usr/local/bin (kubectl at :411,
+          # gitleaks at :495). This path only runs for real on a release
+          # tag push, so it can't be rehearsed beforehand -- match what's
+          # already proven rather than relying on the non-sudo form hosted
+          # runners happen to permit today.
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${VER}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and promote
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          RELEASE_REF: ${{ github.event.inputs.ref || github.ref_name }}
+        run: bash scripts/release/promote-release-images.sh
