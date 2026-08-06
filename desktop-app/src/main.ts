@@ -33,6 +33,7 @@ const appService = new AppService()
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 let mainWindowLifecycleReady = false
 let mainWindowRendererReady = false
+let appWindowVisibilityWired = false
 const appServiceInitializer = createRetryableInitializer(() => appService.initialize())
 const DESKTOP_SETUP_PROTOCOL = SANDBOX_UI_DEEP_LINK_PROTOCOL.replace(/:$/, '')
 const CLERUM_PROTOCOL = CLERUM_OAUTH_PROTOCOL.replace(/:$/, '')
@@ -64,6 +65,21 @@ function isWindowVisible(win: BrowserWindow | null): boolean {
 }
 
 /**
+ * Chromium renderer focus is not the same thing as application focus: a
+ * WebContentsView can own the active document while the Evenfire window still
+ * owns the user's attention. Keep notification policy on the native Electron
+ * window state instead of asking the parent renderer who currently owns DOM
+ * focus.
+ */
+function isAppFocused(): boolean {
+  return BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.isFocused())
+}
+
+function windowState(win: BrowserWindow | null): { visible: boolean; focused: boolean } {
+  return { visible: isWindowVisible(win), focused: isAppFocused() }
+}
+
+/**
  * GAP-D1 (spec-v2 §4.5-4): after the OS sleeps/resumes (or the screen locks and
  * unlocks), open SSE sockets are typically dead but neither the tracker watchdog
  * nor the bridge reconnect has noticed yet. Broadcast a `system:resume` tick so
@@ -82,25 +98,39 @@ function wirePowerMonitor(): void {
   powerMonitor.on('unlock-screen', emit)
 }
 
-/** Push window visibility to the renderer on every show/hide/minimize/focus change. */
+/** Push native window state to the renderer on every visibility/focus change. */
 function wireWindowVisibility(win: BrowserWindow): void {
   const emit = () => {
     if (win.isDestroyed()) return
-    win.webContents.send('window:visibility', { visible: isWindowVisible(win) })
+    win.webContents.send('window:visibility', windowState(win))
   }
   win.on('show', emit)
   win.on('hide', emit)
   win.on('minimize', emit)
   win.on('restore', emit)
-  win.on('focus', emit)
-  win.on('blur', emit)
+}
+
+/**
+ * App-level focus events are process-scoped. Register them once so closing and
+ * recreating the main window cannot accumulate listeners that retain a
+ * destroyed WebContents instance.
+ */
+function wireAppWindowVisibility(): void {
+  if (appWindowVisibilityWired) return
+  appWindowVisibilityWired = true
+  const emit = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send('window:visibility', windowState(mainWindow))
+  }
+  app.on('browser-window-focus', emit)
+  app.on('browser-window-blur', emit)
 }
 
 ipcMain.handle('window:getVisibility', event => {
   // Same trusted-sender invariant as every handler in ipc.ts (defense in depth,
   // even for a read-only boolean getter).
   assertTrustedSender(event)
-  return { visible: isWindowVisible(mainWindow) }
+  return windowState(mainWindow)
 })
 
 ipcMain.handle('app:rendererReady', event => {
@@ -286,6 +316,7 @@ async function createWindow(): Promise<void> {
   })
 
   wireWindowVisibility(window)
+  wireAppWindowVisibility()
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => {

@@ -18,16 +18,25 @@ const CONTROL_API = process.env.CONTROL_API_BASE_URL || 'http://127.0.0.1:8090'
 const WORKLOAD_ID = 'sdk-caller'
 const EVENT_TYPE = 'e2e.test.notification'
 const MODEL_PROVIDER =
-  process.env.E2E_WORKFLOW_MODEL_PROVIDER || process.env.CLURUM_MODEL_PROVIDER || 'zai'
-const MODEL_NAME = process.env.E2E_WORKFLOW_MODEL_NAME || process.env.CLURUM_MODEL_NAME || 'glm-5.1'
+  process.env.E2E_WORKFLOW_MODEL_PROVIDER || process.env.CLERUM_MODEL_PROVIDER || 'openai'
+const MODEL_NAME =
+  process.env.E2E_WORKFLOW_MODEL_NAME ||
+  process.env.CLERUM_MODEL_NAME ||
+  (MODEL_PROVIDER === 'claude' ? 'claude-sonnet-4-6' : 'gpt-5.4-mini')
+if (MODEL_PROVIDER !== 'openai' && MODEL_PROVIDER !== 'claude') {
+  throw new Error(
+    `Plugin Workload SDK Desktop E2E requires OpenAI or Claude; got ${MODEL_PROVIDER}. ` +
+      'Set E2E_WORKFLOW_MODEL_PROVIDER explicitly for the approved provider.'
+  )
+}
+const CREDENTIAL_SLOT = process.env.E2E_WORKFLOW_CREDENTIAL_SLOT || `${MODEL_PROVIDER}-api-key`
 
 function requireAdminPassword(): string {
   const password =
     process.env.E2E_ADMIN_PASSWORD ||
     process.env.ADMIN_PASSWORD ||
     process.env.ADMIN_PASS ||
-    process.env.TEST_ADMIN_PASSWORD ||
-    'changeme123!'
+    process.env.TEST_ADMIN_PASSWORD
   if (!password) {
     throw new Error('E2E_ADMIN_PASSWORD or ADMIN_PASSWORD is required for SDK workload grants')
   }
@@ -101,7 +110,17 @@ export async function createSdkWorkloadGrants(recipeName: string, userRef: strin
       recipeNamespace: RECIPE_NS,
       recipeName,
       capabilityFamily: 'promptBridge',
-      allowedModels: [],
+      provider: MODEL_PROVIDER,
+      allowedModels: [MODEL_NAME],
+      promptTargets: [
+        {
+          targetRef: `primary-${MODEL_PROVIDER}`,
+          provider: MODEL_PROVIDER,
+          model: MODEL_NAME,
+          credentialSlot: CREDENTIAL_SLOT,
+        },
+      ],
+      defaultTargetRef: `primary-${MODEL_PROVIDER}`,
       allowedCallers: [WORKLOAD_ID],
       quotaLimits: { maxRequestsPerRun: 3 },
     }),

@@ -25,9 +25,18 @@ import path from 'node:path'
 export const DESKTOP_APP_ROOT = path.resolve(__dirname, '../..')
 export const MAIN_ENTRY = path.join(DESKTOP_APP_ROOT, 'dist/main.js')
 export const EXTERNAL_REST_API_BASE_URL =
-  process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
-export const RPC_PROXY_BASE_URL = process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094'
+  process.env.EXTERNAL_REST_API_BASE_URL ||
+  process.env.EXTERNAL_REST_API_URL ||
+  process.env.E2E_EXTERNAL_REST_API_URL ||
+  'http://127.0.0.1:8091'
+export const RPC_PROXY_BASE_URL =
+  process.env.RPC_PROXY_BASE_URL ||
+  process.env.RPC_PROXY_URL ||
+  process.env.E2E_RPC_PROXY_URL ||
+  'http://127.0.0.1:8094'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
+const DEFAULT_DESKTOP_EMAIL = 'test@clerum.io'
+const DEFAULT_DESKTOP_PASSWORD = 'changeme123!'
 
 /** Require an explicit opt-in confirmation variable before a journey that writes, messages, or pays. */
 export function requireRecorderConfirm(flag: string, description: string): void {
@@ -39,7 +48,7 @@ export function requireRecorderConfirm(flag: string, description: string): void 
 }
 
 /** Refuse non-loopback targets unless the operator explicitly allowed a remote QA env. */
-export function assertAllowedTarget(label: string, rawUrl: string): void {
+export async function assertAllowedTarget(label: string, rawUrl: string): Promise<void> {
   let url: URL
   try {
     url = new URL(rawUrl)
@@ -54,7 +63,7 @@ export function assertAllowedTarget(label: string, rawUrl: string): void {
   if (LOOPBACK_HOSTS.has(url.hostname) && process.env.QA_RECORDER_ALLOW_REMOTE !== '1') {
     // Target is local — assert the endpoints are healthy right now so a recorder
     // run fails fast with a clear message instead of a slow Electron timeout.
-    void assertHealthy(rawUrl, label)
+    await assertHealthy(rawUrl, label)
   }
 }
 
@@ -77,17 +86,29 @@ function requiredValue(label: string, candidates: Array<string | undefined>): st
   return value
 }
 
+function configuredValue(candidates: Array<string | undefined>): string | undefined {
+  return candidates.find(candidate => candidate?.trim())?.trim()
+}
+
 export function desktopCredentials(): { email: string; password: string } {
+  const password = configuredValue([
+    process.env.E2E_DESKTOP_PASSWORD,
+    process.env.E2E_TEST_PASSWORD,
+    process.env.ADMIN_PASSWORD,
+  ])
+  if (!password && process.env.EVENFIRE_ENV_FILE_PRESENT === '1') {
+    throw new Error(
+      'Desktop QA password is missing from the canonical repository .env (or the explicitly selected lane env file). Refusing to use changeme123! when an env file exists.'
+    )
+  }
   return {
-    email: requiredValue('E2E_DEV_LOGIN_EMAIL or TEST_USER_EMAIL', [
-      process.env.E2E_DEV_LOGIN_EMAIL,
-      process.env.TEST_USER_EMAIL,
-    ]),
-    password: requiredValue('a Desktop test password', [
-      process.env.E2E_DESKTOP_PASSWORD,
-      process.env.E2E_TEST_PASSWORD,
-      process.env.ADMIN_PASSWORD,
-    ]),
+    // The canonical repository .env is loaded by playwright.config.ts before
+    // this helper is imported. Keep explicit process/root-env values first;
+    // these defaults are only for a freshly seeded local profile with no env.
+    email:
+      configuredValue([process.env.E2E_DEV_LOGIN_EMAIL, process.env.TEST_USER_EMAIL]) ||
+      DEFAULT_DESKTOP_EMAIL,
+    password: password || DEFAULT_DESKTOP_PASSWORD,
   }
 }
 
@@ -139,8 +160,21 @@ export async function launchDesktopApp(testInfo: TestInfo): Promise<{
     slowMo: Number.isFinite(slowMo) ? slowMo : 75,
   })
 
+  const actualUserDataDir = await app.evaluate(({ app: electronApp }) =>
+    electronApp.getPath('userData')
+  )
+  if (path.resolve(actualUserDataDir) !== path.resolve(userDataDir)) {
+    await app.close()
+    throw new Error(
+      `Electron did not honor the isolated user-data-dir: expected ${userDataDir}, got ${actualUserDataDir}`
+    )
+  }
+
   const page = await app.firstWindow()
-  await page.setViewportSize({ width: 1280, height: 720 })
+  // Do not emulate a CSS viewport for native WebContentsView journeys. On a
+  // Retina display that forces renderer DPR=1 while Electron remains at
+  // scaleFactor=2, producing misleading half-sized native bounds. The window
+  // is still recorded at 1280x720 when video capture is enabled above.
   await page.waitForLoadState('domcontentloaded')
   return { app, page }
 }

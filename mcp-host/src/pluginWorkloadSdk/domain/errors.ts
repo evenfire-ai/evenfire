@@ -12,6 +12,7 @@ export const PLUGIN_WORKLOAD_ERROR_CODES = [
   'caller_not_allowed',
   'scope_denied',
   'target_not_allowed',
+  'ambiguous_model',
   'event_type_not_allowed',
   'quota_exceeded',
   'provider_policy_denied',
@@ -20,14 +21,45 @@ export const PLUGIN_WORKLOAD_ERROR_CODES = [
   'idempotency_conflict',
   'invalid_request',
   'unauthorized',
+  'protocol_mismatch',
 ] as const
 export type PluginWorkloadErrorCode = (typeof PLUGIN_WORKLOAD_ERROR_CODES)[number]
+
+/** Safe, closed diagnostic classes for provider_unavailable responses. */
+export const PLUGIN_WORKLOAD_ERROR_REASONS = [
+  'rate_limited',
+  'insufficient_quota',
+  'auth',
+  'provider_unavailable',
+  'credential_unavailable',
+  'configuration',
+  'timeout',
+  'network',
+  'outcome_unknown',
+] as const
+export type PluginWorkloadErrorReason = (typeof PLUGIN_WORKLOAD_ERROR_REASONS)[number]
+
+export type PluginWorkloadProviderAttemptContext = {
+  providerAttemptId: string
+  providerAttemptIndex: number
+  target: {
+    targetRef: string
+    provider: string
+    model: string
+    credentialSlot: string
+  }
+  attemptCount: number
+  fallbackUsed: boolean
+  /** Known only after credential resolution; pre-provider failures may not have one. */
+  llmSecretName?: string
+}
 
 const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
   capability_not_declared: 403,
   caller_not_allowed: 403,
   scope_denied: 403,
   target_not_allowed: 403,
+  ambiguous_model: 409,
   event_type_not_allowed: 403,
   quota_exceeded: 429,
   provider_policy_denied: 403,
@@ -36,28 +68,61 @@ const ERROR_HTTP_STATUS: Record<PluginWorkloadErrorCode, number> = {
   idempotency_conflict: 422,
   invalid_request: 400,
   unauthorized: 401,
+  protocol_mismatch: 503,
 }
 
 const ERROR_CODE_SET = new Set<string>(PLUGIN_WORKLOAD_ERROR_CODES)
+const ERROR_REASON_SET = new Set<string>(PLUGIN_WORKLOAD_ERROR_REASONS)
 
 export class PluginWorkloadError extends Error {
   readonly code: PluginWorkloadErrorCode
   readonly retryable: boolean
   readonly httpStatus: number
+  readonly reason?: PluginWorkloadErrorReason
+  /** True when the provider may already have accepted or returned a call. */
+  readonly providerMayHaveExecuted: boolean
+  /** Internal immutable context needed to persist an unknown spend receipt. */
+  readonly providerAttempt?: PluginWorkloadProviderAttemptContext
 
-  constructor(code: PluginWorkloadErrorCode, message: string, retryable = false) {
+  constructor(
+    code: PluginWorkloadErrorCode,
+    message: string,
+    retryable = false,
+    reason?: PluginWorkloadErrorReason,
+    providerMayHaveExecuted = false,
+    providerAttempt?: PluginWorkloadProviderAttemptContext
+  ) {
     super(message)
     this.name = 'PluginWorkloadError'
     this.code = code
     this.retryable = retryable
     this.httpStatus = ERROR_HTTP_STATUS[code]
+    this.reason = reason
+    this.providerMayHaveExecuted = providerMayHaveExecuted
+    this.providerAttempt = providerAttempt
   }
 
-  toBody(): { error: PluginWorkloadErrorCode; message: string; retryable: boolean } {
-    return { error: this.code, message: this.message, retryable: this.retryable }
+  toBody(): {
+    error: PluginWorkloadErrorCode
+    message: string
+    retryable: boolean
+    reason?: PluginWorkloadErrorReason
+  } {
+    return {
+      error: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      ...(this.reason ? { reason: this.reason } : {}),
+    }
   }
 }
 
 export function isKnownPluginWorkloadErrorCode(code: string): code is PluginWorkloadErrorCode {
   return ERROR_CODE_SET.has(code)
+}
+
+export function isKnownPluginWorkloadErrorReason(
+  reason: string
+): reason is PluginWorkloadErrorReason {
+  return ERROR_REASON_SET.has(reason)
 }

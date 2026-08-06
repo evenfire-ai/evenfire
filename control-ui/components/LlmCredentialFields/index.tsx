@@ -479,7 +479,7 @@ export function LlmCredentialFields({
                       monospace
                       value={slot.nameInput}
                       onChange={event => commitExtraSlot(slot, event.target.value, slot.value)}
-                      placeholder={`${group.provider}-api-key-fb1`}
+                      placeholder={`${group.slots[0]?.dataKey ?? group.provider}-fb1`}
                       aria-label="Extra credential slot key name"
                       invalid={Boolean(error)}
                       disabled={disabled}

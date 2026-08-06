@@ -358,9 +358,11 @@ const clerum = Object.freeze({
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
-    onVisibilityChange: (callback: (state: { visible: boolean }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, state: { visible: boolean }) =>
-        callback(state)
+    onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { visible: boolean; focused: boolean }
+      ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
     },

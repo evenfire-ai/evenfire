@@ -39,6 +39,10 @@ type ComposerPanelProps = {
   agentSelector?: React.ReactNode
 }
 
+const COMPOSER_MAX_TEXT_HEIGHT = 240
+const COMPOSER_MIN_TEXT_HEIGHT = 56
+const COMPOSER_INLINE_MIN_TEXT_HEIGHT = 48
+
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'
   if (type === 'connector') return 'Connector'
@@ -108,6 +112,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // activeChatId changes and survives the inline→docked composer swap.
   const [draft, setDraft] = useComposerDraft(activeChatId)
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
 
@@ -126,6 +131,38 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
   })
+
+  const resizeComposerInput = useCallback(() => {
+    const textarea = composerInputRef.current
+    if (!textarea) return
+
+    const minimumHeight = inline ? COMPOSER_INLINE_MIN_TEXT_HEIGHT : COMPOSER_MIN_TEXT_HEIGHT
+    textarea.style.height = 'auto'
+    const height = Math.min(
+      Math.max(textarea.scrollHeight, minimumHeight),
+      COMPOSER_MAX_TEXT_HEIGHT
+    )
+    textarea.style.height = `${height}px`
+    textarea.style.overflowY = textarea.scrollHeight > COMPOSER_MAX_TEXT_HEIGHT ? 'auto' : 'hidden'
+  }, [inline])
+
+  useEffect(() => {
+    resizeComposerInput()
+  }, [activeChatId, draft, resizeComposerInput])
+
+  useEffect(() => {
+    const textarea = composerInputRef.current
+    if (!textarea || typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width
+      if (width === undefined || width === composerInputWidthRef.current) return
+      composerInputWidthRef.current = width
+      resizeComposerInput()
+    })
+    observer.observe(textarea)
+    return () => observer.disconnect()
+  }, [activeChatId, resizeComposerInput])
 
   // Clear attachment error when agent changes
   useEffect(() => {
@@ -567,25 +604,28 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         onDragOver={handleComposerDragOver}
         onDrop={handleComposerDrop}
       >
-        <textarea
-          key={activeChatId ?? 'no-chat'}
-          ref={composerInputRef}
-          data-testid="chat-input"
-          aria-label="Agent message composer"
-          value={draft}
-          onChange={event => {
-            handleDraftChange(event.target.value)
-          }}
-          onPaste={handleComposerPaste}
-          onKeyDown={handleComposerKeyDown}
-          rows={3}
-          disabled={isDegraded}
-          placeholder={
-            isDegraded
-              ? 'Agent degraded — fix the LLM Secret to resume.'
-              : `Message ${selectedAgent}... (Enter to send, Shift+Enter for newline)`
-          }
-        />
+        <div className="composer-textarea-viewport">
+          <textarea
+            key={activeChatId ?? 'no-chat'}
+            ref={composerInputRef}
+            data-testid="chat-input"
+            aria-label="Agent message composer"
+            value={draft}
+            onChange={event => {
+              handleDraftChange(event.target.value)
+              resizeComposerInput()
+            }}
+            onPaste={handleComposerPaste}
+            onKeyDown={handleComposerKeyDown}
+            rows={3}
+            disabled={isDegraded}
+            placeholder={
+              isDegraded
+                ? 'Agent degraded — fix the LLM Secret to resume.'
+                : `Message ${selectedAgent}... (Enter to send, Shift+Enter for newline)`
+            }
+          />
+        </div>
         {dragActive ? <div className="composer-drop-overlay">Drop files here</div> : null}
         <div className="composer-input-actions">
           {agentSelector && <span className="composer-agent-selector-slot">{agentSelector}</span>}

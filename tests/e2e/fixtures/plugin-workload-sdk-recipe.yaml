@@ -1,8 +1,9 @@
 # Plugin Workload SDK E2E fixture.
 #
 # Declares BOTH SDK capability families and a plugin workload (sdk-caller)
-# that exercises them. The recipe also declares an agent + a minimal step so
-# WRC spawns the recipe mcp-host (which hosts the SDK server on :8099).
+# that exercises them. The recipe is intentionally stepless: WRC provisions
+# the eager recipe-bound mcp-host for the SDK capability, not for workflow
+# execution.
 #
 # WRC auto-injects into the sdk-caller pod:
 #   PLUGIN_WORKLOAD_SDK_ENDPOINT, PLUGIN_WORKLOAD_SDK_TOKEN
@@ -19,15 +20,9 @@ metadata:
   name: PLACEHOLDER_RECIPE_NAME
   namespace: sandbox-recipes
 spec:
-  triggers:
-    onDemand: {}
   agent:
     provider: PLACEHOLDER_PROVIDER
     model: PLACEHOLDER_MODEL
-  steps:
-    - id: keepalive
-      instruction: 'Return a one-word acknowledgement for the SDK runtime smoke check.'
-      toolChoice: none
   workloads:
     - id: sdk-caller
       type: deployment
@@ -40,10 +35,13 @@ spec:
         - name: E2E_SDK_USER_REF
           value: PLACEHOLDER_USER_REF
         - name: E2E_SDK_QUOTA_LIMIT
-          value: '3'
+          value: '4'
+        - name: E2E_SDK_EXPLICIT_TARGET_REF
+          value: PLACEHOLDER_FALLBACK_TARGET_REF
   pluginWorkloadSdk:
     promptBridge:
-      allowedModels: []
+      allowedModels:
+        - PLACEHOLDER_MODEL
       maxRequestsPerRun: 10
       maxInvocationsPerMinute: 60
     clientNotifications:
