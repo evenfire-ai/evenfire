@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { registerIpcHandlers } from '../src/ipc.js'
+import { registerIpcHandlers, sanitizeChatLoadWindow } from '../src/ipc.js'
 import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
@@ -38,6 +38,30 @@ function makeTrustedEvent(senderId = 77) {
     destroy: () => destroyedCallbacks.forEach(callback => callback()),
   }
 }
+
+describe('chat IPC pagination validation', () => {
+  it('accepts bounded safe-integer windows', () => {
+    expect(sanitizeChatLoadWindow(100, 200)).toEqual({ limit: 100, offset: 200 })
+    expect(sanitizeChatLoadWindow(undefined, undefined)).toEqual({})
+  })
+
+  it.each([
+    ['10', 0],
+    [NaN, 0],
+    [Infinity, 0],
+    [1.5, 0],
+    [0, 0],
+    [1001, 0],
+    [10, NaN],
+    [10, Infinity],
+    [10, 1.5],
+    [10, -1],
+    [10, Number.MAX_SAFE_INTEGER + 1],
+    [Number.MAX_SAFE_INTEGER + 1, 0],
+  ])('rejects an invalid limit/offset pair: %s, %s', (limit, offset) => {
+    expect(() => sanitizeChatLoadWindow(limit, offset)).toThrow()
+  })
+})
 
 describe('ipc host status stream handlers', () => {
   const service = {
@@ -78,6 +102,9 @@ describe('ipc host status stream handlers', () => {
     getExternalChannelsSummary: vi.fn(),
     listArtifacts: vi.fn(),
     downloadArtifact: vi.fn(),
+    listSessions: vi.fn(),
+    loadSessionMessages: vi.fn(),
+    listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
     resolveGfsUri: vi.fn(),
@@ -125,6 +152,61 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(handler?.(event, { visible: false }))
 
     expect(service.setSandboxUiVisible).toHaveBeenCalledWith(false)
+  })
+
+  it.each([NaN, Infinity, 1.5, 0, -1, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid session catalog limit %s before calling the service',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:listSessions')
+      await expect(
+        Promise.resolve(handler?.(event, { hostRef: 'agent-x', query: { limit } }))
+      ).rejects.toThrow(/limit|integer/)
+      expect(service.listSessions).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['limit', NaN],
+    ['limit', Infinity],
+    ['limit', 1.5],
+    ['limit', 0],
+    ['limit', Number.MAX_SAFE_INTEGER + 1],
+    ['beforeTurn', 0],
+    ['beforeTurn', -1],
+    ['beforeTurn', 1.5],
+    ['afterTurn', -1],
+    ['afterTurn', 1.5],
+  ])('rejects invalid message query %s=%s before calling the service', async (field, value) => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:loadSessionMessages')
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          hostRef: 'agent-x',
+          agent: 'agent-x',
+          chatId: 'chat-a',
+          query: { [field]: value },
+        })
+      )
+    ).rejects.toThrow()
+    expect(service.loadSessionMessages).not.toHaveBeenCalled()
+  })
+
+  it('rejects mutually exclusive message cursors before calling the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:loadSessionMessages')
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          hostRef: 'agent-x',
+          agent: 'agent-x',
+          chatId: 'chat-a',
+          query: { beforeTurn: 2, afterTurn: 1 },
+        })
+      )
+    ).rejects.toThrow(/mutually exclusive/)
+    expect(service.loadSessionMessages).not.toHaveBeenCalled()
   })
 
   it('starts stream and forwards emitted events to sender', async () => {
@@ -510,6 +592,19 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual([{ id: 'approval-1' }])
   })
 
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid pending approval limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('approvals:listPending')
+
+      await expect(Promise.resolve(handler?.(event, { limit }))).rejects.toThrow(
+        'Invalid pending approvals limit'
+      )
+      expect(service.listPendingWorkflowApprovals).not.toHaveBeenCalled()
+    }
+  )
+
   it('routes artifact listing through the IPC handler for trusted senders', async () => {
     service.listArtifacts.mockResolvedValue({ artifacts: [] })
     const { event } = makeTrustedEvent()
@@ -566,6 +661,38 @@ describe('ipc host status stream handlers', () => {
     ).rejects.toThrow('Untrusted IPC sender')
     expect(service.downloadArtifact).not.toHaveBeenCalled()
   })
+
+  it('routes workflow run listing through a validated IPC limit', async () => {
+    service.listWorkflowRuns.mockResolvedValue({ items: [] })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('workflows:runs')
+
+    const result = await Promise.resolve(
+      handler?.(event, { ns: 'sandbox-recipes', name: 'recipe', limit: 25 })
+    )
+
+    expect(service.listWorkflowRuns).toHaveBeenCalledWith('sandbox-recipes', 'recipe', 25)
+    expect(result).toEqual({ items: [] })
+  })
+
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid workflow run limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('workflows:runs')
+
+      await expect(
+        Promise.resolve(
+          handler?.(event, {
+            ns: 'sandbox-recipes',
+            name: 'recipe',
+            limit,
+          })
+        )
+      ).rejects.toThrow('Invalid workflow runs limit')
+      expect(service.listWorkflowRuns).not.toHaveBeenCalled()
+    }
+  )
 
   it('saves run artifacts under Downloads with sanitized filenames', async () => {
     service.downloadWorkflowRunArtifact.mockResolvedValue(Buffer.from('run artifact'))
@@ -657,6 +784,19 @@ describe('ipc host status stream handlers', () => {
       hostRefs: ['chatllm'],
     })
   })
+
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid host activity limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:getHostActivity')
+
+      await expect(
+        Promise.resolve(handler?.(event, { hostRef: 'chatllm', limit }))
+      ).rejects.toThrow('Invalid host activity limit')
+      expect(service.getHostActivity).not.toHaveBeenCalled()
+    }
+  )
 
   it('rejects untrusted sender for stream stop', async () => {
     const handler = testState.handlers.get('rpc:hostStatusStreamStop')
