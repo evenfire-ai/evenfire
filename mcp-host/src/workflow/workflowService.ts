@@ -16,6 +16,14 @@ import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import {
+  configurePluginWorkloadSdkBootstrapIdentity,
+  resolvePluginWorkloadSdkBootstrapCapabilityFamily,
+} from '../pluginWorkloadSdk/bootstrapIdentity'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkClientNotificationsBootstrapProof,
+} from '../pluginWorkloadSdk/promptBridge/controlApiClient'
 import type { ApiKeys } from '../types'
 import { type LlmUsageEvent, type UsageReporter, newRequestId } from '../usage/usageReporter'
 import {
@@ -32,6 +40,7 @@ import {
   ConfigureResponse,
   ExecuteStepRequest,
   ExecuteStepResponse,
+  PluginWorkloadSdkBootstrapRequest,
   ToolCallRecord,
 } from './types'
 import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userApprovalRequester'
@@ -294,6 +303,16 @@ export class WorkflowService {
         provider: import('../types').ModelConfig['provider']
         defaultModel: string
       }) => void
+      /** Public identity-only callback for stepless Plugin Workload SDK mode. */
+      onPluginWorkloadSdkBootstrapConfigured?: (context: {
+        provider: import('../types').ModelConfig['provider']
+        defaultModel: string
+      }) => void
+      verifyPluginWorkloadSdkBootstrapV2?: (
+        provider: string,
+        model: string
+      ) => Promise<PluginWorkloadSdkBootstrapProof | null>
+      verifyPluginWorkloadSdkClientNotifications?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>
     }
   ) {
     this.recipeName = recipeName
@@ -310,6 +329,11 @@ export class WorkflowService {
     this.injectedBudgetClient = opts?.budgetClient
     this.workflowMaxOutputTokens = opts?.workflowMaxOutputTokens ?? resolveWorkflowMaxOutputTokens()
     this.onLlmConfigured = opts?.onLlmConfigured ?? null
+    this.onPluginWorkloadSdkBootstrapConfigured =
+      opts?.onPluginWorkloadSdkBootstrapConfigured ?? null
+    this.verifyPluginWorkloadSdkBootstrapV2 = opts?.verifyPluginWorkloadSdkBootstrapV2 ?? null
+    this.verifyPluginWorkloadSdkClientNotifications =
+      opts?.verifyPluginWorkloadSdkClientNotifications ?? null
   }
 
   private readonly onLlmConfigured:
@@ -320,6 +344,21 @@ export class WorkflowService {
       }) => void)
     | null = null
 
+  private readonly onPluginWorkloadSdkBootstrapConfigured:
+    | ((context: {
+        provider: import('../types').ModelConfig['provider']
+        defaultModel: string
+      }) => void)
+    | null = null
+
+  private readonly verifyPluginWorkloadSdkBootstrapV2:
+    | ((provider: string, model: string) => Promise<PluginWorkloadSdkBootstrapProof | null>)
+    | null = null
+
+  private readonly verifyPluginWorkloadSdkClientNotifications:
+    | (() => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof | null>)
+    | null = null
+
   private notifyLlmConfigured(provider: string, model: string, apiKey: string): void {
     if (!this.onLlmConfigured) return
     // The provider id IS the ApiKeys record key; validate before indexing.
@@ -328,6 +367,31 @@ export class WorkflowService {
       keys: monoCredentialBag(provider, apiKey),
       provider: provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
+    })
+  }
+
+  /**
+   * Accept only the public provider/model identity for the eager SDK host.
+   * This intentionally does not touch `currentApiKey`, `currentProvider`, or
+   * workflow readiness: stepless SDK traffic resolves credentials per attempt
+   * through the WRC broker rather than loading them into this service.
+   */
+  async configurePluginWorkloadSdkBootstrap(
+    req?: PluginWorkloadSdkBootstrapRequest
+  ): Promise<ConfigureResponse> {
+    return configurePluginWorkloadSdkBootstrapIdentity(req, {
+      capabilityFamily: resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+        config.pluginWorkloadSdkCapabilities
+      ),
+      ...(this.onPluginWorkloadSdkBootstrapConfigured
+        ? { onConfigured: this.onPluginWorkloadSdkBootstrapConfigured }
+        : {}),
+      ...(this.verifyPluginWorkloadSdkBootstrapV2
+        ? { verify: this.verifyPluginWorkloadSdkBootstrapV2 }
+        : {}),
+      ...(this.verifyPluginWorkloadSdkClientNotifications
+        ? { verifyClientNotifications: this.verifyPluginWorkloadSdkClientNotifications }
+        : {}),
     })
   }
 

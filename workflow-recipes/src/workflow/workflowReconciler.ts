@@ -48,6 +48,7 @@ import {
   getPodPhase,
   getPodReadiness,
   isRecoverableContainerWaitingReason,
+  waitForPodDeletion,
 } from './crashRecovery'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
@@ -58,7 +59,14 @@ import {
 import type { ModelConfigHandler } from './modelConfigHandler'
 import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPolicyFactory'
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
-import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
+import {
+  type EagerSdkBootstrapProof,
+  PluginWorkloadSdkProvisioner,
+} from './pluginWorkloadSdkProvisioner'
+import type {
+  PluginWorkloadSdkRevocationClient,
+  PluginWorkloadSdkRevocationReceipt,
+} from './pluginWorkloadSdkRevocationClient'
 import {
   type SnippetRunnerSecretAlias,
   WORKFLOW_OUTPUT_CLAIM_LABEL,
@@ -75,6 +83,7 @@ import {
   buildWorkflowOutputAnchorPodName,
   buildWorkflowOutputPreparePod,
   buildWorkflowOutputPreparePodName,
+  declaredPluginWorkloadSdkCapabilities,
   workflowOutputLabelValue,
 } from './podFactory'
 import {
@@ -162,6 +171,16 @@ type ExternalWorkflowOutputPvcState =
   | 'wrc-managed-conflict'
   | 'unauthorized'
 
+export interface PluginWorkloadSdkCleanupOptions {
+  /**
+   * Hybrid workflow recipes share their mcp-host, runtime token Secret and
+   * workflow network policies with the SDK lane. Remove only SDK-owned
+   * authority when the capability is edited out; the workflow reconciler
+   * remains the owner of shared runtime resources.
+   */
+  preserveWorkflowRuntime?: boolean
+}
+
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
   'WorkflowOutputWrcManagedLifecycle',
@@ -189,6 +208,30 @@ type PublicHttpEgressClass = 'exact-host' | 'public-web'
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function pluginWorkloadSdkPolicyReason(
+  spec: WorkflowRecipeSpec,
+  proof: EagerSdkBootstrapProof | undefined
+): string {
+  if (spec.pluginWorkloadSdk?.promptBridge && proof?.policyReady === false) {
+    return proof.policyReason ?? proof.policyState ?? 'unknown'
+  }
+  if (
+    spec.pluginWorkloadSdk?.clientNotifications &&
+    proof?.clientNotificationsPolicyReady === false
+  ) {
+    return (
+      proof.clientNotificationsPolicyReason ?? proof.clientNotificationsPolicyState ?? 'unknown'
+    )
+  }
+  return (
+    proof?.policyReason ??
+    proof?.clientNotificationsPolicyReason ??
+    proof?.policyState ??
+    proof?.clientNotificationsPolicyState ??
+    'unknown'
+  )
 }
 
 function normalizeCidrs(cidrs: string[]): string[] {
@@ -620,6 +663,10 @@ export interface WorkflowReconcileResult {
    * requeue. Propagated up through WRC's ReconcileResult.
    */
   skipStatusPatch?: boolean
+  /** Fresh Control API v2 proof tied to the current eager mcp-host pod. */
+  pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /** Eager host identity is ready, but prompt policy awaits operator action. */
+  pluginWorkloadSdkPolicyPending?: boolean
 }
 
 function mcpHostReadinessMessage(readiness: PodReadiness): string {
@@ -782,6 +829,12 @@ export interface WorkflowReconcilerDeps {
    * mcp-host stays unconfigured until a triggered run injects a model).
    */
   modelConfigHandler?: ModelConfigHandler
+  /**
+   * Recipe-scoped Control API revocation boundary for SDK-only teardown.
+   * Teardown is fail-closed when this client is absent; production always
+   * wires the HTTP implementation and tests provide a deterministic stub.
+   */
+  pluginWorkloadSdkRevocationClient: PluginWorkloadSdkRevocationClient
 }
 
 export class WorkflowReconciler {
@@ -857,6 +910,304 @@ export class WorkflowReconciler {
       return 'snippet workflow runtime is disabled'
     }
     return undefined
+  }
+
+  /**
+   * Reconcile the always-on Plugin Workload SDK host for a recipe that has no
+   * executable workflow steps. This deliberately does not call `reconcile()`:
+   * SDK-only workloads must not acquire coordinator, run, step, or output-PVC
+   * lifecycle merely because they share the WorkflowRecipe CRD.
+   */
+  async reconcilePluginWorkloadSdkOnly(
+    recipeName: string,
+    recipeUid: string,
+    namespace: string,
+    spec: WorkflowRecipeSpec,
+    runtimeScopeRecipeName = recipeName
+  ): Promise<{
+    phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
+    message: string
+    pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  }> {
+    if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
+      return { phase: 'active', message: 'Plugin Workload SDK runtime disabled' }
+    }
+    if ((spec.steps?.length ?? 0) > 0) {
+      throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
+    }
+
+    const runtime = deriveWorkflowRuntimePlan(spec, {
+      recipeName,
+      runtimeScopeRecipeName,
+      pluginWorkloadSdkEnabled: true,
+    })
+    const mcpHostPhase = await getPodPhase(
+      this.deps.coreApi,
+      `${recipeName}-mcp-host`,
+      this.deps.config.sandboxNamespace
+    )
+    const status = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+      recipeName,
+      recipeUid,
+      namespace,
+      runtimeScopeRecipeName,
+      spec,
+      runtime,
+      { mcpHostPhase }
+    )
+    const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
+    switch (status) {
+      case 'ready':
+        return {
+          phase: 'active',
+          message: 'Plugin Workload SDK mcp-host registered',
+          pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        }
+      case 'awaiting_policy':
+        return {
+          phase: 'awaiting_policy',
+          message: `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, bootstrapProof)})`,
+          pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        }
+      case 'deploying':
+        return { phase: 'deploying', message: 'Plugin Workload SDK mcp-host starting' }
+      case 'provider_unavailable':
+        return {
+          phase: 'provider_unavailable',
+          message: 'Plugin Workload SDK mcp-host provider unavailable',
+        }
+      case 'failed':
+        return { phase: 'failed', message: 'Plugin Workload SDK mcp-host could not start' }
+    }
+  }
+
+  /**
+   * Revoke and physically fence the Plugin Workload SDK capability. This is
+   * capability-level cleanup, deliberately independent from workflow
+   * coordinator teardown so both SDK-only and hybrid recipes share the same
+   * authorization-fencing invariant.
+   */
+  async cleanupPluginWorkloadSdk(
+    recipeName: string,
+    options: PluginWorkloadSdkCleanupOptions = {}
+  ): Promise<void> {
+    const ns = this.deps.config.sandboxNamespace
+    const preserveWorkflowRuntime = options.preserveWorkflowRuntime === true
+    this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
+    const sdkNetworkPolicyNames = [
+      `${recipeName}-workload-to-mcp-host-sdk-ingress`,
+      `${recipeName}-workload-to-mcp-host-sdk-egress`,
+      `${recipeName}-mcp-host-to-wrc-sdk-broker`,
+    ]
+    const sharedNetworkPolicyNames = [
+      `${recipeName}-mcp-host-to-servers`,
+      `${recipeName}-mcp-host-to-llm-api`,
+      `${recipeName}-mcp-host-to-gfs`,
+      `${recipeName}-mcp-host-to-approval-gateway`,
+    ]
+    const networkPolicyNames = preserveWorkflowRuntime
+      ? sdkNetworkPolicyNames
+      : [...sdkNetworkPolicyNames, ...sharedNetworkPolicyNames]
+    let revocationReceipt: PluginWorkloadSdkRevocationReceipt | null = null
+    const revocationClient = this.deps.pluginWorkloadSdkRevocationClient
+    if (!revocationClient) {
+      throw new Error(
+        'Plugin Workload SDK revocation client is not configured; refusing to tear down an unfenced capability'
+      )
+    }
+    try {
+      // Authorization fencing is the first state transition. If Control API
+      // cannot revoke (or reports a CAS conflict), retain the finalizer and
+      // every owned runtime object for a retry; deleting locally first would
+      // hide an unfenced broker grant and make recovery non-deterministic.
+      revocationReceipt = await revocationClient.revoke(ns, recipeName)
+      if (revocationReceipt.state === 'conflict') {
+        throw new Error(`Plugin Workload SDK revocation conflict for recipe "${recipeName}"`)
+      }
+    } catch (error) {
+      this.log.error('Plugin Workload SDK control-plane revocation failed', {
+        recipeName,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
+    // Close the service and network-policy edges before removing the pod or
+    // token Secrets. This ordering is the revocation boundary: a live pod
+    // cannot keep receiving broker traffic while its credentials are being
+    // deleted, and a failed delete is requeued instead of reported as disabled.
+    if (!preserveWorkflowRuntime) {
+      await this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedService({
+          name: buildMcpHostServiceName(recipeName),
+          namespace: ns,
+        })
+      )
+    }
+    await Promise.all([
+      ...sdkNetworkPolicyNames.map(name =>
+        this.teardownDelete(() =>
+          this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+        )
+      ),
+      ...(preserveWorkflowRuntime
+        ? []
+        : sharedNetworkPolicyNames.map(name =>
+            this.teardownDelete(() =>
+              this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+            )
+          )),
+      // Older SDK-only reconciles used the shared workflow policy factory and
+      // left coordinator-shaped policies behind. Sweep the complete recipe
+      // label set so upgrades and dynamic policy names cannot retain a stale
+      // isolation lane. The selector is recipe-scoped and only matches WRC-
+      // managed policies, never the namespace-wide baseline policies.
+      ...(preserveWorkflowRuntime
+        ? []
+        : [
+            this.teardownDelete(() =>
+              this.deleteNetworkPoliciesByLabelSelector(
+                ns,
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+              )
+            ),
+            this.teardownDelete(() =>
+              this.deleteNetworkPoliciesByLabelSelector(
+                this.deps.config.mcpServerNamespace,
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+              )
+            ),
+          ]),
+    ])
+    if (!preserveWorkflowRuntime) {
+      await this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedPod({
+          name: `${recipeName}-mcp-host`,
+          namespace: ns,
+          propagationPolicy: 'Background',
+        })
+      )
+    }
+    await Promise.all([
+      this.teardownDelete(() =>
+        this.deps.coreApi.deleteNamespacedSecret({
+          name: buildPluginWorkloadSdkTokenSecretName(recipeName),
+          namespace: ns,
+        })
+      ),
+      ...(preserveWorkflowRuntime
+        ? []
+        : [
+            // The runtime JWT Secret is created for eager SDK hosts as well as
+            // workflow hosts. SDK-only capability removal must revoke it with
+            // the host; hybrid workflow cleanup owns the shared Secret.
+            this.teardownDelete(() =>
+              this.deps.coreApi.deleteNamespacedSecret({
+                name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+                namespace: ns,
+              })
+            ),
+          ]),
+    ])
+    await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames, {
+      preserveWorkflowRuntime,
+    })
+    if (revocationReceipt.state === 'revoking') {
+      if (!revocationReceipt.revocationId) {
+        throw new Error(`Plugin Workload SDK revocation receipt for ${recipeName} has no epoch`)
+      }
+      const finalized = await revocationClient.finalize(
+        ns,
+        recipeName,
+        revocationReceipt.revocationId
+      )
+      // `missing` is also terminal: an operator may have removed the grant
+      // after the revocation epoch was fenced. There is no remaining broker
+      // authority to finalize in that case, so retaining the recipe finalizer
+      // would turn a safe, idempotent cleanup into a permanent wedge.
+      if (finalized.state !== 'disabled' && finalized.state !== 'missing') {
+        throw new Error(
+          `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled or absent`
+        )
+      }
+    }
+  }
+
+  private async assertPluginWorkloadSdkResourcesAbsent(
+    recipeName: string,
+    namespace: string,
+    networkPolicyNames: string[],
+    options: PluginWorkloadSdkCleanupOptions = {}
+  ): Promise<void> {
+    // Keep the API calls lazy until every precondition (notably pod deletion)
+    // has completed. Starting a read and then awaiting the pod poll leaves a
+    // rejection from an already-absent object temporarily unhandled; Node can
+    // terminate the controller before the later Promise.allSettled observes it.
+    // Lazy checks preserve the fail-closed rule while making teardown safe for
+    // the normal idempotent 404 path.
+    const checks: Array<() => Promise<unknown>> = [
+      () =>
+        this.deps.coreApi.readNamespacedSecret({
+          name: buildPluginWorkloadSdkTokenSecretName(recipeName),
+          namespace,
+        }),
+      ...networkPolicyNames.map(
+        name => () => this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+      ),
+    ]
+    if (!options.preserveWorkflowRuntime) {
+      const podGone = await waitForPodDeletion(
+        this.deps.coreApi,
+        `${recipeName}-mcp-host`,
+        namespace,
+        {
+          timeoutMs: 5_000,
+          pollIntervalMs: 250,
+        }
+      )
+      if (!podGone)
+        throw new Error(`Plugin Workload SDK pod for ${recipeName} still exists after teardown`)
+      checks.push(
+        () =>
+          this.deps.coreApi.readNamespacedSecret({
+            name: `wf-${recipeName}-mcp-host-runtime-tokens`,
+            namespace,
+          }),
+        () =>
+          this.deps.coreApi.readNamespacedService({
+            name: buildMcpHostServiceName(recipeName),
+            namespace,
+          }),
+        () =>
+          this.deps.coreApi.readNamespacedEndpoints({
+            name: buildMcpHostServiceName(recipeName),
+            namespace,
+          }),
+        () =>
+          this.deps.networkingApi.listNamespacedNetworkPolicy({
+            namespace,
+            labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+          }),
+        () =>
+          this.deps.networkingApi.listNamespacedNetworkPolicy({
+            namespace: this.deps.config.mcpServerNamespace,
+            labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+          })
+      )
+    }
+    const results = await Promise.allSettled(checks.map(check => check()))
+    const unexpected = results.find(result => {
+      if (result.status !== 'fulfilled') return false
+      const value = result.value as { items?: unknown[] } | undefined
+      return Array.isArray(value?.items) ? value.items.length > 0 : true
+    })
+    if (unexpected) {
+      throw new Error(`Plugin Workload SDK resource for ${recipeName} still exists after teardown`)
+    }
+    const failed = results.find(
+      (result): result is PromiseRejectedResult =>
+        result.status === 'rejected' && getErrorCode(result.reason) !== 404
+    )
+    if (failed) throw failed.reason
   }
 
   async reconcile(
@@ -1056,6 +1407,8 @@ export class WorkflowReconciler {
             runtime,
             { mcpHostPhase }
           )
+          const eagerBootstrapProof =
+            this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
               phase: 'failed',
@@ -1086,10 +1439,28 @@ export class WorkflowReconciler {
               ],
             }
           }
-          const eagerReady = eagerStatus === 'ready'
-          const eagerMessage = eagerReady
-            ? `Plugin Workload SDK mcp-host registered (${classification})`
-            : `Plugin Workload SDK mcp-host starting (${classification})`
+          const eagerPolicyPending = eagerStatus === 'awaiting_policy'
+          const pluginWorkloadSdkDeclared =
+            spec.pluginWorkloadSdk?.promptBridge !== undefined ||
+            spec.pluginWorkloadSdk?.clientNotifications !== undefined
+          const promptBridgeDeclared = spec.pluginWorkloadSdk?.promptBridge !== undefined
+          const eagerReady =
+            (eagerStatus === 'ready' || eagerPolicyPending) &&
+            (!pluginWorkloadSdkDeclared ||
+              !promptBridgeDeclared ||
+              eagerBootstrapProof !== undefined)
+          if (eagerStatus === 'ready' && promptBridgeDeclared && !eagerBootstrapProof) {
+            return withWorkflowConditions({
+              phase: 'deploying',
+              message: `Plugin Workload SDK bootstrap policy proof pending (${classification})`,
+              clearWorkflowExecution: true,
+            })
+          }
+          const eagerMessage = eagerPolicyPending
+            ? `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, eagerBootstrapProof)}) (${classification})`
+            : eagerReady
+              ? `Plugin Workload SDK mcp-host registered (${classification})`
+              : `Plugin Workload SDK mcp-host starting (${classification})`
           return withWorkflowConditions({
             // While the eager mcp-host is still booting (eagerStatus ===
             // 'deploying'), return 'deploying' — NOT 'active' — so the watcher
@@ -1103,6 +1474,8 @@ export class WorkflowReconciler {
             phase: eagerReady ? 'active' : 'deploying',
             message: eagerMessage,
             clearWorkflowExecution: true,
+            pluginWorkloadSdkBootstrapProof: eagerBootstrapProof,
+            pluginWorkloadSdkPolicyPending: eagerPolicyPending,
           })
         }
       }
@@ -1579,8 +1952,9 @@ export class WorkflowReconciler {
             gfsScopes: coordinatorGfsScopes,
             mountWorkflowOutput: runtime.pods.mcpHost!.mountWorkflowOutput,
             workflowOutputScope: runtime.pods.mcpHost!.workflowOutputScope,
-            pluginWorkloadSdkEnabled:
-              this.deps.config.pluginWorkloadSdkEnabled && Boolean(spec.pluginWorkloadSdk),
+            pluginWorkloadSdkCapabilities: this.deps.config.pluginWorkloadSdkEnabled
+              ? declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
+              : [],
           }
         )
         await this.createIfNotExists(
@@ -2297,6 +2671,10 @@ export class WorkflowReconciler {
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
       includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
+      // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
+      // control/egress lanes, but do not manufacture coordinator policies
+      // whose selectors can never match a real workload.
+      includeCoordinator: !eagerSdkMcpHost,
       // The outer WorkflowRecipe reconciler owns this declarative lane so it can
       // revoke before phase short-circuits while gating creation on provenance.
       includeCoordinatorGfs: false,
@@ -2964,7 +3342,17 @@ export class WorkflowReconciler {
       (list.items ?? [])
         .map(policy => policy.metadata?.name)
         .filter((name): name is string => Boolean(name))
-        .map(name => this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }))
+        .map(async name => {
+          try {
+            await this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
+          } catch (error: unknown) {
+            // A concurrent reconciler or the API server may have removed the
+            // policy between list and delete. That is already the desired
+            // postcondition; every other error must keep the revocation
+            // transaction in progress and trigger a retry.
+            if (getErrorCode(error) !== 404) throw error
+          }
+        })
     )
   }
 
@@ -3871,6 +4259,21 @@ export class WorkflowReconciler {
     }
   }
 
+  /**
+   * SDK capability teardown is a revocation boundary, not best-effort
+   * housekeeping. Ignore only an already-absent object; propagate every other
+   * failure so the reconciler keeps the previous capability state and
+   * requeues instead of publishing a false `disabled` result.
+   */
+  private async teardownDelete(deleteFn: () => Promise<unknown>): Promise<void> {
+    try {
+      await deleteFn()
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return
+      throw error
+    }
+  }
+
   private async deletePersistentVolumeClaimIfExists(
     name: string,
     namespace: string
@@ -4100,6 +4503,14 @@ export class WorkflowReconciler {
     const refreshExp = WorkflowReconciler.jwtExp(refreshJwt)
     const accessBinding = WorkflowReconciler.jwtRuntimeBinding(accessJwt)
     const refreshBinding = WorkflowReconciler.jwtRuntimeBinding(refreshJwt)
+    const accessScopes = WorkflowReconciler.jwtWorkflowControlScopes(
+      accessJwt,
+      'workflowControlScopes'
+    )
+    const refreshScopes = WorkflowReconciler.jwtWorkflowControlScopes(
+      refreshJwt,
+      'workflowControlScopes'
+    )
     const rawMcpHostControl = existing.data?.['mcp-host-workflow-control-token']
     const mcpHostControlJwt = rawMcpHostControl
       ? Buffer.from(rawMcpHostControl, 'base64').toString('utf-8')
@@ -4138,6 +4549,9 @@ export class WorkflowReconciler {
         expectedControlHostRef
       )
     const controlScopesMismatch = !workflowControlScopesEqual(controlScopes, workflowControlScopes)
+    const runtimeScopesMismatch =
+      !workflowControlScopesEqual(accessScopes, workflowControlScopes) ||
+      !workflowControlScopesEqual(refreshScopes, workflowControlScopes)
     const gfsSubjectMismatch = !!rawGfsAccess && gfsAccessSub !== expectedGfsSubject
     const gfsScopesMismatch = !gfsScopesEqual(gfsAccessScopes, expectedGfsScopes)
     const refreshBeforeSeconds = this.runtimeTokenFileRefreshBeforeSeconds
@@ -4145,6 +4559,7 @@ export class WorkflowReconciler {
       accessExp === 0 ||
       refreshExp === 0 ||
       runtimeBindingMismatch ||
+      runtimeScopesMismatch ||
       accessExp - nowSecs < refreshBeforeSeconds ||
       refreshExp - nowSecs < refreshBeforeSeconds
 
@@ -4165,6 +4580,7 @@ export class WorkflowReconciler {
 
     if (
       runtimeBindingMismatch ||
+      runtimeScopesMismatch ||
       controlBindingMismatch ||
       controlScopesMismatch ||
       gfsSubjectMismatch ||
@@ -4175,6 +4591,8 @@ export class WorkflowReconciler {
         runtimeScopeRecipeName,
         accessBinding,
         refreshBinding,
+        accessScopes,
+        refreshScopes,
         controlBinding,
         controlScopes,
         expectedControlScopes: workflowControlScopes,
@@ -4292,10 +4710,13 @@ export class WorkflowReconciler {
     }
   }
 
-  private static jwtWorkflowControlScopes(jwt: string): WorkflowControlScope[] {
+  private static jwtWorkflowControlScopes(
+    jwt: string,
+    claim: 'scopes' | 'workflowControlScopes' = 'scopes'
+  ): WorkflowControlScope[] {
     try {
       const payload = decodeJwt(jwt)
-      const scopes = Array.isArray(payload.scopes) ? payload.scopes : []
+      const scopes = Array.isArray(payload[claim]) ? payload[claim] : []
       const normalized: WorkflowControlScope[] = []
       const seen = new Set<string>()
       for (const scope of scopes) {

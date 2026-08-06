@@ -43,12 +43,16 @@ Ready before E2E results are interpreted.
 
 ## Prerequisites
 
-- **Docker Desktop** installed and running
+- **Docker Desktop** installed and running (**≥10 GB RAM / 6 CPUs**)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
 - **python3** (for JWT key sync)
 - **Node.js** 24+ (for building services and desktop app)
+- **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
+
+> Tip: run `make prereqs` (alias `make doctor`) to verify all of the above at
+> once, with per-platform install commands for anything missing.
 
 ---
 
@@ -69,6 +73,11 @@ generated config, secrets, and rollouts match the current worktree:
 make minikube-pre-gate-sync GATE=<gate-name>
 ```
 
+For target-aware promptBridge or provider-free `clientNotifications` upgrades,
+follow the fail-closed migration and rollout order in
+[Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
+before enabling the feature flag.
+
 When deployable code changed and the E2E runner will manage port-forwards
 itself, force the sync and skip the short-lived background port-forward refresh:
 
@@ -76,33 +85,23 @@ itself, force the sync and skip the short-lived background port-forward refresh:
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
 ```
 
-### Invitation Email / member-registration (not in this repo)
+### Invitation email (self-hosted deployments only)
 
-`member-registration-service` lives in a **separate repository that is not part of
-this distribution**. There is no `member-registration` overlay, manifest, or deploy
-script in this tree, so `make minikube-setup` cannot deploy it.
+Invitation and member-registration emails require a self-hosted deployment
+reachable at a real, publicly resolvable domain. See [Member invitations on
+self-hosted](../how-to/member-invitations-self-hosted.md).
 
-> control-api also has a **hosted mode**
-> (`CONTROL_API_MEMBER_REGISTRATION_MODE=hosted`) that sends invitation emails
-> via evenfire's shared registration hub with nothing to deploy — see [Member
-> invitations on self-hosted](../how-to/member-invitations-self-hosted.md).
-> It does not apply here: hosted mode requires real, publicly resolvable
-> `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` / `CONTROL_API_CONTROL_UI_BASE_URL`
-> domains and refuses `localhost`/IP literals, so a stock minikube deploy
-> (127.0.0.1 defaults) cannot use it. This section's sibling-checkout path
-> remains the only option for local minikube.
+They are not part of the minikube flow, and it does not make sense to run them
+here. Hosted mode refuses `localhost` and IP literals, so a stock minikube
+deploy (127.0.0.1 defaults) cannot use it, and any emailed link would only
+point back at your own machine. The `member-registration-service` also lives in
+a **separate repository that is not part of this distribution**, so
+`make minikube-setup` cannot deploy it.
 
-`scripts/minikube/full-setup.sh` looks for a sibling checkout at
-`../evenfire-member-registration` (override with `EVENFIRE_MEMBER_REGISTRATION_DIR`).
-Without it, setup simply prints a warning and continues:
-
-```
-evenfire-member-registration not found at <path>/evenfire-member-registration
-control-api invitation flows will fail any registration call until you clone it:
-```
-
-Everything else in this guide works without it; only control-api invitation /
-registration calls fail.
+`make minikube-setup` prints a harmless warning that
+`evenfire-member-registration` was not found and then continues. Only
+control-api invitation and registration calls fail; everything else in this
+guide works without it.
 
 ### After Setup
 
@@ -112,9 +111,6 @@ npm run ui
 
 # 2. Open Control UI
 open http://localhost:3000
-
-# 3. Invite a member in Control UI. The email link should target:
-#    http://localhost:3001/invitations/<token>
 ```
 
 `make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.

@@ -4,8 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 function loadEnvFile(envPath: string) {
-  if (!fs.existsSync(envPath)) return false
-  const lines = fs.readFileSync(envPath, 'utf8').split('\n')
+  let contents: string
+  try {
+    contents = fs.readFileSync(envPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+  const lines = contents.split('\n')
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
@@ -19,7 +25,7 @@ function loadEnvFile(envPath: string) {
     ) {
       value = value.slice(1, -1)
     }
-    if (!process.env[key]) process.env[key] = value
+    if (!(key in process.env)) process.env[key] = value
   }
   return true
 }
@@ -28,14 +34,21 @@ function loadRootEnv() {
   const repoRoot = path.resolve(__dirname, '..')
   if (loadEnvFile(path.join(repoRoot, '.env'))) return
   const gitCommonDir = path.resolve(repoRoot, '.git')
-  if (!fs.existsSync(gitCommonDir)) return
-  if (!fs.statSync(gitCommonDir).isFile()) return
-  const gitFile = fs.readFileSync(gitCommonDir, 'utf8').trim()
+  let gitFile: string
+  try {
+    gitFile = fs.readFileSync(gitCommonDir, 'utf8').trim()
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === 'ENOENT' ||
+      (error as NodeJS.ErrnoException).code === 'EISDIR'
+    )
+      return
+    throw error
+  }
   const match = gitFile.match(/^gitdir:\s*(.+)$/)
   if (!match) return
   const worktreeGitDir = path.resolve(repoRoot, match[1])
   const commonDirPath = path.join(worktreeGitDir, 'commondir')
-  if (!fs.existsSync(commonDirPath)) return
   const commonDir = fs.readFileSync(commonDirPath, 'utf8').trim()
   const mainGitDir = path.resolve(worktreeGitDir, commonDir)
   loadEnvFile(path.join(mainGitDir, '..', '.env'))

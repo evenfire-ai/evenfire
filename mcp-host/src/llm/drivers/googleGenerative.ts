@@ -109,6 +109,7 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
     return {
       content: textContent,
       usage: mapUsage(response),
+      usage_reported: hasAuthoritativeUsage(response),
       finish_reason: mapFinishReason(response.candidates?.[0]?.finishReason, parts),
     }
   }
@@ -238,6 +239,21 @@ function mapUsage(response: GeminiResponse): CompletionResponse['usage'] {
     output_tokens: output,
     total_tokens: u.totalTokenCount ?? input + output,
   }
+}
+
+function hasAuthoritativeUsage(response: GeminiResponse): boolean {
+  const usage = response.usageMetadata
+  const input = usage?.promptTokenCount
+  const output = usage?.candidatesTokenCount
+  return (
+    usage != null &&
+    typeof input === 'number' &&
+    Number.isInteger(input) &&
+    input >= 0 &&
+    typeof output === 'number' &&
+    Number.isInteger(output) &&
+    output >= 0
+  )
 }
 
 function mapFinishReason(reason: string | undefined, parts: GeminiPart[]): FinishReason {

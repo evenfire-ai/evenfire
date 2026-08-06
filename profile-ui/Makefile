@@ -15,7 +15,7 @@ dev: install
 	EXTERNAL_REST_API_INTERNAL_URL=http://localhost:8091 npm run dev -- --port $(PORT)
 
 docker-build:
-	docker build -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) .
+	docker build -f Dockerfile -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) ..
 
 docker-push: docker-build
 	docker push $(REGISTRY)/$(IMAGE_NAME):$(TAG)

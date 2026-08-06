@@ -30,6 +30,12 @@ DEFAULT_VITEST_SUITES=(
   integration/mcp-hcc-upgrade-rollout.test.ts
   integration/mcp-server-readiness-regression.test.ts
   integration/mcp-secrets-access-guard.test.ts
+  # Platform image-pull credential self-provisioning. This is the only gate that executes
+  # the private-pull acceptance path: unit tests cannot observe namespace placement, HCC
+  # materialization, or whether the kubelet actually authenticated to the registry. It
+  # skips cleanly without the private fixtures, and fails rather than skips under
+  # E2E_REQUIRE_CLUSTER=1 / CI=true.
+  integration/registry-pull-secret-runtime.test.ts
   mcp-host/approval-endpoints.test.ts
   mcp-host/artifacts.e2e.test.ts
   mcp-host/crd.test.ts

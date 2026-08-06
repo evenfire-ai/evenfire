@@ -8,6 +8,12 @@ const pushSpy = vi.fn()
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushSpy }),
 }))
+// The empty-state explainer is capability-aware and fetches on mount; its copy
+// is covered by PluginsEmptyState.test. Stub it here so RecipesTab tests stay
+// focused on the table/list behavior.
+vi.mock('../PluginsEmptyState', () => ({
+  PluginsEmptyState: () => <div>plugins-empty-state</div>,
+}))
 
 afterEach(() => {
   cleanup()
@@ -142,9 +148,11 @@ describe('RecipesTab — render', () => {
     expect(screen.getByLabelText('Reload plugins')).toBeInTheDocument()
   })
 
-  it('renders empty state when no items', () => {
+  it('renders the plugins empty-state explainer when no items and not searching', () => {
     render(<RecipesTab {...DEFAULT_PROPS} items={[]} />)
-    expect(screen.getByText(/No plugins installed/)).toBeInTheDocument()
+    // Copy/branches are covered by PluginsEmptyState.test; here we only assert
+    // the explainer is shown for the no-plugins (non-search) empty state.
+    expect(screen.getByText('plugins-empty-state')).toBeInTheDocument()
   })
 
   it('shows loading state in Refresh button', () => {

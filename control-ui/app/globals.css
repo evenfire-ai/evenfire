@@ -1989,6 +1989,22 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
+/* Previous-versions list inside an expanded owned-entry row: keep the label and
+   each version/Install line spaced so adjacent Install buttons don't touch. */
+.cu-marketplace-versions {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+  min-width: 0;
+  max-width: 28rem;
+}
+
+.cu-marketplace-versions .cu-table-actions {
+  align-items: center;
+  gap: var(--cu-space-4);
+}
+
 .cu-expandable-field__code,
 .cu-code-text {
   color: var(--cu-text-soft);
@@ -2554,6 +2570,22 @@ textarea.cu-input {
   padding: 1.25rem 1rem;
   color: var(--cu-text-soft);
   font-size: 0.875rem;
+}
+
+.cu-empty__explainer {
+  max-width: 52ch;
+  margin: 0 auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-4);
+  line-height: 1.6;
+}
+
+/* No global paragraph reset, so zero the default margins and let the flex gap
+   alone space the paragraphs — otherwise the 1em margins compound with gap. */
+.cu-empty__explainer p {
+  margin: 0;
 }
 
 .cu-empty--compact {
@@ -4462,6 +4494,45 @@ textarea.cu-input {
   display: flex;
   flex-direction: column;
   gap: var(--cu-space-3);
+}
+
+.cu-body-loading-skeleton {
+  display: grid;
+  gap: var(--cu-space-5);
+}
+
+.cu-body-loading-skeleton__section {
+  display: grid;
+  gap: var(--cu-space-3);
+}
+
+.cu-body-loading-skeleton__heading {
+  width: min(15rem, 45%);
+  height: 1rem;
+  border-radius: 4px;
+}
+
+.cu-body-loading-skeleton__line {
+  width: min(34rem, 80%);
+  height: 0.75rem;
+  border-radius: 4px;
+}
+
+.cu-body-loading-skeleton__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--cu-space-3);
+}
+
+.cu-body-loading-skeleton__field {
+  height: 2.5rem;
+  border-radius: var(--cu-radius-sm);
+}
+
+@media (max-width: 720px) {
+  .cu-body-loading-skeleton__fields {
+    grid-template-columns: 1fr;
+  }
 }
 
 .cu-detail-content-stack > .cu-card:first-child {
@@ -8136,6 +8207,29 @@ textarea.cu-input {
   box-shadow: var(--cu-shadow);
 }
 
+/* Wider variant for modals with long content (e.g. Docker commands + config). */
+.cu-modal--wide {
+  width: min(46rem, 96vw);
+}
+
+/* Preformatted command / config snippet inside a modal or panel. Wraps long
+   lines (docker login … -p <secret>, push coordinates, dockerconfigjson) so
+   nothing is clipped, rather than overflowing a fixed-width dialog. */
+.cu-code-block {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--cu-surface-alt, var(--cu-surface));
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-sm, var(--cu-radius));
+  font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 /* Quick-pick chips row for multi-choice shortcuts */
 .cu-quick-picks {
   display: flex;
@@ -8631,6 +8725,57 @@ textarea.cu-input {
   border-radius: 4px;
 }
 
+.cu-section-loading-skeleton {
+  display: grid;
+  gap: 0;
+  min-height: 9rem;
+  padding: 0.25rem 0;
+}
+
+.cu-section-loading-skeleton--compact {
+  min-height: 0;
+}
+
+.cu-section-loading-skeleton__row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1.2fr) minmax(7rem, 1fr) minmax(4rem, 0.45fr);
+  gap: var(--cu-space-3);
+  align-items: center;
+  min-height: 2.55rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--cu-border-subtle);
+}
+
+.cu-section-loading-skeleton__row:last-child {
+  border-bottom: 0;
+}
+
+.cu-section-loading-skeleton__cell {
+  width: 70%;
+  height: 0.875rem;
+  min-width: 0;
+}
+
+.cu-section-loading-skeleton__cell--primary {
+  width: 82%;
+}
+
+.cu-section-loading-skeleton__cell--short {
+  justify-self: end;
+  width: 55%;
+}
+
+@media (max-width: 640px) {
+  .cu-section-loading-skeleton__row {
+    grid-template-columns: 1fr;
+  }
+
+  .cu-section-loading-skeleton__cell,
+  .cu-section-loading-skeleton__cell--short {
+    justify-self: start;
+  }
+}
+
 /* Inline edit */
 .cu-inline-edit {
   display: flex;
@@ -8676,6 +8821,18 @@ textarea.cu-input {
 
 .cu-spin {
   animation: cu-spin 0.85s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-skeleton,
+  .cu-spin,
+  .cu-btn__spinner,
+  .cu-identity-skeleton__tabs,
+  .cu-identity-skeleton__header,
+  .cu-identity-skeleton__line,
+  .cu-identity-skeleton__box {
+    animation: none;
+  }
 }
 
 .sr-only {
@@ -8841,6 +8998,22 @@ textarea.cu-input {
 
 .cu-sidebar__label {
   flex: 1;
+}
+
+.cu-sidebar__item--loading {
+  pointer-events: none;
+}
+
+.cu-sidebar__item--loading .cu-sidebar__icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 4px;
+}
+
+.cu-sidebar__item--loading .cu-sidebar__label {
+  height: 0.75rem;
+  max-width: 7.5rem;
+  border-radius: 4px;
 }
 
 .cu-sidebar__footer {

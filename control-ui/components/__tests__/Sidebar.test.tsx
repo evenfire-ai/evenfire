@@ -6,6 +6,11 @@ import { activeSidebarChildHref } from '../Sidebar/activeChild'
 import { SIDEBAR_TABS } from '../Sidebar/constants'
 
 const navigationState = vi.hoisted(() => ({ pathname: '/agents' }))
+const refreshPublishScope = vi.fn()
+
+function publishScopeState(state: Omit<hook.PublishScopeState, 'refresh'>): hook.PublishScopeState {
+  return { ...state, refresh: refreshPublishScope }
+}
 
 vi.mock('next/navigation', () => ({
   usePathname: () => navigationState.pathname,
@@ -23,51 +28,32 @@ afterEach(() => {
 beforeEach(() => vi.clearAllMocks())
 
 describe('Sidebar publisher gating', () => {
-  it('shows the Publisher entry for an org-bound non-curator deploy', async () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: 'acme', curator: false, orgName: 'Acme' },
-      loading: false,
-      error: false,
-    })
+  it('does not render a Publisher entry (folded into the Marketplace org tab)', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({
+        scope: { scope: 'acme', curator: false, orgName: 'Acme' },
+        loading: false,
+        error: false,
+      })
+    )
     render(<Sidebar currentTab="hosts" />)
-    const link = await screen.findByRole('link', { name: /publisher/i })
-    expect(link).toHaveAttribute('href', '/publisher')
-  })
-
-  it('hides the Publisher entry when publisherUiEnabled is false (self-hosted default), even for an org-bound non-curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: 'acme', curator: false, orgName: 'Acme', publisherUiEnabled: false },
-      loading: false,
-      error: false,
-    })
-    render(<Sidebar currentTab="hosts" />)
+    // Publisher was folded into the org-named Marketplace tab (design spec §4).
     expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry on a curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: null, curator: true, orgName: null },
-      loading: false,
-      error: false,
-    })
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry while publish-scope is loading', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: true, error: false })
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
+    expect(screen.getByRole('link', { name: /marketplace/i })).toBeInTheDocument()
   })
 
   it('still renders the other navigation entries', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: true })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: true })
+    )
     render(<Sidebar currentTab="hosts" />)
     expect(screen.getByRole('link', { name: /agents/i })).toBeInTheDocument()
   })
 
   it('keeps Traces hidden and sorts visible navigation labels alphabetically', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="traces" />)
 
     expect(screen.queryByText('Traces')).not.toBeInTheDocument()
@@ -81,7 +67,9 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('keeps Settings in the footer on its canonical route', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="settings" />)
 
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/ui')
@@ -90,7 +78,9 @@ describe('Sidebar publisher gating', () => {
   it.each(['/llm-models', '/llm-models/model-id/edit', '/llm-models/discovery'])(
     'keeps the merged LLM Models entry selected for %s',
     pathname => {
-      vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+      vi.mocked(hook.usePublishScope).mockReturnValue(
+        publishScopeState({ scope: null, loading: false, error: false })
+      )
       navigationState.pathname = pathname
       render(<Sidebar currentTab="llm-models" />)
 
@@ -106,7 +96,9 @@ describe('Sidebar publisher gating', () => {
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'Global File System', '/global-file-system'],
   ])('selects the matching Directories child for %s', (pathname, label, href) => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     navigationState.pathname = pathname
     render(<Sidebar currentTab="directories" />)
 
@@ -119,7 +111,9 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('renders a thin icon for every visible child route', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="directories" />)
 
     for (const label of ['Agent Outputs', 'Global File System']) {
@@ -129,7 +123,9 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('renders an icon for the Directories group', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="directories" />)
 
     const directories = screen.getByRole('button', { name: 'Directories' })
@@ -137,7 +133,9 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('hides Agent Files from the sidebar without changing its route', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     navigationState.pathname = '/agent-files/example'
     render(<Sidebar currentTab="directories" />)
 
@@ -146,7 +144,9 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('uses the shared Desktop paperclip glyph for Global File System', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     navigationState.pathname = '/global-file-system'
     render(<Sidebar currentTab="directories" />)
 

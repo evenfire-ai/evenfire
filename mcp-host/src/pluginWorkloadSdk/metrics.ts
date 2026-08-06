@@ -27,7 +27,7 @@ export const pluginSdkClientNotificationsTotal = new Counter({
 
 export const pluginSdkCircuitBreakerState = new Gauge({
   name: 'clerum_plugin_workload_sdk_circuit_breaker_state',
-  help: 'Circuit breaker state per gateway (1 = the labeled state is active).',
+  help: 'Circuit breaker state per gateway or authorized target (1 = the labeled state is active).',
   labelNames: ['gateway', 'state'] as const,
 })
 

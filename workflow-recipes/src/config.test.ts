@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loadConfig } from './config'
+import { loadConfig, registryUrlStartupWarning } from './config'
 
 describe('loadConfig', () => {
   const originalEnv = process.env
@@ -251,5 +251,39 @@ describe('loadConfig', () => {
     delete process.env.CLERUM_DEV_MODE
     const config = loadConfig()
     expect(config.devMode).toBe(false)
+  })
+})
+
+// An unset/unparseable CLERUM_REGISTRY_URL makes isPlatformRegistryImage() return false
+// for EVERY image, which turns off platform pull-credential injection entirely — while
+// control-api still mints and writes the Secret. Recipe pods then ImagePullBackOff and
+// nothing in the logs says why. This warning is the announcement of that state.
+describe('registryUrlStartupWarning', () => {
+  it('returns null when a parseable registry URL is configured', () => {
+    expect(registryUrlStartupWarning('https://registry.evenfire.ai')).toBeNull()
+    expect(registryUrlStartupWarning('http://registry-api.registry.svc.cluster.local:8085')).toBe(
+      null
+    )
+  })
+
+  it('warns that pull-credential injection is disabled when the URL is unset', () => {
+    for (const unset of ['', '   ']) {
+      const warning = registryUrlStartupWarning(unset)
+      expect(warning).toMatch(/CLERUM_REGISTRY_URL/)
+      expect(warning).toMatch(/not set/)
+      expect(warning).toMatch(/ImagePullBackOff/)
+    }
+  })
+
+  it('warns when the URL is set but unparseable — same silent-disable effect', () => {
+    const warning = registryUrlStartupWarning('registry.evenfire.ai')
+    expect(warning).toMatch(/CLERUM_REGISTRY_URL/)
+    expect(warning).toMatch(/registry\.evenfire\.ai/)
+    expect(warning).toMatch(/ImagePullBackOff/)
+  })
+
+  it('does not depend on ambient env — it reports on the value it is given', () => {
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
+    expect(registryUrlStartupWarning('')).not.toBeNull()
   })
 })

@@ -27,12 +27,14 @@ describe('SDK routes — workload auth + rate limiting', () => {
     const app = express()
     app.use(express.json({ limit: '1mb' }))
     registerSdkRoutes(app, {
+      capabilities: ['promptBridge', 'clientNotifications'],
       workloadTokens,
       promptBridgeHandler: { handle: promptHandle } as unknown as PromptBridgeHandler,
       clientNotificationsHandler: {
         handle: notifyHandle,
         listRecipients,
       } as unknown as ClientNotificationsHandler,
+      readiness: () => ({ ready: true }),
       maxRequestsPerMinutePerWorkload: 3,
       maxConcurrentPerWorkload: 10,
     })
@@ -59,6 +61,15 @@ describe('SDK routes — workload auth + rate limiting', () => {
   it('GET /healthz responds without auth', async () => {
     const res = await fetch(`${baseUrl}/healthz`)
     expect(res.status).toBe(200)
+  })
+
+  it('GET /health is readiness and /live is liveness', async () => {
+    const health = await fetch(`${baseUrl}/health`)
+    const live = await fetch(`${baseUrl}/live`)
+    expect(health.status).toBe(200)
+    expect(live.status).toBe(200)
+    expect(await health.json()).toMatchObject({ status: 'ready' })
+    expect(await live.json()).toEqual({ status: 'live' })
   })
 
   it('rejects requests without a workload token', async () => {
@@ -153,5 +164,41 @@ describe('SDK routes — workload auth + rate limiting', () => {
     const limited = await get('/sdk/v1/client-notifications/recipients', headers)
     expect(limited.status).toBe(429)
     expect(((await limited.json()) as { error: string }).error).toBe('quota_exceeded')
+  })
+
+  it('does not expose an undeclared route family', async () => {
+    const app = express()
+    app.use(express.json({ limit: '1mb' }))
+    registerSdkRoutes(app, {
+      capabilities: ['clientNotifications'],
+      workloadTokens,
+      clientNotificationsHandler: {
+        handle: notifyHandle,
+        listRecipients,
+      } as unknown as ClientNotificationsHandler,
+      readiness: () => ({ ready: true }),
+      maxRequestsPerMinutePerWorkload: 3,
+      maxConcurrentPerWorkload: 10,
+    })
+    const scopedServer = await new Promise<http.Server>(resolve => {
+      const listener = app.listen(0, '127.0.0.1', () => resolve(listener))
+    })
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${(scopedServer.address() as AddressInfo).port}/sdk/v1/prompt-bridge`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${API_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: '{}',
+        }
+      )
+      expect(response.status).toBe(404)
+      expect(promptHandle).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>(resolve => scopedServer.close(() => resolve()))
+    }
   })
 })

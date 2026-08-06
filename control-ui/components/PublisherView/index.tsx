@@ -3,6 +3,7 @@
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { DockerCredentialsPanel } from './DockerCredentials'
@@ -23,7 +24,9 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
   if (loading) {
     return (
       <div className="cu-card">
-        <div className="cu-card__body">Loading…</div>
+        <div className="cu-card__body">
+          <SectionLoadingSkeleton label="Loading publisher" rows={3} />
+        </div>
       </div>
     )
   }
@@ -53,6 +56,13 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
       ? TABS
       : TABS.filter(t => t.value !== 'shared')
 
+  // Cross-org sharing needs the registry `registry:grant` scope. The inbound
+  // probe is the proxy: `available`/`error` means the scope is present (offer
+  // sharing), while `unavailable` (403) is a self-hosted org that can never
+  // share — state the limit rather than offering a control that gets refused.
+  const canShare = inbound.status === 'available' || inbound.status === 'error'
+  const sharingUnavailable = inbound.status === 'unavailable'
+
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
@@ -65,7 +75,13 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
             className="cu-tabs--flush-top"
             options={tabs}
           />
-          {activeTab === 'entries' ? <OwnedEntries orgScope={orgScope} /> : null}
+          {activeTab === 'entries' ? (
+            <OwnedEntries
+              orgScope={orgScope}
+              canShare={canShare}
+              sharingUnavailable={sharingUnavailable}
+            />
+          ) : null}
           {activeTab === 'shared' ? (
             <GrantedToMe status={inbound.status} grants={inbound.grants} reload={inbound.reload} />
           ) : null}

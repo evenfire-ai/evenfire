@@ -19,15 +19,10 @@ import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
 import {
   HostFleetReconcileError,
-  HostReconciler,
   type HostReconcileSource,
+  HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
-import {
-  hostDeleteCleanupTotal,
-  hostFleetRequestsTotal,
-  hostWatchRecoverySeconds,
-} from './metrics'
 import {
   type InfrastructureTelemetryReporter,
   createInfrastructureTelemetryReporter,
@@ -35,6 +30,7 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'

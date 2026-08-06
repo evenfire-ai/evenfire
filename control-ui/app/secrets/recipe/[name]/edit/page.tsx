@@ -3,6 +3,7 @@
 import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { BodyLoadingSkeleton, FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { IconKey } from '@components/Sidebar/icons'
@@ -187,7 +188,11 @@ function EditRecipeSecretContent() {
         <div className="cu-create-panel">
           <div className="cu-create-content">
             {loading ? (
-              <div className="cu-banner cu-banner--info">Loading recipe secret…</div>
+              <FormSectionsSkeleton
+                label="Recipe secret"
+                primaryActionLabel="Save secret"
+                sections={2}
+              />
             ) : loadError ? (
               <div className="cu-banner cu-banner--error">{loadError}</div>
             ) : notFound ? (
@@ -362,7 +367,18 @@ function EditRecipeSecretContent() {
 
 export default function EditRecipeSecretPage() {
   return (
-    <Suspense fallback={<div>Loading…</div>}>
+    <Suspense
+      fallback={
+        <BodyLoadingSkeleton
+          backLabel="Back to secrets"
+          icon={<IconKey />}
+          primaryActionLabel="Save changes"
+          sections={2}
+          subtitle="Load the saved key metadata before editing stored values."
+          title="Edit recipe secret"
+        />
+      }
+    >
       <EditRecipeSecretContent />
     </Suspense>
   )

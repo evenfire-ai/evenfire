@@ -509,7 +509,7 @@ describe('LlmCredentialFields — retiring stored extra slots', () => {
   })
 })
 
-describe('providerForDataKey (B1, prefix-aware)', () => {
+describe('providerForDataKey (B1, canonical-slot-prefix aware)', () => {
   it('resolves canonical slot keys to their provider', () => {
     expect(providerForDataKey('openai-api-key')).toBe('openai')
     expect(providerForDataKey('claude-api-key')).toBe('claude')
@@ -518,11 +518,11 @@ describe('providerForDataKey (B1, prefix-aware)', () => {
     expect(providerForDataKey('vertex-service-account-json')).toBe('vertex')
   })
 
-  it('resolves extra-slot keys by provider prefix or canonical-slot prefix', () => {
+  it('resolves extra-slot keys only by canonical-slot prefix', () => {
     expect(providerForDataKey('claude-api-key-fb1')).toBe('claude')
     expect(providerForDataKey('openai-api-key-fb2')).toBe('openai')
-    expect(providerForDataKey('zai-secondary-key')).toBe('zai')
-    expect(providerForDataKey('bedrock-api-key-fb1')).toBe('bedrock')
+    expect(providerForDataKey('zai-secondary-key')).toBeNull()
+    expect(providerForDataKey('bedrock-api-key-fb1')).toBeNull()
     // Bedrock extras minted from the canonical slot name carry no `bedrock-`
     // prefix — the canonical-slot-prefix rule must still claim them.
     expect(providerForDataKey('aws-access-key-id-fb1')).toBe('bedrock')
@@ -530,6 +530,7 @@ describe('providerForDataKey (B1, prefix-aware)', () => {
 
   it('returns null for keys owned by no provider', () => {
     expect(providerForDataKey('random-key')).toBeNull()
+    expect(providerForDataKey('openai-project')).toBeNull()
     expect(providerForDataKey('SOME_ENV_VAR')).toBeNull()
     expect(providerForDataKey('')).toBeNull()
   })

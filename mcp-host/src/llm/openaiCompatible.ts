@@ -96,6 +96,12 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     return this.cfg.id as LlmProvider
   }
 
+  // Third-party OpenAI-compatible APIs use the portable legacy field. The
+  // native OpenAI translation is intentionally not inherited for this arm.
+  protected override usesMaxCompletionTokens(): boolean {
+    return false
+  }
+
   override completeSingleTurn(
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }

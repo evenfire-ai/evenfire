@@ -886,6 +886,16 @@ export type AdminUser = {
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.
 export type HostSecretResource = { name: string; keys?: string[] }
+
+/**
+ * Host/LLM Secret metadata only. `keys` are Kubernetes data-key names; values
+ * are never returned. SDK target editors use this rather than recipe-scoped
+ * sandbox secrets because promptBridge credentials resolve from host Secrets.
+ */
+export async function listLlmHostSecrets() {
+  return apiGet('/api/v1/admin/secrets') as Promise<{ items?: HostSecretResource[] }>
+}
+
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -3187,6 +3197,14 @@ export type PluginWorkloadSdkModelPolicy = {
   maxCostUsd?: number
 }
 
+export type PluginWorkloadSdkPromptTarget = {
+  targetRef: string
+  provider: string
+  model: string
+  // Identity of a provider-owned secret data key; never a secret value.
+  credentialSlot: string
+}
+
 export type PluginWorkloadSdkQuotaLimits = {
   maxRequestsPerRun?: number
   maxNotificationsPerRun?: number
@@ -3201,8 +3219,9 @@ export type PluginWorkloadSdkGrant = {
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
   // Explicit provider bound to a promptBridge grant (R1). `null` for older
-  // grants written before the column existed (and for clientNotifications) —
-  // the form falls back to inferProviderFromModels when reading a null provider.
+  // grants written before the column existed (and for clientNotifications).
+  // Null promptBridge grants are legacy/unreviewed; the editor must require an
+  // explicit operator resave and never infer a routable provider from models.
   provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
@@ -3211,8 +3230,32 @@ export type PluginWorkloadSdkGrant = {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
+  revocationId: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
+}
+
+export type PluginWorkloadSdkLegacyGrantInventoryItem = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export type PluginWorkloadSdkLegacyGrantInventory = {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
 }
 
 export type PluginWorkloadSdkGrantInput = {
@@ -3228,6 +3271,8 @@ export type PluginWorkloadSdkGrantInput = {
   allowedCallers?: string[]
   quotaLimits?: PluginWorkloadSdkQuotaLimits
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export type PluginWorkloadSdkQuotaCounter = {
@@ -3271,6 +3316,16 @@ export async function listPluginWorkloadSdkGrants(filter?: {
     recipeNamespace: filter?.recipeNamespace,
     recipeName: filter?.recipeName,
   }) as Promise<{ items?: PluginWorkloadSdkGrant[] }>
+}
+
+export async function getPluginWorkloadSdkLegacyInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  return apiGet('/api/v1/admin/plugin-workload-sdk/legacy-inventory', {
+    recipeNamespace: filter?.recipeNamespace,
+    recipeName: filter?.recipeName,
+  }) as Promise<PluginWorkloadSdkLegacyGrantInventory>
 }
 
 export async function upsertPluginWorkloadSdkGrant(
@@ -3414,6 +3469,21 @@ export async function createRegistryApiKey(
 }
 export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
+}
+
+// ─── Org container images (real repos + tags from the registry) ────────────
+export type OrgImage = {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
+export async function listOrgImages(): Promise<{ org: string; images: OrgImage[] }> {
+  const raw = (await registryCodedRequest('GET', '/api/v1/admin/registry/images')) as {
+    org?: string
+    images?: OrgImage[]
+  }
+  return { org: raw?.org ?? '', images: raw?.images ?? [] }
 }
 
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────

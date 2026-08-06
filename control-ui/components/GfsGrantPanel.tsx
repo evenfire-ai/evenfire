@@ -28,10 +28,7 @@ import {
   putGfsGrant,
 } from '@lib/api'
 import type { GfsExistingAccessItem, GfsGrantPanelProps } from './GfsGrantPanel.types'
-import {
-  buildGfsBulkSubjectOptions,
-  toGfsBulkSubjectInputs,
-} from './gfsGrantSubjectOptions'
+import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSubjectOptions'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator

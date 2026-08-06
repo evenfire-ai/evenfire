@@ -252,7 +252,9 @@ else
   log "Skipping docker-env; multi-node profiles use host builds plus 'minikube image load'"
 fi
 
-# All images built in this session
+# All images built in this session. Every entry here must have a matching
+# row in deploy/images.json (via localRef()) -- scripts/tests/test-images-
+# manifest.sh enforces it.
 ALL_IMAGES=(
   "clerum/host-context-controller:test"
   "clerum/workflow-recipes:test"
@@ -542,8 +544,9 @@ else
   build_control_ui_image
 
   build_image "profile-ui" \
-    "${PROJECT_DIR}/profile-ui" \
-    "clerum/profile-ui:test"
+    "${PROJECT_DIR}" \
+    "clerum/profile-ui:test" \
+    "${PROJECT_DIR}/profile-ui/Dockerfile"
 fi
 
 # Registry now lives in the sibling evenfire-registry repo. Use

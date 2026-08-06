@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { IconX } from '@components/icons'
 import { type OrgGrant, createOrgGrant, listOrgGrants, revokeOrgGrant } from '@lib/api'
 import { useConfirmDialog } from '../../ConfirmDialog'
+import { SectionLoadingSkeleton } from '../../SectionLoadingSkeleton'
 import { useToast } from '../../Toast'
 import { Button } from '../../ui'
 import { RetryBanner } from '../RetryBanner'
@@ -220,7 +221,11 @@ export function GrantAccessModal({
             </span>
           </div>
           {loading ? (
-            <p className="cu-muted-note--compact">Loading grants…</p>
+            <SectionLoadingSkeleton
+              className="cu-section-loading-skeleton--compact"
+              label="Loading grants"
+              rows={2}
+            />
           ) : loadError ? (
             <RetryBanner message="Could not load grants." onRetry={() => void load()} />
           ) : grants.length === 0 ? (

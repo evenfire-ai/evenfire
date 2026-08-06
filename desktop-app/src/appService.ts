@@ -74,6 +74,23 @@ import {
 // the wake scope never widens a caller who was not granted it.
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 
+function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
+  const value = rawValue.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    return null
+  }
+  if (url.pathname !== '/' || url.search) return null
+  url.hash = ''
+  return url.toString().replace(/\/$/, '')
+}
+
 /**
  * Finite-operation scope matrix — the single source of truth for the exact
  * scope array each finite (single request/response) Host RPC operation requests,
@@ -263,9 +280,11 @@ export class AppService {
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
+  private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -377,6 +396,7 @@ export class AppService {
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
+      this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
@@ -495,6 +515,15 @@ export class AppService {
 
     const matchingEntry = directory.items.find(teamHasRefs)
     return matchingEntry?.team.id ?? this.accessCatalog?.teamId ?? null
+  }
+
+  private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sandboxUiLifecycleQueue.then(operation)
+    this.sandboxUiLifecycleQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
   }
 
   private async issueRpcTokenForHostRefs(
@@ -693,16 +722,7 @@ export class AppService {
     options: ProfileSettingsOpenOptions = {}
   ): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    let profileUiBaseUrl = config.desktopProfileUiBaseUrl
-    if (normalizedEmail) {
-      try {
-        const activation =
-          await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-        profileUiBaseUrl = activation.profileUiBaseUrl
-      } catch {
-        profileUiBaseUrl = config.desktopProfileUiBaseUrl
-      }
-    }
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(normalizedEmail)
 
     const network = String(options.network || '')
       .trim()
@@ -716,6 +736,48 @@ export class AppService {
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
+  }
+
+  private async resolveProfileUiBaseUrl(
+    email?: string,
+    options: { fallbackOnLookupError?: boolean } = {}
+  ): Promise<string> {
+    const { fallbackOnLookupError = true } = options
+    if (config.desktopProfileUiBaseUrlExplicit) {
+      const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+      if (!explicitBaseUrl) {
+        throw new Error('Cannot resolve the configured Profile UI URL for this desktop session')
+      }
+      return explicitBaseUrl
+    }
+    const normalizedEmail = String(email || this.me?.email || '')
+      .trim()
+      .toLowerCase()
+    if (!normalizedEmail) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      throw new Error('Cannot resolve the Profile UI for this desktop session')
+    }
+    const cacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
+    if (this.profileUiBaseUrlCache?.key === cacheKey) {
+      return this.profileUiBaseUrlCache.value
+    }
+    try {
+      const activation =
+        await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
+      const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+      if (!profileUiBaseUrl) {
+        if (!fallbackOnLookupError) {
+          throw new Error('the invitation profile did not provide a Profile UI URL')
+        }
+        return config.desktopProfileUiBaseUrl
+      }
+      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
+      return profileUiBaseUrl
+    } catch (error) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Cannot resolve a shareable Profile UI link: ${message}`)
+    }
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
@@ -811,6 +873,7 @@ export class AppService {
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
+    this.profileUiBaseUrlCache = null
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -2844,10 +2907,25 @@ export class AppService {
    * this). This keeps memory + GPU usage bounded and avoids accidental
    * cross-recipe focus / cookie-jar mixups.
    */
-  async openSandboxUi(args: {
+  openSandboxUi(args: {
     recipeNs: string
     recipeName: string
     defaultPath?: string
+    routePath?: string
+    bounds: import('./sandboxUiDriver.js').SandboxUiBounds
+    parentWindow: import('electron').BrowserWindow
+    onClosed?: () => void
+    onRefreshError?: (message: string) => void
+    onOauthError?: (message: string) => void
+  }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
+  }
+
+  private async openSandboxUiNow(args: {
+    recipeNs: string
+    recipeName: string
+    defaultPath?: string
+    routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
     onClosed?: () => void
@@ -2866,6 +2944,7 @@ export class AppService {
       setCookie,
       rpcProxyUrl: config.rpcProxyBaseUrl,
       defaultPath: args.defaultPath,
+      routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
       onClosed: () => {
@@ -2888,10 +2967,10 @@ export class AppService {
       },
     })
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView) {
-      // The mount step already threw if it failed; if we still get null
-      // here something racy happened (parent window closed during the
-      // mint).  Bail without arming refresh.
+    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
+      // A queued close or newer mount can invalidate this operation while an
+      // async cookie write is in flight. Do not cross-wire its refresh loop
+      // to whichever recipe is active now.
       return
     }
     refreshModule.startSandboxUiRefresh({
@@ -2907,11 +2986,29 @@ export class AppService {
     })
   }
 
-  async closeSandboxUi(): Promise<void> {
+  closeSandboxUi(): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      const refreshModule = await import('./sandboxUiSessionRefresh.js')
+      refreshModule.cancelSandboxUiRefresh()
+      await driver.unmountSandboxUiView()
+    })
+  }
+
+  async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
-    const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    await driver.unmountSandboxUiView()
+    const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) throw new Error('No app is currently open')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return {
+      url: buildSandboxUiWebLink(profileUiBaseUrl, {
+        ...location,
+        teamId: String(teamId || '').trim() || undefined,
+      }),
+    }
   }
 
   // In-place hard-reload of the active embed (user-initiated "Refresh"). The

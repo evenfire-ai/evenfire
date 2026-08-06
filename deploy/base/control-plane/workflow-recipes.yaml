@@ -84,6 +84,33 @@ spec:
             configMapKeyRef:
               name: control-api-config
               key: CLERUM_WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS
+        # Registry URL — read from the ONE key that defines it
+        # (`control-api-config.CLERUM_REGISTRY_URL`, which control-api itself consumes via
+        # envFrom) rather than a second copy here. Dual-purpose in WRC: API base URL for
+        # the catalog client, and image host for the platform pull-credential predicate.
+        #
+        # The pairing is load-bearing, not tidiness. WRC decides whether to attach the
+        # platform pull credential with `isPlatformRegistryImage(workload.image,
+        # registryUrl)`, comparing the IMAGE host against this URL's host; control-api
+        # provisions that credential from its own copy. When the two disagree — or when
+        # this is left unset, which the predicate treats as "no platform registry" —
+        # control-api still mints and writes the Secret and returns 201, but WRC never
+        # emits `imagePullSecrets`, so recipe pods get `ImagePullBackOff`
+        # (`unauthorized: authentication required`) with an empty pod-level
+        # `imagePullSecrets` while McpServers — whose reference control-api writes itself
+        # — keep working. That asymmetry is risk R3 in
+        # docs/architecture/registry-pull-secret-recipe-workloads.md.
+        #
+        # `optional: true` because the base ConfigMap ships no CLERUM_REGISTRY_URL — only
+        # overlays set it. A hard reference would put a plain `deploy/base` install into
+        # CreateContainerConfigError. Unset stays a valid configuration (no platform
+        # registry); WRC logs a startup WARN so the disabled state is visible.
+        - name: CLERUM_REGISTRY_URL
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CLERUM_REGISTRY_URL
+              optional: true
         # Step output stored in WorkflowRecipe status is only a bounded preview.
         # Keep max_steps * preview_chars under the Kubernetes object budget
         # (etcd default ~1.5MiB; GKE API server request body commonly ~3MiB).
