@@ -18,17 +18,6 @@ const PROJECTS = [
     codePrefixes: ['rpc-proxy/src/', 'rpc-proxy/test/'],
     codeFiles: ['rpc-proxy/tsconfig.json'],
   },
-  {
-    name: 'desktop-app',
-    packagePath: 'desktop-app/package.json',
-    codePrefixes: ['desktop-app/src/', 'desktop-app/ui/src/', 'desktop-app/test/'],
-    codeFiles: [
-      'desktop-app/forge.config.js',
-      'desktop-app/tsconfig.json',
-      'desktop-app/vitest.config.ts',
-      'desktop-app/ui/vite.config.ts',
-    ],
-  },
 ]
 
 function argValue(name) {

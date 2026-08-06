@@ -106,9 +106,35 @@ for name in "${KEY_NAMES[@]}"; do
   ok "${name} key pair generated"
 done
 
-# Bcrypt hash of "changeme123!" (cost 12) — matches DEV_ADMIN_PASSWORD_HASH in control-api/src/config.ts
+# Derive the bootstrap admin hash from the canonical ADMIN_PASSWORD whenever
+# one was configured by the caller (full-setup resolves the primary checkout's
+# .env before invoking this script). Keep the well-known local-only hash only
+# when no password was configured at all; a configured password must never be
+# silently replaced with the public fallback.
 log "Generating admin bootstrap password hash..."
-ADMIN_HASH='$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
+if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+  BCRYPT_MODULE_DIR="${PROJECT_DIR}/control-api/node_modules"
+  if [[ ! -f "${BCRYPT_MODULE_DIR}/bcryptjs/index.js" ]]; then
+    echo "ERROR: bcryptjs is required to hash the configured ADMIN_PASSWORD" >&2
+    echo "       Expected ${BCRYPT_MODULE_DIR}/bcryptjs/index.js" >&2
+    exit 1
+  fi
+  if ! ADMIN_HASH="$(
+    ADMIN_PASSWORD="${ADMIN_PASSWORD}" NODE_PATH="${BCRYPT_MODULE_DIR}" \
+      node --no-warnings -e 'process.stdout.write(require("bcryptjs").hashSync(process.env.ADMIN_PASSWORD, 12))'
+  )"; then
+    echo "ERROR: failed to derive the admin bootstrap password hash" >&2
+    exit 1
+  fi
+  if [[ ! "${ADMIN_HASH}" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
+    echo "ERROR: bcryptjs returned an invalid admin bootstrap hash" >&2
+    exit 1
+  fi
+else
+  # Local E2E-only fallback. This value is intentionally used only when the
+  # canonical/process credential resolver supplied no password at all.
+  ADMIN_HASH='$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
+fi
 log "Generating OAuth state HMAC and encryption keys..."
 OAUTH_STATE_HMAC_SECRET=$(openssl rand -hex 32)
 OAUTH_ENCRYPTION_KEY=$(openssl rand -hex 32)

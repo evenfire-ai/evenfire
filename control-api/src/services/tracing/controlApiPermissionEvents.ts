@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { config } from '../../config.js'
 import type { DbClient } from '../../db.js'
+import type { AdministrativeEventSubmitterPrincipalV1 } from '../../middleware/tracingSubmitterAuth.js'
 import { currentAdministrativeRequestContext } from './adminOperationContext.js'
 import { AdministrativeEventService } from './administrativeEvents.js'
 import type {
@@ -51,6 +52,12 @@ export async function appendControlApiPermissionEventsInTransaction(
     changes: readonly ControlApiPermissionChange[]
     operationId?: string
     operatorKind?: 'control_admin' | 'platform_user'
+    /**
+     * Authenticated technical principal for an internal control-plane
+     * mutation. Its service subject is auditable but is never coerced into the
+     * UUID-only operator_user_id column.
+     */
+    internalPrincipal?: AdministrativeEventSubmitterPrincipalV1
     requestId?: string | null
     dependencies?: PermissionEventDependencies
   }
@@ -60,10 +67,15 @@ export async function appendControlApiPermissionEventsInTransaction(
   const operationId = params.operationId ?? randomUUID()
   const now = params.dependencies?.now ?? (() => new Date())
   const requestContext = currentAdministrativeRequestContext()
+  const internalPrincipal = params.internalPrincipal
+  if (internalPrincipal && internalPrincipal.serviceSub !== params.operatorSub) {
+    throw new Error('internal permission-event principal does not match operatorSub')
+  }
   const localAdminRequest =
-    params.operatorKind === 'control_admin' ||
-    (params.operatorKind === undefined &&
-      Boolean(requestContext && requestContext.operatorSub === params.operatorSub))
+    !internalPrincipal &&
+    (params.operatorKind === 'control_admin' ||
+      (params.operatorKind === undefined &&
+        Boolean(requestContext && requestContext.operatorSub === params.operatorSub)))
   const events = new AdministrativeEventService({
     transaction: async () => {
       throw new Error('permission event append requires the caller transaction')
@@ -92,7 +104,7 @@ export async function appendControlApiPermissionEventsInTransaction(
         action: change.action === 'grant' ? 'permission_grant' : 'permission_revoke',
         outcome,
         operatorSub: params.operatorSub,
-        operatorUserId: params.operatorSub,
+        operatorUserId: internalPrincipal ? null : params.operatorSub,
         operationId,
         relatedRunId: null,
         requestId:
@@ -111,8 +123,18 @@ export async function appendControlApiPermissionEventsInTransaction(
         targetIdentityIssuer: targetsUser ? config.jwtIssuer : null,
         targetHumanSub: targetsUser ? change.subject.id : null,
         targetUserId: targetsUser ? change.subject.id : null,
-        identityIssuer: localAdminRequest ? config.adminJwtIssuer : config.jwtIssuer,
-        resourceAud: localAdminRequest ? config.adminJwtAudience : config.jwtAudience,
+        identityIssuer: internalPrincipal
+          ? internalPrincipal.kind === 'wrc_internal_control'
+            ? 'wrc'
+            : 'hcc'
+          : localAdminRequest
+            ? config.adminJwtIssuer
+            : config.jwtIssuer,
+        resourceAud: internalPrincipal
+          ? 'control-api'
+          : localAdminRequest
+            ? config.adminJwtAudience
+            : config.jwtAudience,
         effectiveScopes: [],
         authorizationDecision,
         decisionActorSub: params.operatorSub,
@@ -150,7 +172,7 @@ export async function appendControlApiPermissionEventsInTransaction(
   for (let start = 0; start < entries.length; start += PERMISSION_EVENT_BATCH_SIZE) {
     await events.appendManyInTransaction(
       db,
-      CONTROL_API_PERMISSION_ADMINISTRATIVE_PRINCIPAL_V1,
+      internalPrincipal ?? CONTROL_API_PERMISSION_ADMINISTRATIVE_PRINCIPAL_V1,
       entries.slice(start, start + PERMISSION_EVENT_BATCH_SIZE)
     )
   }
