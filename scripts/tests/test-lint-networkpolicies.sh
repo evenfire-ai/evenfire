@@ -135,6 +135,21 @@ ${PUBLIC_EXCEPT_BLOCK}"
 run_lint "${TMP_DIR}/public-with-excepts.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows public-only exception set with explicit ports"
 
+# The minikube overlay references patches/k8s-api-ip.yaml, which is rendered
+# from a gitignored template at setup time (deploy/scripts/minikube-detect-k8s-api-ip.sh)
+# and absent on a fresh checkout — so `kubectl kustomize` would abort with a
+# "no such file" evalsymlink error before ever reaching a lint verdict. Render
+# it inline here from the template with a placeholder CIDR, exactly as the
+# single-writer CI step does (.github/workflows/ci-public.yml), so this test
+# exercises the real rendered overlay instead of failing on a missing env file.
+MINIKUBE_API_IP_TEMPLATE="${ROOT}/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template"
+MINIKUBE_API_IP_PATCH="${ROOT}/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+if [[ ! -f "${MINIKUBE_API_IP_TEMPLATE}" ]]; then
+  echo "FAIL: missing ${MINIKUBE_API_IP_TEMPLATE}; cannot render the minikube k8s-api-ip patch" >&2
+  exit 1
+fi
+sed 's#__K8S_API_IP__#10.96.0.1#g' "${MINIKUBE_API_IP_TEMPLATE}" >"${MINIKUBE_API_IP_PATCH}"
+
 MINIKUBE_RENDERED="${TMP_DIR}/minikube-rendered.yaml"
 kubectl kustomize "${ROOT}/deploy/overlays/minikube" >"${MINIKUBE_RENDERED}"
 RUBYOPT=--disable=gems ruby -ryaml -e '
