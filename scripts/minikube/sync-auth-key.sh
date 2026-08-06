@@ -134,7 +134,12 @@ sync_gfs() {
   # gfsc reads the key at boot; restart the writer+reader so the new key takes
   # effect (label-based — the reconciler owns the deployment names).
   local gfs_deploys
-  gfs_deploys="$("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null || true)"
+  # No `|| true` / `2>/dev/null`: a label-selector LIST returns exit 0 with empty
+  # stdout when zero deployments match (legit first-run → else branch below), so
+  # only a genuine API error makes this non-zero. By here the gfs configmap and
+  # DSN guards above have passed, so a non-zero here IS a real error — let `set -e`
+  # abort loudly with kubectl's message rather than masking it as "no deployments".
+  gfs_deploys="$("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name)"
   if [[ -n "${gfs_deploys}" ]]; then
     log "Restarting gfsc (${GFS_DEPLOY_SELECTOR}) after auth key drift"
     "${KCTL[@]}" rollout restart deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" >/dev/null

@@ -1083,6 +1083,11 @@ step_header 9 $TOTAL_STEPS "Seed Registry Catalog"
 # else still works.
 EVENFIRE_DIR_DEFAULT="$(cd "${PROJECT_DIR}/.." && pwd)/evenfire-registry"
 EVENFIRE_DIR="${EVENFIRE_REGISTRY_DIR:-${EVENFIRE_DIR_DEFAULT}}"
+# Track whether the catalog was actually seeded so the Step 12 summary tells the
+# truth: the three skip branches below are legitimate (sibling repo absent in this
+# distribution — non-fatal by design), so this stays a warn, not an abort, and the
+# summary ✓ is gated on this flag instead of printed unconditionally.
+REGISTRY_SEEDED=false
 if [[ ! -d "${EVENFIRE_DIR}" ]]; then
   warn "evenfire-registry not found at ${EVENFIRE_DIR} — skipping registry seed"
 elif ! $KC get deployment registry-api -n registry &>/dev/null; then
@@ -1093,6 +1098,7 @@ else
   log "Running evenfire-registry minikube-seed target..."
   if (cd "${EVENFIRE_DIR}" && make minikube-seed 2>&1 | tail -25); then
     ok "Registry catalog seeded"
+    REGISTRY_SEEDED=true
   else
     warn "Registry seed encountered errors — check output above"
   fi
@@ -1177,7 +1183,12 @@ else
      bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
     ok "Workflow-trigger E2E recipes seeded"
   else
-    warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
+    # Same fail-loud rationale as Step 10 (P5): under e2e a partial fixture seed
+    # ships broken journeys that only surface in a later gate, and the summary
+    # below prints an unconditional ✓ for this step — so a warn-and-continue here
+    # would leave a lying green checkmark. Abort; setup is idempotent.
+    err "Workflow-trigger E2E seed failed under SEED_PROFILE=e2e — aborting. Downstream desktop/control-ui workflow E2E gates depend on these fixtures. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+    exit 1
   fi
 
   if [ "$SKIP_UIS" = true ]; then
@@ -1188,7 +1199,11 @@ else
        bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
       ok "Sandbox-ui local test app seeded"
     else
-      warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+      # Fail loud like the workflow-trigger seed above (P5-consistent): an e2e
+      # install with incomplete Desktop Apps fixtures is broken, not a warning.
+      # The legitimate opt-out is --skip-uis (handled above), not a failed seed.
+      err "Sandbox-ui test app seed failed under SEED_PROFILE=e2e — aborting. Desktop Apps validation fixtures would be incomplete. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+      exit 1
     fi
   fi
 fi
@@ -1248,5 +1263,9 @@ if [ "${SEED_PROFILE:-}" = "e2e" ]; then
 else
   echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
 fi
-echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+if [ "${REGISTRY_SEEDED:-false}" = true ]; then
+  echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+else
+  echo -e "    ${YELLOW}○${NC} Registry catalog not seeded (evenfire-registry sibling repo absent or seed failed) — control-ui Registry tab will be empty"
+fi
 echo ""
