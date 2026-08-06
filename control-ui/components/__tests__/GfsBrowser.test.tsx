@@ -360,7 +360,7 @@ describe('GfsBrowser', () => {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
-    expect(await screen.findByText('GFS uploads are limited to 10 MB per file.')).toBeTruthy()
+    expect(await screen.findByText('GFS uploads are limited to 16 MB per file.')).toBeTruthy()
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(mockApiSend).not.toHaveBeenCalled()
   })
