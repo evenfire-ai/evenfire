@@ -73,6 +73,19 @@ generated config, secrets, and rollouts match the current worktree:
 make minikube-pre-gate-sync GATE=<gate-name>
 ```
 
+On a cluster running published images (the default), every pod runs a release
+image, so the pre-gate **shadow-builds**: it builds only the services your tree
+changed and tags each build with the exact `ghcr.io/evenfire-ai/...` ref the
+Deployment already references, which `imagePullPolicy: IfNotPresent` then picks
+up. Everything else stays on the release digest, and the run ends with an
+explicit `SHADOWED:` list of what is local and what is not. The next
+`make minikube-setup` re-pulls and discards the shadow set.
+
+Two changes it cannot cover in that mode, both of which stop the gate instead of
+passing it: a changed path that maps to no image at all, and a cluster whose
+release images name no commit this clone has (so the changed set is unknowable).
+Both print the remedy; `make minikube-setup-local` always works.
+
 For target-aware promptBridge or provider-free `clientNotifications` upgrades,
 follow the fail-closed migration and rollout order in
 [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
@@ -792,14 +805,27 @@ make minikube-setup ARGS="--skip-build"   # Re-applies kustomize overlay with co
 
 ### ImagePullBackOff on pods
 
-Images are tagged `:test` locally but the cluster can't find them. Run:
+The cluster cannot find an image it was told to run. The fix depends on how the
+cluster acquired its images, which is recorded in
+`deploy/minikube/.image-manifest.json` (`imageSource`), not by whatever
+`IMAGE_SOURCE` your shell defaults to:
 
 ```bash
-make minikube-pre-gate-sync GATE=image-refresh ARGS="--force-cluster-sync"
-# or:
-make minikube-build-images    # Rebuilds all images in minikube's Docker daemon
-make minikube-restart-all     # Restart deployments to pick up images
+make minikube-verify-images   # Reports the mode and every ref the cluster is missing
 ```
+
+```bash
+# imageSource=ghcr: re-pull the release set at the recorded tag.
+make minikube-pull-images
+make minikube-restart-all
+
+# imageSource=local: rebuild in minikube's Docker daemon.
+make minikube-build-images
+make minikube-restart-all
+```
+
+`make minikube-pre-gate-sync GATE=image-refresh ARGS="--force-cluster-sync"`
+does the right one for you, then re-applies the manifests.
 
 ### Postgres CrashLoopBackOff (WAL corruption)
 

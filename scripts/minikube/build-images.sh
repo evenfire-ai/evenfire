@@ -121,20 +121,20 @@ MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
 # The mode the cluster's images were actually acquired in. Prints nothing when
 # the manifest is absent, unparseable, or records anything other than
 # ghcr|local -- callers then fall back to the IMAGE_SOURCE env var.
+#
+# ONE reader, shared with scripts/minikube/pre-gate-sync.sh through
+# scripts/minikube/image-mode.sh. A second copy here would let the verify path
+# and the pre-gate disagree about what the cluster is running, which is the
+# exact failure this key exists to prevent.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+
 recorded_image_source() {
-  [ -f "$MANIFEST_FILE" ] || return 0
-  node -e '
-    const fs = require("node:fs")
-    let parsed
-    try {
-      parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-    } catch {
-      process.exit(0)
-    }
-    if (parsed.imageSource === "ghcr" || parsed.imageSource === "local") {
-      process.stdout.write(parsed.imageSource)
-    }
-  ' "$MANIFEST_FILE"
+  image_mode_recorded_source "$PROJECT_DIR"
+}
+
+recorded_image_tag() {
+  image_mode_manifest_field "$PROJECT_DIR" 2
 }
 
 # The two E2E-only fixtures are built by `make minikube-setup-e2e` alone, which
@@ -814,11 +814,28 @@ echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
 # fixtures with --only AFTER the ghcr pull, and `make minikube-setup` builds
 # doc-generator-mcp with --only BEFORE it. Carry the recorded value forward
 # instead, and fall back to the env var only when nothing is recorded yet.
+#
+# imageTag rides along for exactly the same reason. A pre-gate shadow build is
+# an --only run, so dropping the tag here would make the next pre-gate fall back
+# to the committed pin and declare a `MINIKUBE_IMAGE_TAG=latest` cluster out of
+# sync on every run. A full build has no ghcr coordinate at all, so it clears
+# the key rather than leaving a stale one behind.
 MANIFEST_IMAGE_SOURCE="local"
+MANIFEST_IMAGE_TAG=""
 if [ -n "$ONLY_SVC" ]; then
   MANIFEST_IMAGE_SOURCE="$(recorded_image_source)"
   if [ -z "$MANIFEST_IMAGE_SOURCE" ]; then
     MANIFEST_IMAGE_SOURCE="$IMAGE_SOURCE"
+  fi
+  MANIFEST_IMAGE_TAG="$(recorded_image_tag)"
+  if [ -z "$MANIFEST_IMAGE_TAG" ] && [ "$MANIFEST_IMAGE_SOURCE" = ghcr ]; then
+    # Charset-checked before it is interpolated into JSON: an unusable value
+    # would make the whole manifest unparseable, which every reader here
+    # correctly treats as "nothing recorded" -- silently losing the mode too.
+    case "${MINIKUBE_IMAGE_TAG:-}" in
+      "" | *[!A-Za-z0-9._-]*) MANIFEST_IMAGE_TAG="" ;;
+      *) MANIFEST_IMAGE_TAG="${MINIKUBE_IMAGE_TAG}" ;;
+    esac
   fi
 fi
 {
@@ -826,6 +843,7 @@ fi
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
   echo "  \"profile\": \"${PROFILE}\","
   echo "  \"imageSource\": \"${MANIFEST_IMAGE_SOURCE}\","
+  echo "  \"imageTag\": \"${MANIFEST_IMAGE_TAG}\","
   echo "  \"images\": {"
   count=0
   total=${#ALL_IMAGES[@]}

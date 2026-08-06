@@ -235,7 +235,17 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	else \
 		echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
 	fi
-	kubectl --context=$(MINIKUBE_PROFILE) kustomize deploy/overlays/minikube | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
+	@# THE OVERLAY FOLLOWS THE CLUSTER, NOT THIS SHELL. Hardcoding
+	@# deploy/overlays/minikube applied clerum/*:test image refs to a cluster
+	@# that pulled ghcr release images: nothing ever built those tags there, so
+	@# a deploy/*-only change produced cluster-wide ImagePullBackOff, and a
+	@# pre-gate full-deployment silently flipped a ghcr cluster to local refs
+	@# with no record. image-mode.sh resolves it from what the last image
+	@# acquisition recorded. It runs HERE, after minikube-detect-k8s-api-ip
+	@# above, because an overridden tag renders from a copy of deploy/ that must
+	@# already contain the generated k8s-api-ip.yaml.
+	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
+		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
 	$(KC) apply -f deploy/overlays/minikube/instances/
 	@# Kustomize reapplies the persisted mcp-host ConfigMap, which can overwrite
