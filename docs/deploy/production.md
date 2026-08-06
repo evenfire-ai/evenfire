@@ -24,6 +24,7 @@ assets.
 | Overlays                   | [deploy/overlays](../../deploy/overlays)                           |
 | Bootstrap scripts          | [scripts/](../../scripts/), [deploy/scripts](../../deploy/scripts) |
 | Local full-stack reference | [minikube.md](minikube.md)                                         |
+| Plugin Workload SDK upgrade | [plugin-workload-sdk-upgrade.md](plugin-workload-sdk-upgrade.md) |
 | Observability starter      | [monitoring/](../../monitoring/README.md)                          |
 
 Install CRDs:
@@ -82,6 +83,7 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 ## Related
 
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
+- [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
 - [Architecture / topology](../architecture/platform-topology.md)
 - [FAQ](../faq.md)

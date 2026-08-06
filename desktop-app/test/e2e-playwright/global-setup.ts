@@ -1,14 +1,22 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import path from 'node:path'
 import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
 
+const configuredAllowedContexts = process.env.E2E_ALLOWED_CONTEXTS?.split(',')
+  .map(context => context.trim())
+  .filter(Boolean)
 const ALLOWED_CONTEXTS = new Set(
-  (process.env.E2E_ALLOWED_CONTEXTS || 'clerum-test,gke_${GCP_PROJECT}_us-central1-a_example-dev')
-    .split(',')
-    .map(context => context.trim())
-    .filter(Boolean)
+  configuredAllowedContexts?.length ? configuredAllowedContexts : ['clerum-test']
 )
-const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
-const PROD_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_clerum'
+const PROD_CONTEXT = process.env.E2E_PROD_CONTEXT?.trim() || ''
+
+function isProductionContext(context: string): boolean {
+  return (
+    (PROD_CONTEXT !== '' && context === PROD_CONTEXT) ||
+    /(^|[-_])(prod|production)([-_]|$)/i.test(context)
+  )
+}
 
 function isLocalhost(url: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)
@@ -141,12 +149,6 @@ function kubectlCurrentContext(): string {
   }).trim()
 }
 
-function kubectlUseContext(ctx: string): void {
-  execFileSync('kubectl', ['config', 'use-context', ctx], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-}
-
 async function assertHealth(baseUrl: string, label: string, path = '/health'): Promise<void> {
   let response: Response
   try {
@@ -163,11 +165,15 @@ async function assertHealth(baseUrl: string, label: string, path = '/health'): P
 }
 
 async function globalSetup(): Promise<void> {
-  const expected = process.env.E2E_K8S_CONTEXT || 'clerum-test'
+  const expected =
+    process.env.E2E_K8S_CONTEXT ||
+    process.env.KUBECONTEXT ||
+    process.env.K8S_CONTEXT ||
+    'clerum-test'
 
-  if (expected === PROD_CONTEXT) {
+  if (isProductionContext(expected)) {
     throw new Error(
-      `[E2E-GUARD] Production context "${PROD_CONTEXT}" is hard-blocked. E2E against prod is never allowed.`
+      `[E2E-GUARD] Production context "${expected}" is hard-blocked. E2E against prod is never allowed.`
     )
   }
   if (!isLocalPortForwardContext(expected) && !ALLOWED_CONTEXTS.has(expected)) {
@@ -184,33 +190,83 @@ async function globalSetup(): Promise<void> {
     throw new Error(`[E2E-GUARD] Failed to read kubectl current-context: ${(err as Error).message}`)
   }
 
-  if (current === PROD_CONTEXT) {
+  if (isProductionContext(current)) {
     throw new Error(
-      `[E2E-GUARD] kubectl current-context is production "${PROD_CONTEXT}". Refusing to run E2E.`
+      `[E2E-GUARD] kubectl current-context is production "${current}". Refusing to run E2E.`
     )
   }
 
   if (current !== expected) {
-    // eslint-disable-next-line no-console
-    console.log(`[E2E-GUARD] Switching kubectl context "${current}" → "${expected}"`)
-    try {
-      kubectlUseContext(expected)
-    } catch (err) {
-      throw new Error(
-        `[E2E-GUARD] Failed to switch context to "${expected}": ${(err as Error).message}. ` +
-          `Is the context configured in ~/.kube/config?`
-      )
-    }
+    throw new Error(
+      `[E2E-GUARD] kubectl context mismatch: expected "${expected}", got "${current}". ` +
+        'Select the branch-owned context before starting the Desktop E2E; the test never changes global kubeconfig state.'
+    )
   }
 
-  const controlApi = process.env.CONTROL_API_BASE_URL || 'http://127.0.0.1:8090'
+  const repoRoot = path.resolve(__dirname, '../../..')
+  const expectedHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim()
+  const expectedWorktreeId = createHash('sha1').update(repoRoot).digest('hex')
+  const marker = JSON.parse(
+    execFileSync(
+      'kubectl',
+      [
+        '--context',
+        expected,
+        '-n',
+        'control-plane',
+        'get',
+        'configmap',
+        'clerum-pre-gate-sync-state',
+        '-o',
+        'json',
+      ],
+      { encoding: 'utf8', timeout: 15_000 }
+    )
+  ) as { data?: Record<string, string> }
+  const markerData = marker.data ?? {}
+  if (!markerData.gitHead || !markerData.worktreeId || !markerData.clusterFingerprint) {
+    throw new Error(
+      `[E2E-GUARD] profile ${expected} has no complete pre-gate marker (gitHead/worktreeId/clusterFingerprint required).`
+    )
+  }
+  if (markerData.gitHead !== expectedHead || markerData.worktreeId !== expectedWorktreeId) {
+    throw new Error(
+      `[E2E-GUARD] profile marker does not belong to this worktree/head: ` +
+        `marker head=${markerData.gitHead} worktree=${markerData.worktreeId}, ` +
+        `expected head=${expectedHead} worktree=${expectedWorktreeId}.`
+    )
+  }
+  const expectedClusterFingerprint = process.env.E2E_EXPECTED_CLUSTER_FINGERPRINT?.trim()
+  if (expectedClusterFingerprint && markerData.clusterFingerprint !== expectedClusterFingerprint) {
+    throw new Error(
+      `[E2E-GUARD] profile marker cluster fingerprint ${markerData.clusterFingerprint} does not match E2E_EXPECTED_CLUSTER_FINGERPRINT ${expectedClusterFingerprint}.`
+    )
+  }
+
+  const controlApi =
+    process.env.CONTROL_API_BASE_URL ||
+    process.env.CONTROL_API_URL ||
+    process.env.E2E_CONTROL_API_URL ||
+    'http://127.0.0.1:8090'
   const controlUi =
     process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://127.0.0.1:3000'
-  const externalRest = process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
-  const rpcProxy = process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094'
+  const externalRest =
+    process.env.EXTERNAL_REST_API_BASE_URL ||
+    process.env.EXTERNAL_REST_API_URL ||
+    process.env.E2E_EXTERNAL_REST_API_URL ||
+    'http://127.0.0.1:8091'
+  const rpcProxy =
+    process.env.RPC_PROXY_BASE_URL ||
+    process.env.RPC_PROXY_URL ||
+    process.env.E2E_RPC_PROXY_URL ||
+    'http://127.0.0.1:8094'
   const workflowApprovalReader =
     process.env.E2E_WORKFLOW_APPROVAL_QUADRANTS === '1'
-      ? process.env.WORKFLOW_APPROVAL_READER_BASE_URL || 'http://127.0.0.1:8098'
+      ? process.env.WORKFLOW_APPROVAL_READER_BASE_URL ||
+        process.env.WORKFLOW_APPROVAL_READER_URL ||
+        'http://127.0.0.1:8098'
       : undefined
   const allowDevPortForward = parseBooleanEnv(process.env.E2E_ALLOW_DEV_PORT_FORWARD)
 

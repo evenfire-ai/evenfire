@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { checkLiveRuntimeBinding, shouldStartPluginWorkloadSdk } from './sdkServer'
+import {
+  checkLiveRuntimeBinding,
+  shouldStartPluginWorkloadSdk,
+  validatePluginWorkloadSdkCredentialBrokerUrl,
+} from './sdkServer'
 
 /**
  * Triple activation gate (plan §6.3): 2^3 combinations — only
@@ -21,6 +25,7 @@ function makeRuntimeToken(recipeNamespace: string | null): string {
 const SANDBOX_TOKEN = makeRuntimeToken('sandbox-recipes')
 const HOST_NS_TOKEN = makeRuntimeToken('mcp-host')
 const UNBOUND_TOKEN = makeRuntimeToken(null)
+const BROKER_URL = 'http://workflow-recipes:8082'
 
 describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
   const cases: Array<{
@@ -106,8 +111,10 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     it(c.name, () => {
       const result = shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: c.enabled,
+        pluginWorkloadSdkCapabilities: c.enabled ? ['promptBridge'] : [],
         mcpHostRuntimeAccessToken: c.token,
         podNamespace: c.podNamespace,
+        pluginWorkloadSdkCredentialBrokerUrl: c.enabled ? BROKER_URL : '',
       })
       expect(result.start).toBe(c.start)
       expect(result.reason).toBeTruthy()
@@ -118,24 +125,85 @@ describe('shouldStartPluginWorkloadSdk — behavior matrix', () => {
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: false,
+        pluginWorkloadSdkCapabilities: [],
         mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
         podNamespace: 'sandbox-recipes',
+        pluginWorkloadSdkCredentialBrokerUrl: '',
       }).reason
     ).toContain('PLUGIN_WORKLOAD_SDK_ENABLED')
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
         mcpHostRuntimeAccessToken: HOST_NS_TOKEN,
         podNamespace: 'sandbox-recipes',
+        pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
       }).reason
     ).toContain("recipeNamespace is 'mcp-host'")
     expect(
       shouldStartPluginWorkloadSdk({
         pluginWorkloadSdkEnabled: true,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
         mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
         podNamespace: '',
+        pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
       }).reason
     ).toContain('(empty)')
+  })
+
+  it('fails closed when WRC did not declare a capability family', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: [],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: BROKER_URL,
+    })
+    expect(result.start).toBe(false)
+    expect(result.reason).toContain('PLUGIN_WORKLOAD_SDK_CAPABILITIES')
+  })
+
+  it('starts a notification-only host without a promptBridge broker URL', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: ['clientNotifications'],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: '',
+    })
+    expect(result).toEqual({ start: true, reason: 'all three gate conditions satisfied' })
+  })
+
+  it('requires the broker only when promptBridge is declared', () => {
+    const result = shouldStartPluginWorkloadSdk({
+      pluginWorkloadSdkEnabled: true,
+      pluginWorkloadSdkCapabilities: ['promptBridge'],
+      mcpHostRuntimeAccessToken: SANDBOX_TOKEN,
+      podNamespace: 'sandbox-recipes',
+      pluginWorkloadSdkCredentialBrokerUrl: '',
+    })
+    expect(result.start).toBe(false)
+    expect(result.reason).toContain('CLERUM_WRC_URL')
+  })
+})
+
+describe('validatePluginWorkloadSdkCredentialBrokerUrl', () => {
+  it.each(['', '   ', 'workflow-recipes:8082', 'ftp://workflow-recipes:8082'])(
+    'rejects %j',
+    value => {
+      expect(validatePluginWorkloadSdkCredentialBrokerUrl(value)).toBeTruthy()
+    }
+  )
+
+  it('accepts an internal service base URL and rejects URL authority/path injection', () => {
+    expect(validatePluginWorkloadSdkCredentialBrokerUrl('http://workflow-recipes:8082')).toBeNull()
+    expect(validatePluginWorkloadSdkCredentialBrokerUrl('https://wrc.example.test')).toBeNull()
+    expect(
+      validatePluginWorkloadSdkCredentialBrokerUrl('http://user:pass@workflow-recipes:8082')
+    ).toBeTruthy()
+    expect(
+      validatePluginWorkloadSdkCredentialBrokerUrl('http://workflow-recipes:8082/api')
+    ).toBeTruthy()
   })
 })
 

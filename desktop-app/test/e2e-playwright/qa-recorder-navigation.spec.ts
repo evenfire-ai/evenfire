@@ -18,8 +18,8 @@ import {
 // No confirm flag is required: nothing here writes, messages, or pays.
 
 test('optional QA recorder: Desktop navigation journey — primary sidebar', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
@@ -56,8 +56,8 @@ test('optional QA recorder: Desktop navigation journey — primary sidebar', asy
 })
 
 test('optional QA recorder: Desktop navigation journey — footer settings menu', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
@@ -102,8 +102,8 @@ test('optional QA recorder: Desktop navigation journey — footer settings menu'
 })
 
 test('optional QA recorder: Desktop navigation journey — resources pages', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined

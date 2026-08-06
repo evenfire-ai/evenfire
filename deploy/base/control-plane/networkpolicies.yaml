@@ -645,8 +645,9 @@ spec:
         - port: 8082
           protocol: TCP
 ---
-# Allow workflow coordinators (sandbox-recipes) to reach WRC for status
-# reporting and /configure-model calls. The per-recipe egress NPs are
+# Allow workflow coordinators and SDK-enabled workflow mcp-hosts
+# (sandbox-recipes) to reach WRC. Coordinators report status/configure models;
+# mcp-hosts redeem one signed prompt target credential per attempt. Per-recipe egress NPs are
 # created dynamically by WRC in sandbox-recipes; this static NP opens
 # the ingress side in control-plane (WRC cannot self-modify its own ns).
 apiVersion: networking.k8s.io/v1
@@ -670,6 +671,12 @@ spec:
           podSelector:
             matchLabels:
               clerum.io/component: workflow-coordinator
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandbox-recipes
+          podSelector:
+            matchLabels:
+              clerum.io/component: workflow-mcp-host
       ports:
         - port: 8082
           protocol: TCP
