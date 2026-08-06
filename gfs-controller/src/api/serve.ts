@@ -73,15 +73,21 @@ export interface ServingDeps {
 
 /**
  * Largest mutation body gfsc accepts before failing loud with payload_too_large.
- * Configurable via GFS_MAX_WRITE_BODY_BYTES so ops can raise it beyond the 16MiB
- * default (which already fits base64(10MB) ≈ 13.98MB). A non-integer or
- * non-positive value falls back to the default (fail-safe; never NaN).
- * NOTE: to take effect on the gfsc pod this env must be plumbed through the
- * host-context-controller gfsc template (deferred — inert while the default holds).
+ * Configurable via GFS_MAX_WRITE_BODY_BYTES, plumbed to the gfsc pod through the
+ * host-context-controller gfsc template (deploy sets it to 24MiB for the 16MB upload
+ * cap). A non-integer or non-positive value fails loud to stderr and falls back to the
+ * 16MiB default — otherwise a config typo would silently 413 every large upload.
  */
+const DEFAULT_MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_WRITE_BODY_BYTES = ((): number => {
-  const raw = Number(process.env.GFS_MAX_WRITE_BODY_BYTES);
-  return Number.isInteger(raw) && raw > 0 ? raw : 16 * 1024 * 1024;
+  const rawEnv = process.env.GFS_MAX_WRITE_BODY_BYTES;
+  if (rawEnv === undefined) return DEFAULT_MAX_WRITE_BODY_BYTES;
+  const raw = Number(rawEnv);
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  console.error(
+    `[gfsc] ignoring invalid GFS_MAX_WRITE_BODY_BYTES="${rawEnv}" (must be a positive integer); using ${DEFAULT_MAX_WRITE_BODY_BYTES}`
+  );
+  return DEFAULT_MAX_WRITE_BODY_BYTES;
 })();
 const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;

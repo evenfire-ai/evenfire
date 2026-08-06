@@ -30,14 +30,11 @@ spec:
         env:
         - name: CONTROL_API_INTERNAL_URL
           value: http://control-api.control-plane.svc.cluster.local:8090
-        # Server-side control-ui proxy timeout in milliseconds (see
-        # app/control-api/[...path]/route.ts). Intended to keep large GFS uploads (file
-        # sent base64-encoded, ~+33%) from being cut mid-body over the Cloudflare tunnel;
-        # applies only to body-bearing methods, so SSE streams are unaffected.
-        # NOTE: currently LATENT — /control-api/* is served by the next.config.js rewrite,
-        # not this route handler, so this value does not govern prod today. It takes
-        # effect once the proxy is consolidated onto the handler (tracked follow-up); the
-        # client-side upload timeout in control-ui/lib/api.ts is what unblocks prod now.
+        # Server-side control-ui proxy timeout in milliseconds. The app-router handler
+        # app/control-api/[...path]/route.ts OWNS /control-api/* (the next.config.js
+        # rewrite was removed), so this value governs the proxied upstream fetch. It
+        # keeps large GFS uploads (file sent base64-encoded, ~+33%) from being cut
+        # mid-body, and applies only to body-bearing methods so SSE streams are unaffected.
         - name: CONTROL_API_PROXY_TIMEOUT_MS
           value: "300000"
         - name: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET
@@ -68,10 +65,14 @@ spec:
         resources:
           limits:
             cpu: 300m
-            memory: 256Mi
+            # The /control-api proxy route handler buffers a full arrayBuffer copy of
+            # the request body (~22.4MB for a 16MB GFS upload) before forwarding; 256Mi
+            # is tight under concurrent uploads. 512Mi gives headroom over the Next.js
+            # baseline. The minikube overlay must not reduce this.
+            memory: 512Mi
           requests:
             cpu: 50m
-            memory: 64Mi
+            memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

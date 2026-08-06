@@ -266,7 +266,7 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     ['GFS_SYNC_COPY_TIMEOUT_MS', config.syncCopyTimeoutMs],
     ['GFS_MAX_WRITE_BODY_BYTES', config.maxWriteBodyBytes],
   ]
-  const copyEnv = passthroughEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
+  const passthroughEnv = passthroughEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
     value === undefined ? [] : [{ name, value }]
   )
 
@@ -295,7 +295,7 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
         },
       },
     },
-    ...copyEnv,
+    ...passthroughEnv,
   ]
 }
 

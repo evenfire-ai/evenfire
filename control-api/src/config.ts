@@ -185,9 +185,10 @@ type Config = {
   gfscBaseUrl: string
   // In-cluster base URL of the writer-only gfsc Service for mutations.
   gfscWriteBaseUrl: string
-  // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the
-  // browser client (GFS_UPLOAD_TIMEOUT_MS) and the control-ui server proxy
-  // (CONTROL_API_PROXY_TIMEOUT_MS): all default 300000. Raise all three together.
+  // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
+  // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
+  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
+  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
   gfscProxyTimeoutMs: number
   // ClusterIP service URL template for the per-SFS wfc. {hash} is replaced
   // with the 10-char sfsHash that HCC's sharedFileSystemReconciler computes.

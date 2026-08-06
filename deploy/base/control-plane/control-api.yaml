@@ -125,13 +125,15 @@ spec:
         resources:
           limits:
             cpu: 300m
-            # GFS uploads arrive base64-in-JSON and are fully buffered: one 10.7MB
-            # upload holds ~5 transient copies (express raw buffer, JSON.parse input,
-            # parsed contentBase64 string, JSON.stringify output, undici write buffer)
-            # ≈ +60MiB over the ~86MiB idle baseline. Measured live: 4 concurrent
-            # 10.7MB uploads OOMKilled (exit 137) the pod at 256Mi; 512Mi holds ≥4
-            # concurrent worst-case (16MiB, the gfsc write cap) uploads with margin.
-            memory: 512Mi
+            # GFS uploads arrive base64-in-JSON and are fully buffered: one upload
+            # holds ~5 transient copies (express raw buffer, JSON.parse input, parsed
+            # contentBase64 string, JSON.stringify output, undici write buffer). The
+            # gfsc write cap is 24MiB (GFS_MAX_WRITE_BODY_BYTES), i.e. a 16MB raw file
+            # → ~22.4MB body → ~125MiB transient over the ~86MiB idle baseline. At 256Mi
+            # 2 concurrent uploads OOMKilled (exit 137) the pod; 768Mi holds ~5 concurrent
+            # worst-case uploads with margin. The minikube overlay must not reduce this
+            # (see deploy/overlays/minikube/patches/resource-limits.yaml).
+            memory: 768Mi
           requests:
             cpu: 50m
             memory: 128Mi
