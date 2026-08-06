@@ -3,7 +3,23 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+
+# The minikube k8s-api-ip patch is a machine-specific, gitignored file rendered
+# at setup time. On a developer box with a live minikube it may already exist;
+# this test shadows it with a dummy render below. Save the real one (if any) and
+# restore it on EXIT so the test leaves the working tree exactly as it found it.
+MINIKUBE_API_IP_PATCH=""
+MINIKUBE_API_IP_PATCH_BACKUP=""
+MINIKUBE_API_IP_PATCH_PREEXISTING=0
+cleanup() {
+  if [[ "${MINIKUBE_API_IP_PATCH_PREEXISTING}" -eq 1 ]]; then
+    cp "${MINIKUBE_API_IP_PATCH_BACKUP}" "${MINIKUBE_API_IP_PATCH}"
+  elif [[ -n "${MINIKUBE_API_IP_PATCH:-}" && -f "${MINIKUBE_API_IP_PATCH}" ]]; then
+    rm -f "${MINIKUBE_API_IP_PATCH}"
+  fi
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
 write_policy() {
   local path="$1"
@@ -147,6 +163,13 @@ MINIKUBE_API_IP_PATCH="${ROOT}/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
 if [[ ! -f "${MINIKUBE_API_IP_TEMPLATE}" ]]; then
   echo "FAIL: missing ${MINIKUBE_API_IP_TEMPLATE}; cannot render the minikube k8s-api-ip patch" >&2
   exit 1
+fi
+if [[ -f "${MINIKUBE_API_IP_PATCH}" ]]; then
+  # A developer's real rendered patch is present — preserve it so the dummy
+  # render below doesn't clobber it; the EXIT trap restores it verbatim.
+  MINIKUBE_API_IP_PATCH_BACKUP="${TMP_DIR}/k8s-api-ip.yaml.orig"
+  cp "${MINIKUBE_API_IP_PATCH}" "${MINIKUBE_API_IP_PATCH_BACKUP}"
+  MINIKUBE_API_IP_PATCH_PREEXISTING=1
 fi
 sed 's#__K8S_API_IP__#10.96.0.1#g' "${MINIKUBE_API_IP_TEMPLATE}" >"${MINIKUBE_API_IP_PATCH}"
 
