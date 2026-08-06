@@ -6,15 +6,28 @@ export const dynamic = 'force-dynamic'
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
 const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 30_000
 
+// setTimeout / AbortSignal.timeout reject non-integers and values above the 32-bit
+// signed ceiling (ERR_OUT_OF_RANGE), so an out-of-range env value must NOT reach them.
+const MAX_PROXY_TIMEOUT_MS = 2_147_483_647
+
 // Runtime-configurable server-side timeout (NOT NEXT_PUBLIC: read at request time in
 // the control-ui pod, mirroring CONTROL_API_INTERNAL_URL above). GFS uploads send the
 // file base64-encoded, so a ~10 MB payload over the Cloudflare tunnel can exceed the
 // old fixed 30s. Set CONTROL_API_PROXY_TIMEOUT_MS (milliseconds) on the deployment to
-// raise it; an absent, NaN, or non-positive value falls back to the default.
+// raise it; an absent, non-integer, non-positive, or out-of-range value falls back to
+// the default.
+//
+// NOTE: currently LATENT — `/control-api/*` is served by the next.config.js rewrite
+// (afterFiles precedence shadows this catch-all route handler), so this timeout does
+// not govern prod today. It becomes effective once the proxy is consolidated onto this
+// handler (tracked follow-up); the client-side upload timeout in lib/api.ts is what
+// unblocks prod now.
 function resolveProxyTimeoutMs(): number {
   const raw = process.env.CONTROL_API_PROXY_TIMEOUT_MS
   const parsed = raw ? Number(raw) : Number.NaN
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_PROXY_TIMEOUT_MS
+    ? parsed
+    : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
 }
 
 const HOP_BY_HOP_HEADERS = new Set([

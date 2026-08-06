@@ -31,9 +31,13 @@ spec:
         - name: CONTROL_API_INTERNAL_URL
           value: http://control-api.control-plane.svc.cluster.local:8090
         # Server-side control-ui proxy timeout in milliseconds (see
-        # app/control-api/[...path]/route.ts). Raised above the 30s default so large
-        # GFS uploads (file sent base64-encoded, ~+33%) are not cut mid-body over the
-        # Cloudflare tunnel. Applies only to body-bearing methods; SSE streams unaffected.
+        # app/control-api/[...path]/route.ts). Intended to keep large GFS uploads (file
+        # sent base64-encoded, ~+33%) from being cut mid-body over the Cloudflare tunnel;
+        # applies only to body-bearing methods, so SSE streams are unaffected.
+        # NOTE: currently LATENT — /control-api/* is served by the next.config.js rewrite,
+        # not this route handler, so this value does not govern prod today. It takes
+        # effect once the proxy is consolidated onto the handler (tracked follow-up); the
+        # client-side upload timeout in control-ui/lib/api.ts is what unblocks prod now.
         - name: CONTROL_API_PROXY_TIMEOUT_MS
           value: "300000"
         - name: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET

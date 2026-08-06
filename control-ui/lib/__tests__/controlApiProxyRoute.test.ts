@@ -145,10 +145,13 @@ describe('control-ui control-api proxy route', () => {
       expect(timeoutSpy).toHaveBeenCalledWith(300000)
     })
 
-    it('falls back to 30000ms when the env value is absent, NaN, or non-positive', async () => {
+    it('falls back to 30000ms when the env value is absent, NaN, non-positive, non-integer, or out-of-range', async () => {
       const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
 
-      for (const bad of [undefined, 'not-a-number', '0', '-5']) {
+      // Includes non-integer and out-of-range values: AbortSignal.timeout throws
+      // ERR_OUT_OF_RANGE for those, which would 500 every body-bearing request if they
+      // reached it, so they MUST fall back to the default instead.
+      for (const bad of [undefined, 'not-a-number', '0', '-5', '300000.5', '5000000000', '1e12']) {
         timeoutSpy.mockClear()
         if (bad === undefined) delete process.env[ENV_KEY]
         else process.env[ENV_KEY] = bad

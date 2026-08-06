@@ -174,7 +174,11 @@ async function fetchWithTimeout(
   timeoutMs: number = API_REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+  // A non-positive or non-finite override means "use the default", never "abort
+  // immediately" — this matches the server proxy's resolveProxyTimeoutMs semantics.
+  const effectiveTimeoutMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : API_REQUEST_TIMEOUT_MS
+  const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {

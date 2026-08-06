@@ -53,6 +53,16 @@ describe('apiSend request timeout', () => {
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), GFS_UPLOAD_TIMEOUT_MS)
   })
 
+  it('treats a non-positive timeoutMs override as the default, never abort-immediately', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    await apiSend('POST', '/api/v1/example', { a: 1 }, {}, {}, { timeoutMs: 0 })
+
+    // 0 must NOT arm setTimeout(fn, 0) (which would abort on the next tick); it falls
+    // back to the 30s default, matching the server proxy's resolveProxyTimeoutMs.
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30000)
+  })
+
   it('exposes a GFS upload ceiling well above the 30s default', () => {
     expect(GFS_UPLOAD_TIMEOUT_MS).toBe(300000)
     expect(GFS_UPLOAD_TIMEOUT_MS).toBeGreaterThan(30000)
