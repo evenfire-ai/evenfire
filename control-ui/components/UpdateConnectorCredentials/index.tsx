@@ -100,6 +100,20 @@ export function UpdateConnectorCredentials({
   const [phaseMessage, setPhaseMessage] = useState('')
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
   const [rotationAffected, setRotationAffected] = useState<string[]>([])
+  // Latches the form onto rotate semantics after a successful create, so a
+  // stale `surface` prop cannot leave "set" copy on a Secret that now exists.
+  const [secretCreated, setSecretCreated] = useState(false)
+  // Latches the form onto set semantics when a rotate PUT 404s (Task 5).
+  const [recreateRequired, setRecreateRequired] = useState(false)
+  // Which operation is actually in flight / just completed. Captured at submit
+  // time and used for the in-flight and success banners.
+  //
+  // This CANNOT be derived from `mode`: setSecretCreated(true) flips `mode` to
+  // 'rotate' the instant a create succeeds, so a banner reading `mode` would
+  // announce "Credentials rotated" immediately after a create. The latch and
+  // the banner answer different questions — "what should the form do next?"
+  // versus "what did we just do?" — so they need separate state.
+  const [submittedMode, setSubmittedMode] = useState<'set' | 'rotate'>('rotate')
   // The HCC's most recent RolloutIncomplete diagnostic, kept across polls (a
   // ref, not state: it only matters at the timeout boundary, so it must not
   // re-render or re-fire the poll effect). Seeing RolloutIncomplete never
@@ -228,6 +242,9 @@ export function UpdateConnectorCredentials({
     }
   }, [phase, rotationCutoff, serverName])
 
+  const mode: 'set' | 'rotate' =
+    recreateRequired || (surface === 'set' && !secretCreated) ? 'set' : 'rotate'
+
   if (!envSecret) {
     return (
       <FormSection title="Update credentials">
@@ -268,7 +285,18 @@ export function UpdateConnectorCredentials({
       const value = draft[key.secretKey]
       if (value && value.trim() !== '') data[key.secretKey] = value
     }
-    if (Object.keys(data).length === 0) {
+    if (mode === 'set') {
+      // Every declared key is required. HCC validates each key and answers
+      // SecretMissingKey if any is absent, so a partial create would just swap
+      // one broken state for another while this screen reported success.
+      const missing = envSecret!.keys
+        .map(k => k.secretKey)
+        .filter(secretKey => !(data[secretKey] && data[secretKey].trim()))
+      if (missing.length > 0) {
+        setValidationError(`Enter every credential value. Missing: ${missing.join(', ')}.`)
+        return
+      }
+    } else if (Object.keys(data).length === 0) {
       setValidationError('Enter at least one credential value to rotate.')
       return
     }
@@ -335,12 +363,19 @@ export function UpdateConnectorCredentials({
 
   return (
     <FormSection
-      title="Update credentials"
+      title={mode === 'set' ? 'Set credentials' : 'Update credentials'}
       description={
-        <>
-          Rotate values stored in Secret <code>{envSecret.name}</code>. Values are write-only — this
-          screen never shows a stored credential, only key names.
-        </>
+        mode === 'set' ? (
+          <>
+            This connector needs credentials before it can start. Values are write-only — this
+            screen never shows a stored credential, only key names.
+          </>
+        ) : (
+          <>
+            Rotate values stored in Secret <code>{envSecret.name}</code>. Values are write-only —
+            this screen never shows a stored credential, only key names.
+          </>
+        )
       }
     >
       {confirmDialog}
@@ -375,7 +410,7 @@ export function UpdateConnectorCredentials({
               id={`mcp-cred-${k.secretKey}`}
               type="password"
               autoComplete="new-password"
-              placeholder="Leave blank to keep current value"
+              placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
               value={draft[k.secretKey] || ''}
               onChange={e => updateField(k.secretKey, e.target.value)}
               disabled={busy}
@@ -425,8 +460,12 @@ export function UpdateConnectorCredentials({
               {phase === 'saving'
                 ? 'Saving…'
                 : phase === 'rotating'
-                  ? 'Rotating…'
-                  : 'Rotate credentials'}
+                  ? submittedMode === 'set'
+                    ? 'Starting…'
+                    : 'Rotating…'
+                  : mode === 'set'
+                    ? 'Set credentials'
+                    : 'Rotate credentials'}
             </Button>
           )}
         </div>

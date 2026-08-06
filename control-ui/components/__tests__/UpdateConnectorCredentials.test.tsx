@@ -607,3 +607,28 @@ describe('UpdateConnectorCredentials — recipe-owned', () => {
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 })
+
+describe('UpdateConnectorCredentials — set mode', () => {
+  it('renders set-mode copy instead of rotation copy', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    expect(screen.getByText(/needs credentials before it can start/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  })
+
+  it('blocks submit until every declared key has a value and names the missing ones', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // Only one of the two declared keys filled.
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'secret-value' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    expect(
+      screen.getByText(/Enter every credential value\. Missing: workspace-id/)
+    ).toBeInTheDocument()
+    // No confirm dialog, so nothing was sent.
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})
