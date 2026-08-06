@@ -4,7 +4,18 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
-const CONTROL_API_PROXY_TIMEOUT_MS = 30_000
+const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 30_000
+
+// Runtime-configurable server-side timeout (NOT NEXT_PUBLIC: read at request time in
+// the control-ui pod, mirroring CONTROL_API_INTERNAL_URL above). GFS uploads send the
+// file base64-encoded, so a ~10 MB payload over the Cloudflare tunnel can exceed the
+// old fixed 30s. Set CONTROL_API_PROXY_TIMEOUT_MS (milliseconds) on the deployment to
+// raise it; an absent, NaN, or non-positive value falls back to the default.
+function resolveProxyTimeoutMs(): number {
+  const raw = process.env.CONTROL_API_PROXY_TIMEOUT_MS
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
+}
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -56,11 +67,15 @@ async function proxyControlApi(
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
   const rawBody = hasBody ? await req.arrayBuffer() : undefined
   const body = rawBody && rawBody.byteLength > 0 ? rawBody : undefined
-  const timeoutSignal = AbortSignal.timeout(CONTROL_API_PROXY_TIMEOUT_MS)
-  const signal =
-    typeof AbortSignal.any === 'function'
+  // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
+  // including long-lived SSE notification streams — rely solely on the client's own
+  // abort signal, so this timeout can never cut a streaming response.
+  const timeoutSignal = hasBody ? AbortSignal.timeout(resolveProxyTimeoutMs()) : undefined
+  const signal = timeoutSignal
+    ? typeof AbortSignal.any === 'function'
       ? AbortSignal.any([timeoutSignal, req.signal])
       : timeoutSignal
+    : req.signal
 
   try {
     const upstream = await fetch(upstreamUrl, {

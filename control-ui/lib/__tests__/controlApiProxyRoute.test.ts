@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GET, POST } from '../../app/control-api/[...path]/route'
 
 describe('control-ui control-api proxy route', () => {
@@ -108,6 +108,77 @@ describe('control-ui control-api proxy route', () => {
     expect(res.status).toBe(502)
     await expect(res.json()).resolves.toEqual({
       error: 'control-api proxy request failed: connect ECONNREFUSED 127.0.0.1:8090',
+    })
+  })
+
+  describe('proxy timeout is runtime-configurable via CONTROL_API_PROXY_TIMEOUT_MS', () => {
+    const ENV_KEY = 'CONTROL_API_PROXY_TIMEOUT_MS'
+    let savedEnv: string | undefined
+
+    beforeEach(() => {
+      savedEnv = process.env[ENV_KEY]
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+    })
+
+    afterEach(() => {
+      if (savedEnv === undefined) delete process.env[ENV_KEY]
+      else process.env[ENV_KEY] = savedEnv
+    })
+
+    it('arms the abort timeout with the env value for body-bearing methods', async () => {
+      process.env[ENV_KEY] = '300000'
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+
+      const req = new NextRequest(
+        'http://localhost:3000/control-api/api/v1/gfs/proxy/v1/resources/r1/children',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'deck.pdf', kind: 'file', contentBase64: 'AAAA' }),
+        }
+      )
+
+      await POST(req, {
+        params: { path: ['api', 'v1', 'gfs', 'proxy', 'v1', 'resources', 'r1', 'children'] },
+      })
+
+      expect(timeoutSpy).toHaveBeenCalledWith(300000)
+    })
+
+    it('falls back to 30000ms when the env value is absent, NaN, or non-positive', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+
+      for (const bad of [undefined, 'not-a-number', '0', '-5']) {
+        timeoutSpy.mockClear()
+        if (bad === undefined) delete process.env[ENV_KEY]
+        else process.env[ENV_KEY] = bad
+
+        const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ a: 1 }),
+        })
+
+        await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
+
+        expect(timeoutSpy).toHaveBeenCalledWith(30000)
+      }
+    })
+
+    it('does not arm the proxy timeout for GET, so SSE streams are never cut', async () => {
+      process.env[ENV_KEY] = '300000'
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+
+      const req = new NextRequest(
+        'http://localhost:3000/control-api/api/v1/admin/notifications/stream',
+        { method: 'GET', headers: { Authorization: 'Bearer t' } }
+      )
+
+      await GET(req, {
+        params: { path: ['api', 'v1', 'admin', 'notifications', 'stream'] },
+      })
+
+      expect(timeoutSpy).not.toHaveBeenCalled()
     })
   })
 })

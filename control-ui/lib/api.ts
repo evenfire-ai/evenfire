@@ -55,6 +55,15 @@ export type Metadata = {
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const ADMIN_TOKEN_STORAGE_KEY = 'controlUiAdminToken'
 const API_REQUEST_TIMEOUT_MS = 30000
+// GFS uploads send the file base64-encoded inside a JSON body (~+33% over the raw
+// bytes), so a 7.5 MB file crosses the wire as ~10 MB. On prod the Cloudflare tunnel
+// plus control-api forwarding push that past the default 30s window, and the browser
+// AbortController would cut the request mid-body — control-api then logs "request
+// aborted" (400) and the user sees "Request timed out". Give GFS uploads a generous
+// ceiling. This is a client (browser) constant: it cannot read a server runtime env
+// without NEXT_PUBLIC (build-time) or a config endpoint (neither exists here). The
+// server-side proxy has its own, runtime-configurable timeout.
+export const GFS_UPLOAD_TIMEOUT_MS = 300000
 const inFlightGetRequests = new Map<string, Promise<unknown>>()
 let sessionEpoch = 0
 type ApiRequestOptions = {
@@ -161,10 +170,11 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs: number = API_REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
@@ -249,17 +259,22 @@ export async function apiSend(
   path: string,
   body?: unknown,
   query: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: { timeoutMs?: number } = {}
 ) {
-  const res = await fetchWithTimeout(`${API_BASE}${path}${qs(query)}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...extraHeaders,
+  const res = await fetchWithTimeout(
+    `${API_BASE}${path}${qs(query)}`,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+    options.timeoutMs
+  )
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) {

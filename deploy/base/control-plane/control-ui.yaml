@@ -30,6 +30,12 @@ spec:
         env:
         - name: CONTROL_API_INTERNAL_URL
           value: http://control-api.control-plane.svc.cluster.local:8090
+        # Server-side control-ui proxy timeout in milliseconds (see
+        # app/control-api/[...path]/route.ts). Raised above the 30s default so large
+        # GFS uploads (file sent base64-encoded, ~+33%) are not cut mid-body over the
+        # Cloudflare tunnel. Applies only to body-bearing methods; SSE streams unaffected.
+        - name: CONTROL_API_PROXY_TIMEOUT_MS
+          value: "300000"
         - name: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET
           valueFrom:
             secretKeyRef:
