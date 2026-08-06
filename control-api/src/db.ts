@@ -2289,19 +2289,32 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
 /**
  * Reconcile all Plugin Workload SDK contracts that were edited in-place after
  * their migrations had already run on long-lived databases. This is one
- * forward-only migration on purpose: re-running 0080 would relabel legitimate
- * v2 terminal invocations and re-running 0081 would not repair existing
- * constraints created from its earlier body.
+ * forward-only migration on purpose: the migration runner never replays a
+ * recorded version, so the repair must be an explicit new step rather than a
+ * re-run of an historical migration.
  */
 async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
   await db.query(`
+    -- Runtime writers do not take the initDb advisory lock. Hold the table
+    -- locks in the same logical order as finalization (invocation -> receipt
+    -- -> provider attempt) before replacing validators or fencing rows. This
+    -- closes the rolling-deploy race in which a writer could change a row
+    -- between the ambiguity check and the repair UPDATE.
+    LOCK TABLE
+      plugin_workload_sdk_invocations,
+      plugin_workload_sdk_invocation_attempts,
+      plugin_workload_sdk_provider_attempts,
+      agent_run_events
+      IN SHARE ROW EXCLUSIVE MODE;
+
     CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
     RETURNS BOOLEAN
     LANGUAGE sql
     IMMUTABLE
     SET search_path = pg_catalog, public
     AS $$
-      SELECT CASE
+      SELECT COALESCE(CASE
+        WHEN event_kind IS NULL THEN FALSE
         WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
         ELSE jsonb_typeof(value) = 'object'
          AND octet_length(value::text) <= 16384
@@ -2359,6 +2372,10 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
                'fallback_used', 'attempt_count', 'provider_attempt_id',
                'provider_attempt_index'
              ]
+             AND jsonb_typeof(value->'prompt_bridge'->'invocation_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_generation') = 'number'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_index') = 'number'
              AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
              AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
              AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
@@ -2370,7 +2387,7 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
              AND (value->'prompt_bridge'->>'attempt_count') ~ '^[1-4]$'
            )
          )
-      END;
+      END, FALSE);
     $$;
 
     ALTER FUNCTION governed_trace_safe_metadata(JSONB)
@@ -2387,11 +2404,44 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
     GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
       TO control_api_runtime;
 
+    -- Changing a function body does not recheck rows already accepted by a
+    -- CHECK that calls it. Reinstall the named constraint as NOT VALID, scan
+    -- every historical row fail-closed, and only then validate the constraint.
+    -- No row is rewritten or deleted: an invalid append-only history aborts
+    -- the whole migration and requires an explicit data-governance decision.
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_check;
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_payload_metadata_check;
+    ALTER TABLE agent_run_events
+      ADD CONSTRAINT agent_run_events_check
+      CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE)
+      NOT VALID;
+
+    DO $$
+    DECLARE invalid_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO invalid_count
+        FROM agent_run_events
+       WHERE governed_trace_safe_agent_run_metadata(event_type, payload_metadata)
+             IS DISTINCT FROM TRUE;
+      IF invalid_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % historical agent_run_events rows with invalid payload metadata',
+          invalid_count;
+      END IF;
+    END
+    $$;
+
+    ALTER TABLE agent_run_events
+      VALIDATE CONSTRAINT agent_run_events_check;
+
     ALTER TABLE plugin_workload_sdk_invocations
       ALTER COLUMN contract_version SET DEFAULT 1;
 
     DO $$
-    DECLARE ambiguous_count INTEGER;
+    DECLARE ambiguous_count BIGINT;
     BEGIN
       SELECT COUNT(*)
         INTO ambiguous_count
@@ -2426,20 +2476,46 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
        AND status = 'in_progress'
        AND lease_expires_at IS NULL;
 
-    UPDATE plugin_workload_sdk_invocations
-       SET contract_version = 1,
-           status = 'failed',
-           authorization_decision = CASE
-             WHEN authorization_decision = 'authorized' THEN 'migration_interrupted'
-             ELSE authorization_decision
-           END,
-           updated_at = now(),
-           completed_at = COALESCE(completed_at, now()),
-           lease_expires_at = NULL
-     WHERE id IN (
-       SELECT invocation_id
-         FROM plugin_workload_sdk_runtime_reconciled_invocations
-     );
+    DO $$
+    DECLARE expected_count BIGINT;
+    DECLARE fenced_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO expected_count
+        FROM plugin_workload_sdk_runtime_reconciled_invocations;
+
+      UPDATE plugin_workload_sdk_invocations invocations
+         SET contract_version = 1,
+             status = 'failed',
+             authorization_decision = CASE
+               WHEN authorization_decision = 'authorized' THEN 'migration_interrupted'
+               ELSE authorization_decision
+             END,
+             updated_at = now(),
+             completed_at = COALESCE(completed_at, now()),
+             lease_expires_at = NULL
+       WHERE invocations.id IN (
+         SELECT invocation_id
+           FROM plugin_workload_sdk_runtime_reconciled_invocations
+       )
+         AND invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+
+      GET DIAGNOSTICS fenced_count = ROW_COUNT;
+      IF fenced_count <> expected_count THEN
+        RAISE EXCEPTION
+          'plugin workload SDK invocation state changed during reconciliation; retry safely';
+      END IF;
+    END
+    $$;
 
     UPDATE plugin_workload_sdk_invocation_attempts attempts
        SET status = 'failed',
@@ -2449,6 +2525,15 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
      WHERE attempts.invocation_id = reconciled.invocation_id
        AND attempts.attempt_generation = reconciled.attempt_generation
        AND attempts.status = 'in_progress';
+
+    UPDATE plugin_workload_sdk_provider_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status IN ('reserved', 'in_progress');
 
     ALTER TABLE plugin_workload_sdk_invocations
       DROP CONSTRAINT IF EXISTS plugin_workload_sdk_invocations_v2_lease_check;

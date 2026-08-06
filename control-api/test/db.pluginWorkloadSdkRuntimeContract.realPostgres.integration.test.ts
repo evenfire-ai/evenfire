@@ -26,17 +26,14 @@ async function commit(client: PoolClient): Promise<void> {
 
 describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real PostgreSQL', () => {
   const database = `control_api_sdk_contract_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
   let adminPool: Pool
   let dbPool: Pool
 
   beforeAll(async () => {
+    if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database.replace(/"/g, '""')}"`)
-    dbPool = new Pool({ connectionString })
+    dbPool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
     await initDb({ connect: () => dbPool.connect() })
   })
 
@@ -152,6 +149,23 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
             AND NOT (value ? 'prompt_bridge')
           );
       $$;
+      ALTER FUNCTION governed_trace_safe_metadata(JSONB) RESET search_path;
+      ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB) RESET search_path;
+      REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB)
+        FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+      REVOKE ALL ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+        FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+      GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB)
+        TO control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+      GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+        TO control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+      ALTER TABLE agent_run_events
+        DROP CONSTRAINT IF EXISTS agent_run_events_check;
+      ALTER TABLE agent_run_events
+        DROP CONSTRAINT IF EXISTS agent_run_events_payload_metadata_check;
+      ALTER TABLE agent_run_events
+        ADD CONSTRAINT agent_run_events_check
+        CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata));
       ALTER TABLE plugin_workload_sdk_invocations
         ALTER COLUMN contract_version SET DEFAULT 2;
       ALTER TABLE plugin_workload_sdk_invocations
@@ -160,10 +174,57 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
         DROP CONSTRAINT IF EXISTS plugin_workload_sdk_provider_attempts_status_check;
       ALTER TABLE plugin_workload_sdk_provider_attempts
         ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
-        CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable'));
+       CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable'));
       DELETE FROM schema_migrations
        WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation';
     `)
+  }
+
+  async function seedTraceEvent(
+    payloadMetadata: Record<string, unknown>,
+    prefix: string
+  ): Promise<string> {
+    const eventId = randomUUID()
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const payloadSha256 = randomBytes(32).toString('hex')
+      const occurredAt = new Date()
+      await client.query(
+        `INSERT INTO agent_run_events
+           (event_id, source_kind, source_service, source_event_id, idempotency_key,
+            run_id, span_id, origin, event_type, outcome, agent_sub, payload_metadata,
+            payload_sha256, occurred_at)
+         VALUES ($1, 'control_api_local', 'control-api', $2, $3, $4, 'span-1',
+                 'api', 'token_usage', 'succeeded', 'integration-test', $5::jsonb, $6, $7)`,
+        [
+          eventId,
+          `${prefix}-${eventId}`,
+          randomBytes(32).toString('hex'),
+          randomUUID(),
+          JSON.stringify(payloadMetadata),
+          payloadSha256,
+          occurredAt,
+        ]
+      )
+      await client.query(
+        `INSERT INTO governed_event_stream
+           (event_family, event_id, schema_version, occurred_at, ingested_at, payload_sha256)
+         VALUES ('agent_run', $1, 1, $2, $3, $4)`,
+        [eventId, occurredAt, new Date(), payloadSha256]
+      )
+      await commit(client)
+      return eventId
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        // Preserve the original assertion error.
+      }
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   function validPayload(invocationId = randomUUID(), providerAttemptId = randomUUID()) {
@@ -192,6 +253,43 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
   it('repairs the historical runtime contracts, finalizes usage, and is idempotent', async () => {
     await restoreHistoricalRuntimeState()
 
+    const historicalState = await dbPool.query<{
+      validator_config: string[] | null
+      metadata_config: string[] | null
+      trace_validator: boolean
+      workflow_validator: boolean
+      workflow_metadata: boolean
+    }>(
+      `SELECT
+          validator.proconfig AS validator_config,
+          metadata.proconfig AS metadata_config,
+          has_function_privilege('trace_maintenance_runtime', 'public.governed_trace_safe_agent_run_metadata(text,jsonb)', 'EXECUTE') AS trace_validator,
+          has_function_privilege('workflow_recipes_runtime', 'public.governed_trace_safe_agent_run_metadata(text,jsonb)', 'EXECUTE') AS workflow_validator,
+          has_function_privilege('workflow_recipes_runtime', 'public.governed_trace_safe_metadata(jsonb)', 'EXECUTE') AS workflow_metadata
+       FROM pg_proc validator
+       JOIN pg_proc metadata
+         ON metadata.proname = 'governed_trace_safe_metadata'
+        AND metadata.proargtypes::text = '3802'
+      WHERE validator.proname = 'governed_trace_safe_agent_run_metadata'
+        AND validator.proargtypes::text = '25 3802'`
+    )
+    expect(historicalState.rows[0]).toMatchObject({
+      validator_config: null,
+      metadata_config: null,
+      trace_validator: true,
+      workflow_validator: true,
+      workflow_metadata: true,
+    })
+
+    const historicalInvalidEventId = await seedTraceEvent(
+      {
+        source_kind: 'unknown',
+        input_tokens: 1,
+        output_tokens: 1,
+      },
+      'historical'
+    )
+
     const historicalClient = await dbPool.connect()
     let redInput: PromptBridgeFinalizationInput
     try {
@@ -210,6 +308,31 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       [JSON.stringify(validPayload(redInput!.invocationId, redInput!.providerAttemptId))]
     )
     expect(rejected.rows[0]?.accepted).toBe(false)
+
+    await expect(initDb({ connect: () => dbPool.connect() })).rejects.toThrow(
+      /cannot reconcile .* historical agent_run_events rows with invalid payload metadata/
+    )
+    const failedMigrationState = await dbPool.query<{ migration_count: string; row_count: string }>(
+      `SELECT
+          (SELECT COUNT(*)::text FROM schema_migrations
+            WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation') AS migration_count,
+          (SELECT COUNT(*)::text FROM agent_run_events WHERE event_id = $1) AS row_count`,
+      [historicalInvalidEventId]
+    )
+    expect(failedMigrationState.rows[0]).toEqual({ migration_count: '0', row_count: '1' })
+    const historicalCleanupClient = await dbPool.connect()
+    try {
+      await begin(historicalCleanupClient)
+      await historicalCleanupClient.query('DELETE FROM agent_run_events WHERE event_id = $1', [
+        historicalInvalidEventId,
+      ])
+      await historicalCleanupClient.query('DELETE FROM governed_event_stream WHERE event_id = $1', [
+        historicalInvalidEventId,
+      ])
+      await commit(historicalCleanupClient)
+    } finally {
+      historicalCleanupClient.release()
+    }
 
     const skippedAttempt = {
       id: randomUUID(),
@@ -292,6 +415,7 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
 
     const legacyClient = await dbPool.connect()
     const legacyInvocationId = randomUUID()
+    const legacyProviderAttemptId = randomUUID()
     try {
       await legacyClient.query(
         `INSERT INTO plugin_workload_sdk_invocations
@@ -309,6 +433,14 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
          VALUES ($1, 'sandbox-recipes', 'legacy-v2-no-lease', 1,
                  'promptBridge', '["primary-openai"]'::jsonb, 'in_progress', NULL)`,
         [legacyInvocationId]
+      )
+      await legacyClient.query(
+        `INSERT INTO plugin_workload_sdk_provider_attempts
+           (id, invocation_id, recipe_namespace, recipe_name, attempt_generation,
+            attempt_index, target_ref, provider, model, credential_slot, status)
+         VALUES ($1, $2, 'sandbox-recipes', 'legacy-v2-no-lease', 1, 1,
+                 'primary-openai', 'openai', 'gpt-4o-mini', 'openai-api-key', 'reserved')`,
+        [legacyProviderAttemptId, legacyInvocationId]
       )
     } finally {
       legacyClient.release()
@@ -331,6 +463,17 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       status: 'failed',
       authorization_decision: 'migration_interrupted',
     })
+    const repairedProviderAttempt = await dbPool.query<{
+      status: string
+      completed_at: Date | null
+    }>(
+      `SELECT status, completed_at
+         FROM plugin_workload_sdk_provider_attempts
+        WHERE id = $1`,
+      [legacyProviderAttemptId]
+    )
+    expect(repairedProviderAttempt.rows[0]?.status).toBe('failed')
+    expect(repairedProviderAttempt.rows[0]?.completed_at).not.toBeNull()
 
     const accepted = await dbPool.query<{ accepted: boolean }>(
       `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
@@ -370,11 +513,61 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
         }),
       ]
     )
+    const rejectedNullUuid = await dbPool.query<{ accepted: boolean }>(
+      `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
+      [
+        JSON.stringify({
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, invocation_id: null },
+        }),
+      ]
+    )
+    const rejectedNumericString = await dbPool.query<{ accepted: boolean }>(
+      `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
+      [
+        JSON.stringify({
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, attempt_generation: '1' },
+        }),
+      ]
+    )
+    const rejectedMissingRequired = await dbPool.query<{ accepted: boolean }>(
+      `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
+      [
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(validPayload()).filter(([key]) => key !== 'cache_tokens_reported')
+          )
+        ),
+      ]
+    )
     expect(accepted.rows[0]?.accepted).toBe(true)
     expect(rejectedTopLevel.rows[0]?.accepted).toBe(false)
     expect(rejectedNested.rows[0]?.accepted).toBe(false)
     expect(rejectedUuid.rows[0]?.accepted).toBe(false)
     expect(rejectedCount.rows[0]?.accepted).toBe(false)
+    expect(rejectedNullUuid.rows[0]?.accepted).toBe(false)
+    expect(rejectedNumericString.rows[0]?.accepted).toBe(false)
+    expect(rejectedMissingRequired.rows[0]?.accepted).toBe(false)
+
+    await expect(
+      seedTraceEvent(
+        {
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, invocation_id: null },
+        },
+        'runtime'
+      )
+    ).rejects.toThrow(/agent_run_events_check/)
+    await expect(
+      seedTraceEvent(
+        {
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, attempt_generation: '1' },
+        },
+        'runtime'
+      )
+    ).rejects.toThrow(/agent_run_events_check/)
 
     const repairedSkippedId = randomUUID()
     await dbPool.query(
@@ -385,6 +578,19 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
                'primary-openai', 'openai', 'gpt-4o-mini', 'openai-api-key', 'skipped')`,
       [repairedSkippedId, randomUUID()]
     )
+
+    const invalidLeaseInvocationId = randomUUID()
+    await expect(
+      dbPool.query(
+        `INSERT INTO plugin_workload_sdk_invocations
+           (id, recipe_namespace, recipe_name, caller_ref, method, detail,
+            idempotency_key_hash, payload_hash, status, authorization_decision,
+            contract_version, attempt_generation, lease_expires_at)
+         VALUES ($1, 'sandbox-recipes', 'invalid-v2-lease', 'integration-test',
+                 'promptBridge', '{}', $2, $3, 'in_progress', 'authorized', 2, 1, NULL)`,
+        [invalidLeaseInvocationId, randomBytes(32).toString('hex'), randomBytes(32).toString('hex')]
+      )
+    ).rejects.toThrow(/plugin_workload_sdk_invocations_v2_lease_check/)
 
     const exactClient = await dbPool.connect()
     let exactInput: PromptBridgeFinalizationInput
@@ -425,6 +631,7 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       default_value: string | null
       lease_check: string
       attempt_check: string
+      trace_check: string
     }>(
       `SELECT
           (SELECT column_default
@@ -433,15 +640,19 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
               AND table_name = 'plugin_workload_sdk_invocations'
               AND column_name = 'contract_version') AS default_value,
           (SELECT pg_get_constraintdef(oid)
-             FROM pg_constraint
+           FROM pg_constraint
             WHERE conname = 'plugin_workload_sdk_invocations_v2_lease_check') AS lease_check,
           (SELECT pg_get_constraintdef(oid)
              FROM pg_constraint
-            WHERE conname = 'plugin_workload_sdk_provider_attempts_status_check') AS attempt_check`
+            WHERE conname = 'plugin_workload_sdk_provider_attempts_status_check') AS attempt_check,
+          (SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+            WHERE conname = 'agent_run_events_check') AS trace_check`
     )
     expect(contractState.rows[0]?.default_value).toBe('1')
     expect(contractState.rows[0]?.lease_check).toContain('lease_expires_at IS NOT NULL')
     expect(contractState.rows[0]?.attempt_check).toContain("'skipped'")
+    expect(contractState.rows[0]?.trace_check).toContain('IS TRUE')
 
     const functionState = await dbPool.query<{
       validator_config: string[] | null

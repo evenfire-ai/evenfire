@@ -56,6 +56,12 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     expect(migrationSql).toContain('plugin_workload_sdk_provider_attempts_status_check')
     expect(migrationSql).toContain("'skipped'")
     expect(migrationSql).toContain('cannot reconcile % v2 invocations without leases')
+    expect(migrationSql).toContain('LOCK TABLE')
+    expect(migrationSql).toContain('agent_run_events_check')
+    expect(migrationSql).toContain('IS DISTINCT FROM TRUE')
+    expect(migrationSql).toContain('IS TRUE)')
+    expect(migrationSql).toContain('state changed during reconciliation')
+    expect(migrationSql).toContain("attempts.status IN ('reserved', 'in_progress')")
 
     const recordCalls = clientQuery.mock.calls.filter(
       ([, params]) => Array.isArray(params) && params[0] === migration?.version
@@ -77,6 +83,13 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     expect(migrationSql).toContain('WHERE key_name NOT IN')
     expect(migrationSql).toContain("'prompt_bridge'")
     expect(migrationSql).toContain("jsonb_typeof(value->'prompt_bridge') = 'object'")
+    expect(migrationSql).toContain(
+      "jsonb_typeof(value->'prompt_bridge'->'invocation_id') = 'string'"
+    )
+    expect(migrationSql).toContain(
+      "jsonb_typeof(value->'prompt_bridge'->'attempt_generation') = 'number'"
+    )
+    expect(migrationSql).toContain('COALESCE(CASE')
     expect(migrationSql).toContain("value->'prompt_bridge' ?& ARRAY[")
     expect(migrationSql).toContain(
       'FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime'
