@@ -7,6 +7,7 @@ import type {
   McpServerStatus,
   McpServerTableProps,
 } from './McpServerTable.types'
+import { type RowAction, RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { SelectionDropdown } from './SelectionDropdown'
 import { IconCable } from './Sidebar/icons'
@@ -17,6 +18,8 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
+type ConnectorSortKey = 'name' | 'enabled' | 'status'
+type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
   { key: 'expand', ariaLabel: 'Expand connector' },
@@ -51,25 +54,29 @@ function BoolBadge({
   )
 }
 
-function StatusBadge({ status }: { status?: McpServerStatus }) {
+function getStatusState(status?: McpServerStatus) {
   const conditions = status?.conditions
   const missingSecret = conditions?.find(c => c.type === 'SecretResolved' && c.status === 'False')
   const ready = conditions?.find(c => c.type === 'Ready' && c.status === 'True')
-  const state = missingSecret
-    ? 'error'
-    : ready
-      ? 'ready'
-      : conditions?.length
-        ? 'pending'
-        : 'unknown'
-  const label =
-    state === 'error'
-      ? 'Missing Secret'
-      : state === 'ready'
-        ? 'Ready'
-        : state === 'pending'
-          ? 'Pending'
-          : 'Unknown'
+  return missingSecret ? 'error' : ready ? 'ready' : conditions?.length ? 'pending' : 'unknown'
+}
+
+function getStatusLabel(status?: McpServerStatus) {
+  const state = getStatusState(status)
+  return state === 'error'
+    ? 'Missing Secret'
+    : state === 'ready'
+      ? 'Ready'
+      : state === 'pending'
+        ? 'Pending'
+        : 'Unknown'
+}
+
+function StatusBadge({ status }: { status?: McpServerStatus }) {
+  const conditions = status?.conditions
+  const missingSecret = conditions?.find(c => c.type === 'SecretResolved' && c.status === 'False')
+  const state = getStatusState(status)
+  const label = getStatusLabel(status)
   return (
     <span
       className={`cu-connector-badge cu-connector-badge--status-${state}`}
@@ -126,6 +133,8 @@ export function McpServerTable({
   loading,
 }: McpServerTableProps) {
   const [searchQuery, setSearchQuery] = useState('')
+  const [sortKey, setSortKey] = useState<ConnectorSortKey | null>(null)
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
@@ -140,38 +149,52 @@ export function McpServerTable({
   )
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
-    if (!normalizedSearch) return rows
-    return rows.filter(({ namespace, name, item, key }) => {
-      const spec = item.spec || {}
-      const access = accessByConnectorKey?.[key]
-      const accessText = [
-        ...(access?.agents ?? []),
-        ...(access?.users ?? []),
-        ...(access?.teams ?? []),
-      ]
-        .flatMap(principal => [principal.id, principal.label])
-        .join(' ')
-      const conditionText = (item.status?.conditions || [])
-        .map(condition =>
-          [condition.type, condition.status, condition.reason, condition.message].join(' ')
-        )
-        .join(' ')
-      return [
-        namespace,
-        name,
-        spec.image,
-        spec.contextRef,
-        spec.description,
-        spec.transport?.type,
-        spec.transport?.url,
-        accessText,
-        conditionText,
-      ]
-        .join(' ')
-        .toLowerCase()
-        .includes(normalizedSearch)
+    const matchingRows = !normalizedSearch
+      ? rows
+      : rows.filter(({ namespace, name, item, key }) => {
+          const spec = item.spec || {}
+          const access = accessByConnectorKey?.[key]
+          const accessText = [
+            ...(access?.agents ?? []),
+            ...(access?.users ?? []),
+            ...(access?.teams ?? []),
+          ]
+            .flatMap(principal => [principal.id, principal.label])
+            .join(' ')
+          const conditionText = (item.status?.conditions || [])
+            .map(condition =>
+              [condition.type, condition.status, condition.reason, condition.message].join(' ')
+            )
+            .join(' ')
+          return [
+            namespace,
+            name,
+            spec.image,
+            spec.contextRef,
+            spec.description,
+            spec.transport?.type,
+            spec.transport?.url,
+            accessText,
+            conditionText,
+          ]
+            .join(' ')
+            .toLowerCase()
+            .includes(normalizedSearch)
+        })
+    if (!sortKey) return matchingRows
+
+    const direction = sortDirection === 'asc' ? 1 : -1
+    return [...matchingRows].sort((left, right) => {
+      const comparison =
+        sortKey === 'name'
+          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+          : sortKey === 'enabled'
+            ? Number((left.item.spec?.enabled ?? true) === true) -
+              Number((right.item.spec?.enabled ?? true) === true)
+            : getStatusLabel(left.item.status).localeCompare(getStatusLabel(right.item.status))
+      return comparison * direction
     })
-  }, [accessByConnectorKey, normalizedSearch, rows])
+  }, [accessByConnectorKey, normalizedSearch, rows, sortDirection, sortKey])
 
   React.useEffect(() => {
     if (!onRefresh) return
@@ -187,6 +210,39 @@ export function McpServerTable({
       return next
     })
   }
+
+  function toggleSort(key: ConnectorSortKey) {
+    if (sortKey === key) {
+      setSortDirection(direction => (direction === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setSortKey(key)
+    setSortDirection('asc')
+  }
+
+  function renderSortHeader(key: ConnectorSortKey, label: string) {
+    const isActive = sortKey === key
+    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
+    const nextDirection = isActive && sortDirection === 'asc' ? 'descending' : 'ascending'
+    return (
+      <button
+        type="button"
+        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        onClick={() => toggleSort(key)}
+        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
+        aria-pressed={isActive}
+      >
+        {label} {indicator}
+      </button>
+    )
+  }
+
+  const columns = CONNECTOR_COLUMNS.map(column => {
+    if (column.key === 'name' || column.key === 'enabled' || column.key === 'status') {
+      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+    }
+    return column
+  })
 
   function contextsForConnector(name: string): ConnectorContextBinding[] {
     return contexts.filter(context => context.mcpServers.includes(name))
@@ -213,6 +269,21 @@ export function McpServerTable({
             <IconCable />
             {isInitialLoad ? 'Connectors' : `Connectors (${filteredRows.length})`}
           </>
+        }
+        titleActions={
+          onCreate ? (
+            <RowActionsMenu
+              ariaLabel="Connector actions"
+              actions={[
+                {
+                  key: 'create',
+                  label: 'Create connector',
+                  onClick: onCreate,
+                  disabled: isInitialLoad,
+                },
+              ]}
+            />
+          ) : null
         }
         subtitle="Browse connector deployments and context bindings."
         actionsClassName="cu-table-panel__actions--mcp"
@@ -243,21 +314,11 @@ export function McpServerTable({
             {onInstallFromRegistry ? (
               <button
                 type="button"
-                className="cu-btn cu-btn--secondary cu-btn--sm cu-btn--mcp-install"
+                className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
                 onClick={onInstallFromRegistry}
                 disabled={isInitialLoad}
               >
                 Install from Marketplace
-              </button>
-            ) : null}
-            {onCreate ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={onCreate}
-                disabled={isInitialLoad}
-              >
-                Create Connector
               </button>
             ) : null}
           </>
@@ -268,10 +329,10 @@ export function McpServerTable({
         <div className="cu-table-wrap cu-connectors-table-wrap">
           <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
-              <TableHeaderRow columns={CONNECTOR_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={CONNECTOR_COLUMNS.length} rows={5} />
+              <SkeletonTableRows columns={columns.length} rows={5} />
             </tbody>
           </table>
         </div>
@@ -283,7 +344,7 @@ export function McpServerTable({
         <div className="cu-table-wrap cu-connectors-table-wrap">
           <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
-              <TableHeaderRow columns={CONNECTOR_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
               {filteredRows.map(({ key, namespace, name, item }) => {

@@ -81,7 +81,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       />
     )
 
-    expect(screen.getByText('Discovery review (1)')).toBeInTheDocument()
+    expect(screen.getByText('LLM Models')).toBeInTheDocument()
     expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
 
     const reviewGroup = screen.getByRole('button', { name: 'Expand OpenAI review models' })
@@ -155,5 +155,75 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     await waitFor(() => expect(screen.getByText('+2 new')).toBeInTheDocument())
     expect(screen.queryByText('+99 new')).toBeNull()
     expect(screen.getByRole('button', { name: 'Reload discovery review' })).toBeEnabled()
+  })
+})
+
+describe('LlmDiscoveryPanel sorting', () => {
+  function rowOrder(): string[] {
+    const rows = document.querySelectorAll('tr.cu-llm-model-row')
+    return Array.from(rows).map(row => {
+      const cell = row.querySelector('td.cu-px-model')
+      return cell?.textContent?.trim() ?? ''
+    })
+  }
+
+  function expandOpenAi() {
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+  }
+
+  const discoveryModel = (overrides: Partial<LlmAllowedModel>): LlmAllowedModel => ({
+    ...reviewModel,
+    id: overrides.id ?? reviewModel.id,
+    enabled: false,
+    source: 'discovery',
+    stale: false,
+    ...overrides,
+  })
+
+  it('keeps the static LLM Models title for the discovery panel', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    expect(document.querySelector('.cu-panel-title')?.textContent).toContain('LLM Models')
+  })
+
+  it('sorts queued models by model name ascending when clicked', () => {
+    const alpha = discoveryModel({ id: 'a', model: 'alpha' })
+    const bravo = discoveryModel({ id: 'b', model: 'bravo' })
+    const charlie = discoveryModel({ id: 'c', model: 'charlie' })
+    render(
+      <LlmDiscoveryPanel
+        items={[charlie, alpha, bravo]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    expandOpenAi()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+
+    expect(rowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
+  })
+
+  it('sorts context window descending by default and pushes null values to the end', () => {
+    const small = discoveryModel({ id: 's', model: 'small', context_window_tokens: 8_000 })
+    const large = discoveryModel({ id: 'l', model: 'large', context_window_tokens: 1_000_000 })
+    const unknown = discoveryModel({ id: 'u', model: 'unknown', context_window_tokens: null })
+    render(
+      <LlmDiscoveryPanel
+        items={[small, large, unknown]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    expandOpenAi()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+
+    expect(rowOrder()).toEqual(['large', 'small', 'unknown'])
   })
 })
