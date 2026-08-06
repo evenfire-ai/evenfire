@@ -949,6 +949,7 @@ export function createRpcRouter(): Router {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
