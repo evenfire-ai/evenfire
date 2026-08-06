@@ -15,6 +15,13 @@ fail() { echo "FAIL: $1"; FAIL=1; }
 
 # Builds a stub bin dir. `docker` logs every invocation and fails any pull whose
 # ref appears in $TEST_MISSING_TAGS, which is how the missing-tag cases work.
+# A TEST_MISSING_TAGS failure is verbose on purpose -- 20 lines of fake
+# layer-progress noise followed by a distinguishing marker line -- so tests can
+# assert the real diagnostic is surfaced (not dropped) *and* trimmed (not
+# dumped in full). $TEST_FLAKY_TAGS is separate: refs listed there fail the
+# first $TEST_FLAKY_FAIL_COUNT pulls (tracked per-ref in
+# $TEST_FLAKY_COUNTER_DIR) and then succeed, which is how the
+# retries-then-succeeds cases work.
 make_stubs() {
   local d=$1
   mkdir -p "$d/bin"
@@ -23,10 +30,28 @@ make_stubs() {
 printf '%s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   pull)
+    ref="${2:-}"
     for missing in ${TEST_MISSING_TAGS:-}; do
-      if [[ "${2:-}" == "$missing" ]]; then
-        echo "Error response from daemon: manifest unknown" >&2
+      if [[ "$ref" == "$missing" ]]; then
+        for i in $(seq 1 20); do
+          echo "Downloading layer sha256:deadbeef${i} (${i}/20)" >&2
+        done
+        echo "Error response from daemon: manifest unknown: TESTMARKER-DIAG-42" >&2
         exit 1
+      fi
+    done
+    for flaky in ${TEST_FLAKY_TAGS:-}; do
+      if [[ "$ref" == "$flaky" ]]; then
+        counter_file="${TEST_FLAKY_COUNTER_DIR:?}/$(echo "$ref" | tr -c 'a-zA-Z0-9' '_').count"
+        count=0
+        [ -f "$counter_file" ] && count="$(cat "$counter_file")"
+        count=$((count + 1))
+        echo "$count" > "$counter_file"
+        if [ "$count" -le "${TEST_FLAKY_FAIL_COUNT:-1}" ]; then
+          echo "Error response from daemon: transient TLS handshake timeout (attempt ${count})" >&2
+          exit 1
+        fi
+        exit 0
       fi
     done
     exit 0
@@ -61,6 +86,12 @@ run_puller() {
   PATH="$d/bin:$PATH" \
   TEST_LOG_FILE="$d/ops.log" \
   TEST_MISSING_TAGS="${TEST_MISSING_TAGS:-}" \
+  TEST_FLAKY_TAGS="${TEST_FLAKY_TAGS:-}" \
+  TEST_FLAKY_FAIL_COUNT="${TEST_FLAKY_FAIL_COUNT:-}" \
+  TEST_FLAKY_COUNTER_DIR="${TEST_FLAKY_COUNTER_DIR:-}" \
+  MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
+  MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
+  MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
     bash "$d/repo/scripts/minikube/pull-images.sh" "$@" 2>&1
 }
 
@@ -223,6 +254,135 @@ assert_it_writes_the_image_manifest_consumers_read() {
   rm -rf "$d"
 }
 
+# ---------------------------------------------------------------------------
+# Real minikube run (2026-08-06): ghcr.io/evenfire-ai/nginx-egress-proxy:latest
+# failed transiently 24 images into a 25-image pull, aborting the whole setup.
+# A manual `docker pull` of the exact ref immediately after succeeded -- the
+# image existed, the tag existed, the failure was a one-shot network blip. The
+# three cases below cover the fixes: bounded retry, surfaced diagnostics, and
+# remediation text that never recommends the tag that just failed.
+# ---------------------------------------------------------------------------
+
+# Mutation coverage for this one: bound the retry loop at 1 attempt (`if false
+# && ...` around the retry body, or `attempt -le 1`) and this fails both ways
+# -- rc becomes nonzero (the flaky ref needed 3 attempts) and pulls drops to 1.
+assert_a_transient_pull_failure_is_retried_until_it_succeeds() {
+  local d out rc pulls
+  d="$(mktemp -d)"
+  mkdir -p "$d/flaky-counters"
+  export TEST_FLAKY_TAGS="ghcr.io/evenfire-ai/control-api:flaky-test-tag"
+  export TEST_FLAKY_FAIL_COUNT=2
+  export TEST_FLAKY_COUNTER_DIR="$d/flaky-counters"
+  export MINIKUBE_IMAGE_TAG=flaky-test-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=5
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_FLAKY_TAGS TEST_FLAKY_FAIL_COUNT TEST_FLAKY_COUNTER_DIR \
+    MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  pulls="$(grep -c '^pull ghcr\.io/evenfire-ai/control-api:flaky-test-tag$' "$d/ops.log" || true)"
+  # 2 failures + 1 success = 3 attempts logged, well inside the 5-attempt
+  # budget -- proves retry happens AND stops as soon as a pull succeeds
+  # (a mutation that always burns the full budget would log 5, not 3).
+  if [ "$rc" -eq 0 ] && [ "$pulls" -eq 3 ]; then
+    pass "a transient pull failure is retried and the pull eventually succeeds (3 attempts logged)"
+  else
+    fail "expected rc=0 and exactly 3 logged pull attempts, got rc=$rc pulls=$pulls: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Mutation coverage: an unbounded/ignored retry loop (dropping the `-le`
+# comparison, or `if false && attempt=$((attempt + 1))` on the increment)
+# either hangs this test or logs more than 3 attempts; a bound stuck at 1
+# logs 1 attempt instead of 3. Both are caught by the exact-count assertion.
+assert_a_permanently_failing_pull_stops_after_the_retry_bound() {
+  local d out rc pulls
+  d="$(mktemp -d)"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:permafail-test-tag"
+  export MINIKUBE_IMAGE_TAG=permafail-test-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=3
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_MISSING_TAGS MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  pulls="$(grep -c '^pull ghcr\.io/evenfire-ai/control-api:permafail-test-tag$' "$d/ops.log" || true)"
+  if [ "$rc" -ne 0 ] && [ "$pulls" -eq 3 ]; then
+    pass "a permanently failing pull is retried exactly MINIKUBE_IMAGE_PULL_RETRIES times, then reported failed"
+  else
+    fail "expected rc!=0 and exactly 3 logged pull attempts, got rc=$rc pulls=$pulls: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Mutation coverage: wrap the diagnostic-printing block in `if false && ...`
+# (marker_hits drops to 0) or replace `tail -n 5` with `cat` / no trim at all
+# (filler_hits jumps from a handful to 20) -- either mutation is caught.
+assert_a_pull_failure_surfaces_the_captured_diagnostic_trimmed() {
+  local d out marker_hits filler_hits
+  d="$(mktemp -d)"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:diag-test-tag"
+  export MINIKUBE_IMAGE_TAG=diag-test-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller "$d" --only=control-api)"
+  unset TEST_MISSING_TAGS MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  marker_hits="$(grep -c 'TESTMARKER-DIAG-42' <<< "$out" || true)"
+  filler_hits="$(grep -c 'Downloading layer' <<< "$out" || true)"
+  if [ "$marker_hits" -ge 1 ] && [ "$filler_hits" -ge 1 ] && [ "$filler_hits" -le 5 ]; then
+    pass "the real docker diagnostic is surfaced, trimmed rather than dumped in full"
+  else
+    fail "expected the marker line present and filler trimmed to <=5 lines; got marker_hits=$marker_hits filler_hits=$filler_hits: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The exact bug from the real run: MINIKUBE_IMAGE_TAG=latest failed, and the
+# script told the operator to retry with `MINIKUBE_IMAGE_TAG=latest`.
+# Mutation coverage: drop the `[ "$IMAGE_TAG" != "latest" ]` guard (or invert
+# it to `==`) and the forbidden string reappears in the output.
+assert_a_failure_at_the_latest_override_never_suggests_the_tag_that_just_failed() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:latest"
+  export MINIKUBE_IMAGE_TAG=latest
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_MISSING_TAGS MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  if [ "$rc" -ne 0 ] \
+     && grep -q "came from the MINIKUBE_IMAGE_TAG override" <<< "$out" \
+     && ! grep -q "MINIKUBE_IMAGE_TAG=latest" <<< "$out"; then
+    pass "a failure at the 'latest' override never advises retrying with the tag that just failed"
+  else
+    fail "expected rc!=0, the tag-origin line, and no 'MINIKUBE_IMAGE_TAG=latest' suggestion; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The real-run shape: 24 of 25 images pulled fine at the tag and only one
+# failed, which proves the tag exists. Mutation coverage: swap the branch
+# condition (`-gt 0` -> `-eq 0`, or `if false && ...` around it) and the
+# missing-tag remediation (or its "latest" line) leaks back in even though
+# other images plainly succeeded at this exact tag.
+assert_a_partial_failure_says_the_tag_exists_and_advises_a_retry() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/nginx-egress-proxy:partial-fail-tag"
+  export MINIKUBE_IMAGE_TAG=partial-fail-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller "$d")"; rc=$?
+  unset TEST_MISSING_TAGS MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  if [ "$rc" -ne 0 ] \
+     && grep -qi "pulled fine at" <<< "$out" \
+     && ! grep -q "MINIKUBE_IMAGE_TAG=latest" <<< "$out" \
+     && ! grep -qi "has not been promoted yet" <<< "$out"; then
+    pass "a partial failure says other images pulled fine at the tag and advises a retry, not a missing-tag remediation"
+  else
+    fail "expected rc!=0, 'pulled fine at' messaging, and no missing-tag remediation; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pull-images.sh"
@@ -244,6 +404,11 @@ assert_the_alias_honours_local_tag_and_local_name
 assert_a_missing_tag_names_the_tag_and_the_override
 assert_minikube_image_tag_overrides_the_pin
 assert_it_writes_the_image_manifest_consumers_read
+assert_a_transient_pull_failure_is_retried_until_it_succeeds
+assert_a_permanently_failing_pull_stops_after_the_retry_bound
+assert_a_pull_failure_surfaces_the_captured_diagnostic_trimmed
+assert_a_failure_at_the_latest_override_never_suggests_the_tag_that_just_failed
+assert_a_partial_failure_says_the_tag_exists_and_advises_a_retry
 assert_every_defined_case_is_invoked
 
 exit $FAIL

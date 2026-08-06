@@ -20,6 +20,15 @@
 #   MINIKUBE_PROFILE          Target profile (default: clerum-test)
 #   MINIKUBE_MULTI_NODE       true -> pull on the host + `minikube image load`
 #   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6)
+#   MINIKUBE_IMAGE_PULL_RETRIES     Attempts per image before it is reported
+#                             failed (default: 3). A transient registry blip
+#                             (one bad pull 24 images into a run) should not
+#                             abort the whole setup. Mirrors the naming and
+#                             defaults of build-images.sh's
+#                             MINIKUBE_BASE_IMAGE_PULL_RETRIES, applied here to
+#                             the ghcr application-image pull instead of
+#                             Dockerfile base images.
+#   MINIKUBE_IMAGE_PULL_DELAY_SECS  Delay between failed attempts (default: 5).
 #
 # Two behaviours here are load-bearing; do not "optimize" them away:
 #
@@ -49,6 +58,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}"
 PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-6}"
+MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-3}"
+MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-5}"
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
 COMPONENT="${PROJECT_DIR}/deploy/components/ghcr-images/kustomization.yaml"
 ONLY_SVC=""
@@ -135,13 +146,40 @@ STATUS_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$STATUS_DIR"; }
 trap cleanup EXIT
 
+# ---- Bounded retry for one pull ------------------------------------------
+# A transient registry blip (one bad pull 24 images into a run) should not
+# read the same as a tag that genuinely does not exist. Mirrors
+# build-images.sh's pull_host_image_with_retry: same attempt-count/delay
+# shape and the same defaults, applied here to the ghcr application-image
+# pull instead of a Dockerfile base image.
+#
+# Every attempt is a real `docker pull` -- retrying never turns into "skip if
+# present"; see header note 1. out_file is truncated on each attempt, so on
+# final failure it holds only the last attempt's diagnostic, not a pile-up of
+# every prior one.
+pull_with_retry() {
+  local ref="$1" out_file="$2"
+  local attempt=1
+  while [ "$attempt" -le "$MINIKUBE_IMAGE_PULL_RETRIES" ]; do
+    if docker pull "$ref" >"$out_file" 2>&1; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$MINIKUBE_IMAGE_PULL_RETRIES" ]; then
+      warn "Pull failed for ${ref} (attempt ${attempt}/${MINIKUBE_IMAGE_PULL_RETRIES}); retrying in ${MINIKUBE_IMAGE_PULL_DELAY_SECS}s"
+      sleep "$MINIKUBE_IMAGE_PULL_DELAY_SECS"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 # ---- One image ----------------------------------------------------------
 pull_one() {
   local name="$1" local_ref="$2" slot="$3"
   local ghcr_ref="${GHCR_NAMESPACE}/${name}:${IMAGE_TAG}"
 
   # Always pull. Never skip a present tag -- see the header.
-  if ! docker pull "$ghcr_ref" >"${STATUS_DIR}/${slot}.out" 2>&1; then
+  if ! pull_with_retry "$ghcr_ref" "${STATUS_DIR}/${slot}.out"; then
     printf '%s' "$ghcr_ref" > "${STATUS_DIR}/${slot}.failed"
     return 0
   fi
@@ -190,27 +228,59 @@ fi
 
 # ---- Report -------------------------------------------------------------
 FAILED=()
+FAILED_SLOTS=()
 for f in "${STATUS_DIR}"/*.failed; do
   [ -e "$f" ] || continue
   FAILED+=("$(cat "$f")")
+  FAILED_SLOTS+=("$(basename "$f" .failed)")
 done
 
+DONE_COUNT=0
 for f in "${STATUS_DIR}"/*.done; do
   [ -e "$f" ] || continue
+  DONE_COUNT=$((DONE_COUNT + 1))
   ok "$(cut -f1 "$f") -> $(cut -f2 "$f")"
 done
 
 if [ "${#FAILED[@]}" -gt 0 ]; then
   echo ""
   err "${#FAILED[@]} of ${selected} image(s) could not be pulled at tag '${IMAGE_TAG}':"
+  idx=0
   for ref in "${FAILED[@]}"; do
     err "  ${ref}"
+    # Surface the diagnostic docker already captured instead of discarding it.
+    # A transient network error and a missing tag both print just the ref
+    # here; the "why" only exists in the captured output. Trimmed to the last
+    # few lines -- layer-progress noise can run to hundreds of lines per
+    # image, and several images can fail at once.
+    out_file="${STATUS_DIR}/${FAILED_SLOTS[$idx]}.out"
+    if [ -s "$out_file" ]; then
+      while IFS= read -r diag_line; do
+        err "      ${diag_line}"
+      done < <(tail -n 5 "$out_file")
+    fi
+    idx=$((idx + 1))
   done
   echo "" >&2
   err "The tag '${IMAGE_TAG}' came from the ${TAG_ORIGIN}."
-  err "If '${IMAGE_TAG}' has not been promoted yet (the release-prep commit reaches main"
-  err "BEFORE the tag is cut and the images are promoted), pull a tag that exists:"
-  err "    MINIKUBE_IMAGE_TAG=latest make minikube-setup"
+  if [ "$DONE_COUNT" -gt 0 ]; then
+    # Other images pulled fine at this exact tag, so the tag itself is not in
+    # question -- this is a per-image failure (registry blip, timeout), not a
+    # tag that hasn't been promoted yet.
+    err "${DONE_COUNT} other image(s) pulled fine at '${IMAGE_TAG}', so the tag exists;"
+    err "the failure(s) above look transient. Retry:"
+    err "    make minikube-setup"
+  elif [ "$IMAGE_TAG" != "latest" ]; then
+    err "If '${IMAGE_TAG}' has not been promoted yet (the release-prep commit reaches main"
+    err "BEFORE the tag is cut and the images are promoted), pull a tag that exists:"
+    err "    MINIKUBE_IMAGE_TAG=latest make minikube-setup"
+  else
+    # IMAGE_TAG is already 'latest' and every selected image failed -- do not
+    # recommend the tag that just failed (verbatim from a real run).
+    err "Every selected image failed at '${IMAGE_TAG}', which is already the widest tag;"
+    err "this does not look like an unpromoted tag. Retry, or check registry/network access:"
+    err "    make minikube-setup"
+  fi
   err "Or build everything locally instead:"
   err "    make minikube-setup-local"
   exit 1
