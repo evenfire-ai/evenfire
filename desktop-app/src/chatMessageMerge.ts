@@ -254,35 +254,60 @@ export function mergeAuthoritativeServerMessages(
       candidateTurns.add(messageServerTurnNumber(candidate)!)
     }
 
-    // Idle echo collapse, gated by content (§6.1, R2-H1). When no incoming server
-    // row of this role is free to host the idle optimistic (candidateTurns empty)
-    // AND it is bracketed on both sides by numbered turns (slot saturation — the
-    // core case is the consecutive same-role sandwich Q = P + 1), the bubble is
-    // the residual echo of an already-materialised numbered turn. We drop it
-    // (drop-only) ONLY when its content matches a numbered neighbour of the same
-    // role that is already in the output — so its text still survives in that
-    // numbered row and nothing observable is lost. We compare against `next` first
+    // Idle echo collapse, gated by content against the AUTHORITATIVE incoming row
+    // that fills the neighbour slot (§6.1, R2-H1). When no incoming server row of
+    // this role is free to host the idle optimistic (candidateTurns empty) AND it is
+    // bracketed on both sides by numbered turns (slot saturation — the core case is
+    // the consecutive same-role sandwich Q = P + 1), the bubble is the residual echo
+    // of an already-materialised numbered turn. We drop it (drop-only) ONLY when its
+    // content matches the AUTHORITATIVE incoming row of the same role that fills the
+    // neighbour's (turn, role) slot — NOT the numbered neighbour taken from
+    // `existing`, which can be stale: the row that actually lands in that output slot
+    // comes from `incoming` (the first loop replaces the disk row with it), and their
+    // content can diverge for the same slot (the assistant `response` evolves via
+    // streaming / server-side reformat). Comparing against the stale disk neighbour
+    // gives a false-equal and drops a local whose text is NOT in the output. Comparing
+    // against the incoming row that actually occupies the slot makes the drop safe by
+    // construction: that row survives verbatim (prop #1; preferredServerMessage never
+    // rewrites content), so L's text is present in the output. We check `next` first
     // (the higher turn, the R2-H1 echo semantics) and fall back to `prev`.
+    //
+    // We do NOT additionally require Q = P + 1: the content-vs-authoritative gate
+    // already makes every drop loss-safe, so narrowing to strict adjacency closes no
+    // loss path — and it WOULD reintroduce a permanent duplicate in the saturated-gap
+    // case (I-2: Q > P+1 with every in-between slot already numbered), where the echo
+    // must still collapse. So the branch stays general over `candidateTurns.size === 0`.
     //
     // The content gate is what makes this safe versus a content-blind positional
     // rule: an orphan of a task that never registered a server turn (cancelled-in-
     // queue, budget-denied, persistTurnStart failure — verified in mcp-host) stays
     // turnless idle non-durable and, with divergent content, is NOT collapsed, so
-    // no local text is lost. Declared residual FP: a user message whose content is
-    // identical to an adjacent same-role numbered turn AND is an orphan of a
-    // turn-less task is dropped — a rare loss of a duplicate-content message,
-    // unavoidable without an identity discriminator the server does not provide.
+    // no local text is lost. Declared residual FP: a message whose content is
+    // identical to the adjacent same-role AUTHORITATIVE turn AND is an orphan of a
+    // turn-less task is dropped as a visual duplicate — but its text still survives
+    // verbatim in that authoritative row, so no local text is lost. The residual FP
+    // is only the collapse of a duplicate bubble, unavoidable without an identity
+    // discriminator the server does not provide.
     if (candidateTurns.size === 0) {
       const previousNumbered = previousNumberedMessages[index]
       const nextNumbered = nextNumberedMessages[index]
       if (previousNumbered && nextNumbered) {
-        const echoNeighbour =
-          nextNumbered.role === message.role && nextNumbered.content === message.content
-            ? nextNumbered
-            : previousNumbered.role === message.role && previousNumbered.content === message.content
-              ? previousNumbered
+        const authoritativeSlotRow = (neighbour: ChatMessage): ChatMessage | undefined => {
+          const neighbourTurn = messageServerTurnNumber(neighbour)
+          return authoritative.find(
+            server =>
+              server.role === message.role && messageServerTurnNumber(server) === neighbourTurn
+          )
+        }
+        const nextAuthoritative = authoritativeSlotRow(nextNumbered)
+        const previousAuthoritative = authoritativeSlotRow(previousNumbered)
+        const echoRow =
+          nextAuthoritative?.content === message.content
+            ? nextAuthoritative
+            : previousAuthoritative?.content === message.content
+              ? previousAuthoritative
               : undefined
-        if (echoNeighbour) dropLocalEcho(message)
+        if (echoRow) dropLocalEcho(message)
       }
       continue
     }

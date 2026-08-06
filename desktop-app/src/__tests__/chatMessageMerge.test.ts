@@ -1304,6 +1304,49 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
     expect(reMerge.map(m => m.id)).toEqual(['turn-1-user', 'turn-2-user'])
   })
 
+  it('compares the idle echo against the authoritative incoming row, not the stale disk neighbour (STALE/FRESH)', () => {
+    // Regression for the R2-H1 content-gate defect: the collapse gate must compare
+    // the idle local against the AUTHORITATIVE incoming row that fills the neighbour
+    // slot, not against the stale numbered neighbour from `existing`. Here the disk
+    // turn-2-user still holds the pre-reconcile text 'STALE'; incoming carries the
+    // fresh 'FRESH' for that same slot. The idle optimistic content 'STALE' equals
+    // the STALE disk neighbour but NOT the FRESH authoritative row that actually
+    // lands in the output. Dropping it would erase local text that is nowhere in the
+    // output. Server rows are derived from the real producer (T1).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'A', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'FRESH', started_at: new Date(3).toISOString() },
+    ])
+    const existing: ChatMessage[] = [
+      { id: 'turn-1-user', role: 'user', content: 'A', timestamp: 1, serverTurnNumber: 1 },
+      {
+        id: 'optimistic-stale',
+        role: 'user',
+        content: 'STALE',
+        timestamp: 2,
+        task_id: 'done-task',
+      },
+      { id: 'turn-2-user', role: 'user', content: 'STALE', timestamp: 2, serverTurnNumber: 2 },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+    const ids = merged.map(m => m.id)
+
+    // The local's text must survive: the optimistic is not dropped, because its
+    // content matches neither authoritative neighbour (turn-1='A', turn-2='FRESH').
+    expect(ids).toContain('optimistic-stale')
+    expect(merged.find(m => m.id === 'optimistic-stale')).toEqual(
+      expect.objectContaining({ content: 'STALE' })
+    )
+    // 'STALE' text is present in the output at least once (via the surviving local).
+    expect(merged.some(m => m.content === 'STALE')).toBe(true)
+    // Non-reintroduction of R1-B1: both authoritative rows survive, carrying FRESH.
+    expect(ids).toEqual(expect.arrayContaining(['turn-1-user', 'turn-2-user']))
+    expect(merged.find(m => m.id === 'turn-2-user')?.content).toBe('FRESH')
+  })
+
   it('does NOT drop an idle orphan whose content diverges from its numbered neighbours (gate (b))', () => {
     // The key test of remediation (b): an accepted task that never registered a
     // server turn (cancelled-in-queue / budget-denied / persistTurnStart failure,
@@ -1363,14 +1406,21 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
     const scenarioArb = fc.record({
       start: fc.integer({ min: 1, max: 6 }),
       role: fc.constantFrom<'user' | 'assistant'>('user', 'assistant'),
-      // true -> echo (content mirrors the higher numbered neighbour), false -> orphan.
-      isEcho: fc.boolean(),
+      // fresh-echo -> content mirrors the AUTHORITATIVE incoming row (collapses when
+      //   idle); stale-echo -> content mirrors a STALE disk neighbour that diverges
+      //   from incoming for the same slot (must NOT collapse — its text is nowhere
+      //   in the output otherwise); orphan -> content matches neither (survives).
+      bubbleMode: fc.constantFrom<'fresh-echo' | 'stale-echo' | 'orphan'>(
+        'fresh-echo',
+        'stale-echo',
+        'orphan'
+      ),
       // If active, the bubble is optimistic-live and must never collapse (I-5).
       active: fc.boolean(),
     })
 
     fc.assert(
-      fc.property(scenarioArb, ({ start, role, isEcho, active }) => {
+      fc.property(scenarioArb, ({ start, role, bubbleMode, active }) => {
         const turns = [
           { number: start, user_input: `q${start}`, started_at: new Date(start).toISOString() },
           {
@@ -1386,7 +1436,21 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
         const numbered = turnsToChatMessages(turns).filter(m => m.role === role)
         if (numbered.length !== 2) return
         const [low, high] = numbered
-        const bubbleContent = isEcho ? high!.content : `orphan-${start}`
+        const incoming = numbered
+        // The disk copy of the higher numbered neighbour. In stale-echo it carries a
+        // pre-reconcile text that diverges from the authoritative incoming row for the
+        // same (turn, role) slot; the first loop replaces it with the fresh incoming
+        // row in the output, so a gate comparing against this disk row would false-
+        // match and drop a local whose text never reaches the output.
+        const staleContent = `stale-${start + 1}`
+        const diskHigh: ChatMessage =
+          bubbleMode === 'stale-echo' ? { ...high!, content: staleContent } : high!
+        const bubbleContent =
+          bubbleMode === 'fresh-echo'
+            ? high!.content
+            : bubbleMode === 'stale-echo'
+              ? staleContent
+              : `orphan-${start}`
         const bubble: ChatMessage = {
           id: 'sandwiched-bubble',
           role,
@@ -1394,20 +1458,27 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
           timestamp: 999,
           task_id: 'the-task',
         }
-        const existing: ChatMessage[] = [low!, bubble, high!]
-        const incoming = numbered
+        const existing: ChatMessage[] = [low!, bubble, diskHigh]
 
         const activeTaskIds = active ? new Set(['the-task']) : new Set<string>()
         const merged = mergeAuthoritativeServerMessages(existing, incoming, { activeTaskIds })
         const ids = merged.map(m => m.id)
 
-        // Prop #7 liveness: an idle content-echo collapses; a live bubble (I-5) and
-        // a content-divergent orphan both survive (gate (b) — no local text lost).
-        if (isEcho && !active) {
+        // Prop #7 liveness: ONLY an idle bubble whose content matches the AUTHORITATIVE
+        // incoming row collapses. A live bubble (I-5), a content-divergent orphan, and
+        // a stale-echo (matches the disk neighbour but not incoming) all survive —
+        // gate (b) plus the authoritative-comparison fix: no local text is lost.
+        if (bubbleMode === 'fresh-echo' && !active) {
           expect(ids).not.toContain('sandwiched-bubble')
         } else {
           expect(ids).toContain('sandwiched-bubble')
+          // The surviving bubble keeps its original text in the output.
+          expect(merged.find(m => m.id === 'sandwiched-bubble')?.content).toBe(bubbleContent)
         }
+        // The authoritative higher turn always lands with its FRESH content.
+        expect(merged.find(m => m.serverTurnNumber === start + 1 && m.role === role)?.content).toBe(
+          high!.content
+        )
 
         // Prop #1: no numbered server row is ever suppressed (R1-B1 guard).
         for (const server of incoming) {
