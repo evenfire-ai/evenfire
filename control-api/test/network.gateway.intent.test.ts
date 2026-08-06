@@ -333,6 +333,16 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
+  it('keeps the profile-control-funnel body cap at gfsc write-cap parity (24MiB)', () => {
+    const configmaps = read(`${BASE}/profiles/configmaps.yaml`)
+    const funnelConf = docContaining(yamlDocs(configmaps), 'name: profile-control-funnel-nginx')
+    // nginx defaults client_max_body_size to 1m. Without an explicit cap the
+    // me-path (external-rest-api → funnel → control-api) 413s GFS uploads at
+    // ~1MB, far below the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES = 25165824,
+    // 24MiB) that the operator path already honors end to end.
+    expect(funnelConf).toContain('client_max_body_size 25165824;')
+  })
+
   it('keeps the Minikube control-api Marketplace on the shared registry', () => {
     const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
 

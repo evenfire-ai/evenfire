@@ -24,6 +24,13 @@ data:
 
       resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
 
+      # nginx defaults client_max_body_size to 1m, which 413s me-path GFS
+      # uploads (base64-in-JSON) at ~1MB. Homologate with the gfsc write cap
+      # (GFS_MAX_WRITE_BODY_BYTES = 25165824 bytes, 24MiB) so the me-path
+      # accepts the same payloads the operator path already does; gfsc remains
+      # the authoritative size gate downstream.
+      client_max_body_size 25165824;
+
       server {
         listen 8080;
 
