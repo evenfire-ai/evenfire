@@ -393,7 +393,11 @@ if [ "$VERIFY_ONLY" = true ]; then
     sha=$(minikube_image_id "$img")
     if [ "$sha" = "NOT_FOUND" ]; then
       err "MISSING: ${img}"
-      ((fail_count++))
+      # NOT ((fail_count++)): post-increment evaluates to the OLD value, so the
+      # first miss (0) makes the arithmetic command exit 1 and `set -e` aborts
+      # the loop. That reports ONE missing image when several are missing, and
+      # sends you round the pull/verify loop once per image.
+      fail_count=$((fail_count + 1))
     else
       ok "${img} (${sha:7:12})"
     fi
