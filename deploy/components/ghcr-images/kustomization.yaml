@@ -86,12 +86,6 @@ images:
   - name: clerum/workspace-files-controller
     newName: ghcr.io/evenfire-ai/workspace-files-controller
     newTag: v0.6.0
-  - name: clerum/airtable-mcp-server
-    newName: ghcr.io/evenfire-ai/airtable-mcp-server
-    newTag: v0.6.0
-  - name: clerum/web-search-mcp
-    newName: ghcr.io/evenfire-ai/web-search-mcp
-    newTag: v0.6.0
   - name: clerum/mock-mcp-server
     newName: ghcr.io/evenfire-ai/mock-mcp-server
     newTag: v0.6.0

@@ -768,13 +768,12 @@ elif [ "$IMAGE_SOURCE" = ghcr ]; then
   bash "${SCRIPT_DIR}/build-images.sh" --public-only
   ok "Public base images loaded"
 
-  # The three published:false images (workflow-custom-sdk-e2e,
-  # workflow-plugin-sdk-e2e, doc-generator-mcp) have no ghcr counterpart.
-  # doc-generator-mcp is an ordinary MCP server the default path needs; the two
-  # fixtures are E2E-only and are built by `make minikube-setup-e2e` instead.
-  log "Building the unpublished image doc-generator-mcp locally..."
-  bash "${SCRIPT_DIR}/build-images.sh" --only=doc-generator-mcp
-  ok "doc-generator-mcp built"
+  # No local build runs on this path any more. The published:false images
+  # (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e, doc-generator-mcp) have
+  # no ghcr counterpart, and all three are now built only by the path that
+  # actually needs them: the two fixtures by `make minikube-setup-e2e`, and
+  # doc-generator-mcp by nothing at all -- the registry distributes it and
+  # installs it on demand, so no cluster manifest names its local ref.
 
   log "Pulling published images (${EFFECTIVE_IMAGE_TAG}) into minikube..."
   # `${MINIKUBE_MULTI_NODE:-false}`, not `$MINIKUBE_MULTI_NODE`: this script
@@ -942,6 +941,20 @@ ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
 # instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
 # so its non-empty mcpServers list wins over the empty default.
 if [ "$SEED_PROFILE" = "e2e" ]; then
+  # airtable-server.yaml names the LOCAL ref clerum/airtable-mcp-server:test,
+  # and this directory is applied with `kubectl apply -f` -- outside kustomize,
+  # so the ghcr component never rewrites it -- while HCC forces
+  # imagePullPolicy=IfNotPresent on minikube. That ref must therefore already
+  # be in the daemon, and minikube setup no longer acquires it: the registry
+  # distributes MCP servers and installs them on demand, so airtable-mcp-server
+  # is deployed_to_minikube:false and is neither built nor pulled by default.
+  # Build it here, gated on the one branch that consumes it, rather than paying
+  # for it on every setup.
+  log "Building the optional Airtable MCP image for the E2E demo instance..."
+  MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true \
+    bash "${SCRIPT_DIR}/build-images.sh" --only=airtable-mcp-server
+  ok "airtable-mcp-server built"
+
   log "Applying E2E demo MCP server instances..."
   $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
   ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"

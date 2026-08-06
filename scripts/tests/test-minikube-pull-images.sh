@@ -83,6 +83,15 @@ run_puller() {
   mkdir -p "$d/repo"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
+  run_puller_prepared "$d" "$@"
+}
+
+# The second half of run_puller, for cases that must patch the throwaway tree
+# (deploy/images.json) between the copy and the run. Splitting it is what keeps
+# the stub/env wiring in ONE place: a copy-pasted invocation would drift from
+# run_puller's the first time a variable is added here.
+run_puller_prepared() {
+  local d=$1; shift
   PATH="$d/bin:$PATH" \
   TEST_LOG_FILE="$d/ops.log" \
   TEST_MISSING_TAGS="${TEST_MISSING_TAGS:-}" \
@@ -145,15 +154,17 @@ assert_it_repulls_a_tag_already_present_in_the_daemon() {
   rm -rf "$d"
 }
 
-# Six pull_in_ghcr_mode images have no overlay row and are consumed under their
-# local clerum/ names by McpServer CRD instances and E2E scripts.
+# Four pull_in_ghcr_mode images have no overlay row and are consumed under their
+# local clerum/ names by McpServer CRD instances and E2E scripts. mock-mcp-server
+# is the load-bearing one: the minikube registry catalog seed publishes the
+# mcp-airtable entry with imageRef clerum/mock-mcp-server:test, so the registry
+# install specs resolve to that alias.
 assert_it_aliases_each_image_to_its_local_ref() {
   local d out missing
   d="$(mktemp -d)"
   out="$(run_puller "$d")"
   missing=""
-  for ref in clerum/airtable-mcp-server:test clerum/web-search-mcp:v1 \
-             clerum/mock-mcp-server:test clerum/mock-stdio-mcp-server:test \
+  for ref in clerum/mock-mcp-server:test clerum/mock-stdio-mcp-server:test \
              clerum/mcp-host-slim:test clerum/mcp-host-full:test \
              clerum/control-api:test; do
     grep -q "^tag ghcr\.io/evenfire-ai/[a-z0-9.:-]* ${ref}\$" "$d/ops.log" || missing+=" $ref"
@@ -166,16 +177,76 @@ assert_it_aliases_each_image_to_its_local_ref() {
   rm -rf "$d"
 }
 
-# web-search-mcp uses local_tag v1, not test. Hardcoding :test here would break
-# every McpServer instance that names it.
+# The alias must come from localRef(), which honours local_name and local_tag,
+# not from a hardcoded `clerum/<name>:test`. Getting this wrong breaks every
+# McpServer instance that names the image.
+#
+# This used to ride on web-search-mcp (local_tag v1). No pull_in_ghcr_mode image
+# carries a local_name/local_tag override any more -- the two that did are
+# registry-distributed and deployed_to_minikube:false now, and playwright-server
+# (local_name) never was in the minikube set. Rather than delete the only
+# coverage localRef() has on this path, the row is INJECTED into the throwaway
+# manifest: the assertion still runs the real script through the real reader,
+# and it now fails for a name override as well as a tag override, which the
+# web-search-mcp version never checked.
 assert_the_alias_honours_local_tag_and_local_name() {
   local d out
   d="$(mktemp -d)"
-  out="$(run_puller "$d" --only=web-search-mcp)"
-  if grep -q '^tag ghcr\.io/evenfire-ai/web-search-mcp:[^ ]* clerum/web-search-mcp:v1$' "$d/ops.log"; then
-    pass "the alias uses localRef(), honouring local_tag"
+  make_stubs "$d"
+  mkdir -p "$d/repo"
+  cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
+  cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
+
+  # Append a published+deployed row whose local ref differs from its name in
+  # BOTH dimensions. node, not sed: the manifest is JSON and a text patch would
+  # silently produce something the reader rejects.
+  if ! node -e '
+    const fs = require("node:fs")
+    const p = process.argv[1]
+    const m = JSON.parse(fs.readFileSync(p, "utf8"))
+    m.images.push({
+      name: "alias-probe",
+      path: "alias-probe",
+      source_paths: ["alias-probe/**"],
+      local_name: "renamed-alias-probe",
+      local_tag: "v9",
+      published: true,
+      deployed_to_minikube: true,
+    })
+    fs.writeFileSync(p, JSON.stringify(m, null, 2))
+  ' "$d/repo/deploy/images.json"; then
+    fail "could not inject the alias-probe row into the throwaway manifest"
+    rm -rf "$d"
+    return
+  fi
+
+  out="$(run_puller_prepared "$d" --only=alias-probe)"
+  if grep -q '^tag ghcr\.io/evenfire-ai/alias-probe:[^ ]* clerum/renamed-alias-probe:v9$' "$d/ops.log"; then
+    pass "the alias uses localRef(), honouring local_name and local_tag"
   else
-    fail "web-search-mcp was not aliased to clerum/web-search-mcp:v1: $out"
+    fail "alias-probe was not aliased to clerum/renamed-alias-probe:v9: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The regression this whole change is about: minikube setup must neither build
+# nor PULL the registry-distributed MCP servers. This is the pull half.
+#
+# Spelled out by name rather than re-derived from pullInGhcrMode(): a test that
+# recomputes the production rule passes no matter what the rule says.
+assert_it_never_pulls_a_registry_distributed_mcp_server() {
+  local d out bad aliased
+  d="$(mktemp -d)"
+  out="$(run_puller "$d")"
+  bad="$(grep -E '^pull ghcr\.io/evenfire-ai/(airtable-mcp-server|web-search-mcp|doc-generator-mcp):' "$d/ops.log" || true)"
+  # The alias is the other half: a `docker tag` onto clerum/airtable-mcp-server
+  # would put the image in the daemon under the exact name the old McpServer
+  # instance expects, hiding the removal from every consumer.
+  aliased="$(grep -E '^tag [^ ]+ clerum/(airtable-mcp-server|web-search-mcp|doc-generator-mcp):' "$d/ops.log" || true)"
+  if [ -z "$bad" ] && [ -z "$aliased" ]; then
+    pass "no registry-distributed MCP server was pulled or aliased"
+  else
+    fail "registry-distributed MCP server acquired: ${bad}${aliased}"
   fi
   rm -rf "$d"
 }
@@ -398,6 +469,7 @@ assert_every_defined_case_is_invoked() {
 
 assert_it_pulls_every_pull_in_ghcr_mode_image
 assert_it_never_pulls_an_unpublished_image
+assert_it_never_pulls_a_registry_distributed_mcp_server
 assert_it_repulls_a_tag_already_present_in_the_daemon
 assert_it_aliases_each_image_to_its_local_ref
 assert_the_alias_honours_local_tag_and_local_name

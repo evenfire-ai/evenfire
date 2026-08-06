@@ -152,14 +152,14 @@ assert_a_recorded_local_build_is_verified_locally_despite_the_ghcr_default() {
 }
 
 # The other direction, so the fix cannot be "always verify local refs": the
-# daemon holds the ghcr refs (plus doc-generator-mcp, which is built locally on
-# both paths) and IMAGE_SOURCE=local is explicitly in the environment.
+# daemon holds exactly the ghcr refs and IMAGE_SOURCE=local is explicitly in
+# the environment.
 assert_a_recorded_ghcr_pull_is_verified_against_ghcr_despite_a_local_env() {
   local d out rc present
   d="$(mktemp -d)"
   prepare_repo "$d"
   write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
-  present="$(all_ghcr_refs)"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs)"
   out="$(IMAGE_SOURCE=local run_verify "$d" "$present")"; rc=$?
   if [ "$rc" -eq 0 ] \
      && grep -q "ghcr\.io/evenfire-ai/control-api:${PIN_TAG}" <<< "$out" \
@@ -237,7 +237,7 @@ assert_a_pulled_cluster_is_told_to_pull_at_the_named_tag() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
-  present="$(all_ghcr_refs | grep -v "^ghcr.io/evenfire-ai/control-api:${PIN_TAG}\$")"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs | grep -v "^ghcr.io/evenfire-ai/control-api:${PIN_TAG}\$")"
   out="$(run_verify "$d" "$present")"; rc=$?
   if [ "$rc" -ne 0 ] \
      && grep -q "MISSING: ghcr\.io/evenfire-ai/control-api:${PIN_TAG}" <<< "$out" \
@@ -267,7 +267,7 @@ assert_the_puller_records_ghcr_and_the_verifier_reads_it_back() {
   if [ "$pull_rc" -ne 0 ]; then
     fail "the stubbed pull run failed: $(cat "$d/pull.out")"; rm -rf "$d"; return 0
   fi
-  present="$(all_ghcr_refs)"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs)"
   out="$(IMAGE_SOURCE=local run_verify "$d" "$present")"; rc=$?
   if [ "$rc" -eq 0 ] && grep -q "ghcr\.io/evenfire-ai/control-api:${PIN_TAG}" <<< "$out"; then
     pass "pull-images.sh records ghcr and --verify-only verifies ghcr refs off it"
@@ -340,25 +340,68 @@ assert_an_only_build_carries_the_recorded_mode_forward() {
 # ---------------------------------------------------------------------------
 
 # The exact reported reproduction: default ghcr setup, SEED_PROFILE=minimal, so
-# the daemon has every pulled image plus doc-generator-mcp and NEITHER fixture.
-# No pod references either fixture, and no pull could supply them
-# (published:false), so demanding them is a lying diagnostic.
+# the daemon has exactly what the puller put there and NEITHER fixture. No pod
+# references either fixture, and no pull could supply them (published:false),
+# so demanding them is a lying diagnostic.
+#
+# The daemon fixture is now `all_ghcr_refs` alone. It used to carry
+# clerum/doc-generator-mcp:v1 as well, because full-setup.sh built that one
+# unpublished image before the pull; nothing builds it on this path any more.
 assert_the_default_ghcr_verify_passes_without_the_e2e_fixtures() {
   local d out rc present
   d="$(mktemp -d)"
   prepare_repo "$d"
   write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
-  present="$(all_ghcr_refs)"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs)"
   out="$(run_verify "$d" "$present")"; rc=$?
   if [ "$rc" -eq 0 ] \
      && ! grep -q 'workflow-custom-sdk-e2e' <<< "$out" \
-     && ! grep -q 'workflow-plugin-sdk-e2e' <<< "$out" \
-     && grep -q 'clerum/doc-generator-mcp:v1' <<< "$out"; then
-    pass "the default ghcr verify set omits the E2E fixtures and still checks doc-generator-mcp"
+     && ! grep -q 'workflow-plugin-sdk-e2e' <<< "$out"; then
+    pass "the default ghcr verify set omits the E2E fixtures and passes on exactly what the puller supplied"
   else
-    fail "expected a clean ghcr verify with no fixture refs but with doc-generator-mcp; got rc=$rc: $out"
+    fail "expected a clean ghcr verify with no fixture refs; got rc=$rc: $out"
   fi
   rm -rf "$d"
+}
+
+# The end-to-end half of the manifest guard, through the REAL script: a cluster
+# that correctly never acquired the registry-distributed MCP servers must
+# verify CLEAN. If any of the three were still demanded, the daemon fixture
+# above (which does not contain them) would make this rc!=0 -- so the run has to
+# be green AND silent about all three, in every mode the verifier supports.
+#
+# rc is checked before the greps: "no mention of airtable" is also true of a
+# crashed run that printed nothing.
+assert_the_verify_set_never_demands_a_registry_distributed_mcp_server() {
+  local d out rc present named mode
+  for mode in default e2e local; do
+    d="$(mktemp -d)"
+    prepare_repo "$d"
+    case "$mode" in
+      local)
+        write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"local","images":{}}'
+        present="$(all_local_refs)"
+        out="$(run_verify "$d" "$present")"; rc=$?
+        ;;
+      e2e)
+        write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
+        present="$(all_ghcr_refs)"$'\n'"clerum/workflow-custom-sdk-e2e:test"$'\n'"clerum/workflow-plugin-sdk-e2e:test"
+        out="$(MINIKUBE_SEED_PROFILE=e2e run_verify "$d" "$present")"; rc=$?
+        ;;
+      *)
+        write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
+        present="$(all_ghcr_refs)"
+        out="$(run_verify "$d" "$present")"; rc=$?
+        ;;
+    esac
+    named="$(grep -E 'airtable-mcp-server|web-search-mcp|doc-generator-mcp' <<< "$out" || true)"
+    if [ "$rc" -eq 0 ] && [ -z "$named" ]; then
+      pass "the ${mode} verify set demands no registry-distributed MCP server"
+    else
+      fail "expected a clean ${mode} verify with no MCP-server refs; got rc=$rc named='$named': $out"
+    fi
+    rm -rf "$d"
+  done
 }
 
 # The exclusion is an opt-out, not a deletion: after `make minikube-setup-e2e`
@@ -369,7 +412,7 @@ assert_the_e2e_seed_profile_puts_the_fixtures_back() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
-  present="$(all_ghcr_refs)"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs)"
   out="$(MINIKUBE_SEED_PROFILE=e2e run_verify "$d" "$present")"; rc=$?
   if [ "$rc" -ne 0 ] \
      && grep -q 'MISSING: clerum/workflow-custom-sdk-e2e:test' <<< "$out" \
@@ -386,7 +429,7 @@ assert_the_include_flag_puts_the_fixtures_back() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   write_recorded_manifest "$d" '{"generated":"x","profile":"clerum-test","imageSource":"ghcr","images":{}}'
-  present="$(all_ghcr_refs)"$'\n'"clerum/doc-generator-mcp:v1"
+  present="$(all_ghcr_refs)"
   out="$(run_verify "$d" "$present" --include-e2e-fixtures)"; rc=$?
   if [ "$rc" -ne 0 ] && grep -q 'MISSING: clerum/workflow-custom-sdk-e2e:test' <<< "$out"; then
     pass "--include-e2e-fixtures restores the fixtures to the ghcr verify set"
@@ -486,6 +529,7 @@ assert_the_puller_records_ghcr_and_the_verifier_reads_it_back
 assert_a_full_build_records_local_and_the_verifier_reads_it_back
 assert_an_only_build_carries_the_recorded_mode_forward
 assert_the_default_ghcr_verify_passes_without_the_e2e_fixtures
+assert_the_verify_set_never_demands_a_registry_distributed_mcp_server
 assert_the_e2e_seed_profile_puts_the_fixtures_back
 assert_the_include_flag_puts_the_fixtures_back
 assert_local_mode_still_demands_the_e2e_fixtures

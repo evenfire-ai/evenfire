@@ -27,7 +27,9 @@ No API keys or secrets are required.
 docker build -t doc-generator-mcp:latest .
 ```
 
-Multi-stage `node:24-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. `scripts/minikube/build-images.sh` builds it into minikube as `clerum/doc-generator-mcp:v1`. It is not currently in the `.github/workflows/build-publish.yml` publish matrix.
+Multi-stage `node:24-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. Minikube setup neither builds nor pulls it: the evenfire registry distributes this connector and installs it on demand, writing the catalog entry's image reference straight into the `McpServer` resource, so no locally loaded `clerum/*` alias is involved. It is `deployed_to_minikube: false` in `deploy/images.json`.
+
+It is also not in the `.github/workflows/build-publish.yml` publish matrix (`published: false`), so nothing pushes it anywhere. That is a known gap, not the intended end state: a registry-distributed connector has to be published somewhere the kubelet can pull it from.
 
 ## Deployment
 
@@ -35,4 +37,4 @@ This directory has no `mcpserver.yaml` or NetworkPolicy — there is no ready-ma
 
 ## Status
 
-Available; built for local minikube use by `scripts/minikube/build-images.sh` and type-checked by `scripts/build-preflight.sh`. No test suite yet (unlike `airtable/` and `mongodb/`) and not yet referenced by user-facing docs.
+Available; type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image. No test suite yet (unlike `airtable/` and `mongodb/`) and not yet referenced by user-facing docs.

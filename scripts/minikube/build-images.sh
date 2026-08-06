@@ -42,6 +42,10 @@
 #                  Include clerum/mcp-host-desktop:test in full builds.
 #   --include-playwright-mcp-image
 #                  Include the heavy playwright MCP image in full builds.
+#   --include-airtable-mcp-image
+#                  Include clerum/airtable-mcp-server:test in full builds. The
+#                  registry distributes this connector, so no default setup
+#                  needs it; the SEED_PROFILE=e2e demo McpServer instance does.
 #
 # Env:
 #   MINIKUBE_PRELOAD_BASE_IMAGES=false  Skip preloading Dockerfile base images
@@ -66,6 +70,19 @@
 #   MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE
 #                                      Published image to retag locally when
 #                                      Playwright MCP is explicitly enabled.
+#   MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true
+#                                      Include the optional local Airtable MCP
+#                                      image. MCP servers are distributed via
+#                                      the evenfire registry and installed on
+#                                      demand -- a registry install writes a
+#                                      fully-qualified imageRef the kubelet
+#                                      pulls, so nothing on the default path
+#                                      needs a locally loaded clerum/* alias.
+#                                      Only the SEED_PROFILE=e2e demo instance
+#                                      (deploy/overlays/minikube/instances-e2e/
+#                                      airtable-server.yaml) still names the
+#                                      local ref, and full-setup.sh sets this
+#                                      flag for exactly that case.
 # ======================================================================
 
 set -euo pipefail
@@ -88,6 +105,7 @@ MINIKUBE_BUILD_DESKTOP_IMAGE="${MINIKUBE_BUILD_DESKTOP_IMAGE:-false}"
 MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE:-false}"
 MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE:-true}"
 MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE:-us-central1-docker.pkg.dev/your-gcp-project/clerum/playwright-server:latest}"
+MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE="${MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE:-false}"
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 
 case "${SKIP_UIS}" in
@@ -171,6 +189,7 @@ for arg in "$@"; do
     --include-e2e-fixtures) INCLUDE_E2E_FIXTURES=true ;;
     --include-desktop-image) MINIKUBE_BUILD_DESKTOP_IMAGE=true ;;
     --include-playwright-mcp-image) MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true ;;
+    --include-airtable-mcp-image) MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true ;;
   esac
 done
 
@@ -182,6 +201,13 @@ if [ -n "$ONLY_SVC" ]; then
   fi
   if [[ "$ONLY_SVC" == *"playwright"* ]]; then
     MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true
+  fi
+  # Same self-enabling rule the two opt-in images above already use: naming an
+  # image in --only IS the opt-in. Without this, `--only=airtable-mcp-server`
+  # would print the "skipping the optional Airtable MCP image" warning and exit
+  # 0 having built nothing -- a silent no-op in the one place that asks for it.
+  if [[ "$ONLY_SVC" == *"airtable"* ]]; then
+    MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true
   fi
 fi
 
@@ -356,9 +382,6 @@ ALL_IMAGES=(
   "clerum/stdio-bridge:test"
   "clerum/control-ui:test"
   "clerum/profile-ui:test"
-  "clerum/airtable-mcp-server:test"
-  "clerum/web-search-mcp:v1"
-  "clerum/doc-generator-mcp:v1"
   "clerum/mock-mcp-server:test"
   "clerum/mock-stdio-mcp-server:test"
   "clerum/workspace-files-controller:test"
@@ -370,6 +393,10 @@ fi
 
 if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
   ALL_IMAGES+=("clerum/playwright-mcp-server:test")
+fi
+
+if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
+  ALL_IMAGES+=("clerum/airtable-mcp-server:test")
 fi
 
 if [ "$SKIP_UIS" = true ]; then
@@ -390,13 +417,20 @@ fi
 # mode: a published+deployed image runs from ghcr in ghcr mode, and the
 # unpublished ones are built locally and verified under their clerum/* ref.
 #
-# doc-generator-mcp is unpublished but built on BOTH paths (full-setup.sh runs
-# `--only=doc-generator-mcp` before the pull), so it is always verified. The
-# two e2e_only fixtures are NOT: on the ghcr path nothing builds them, so
-# demanding them there fails a healthy default cluster with a remedy that can
-# never supply them (they are published:false, so no pull can fetch them). They
-# come back with --include-e2e-fixtures / MINIKUBE_SEED_PROFILE=e2e, and in
-# local mode, where a full build builds every fixture.
+# The two e2e_only fixtures are NOT verified on the default ghcr path: nothing
+# builds them there, so demanding them fails a healthy default cluster with a
+# remedy that can never supply them (they are published:false, so no pull can
+# fetch them). They come back with --include-e2e-fixtures /
+# MINIKUBE_SEED_PROFILE=e2e, and in local mode, where a full build builds every
+# fixture.
+#
+# The registry-distributed MCP servers (airtable-mcp-server, web-search-mcp,
+# doc-generator-mcp) are absent from this set entirely, because they are
+# deployed_to_minikube:false -- minikube setup neither builds nor pulls them,
+# so demanding them would fail every cluster. airtable-mcp-server is an opt-in
+# local build (MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE) for the SEED_PROFILE=e2e demo
+# instance; like mcp-host-desktop and playwright-server before it, an opt-in
+# image is not part of the verify contract.
 if [ "$VERIFY_ONLY" = true ]; then
   # What the cluster RUNS decides what gets verified. The env var is only a
   # fallback for a cluster nothing has built or pulled into yet.
@@ -725,11 +759,33 @@ fi
 # `make minikube-deploy-evenfire-registry` to build + deploy it. This script
 # only builds clerum-monorepo services.
 
+# MCP servers are distributed through the evenfire registry and installed on
+# demand: a registry install copies the catalog entry's fully-qualified
+# imageRef straight into McpServer.spec.image (control-api/src/routes/admin/
+# registry.ts:1088) and the kubelet pulls it. Nothing on that path wants a
+# locally loaded clerum/* alias, so minikube setup neither builds nor pulls
+# these images -- they are deployed_to_minikube:false in deploy/images.json.
+#
+# The two that remain here are opt-in only:
+#   playwright-mcp-server -- heavy, never deployed by the minikube overlay.
+#   airtable-mcp-server   -- named by its LOCAL ref in the SEED_PROFILE=e2e
+#                            demo instance (deploy/overlays/minikube/
+#                            instances-e2e/airtable-server.yaml), which is
+#                            applied with `kubectl apply -f`, outside kustomize,
+#                            so the ghcr component never rewrites it. HCC forces
+#                            imagePullPolicy=IfNotPresent on minikube, so that
+#                            ref must already be in the daemon. full-setup.sh
+#                            sets MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE for exactly
+#                            that branch and nothing else.
 echo -e "\n${BOLD}=== Building MCP Servers ===${NC}"
 
-build_image "airtable-mcp" \
-  "${PROJECT_DIR}/mcp-servers/airtable" \
-  "clerum/airtable-mcp-server:test"
+if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
+  build_image "airtable-mcp" \
+    "${PROJECT_DIR}/mcp-servers/airtable" \
+    "clerum/airtable-mcp-server:test"
+else
+  warn "Skipping the optional Airtable MCP image. The registry installs this connector on demand; set MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true (or --include-airtable-mcp-image) for the SEED_PROFILE=e2e demo instance."
+fi
 
 if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
   if [ "$MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
@@ -744,14 +800,6 @@ if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
 else
   warn "Skipping optional Playwright MCP local image. The default minikube overlay does not deploy clerum/playwright-mcp-server:test; GKE publishes this image as playwright-server:<tag>."
 fi
-
-build_image "web-search-mcp" \
-  "${PROJECT_DIR}/mcp-servers/web-search" \
-  "clerum/web-search-mcp:v1"
-
-build_image "doc-generator-mcp" \
-  "${PROJECT_DIR}/mcp-servers/doc-generator" \
-  "clerum/doc-generator-mcp:v1"
 
 echo -e "\n${BOLD}=== Building Test Fixtures ===${NC}"
 
@@ -810,10 +858,10 @@ echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
 # the cluster renders, not what just happened here.
 #
 # A partial run (--only=<svc>, and --public-only, which sets ONLY_SVC) acquires
-# a subset and must not redefine the mode: `make minikube-setup-e2e` builds two
-# fixtures with --only AFTER the ghcr pull, and `make minikube-setup` builds
-# doc-generator-mcp with --only BEFORE it. Carry the recorded value forward
-# instead, and fall back to the env var only when nothing is recorded yet.
+# a subset and must not redefine the mode: `make minikube-setup-e2e` builds the
+# two E2E fixtures and the opt-in airtable-mcp-server image with --only AFTER
+# the ghcr pull. Carry the recorded value forward instead, and fall back to the
+# env var only when nothing is recorded yet.
 #
 # imageTag rides along for exactly the same reason. A pre-gate shadow build is
 # an --only run, so dropping the tag here would make the next pre-gate fall back

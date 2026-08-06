@@ -38,16 +38,24 @@
 #      that local build survive across setups indefinitely and invisibly, and a
 #      gate would keep testing code that was never deployed.
 #
-#   2. It ALIASES each ghcr ref to clerum/<local_name>:<local_tag>. Six
+#   2. It ALIASES each ghcr ref to clerum/<local_name>:<local_tag>. Four
 #      pull_in_ghcr_mode images have no row in the minikube overlay and are
 #      never rewritten by the ghcr component -- mcp-host-slim, mcp-host-full,
-#      airtable-mcp-server, web-search-mcp, mock-mcp-server,
-#      mock-stdio-mcp-server. They are consumed under their LOCAL names by
-#      McpServer CRD instances applied outside the overlay
-#      (deploy/overlays/minikube/instances-e2e/airtable-server.yaml) and by the
-#      E2E scripts under scripts/e2e/. A `docker tag` is a pointer; dropping it
-#      breaks those paths in ghcr mode only, which is the worst place to find
-#      out.
+#      mock-mcp-server, mock-stdio-mcp-server. They are consumed under their
+#      LOCAL names by McpServer CRD instances applied outside the overlay and
+#      by the E2E scripts under scripts/e2e/ (the minikube registry catalog
+#      seed publishes mcp-airtable with imageRef clerum/mock-mcp-server:test,
+#      so that alias is load-bearing for the registry install specs). A
+#      `docker tag` is a pointer; dropping it breaks those paths in ghcr mode
+#      only, which is the worst place to find out.
+#
+#      airtable-mcp-server and web-search-mcp used to be in that list. They are
+#      deployed_to_minikube:false now: the evenfire registry distributes MCP
+#      servers and installs them on demand, writing the catalog entry's
+#      fully-qualified imageRef into McpServer.spec.image, so no local alias is
+#      involved. The one manifest still naming a local MCP-server ref
+#      (instances-e2e/airtable-server.yaml, SEED_PROFILE=e2e only) is served by
+#      an opt-in local build instead -- see MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE.
 # ======================================================================
 
 set -euo pipefail
