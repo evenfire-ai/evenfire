@@ -5,12 +5,44 @@ import {
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import type { McpServerCondition } from '@lib/api'
 
+// ─── Fixtures are copied from the PRODUCER, not invented ───────────────────
+//
+// The only producer of `SecretResolved` is the HCC:
+// host-context-controller/src/reconciler.ts. A fixture that drifts from what it
+// actually writes tests a condition Kubernetes will never hold, and the drift
+// is invisible — the resolver matches on `reason`, so a plausible-but-wrong
+// reason string still exercises "not an absence claim" and stays green while
+// proving nothing about the real one.
+//
+// Absence claim: reconciler.ts:2039-2046 writes `SecretResolved` / `False` with
+// `secretResult.reason` and `secretResult.message` straight from validateSecret,
+// whose 404 branch (reconciler.ts:470-473) produces exactly the reason and
+// message below.
 function condition(overrides: Partial<McpServerCondition> = {}): McpServerCondition {
   return {
     type: 'SecretResolved',
     status: 'False',
     reason: 'SecretNotFound',
     message: 'Secret "x-credentials" not found in namespace "mcp-server"',
+    lastTransitionTime: '2026-08-06T04:48:48.564Z',
+    ...overrides,
+  }
+}
+
+// Clean resolution: reconciler.ts:1979-1986 (managed connectors) and
+// :2061-2068 (WRC-owned runtimes) both write this exact triple.
+//
+// The reason is `SecretFound`. It is NOT `SecretResolved` — that is the
+// condition TYPE, and reusing it as the reason is the specific mistake these
+// fixtures used to make. The resolver only asks "is this an absence claim?", so
+// the wrong string passed just as happily, which is what made the drift
+// survivable in the first place.
+function resolvedCondition(overrides: Partial<McpServerCondition> = {}): McpServerCondition {
+  return {
+    type: 'SecretResolved',
+    status: 'True',
+    reason: 'SecretFound',
+    message: 'Secret resolved and validated',
     lastTransitionTime: '2026-08-06T04:48:48.564Z',
     ...overrides,
   }
@@ -36,6 +68,9 @@ describe('resolveCredentialSurface', () => {
   // the whole suite green: a DeploymentReady=False/SecretNotFound (or any other
   // condition type reusing that reason) would then be read as a missing Secret
   // and send the operator to the create form.
+  //
+  // SYNTHETIC ADVERSARY, not producer output: the HCC writes `SecretNotFound`
+  // only on `SecretResolved`. The fixture deliberately misplaces it.
   it('returns "rotate" when SecretNotFound is carried by a different condition type', () => {
     expect(
       resolveCredentialSurface([condition({ type: 'Ready', reason: 'SecretNotFound' })], {
@@ -54,9 +89,7 @@ describe('resolveCredentialSurface', () => {
   })
 
   it('returns "rotate" when the Secret resolves cleanly', () => {
-    expect(
-      resolveCredentialSurface([condition({ status: 'True', reason: 'SecretResolved' })], {})
-    ).toBe('rotate')
+    expect(resolveCredentialSurface([resolvedCondition()], {})).toBe('rotate')
   })
 
   it('returns "rotate" when there are no conditions', () => {
@@ -75,7 +108,7 @@ describe('resolveCredentialSurface', () => {
   // works today on a WRC-owned connector must not be taken away.
   it('returns "rotate" for a WRC-owned connector whose Secret resolves', () => {
     expect(
-      resolveCredentialSurface([condition({ status: 'True', reason: 'SecretResolved' })], {
+      resolveCredentialSurface([resolvedCondition()], {
         managed: false,
       })
     ).toBe('rotate')
@@ -103,9 +136,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
       resolveCredentialSurface(
         [
           condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: '2026-08-06T05:00:00.000Z',
           }),
         ],
@@ -131,9 +162,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
     expect(
       resolveCredentialSurface(
         [
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: '2026-08-06T05:00:00.000Z',
           }),
           condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
@@ -147,9 +176,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
     expect(
       resolveCredentialSurface(
         [
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: '2026-08-06T04:00:00.000Z',
           }),
           condition({ lastTransitionTime: '2026-08-06T05:00:00.000Z' }),
@@ -163,9 +190,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
     expect(
       resolveCredentialSurface(
         [
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: '2026-08-06T04:00:00.000Z',
           }),
           condition({ lastTransitionTime: '2026-08-06T05:00:00.000Z' }),
@@ -181,19 +206,13 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
     const same = '2026-08-06T04:00:00.000Z'
     expect(
       resolveCredentialSurface(
-        [
-          condition({ lastTransitionTime: same }),
-          condition({ status: 'True', reason: 'SecretResolved', lastTransitionTime: same }),
-        ],
+        [condition({ lastTransitionTime: same }), resolvedCondition({ lastTransitionTime: same })],
         { managed: true }
       )
     ).toBe('rotate')
     expect(
       resolveCredentialSurface(
-        [
-          condition({ status: 'True', reason: 'SecretResolved', lastTransitionTime: same }),
-          condition({ lastTransitionTime: same }),
-        ],
+        [resolvedCondition({ lastTransitionTime: same }), condition({ lastTransitionTime: same })],
         { managed: true }
       )
     ).toBe('rotate')
@@ -201,14 +220,16 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
 
   // Tie-break rule 2. An unparseable timestamp carries no recency proof, so it
   // must not let a stale absence claim outrank a well-stamped resolution.
+  //
+  // DELIBERATELY MALFORMED — not producer output. The HCC always stamps a valid
+  // RFC3339 `lastTransitionTime`; these two tests exist for hand-edited or
+  // legacy resources, which is the only way such a value reaches the resolver.
   it('returns "rotate" when the SecretNotFound duplicate carries an unparseable timestamp', () => {
     expect(
       resolveCredentialSurface(
         [
           condition({ lastTransitionTime: 'not-a-timestamp' }),
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: '2026-08-06T04:00:00.000Z',
           }),
         ],
@@ -222,9 +243,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
       resolveCredentialSurface(
         [
           condition({ lastTransitionTime: '' }),
-          condition({
-            status: 'True',
-            reason: 'SecretResolved',
+          resolvedCondition({
             lastTransitionTime: 'whenever',
           }),
         ],
@@ -235,6 +254,7 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
 
   // A LONE absence claim with a malformed timestamp still means "missing":
   // there is nothing contradicting it, so today's behavior is preserved.
+  // DELIBERATELY MALFORMED — see above; the HCC never emits this.
   it('returns "set" for a lone SecretNotFound with an unparseable timestamp', () => {
     expect(
       resolveCredentialSurface([condition({ lastTransitionTime: 'not-a-timestamp' })], {
@@ -245,6 +265,13 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
 
   // Unrelated condition types must not participate in the selection at all —
   // not as candidates, and not by shifting array order.
+  //
+  // The two bracketing entries are SYNTHETIC ADVERSARIES, not producer output:
+  // they pair a real `SecretResolved` reason with the WRONG condition type, and
+  // carry the NEWEST timestamps in the array. The HCC only ever writes those
+  // reasons on `SecretResolved` (reconciler.ts:2039-2046, :1979-1986), so a
+  // resolver that dropped the `type` clause and matched on reason alone would
+  // pick one of these instead of either real candidate.
   it('ignores unrelated condition types regardless of their position or recency', () => {
     const conditions: McpServerCondition[] = [
       {
@@ -258,13 +285,11 @@ describe('resolveCredentialSurface — duplicate SecretResolved conditions', () 
       {
         type: 'Ready',
         status: 'True',
-        reason: 'SecretResolved',
+        reason: 'SecretFound',
         message: 'noise',
         lastTransitionTime: '2026-08-06T09:00:00.000Z',
       },
-      condition({
-        status: 'True',
-        reason: 'SecretResolved',
+      resolvedCondition({
         lastTransitionTime: '2026-08-06T05:00:00.000Z',
       }),
     ]

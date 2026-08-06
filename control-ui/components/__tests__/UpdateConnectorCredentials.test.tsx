@@ -897,12 +897,35 @@ describe('UpdateConnectorCredentials — required semantics and validation', () 
     }
   })
 
-  it('flags only the missing inputs, points them at the error, and focuses the first one', async () => {
+  // ─── The focus TARGET needs three cases to be pinned, not one ─────────────
+  //
+  // `rejectSubmit` focuses `missing[0]`, and `missing` is built by filtering the
+  // DECLARED key order — so the assertion "focus the first invalid input" has
+  // two independent claims inside it: that focus follows declaration ORDER, and
+  // that it follows INVALIDITY rather than mere position. A single fixture can
+  // only ever pin one of them:
+  //
+  //   - fill nothing            -> first invalid IS field #1. Pins order only;
+  //                                indistinguishable from "focus field #1".
+  //   - fill the SECOND key     -> first invalid is STILL field #1. Pins
+  //                                nothing about focus at all — it is exactly
+  //                                the coincidence that makes a hardcoded
+  //                                "focus field #1" pass.
+  //   - fill the FIRST key      -> first invalid is field #2. The only fixture
+  //                                where position and invalidity DISAGREE, so
+  //                                the only one that can catch a focus target
+  //                                that ignores which fields are actually bad.
+  //
+  // All three are below. The last one is the discriminating one; the first two
+  // exist so a regression that breaks ordering is still caught.
+
+  it('flags only the missing inputs and points them at the error (missing key first)', async () => {
     await renderPanel(ENV_SECRET, 'set')
 
-    // Fill the SECOND declared key only, so the first one is the missing one
-    // and "focus the first invalid input" cannot pass by focusing field #1 by
-    // accident.
+    // The SECOND declared key is filled, so the missing one happens to be field
+    // #1. Deliberately NOT the case that pins the focus target — see the
+    // "focuses the first INVALID input" test below for that. This one carries
+    // the per-input aria wiring.
     fireEvent.change(screen.getByLabelText('workspace-id', { exact: false }), {
       target: { value: 'w-value' },
     })
@@ -922,6 +945,56 @@ describe('UpdateConnectorCredentials — required semantics and validation', () 
     expect(filled).not.toHaveAttribute('aria-describedby')
     // ...and the operator is put on the field they have to repair.
     expect(missing).toHaveFocus()
+  })
+
+  it('focuses the FIRST declared key when every input is empty', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // Nothing filled: both keys are invalid, so the focus target is decided
+    // purely by declaration ORDER. Reverse that order in `rejectSubmit` (focus
+    // `missing[missing.length - 1]`) and only this case goes red.
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const first = screen.getByLabelText('api-key', { exact: false })
+    const second = screen.getByLabelText('workspace-id', { exact: false })
+
+    expect(screen.getByText(/Missing: api-key, workspace-id/)).toBeInTheDocument()
+    expect(first).toHaveAttribute('aria-invalid', 'true')
+    expect(second).toHaveAttribute('aria-invalid', 'true')
+    expect(first).toHaveFocus()
+    expect(second).not.toHaveFocus()
+  })
+
+  it('focuses the first INVALID input, not the first input, when an earlier key is already filled', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // The DISCRIMINATING fixture: field #1 is valid and field #2 is not, so
+    // position and invalidity point at different elements. Replace the focus
+    // target with an unconditional `envSecret.keys[0]` (i.e. "focus the first
+    // field on the form") and this is the assertion that fails — every other
+    // focus case in this file keeps passing, because in all of them the first
+    // field IS the first invalid one.
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'a-value' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const filled = screen.getByLabelText('api-key', { exact: false })
+    const missing = screen.getByLabelText('workspace-id', { exact: false })
+    const alert = screen.getByRole('alert')
+
+    expect(
+      screen.getByText(/Enter every credential value\. Missing: workspace-id/)
+    ).toBeInTheDocument()
+    expect(missing).toHaveAttribute('aria-invalid', 'true')
+    expect(filled).not.toHaveAttribute('aria-invalid', 'true')
+    expect(missing.getAttribute('aria-describedby')).toContain(alert.getAttribute('id'))
+    expect(filled).not.toHaveAttribute('aria-describedby')
+    // The whole point: focus is on field #2, and demonstrably NOT on field #1.
+    expect(missing).toHaveFocus()
+    expect(filled).not.toHaveFocus()
   })
 
   it('clears the invalid state as soon as the operator types into the flagged input', async () => {
@@ -1058,6 +1131,51 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
   })
 
+  // The third side, and the one that makes "status-agnostic" actually mean ANY:
+  // every other retry fixture in this file carries a `.status`, so a gate
+  // written as `if (postError.status === undefined) throw postError` — the shape
+  // a well-meaning "only retry real HTTP failures" refactor produces — survives
+  // all of them green. A transport failure (fetch rejects before any response
+  // exists, so there is no status to read) is the real-world case that gate
+  // would break, and it is exactly when the Secret may well have been created
+  // by a request whose response never came back.
+  it('retries the merge-patch and still succeeds when the create rejects with NO status at all', async () => {
+    // A bare Error: no `.status` property whatsoever, not even undefined-valued.
+    const transportFailure = new Error('Failed to fetch')
+    expect('status' in transportFailure).toBe(false)
+    mockCreateMcpSecret.mockRejectedValue(transportFailure)
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    // Exactly once — not zero (the gate above), not twice (a retry loop).
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+
+    // ...and the operator reaches the user-visible success state, so this cannot
+    // pass on a retry that fired but left the screen stuck mid-flight.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+  })
+
   // ─── R1-M1: which failure the operator is shown when BOTH legs fail ──────
   //
   // A 404 from the follow-up PUT is noise — the whole point of the retry is
@@ -1078,6 +1196,38 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     // The PUT was genuinely attempted — otherwise this test would pass for the
     // wrong reason (a retry that never ran also "reports the create error").
     expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+  })
+
+  // The SAME rule against the PRODUCTION pair. The case above uses a 400 create,
+  // which is a legible error on its own; this one uses control-api's real
+  // duplicate-create answer — a bare 500 (see `serverError()`) — where the
+  // temptation to prefer the "more specific" 404 is strongest. It must still
+  // lose: the retry exists on the hypothesis "the Secret already exists", and a
+  // 404 only refutes that hypothesis. It explains nothing about why the create
+  // failed, and telling the operator the Secret does not exist on the screen
+  // whose whole job is creating it is worse than opaque — it is misleading.
+  it('reports the create error, not the PUT 404, for the production POST 500 + PUT 404 pair', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(
+      screen.getByText(/Could not set credentials: 500 Internal Server Error/)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/not found in mcp-server/)).not.toBeInTheDocument()
+    // Neither leg may be skipped: the create ran, and the retry it is being
+    // preferred over genuinely ran too.
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    // A 404 must not be mistaken for the rotate path's vanished-Secret recovery:
+    // this IS the create path, so there is nothing to flip to.
+    expect(screen.queryByText(/This Secret no longer exists\./)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
   })
 
   // Any OTHER PUT failure describes the CURRENT state more precisely than the
