@@ -44,6 +44,7 @@ every service and a seeded agent named `chatllm`:
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required, no default ships) and ONE LLM key
+make prereqs            # check Docker/minikube/kubectl/node/… up front (alias: make doctor)
 make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
 make minikube-status    # wait for every deployment READY
 ```
