@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { resolveCredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import {
+  isRecipeOwned,
+  resolveCredentialSurface,
+} from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import type { McpServerCondition } from '@lib/api'
 
 function condition(overrides: Partial<McpServerCondition> = {}): McpServerCondition {
@@ -76,5 +79,206 @@ describe('resolveCredentialSurface', () => {
         managed: false,
       })
     ).toBe('rotate')
+  })
+})
+
+// ─── R1-M2: duplicate SecretResolved conditions ────────────────────────────
+//
+// The McpServer CRD declares an ordinary conditions array and does NOT enforce
+// uniqueness per `type`. HCC normally rewrites a type in place, but a legacy or
+// hand-edited resource can carry two SecretResolved entries that contradict
+// each other. A `.some()` predicate lets ANY stale absence claim win, which
+// forces every key and re-enables POST against a Secret that already exists.
+//
+// The resolver therefore selects ONE authoritative SecretResolved condition:
+//   1. newest parseable `lastTransitionTime` wins;
+//   2. an absent/unparseable timestamp ranks as the OLDEST possible, so a
+//      malformed absence claim can never outrank a well-stamped resolution;
+//   3. on an exact tie, the condition that does NOT claim absence wins —
+//      ambiguity must never resolve to the destructive "the Secret is missing";
+//   4. still tied (they all claim absence, so they agree): last array entry.
+describe('resolveCredentialSurface — duplicate SecretResolved conditions', () => {
+  it('returns "rotate" when a NEWER duplicate says the Secret resolved cleanly', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: '2026-08-06T05:00:00.000Z',
+          }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  it('returns "rotate" when a NEWER duplicate says SecretMissingKey', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
+          condition({ reason: 'SecretMissingKey', lastTransitionTime: '2026-08-06T05:00:00.000Z' }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  // Array order must not decide anything: the same pair, reversed.
+  it('returns "rotate" when the newer clean duplicate is listed FIRST', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: '2026-08-06T05:00:00.000Z',
+          }),
+          condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  it('returns "set" when the NEWEST duplicate is the SecretNotFound one', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: '2026-08-06T04:00:00.000Z',
+          }),
+          condition({ lastTransitionTime: '2026-08-06T05:00:00.000Z' }),
+        ],
+        { managed: true }
+      )
+    ).toBe('set')
+  })
+
+  it('returns "recipe-owned" when the newest duplicate is SecretNotFound on a WRC-owned connector', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: '2026-08-06T04:00:00.000Z',
+          }),
+          condition({ lastTransitionTime: '2026-08-06T05:00:00.000Z' }),
+        ],
+        { managed: false }
+      )
+    ).toBe('recipe-owned')
+  })
+
+  // Tie-break rule 3, both orders: an exact timestamp tie is ambiguous, and
+  // ambiguity resolves AWAY from absence.
+  it('returns "rotate" when contradictory duplicates share the exact same timestamp', () => {
+    const same = '2026-08-06T04:00:00.000Z'
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ lastTransitionTime: same }),
+          condition({ status: 'True', reason: 'SecretResolved', lastTransitionTime: same }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ status: 'True', reason: 'SecretResolved', lastTransitionTime: same }),
+          condition({ lastTransitionTime: same }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  // Tie-break rule 2. An unparseable timestamp carries no recency proof, so it
+  // must not let a stale absence claim outrank a well-stamped resolution.
+  it('returns "rotate" when the SecretNotFound duplicate carries an unparseable timestamp', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ lastTransitionTime: 'not-a-timestamp' }),
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: '2026-08-06T04:00:00.000Z',
+          }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  it('returns "rotate" when BOTH contradictory duplicates carry unparseable timestamps', () => {
+    expect(
+      resolveCredentialSurface(
+        [
+          condition({ lastTransitionTime: '' }),
+          condition({
+            status: 'True',
+            reason: 'SecretResolved',
+            lastTransitionTime: 'whenever',
+          }),
+        ],
+        { managed: true }
+      )
+    ).toBe('rotate')
+  })
+
+  // A LONE absence claim with a malformed timestamp still means "missing":
+  // there is nothing contradicting it, so today's behavior is preserved.
+  it('returns "set" for a lone SecretNotFound with an unparseable timestamp', () => {
+    expect(
+      resolveCredentialSurface([condition({ lastTransitionTime: 'not-a-timestamp' })], {
+        managed: true,
+      })
+    ).toBe('set')
+  })
+
+  // Unrelated condition types must not participate in the selection at all —
+  // not as candidates, and not by shifting array order.
+  it('ignores unrelated condition types regardless of their position or recency', () => {
+    const conditions: McpServerCondition[] = [
+      {
+        type: 'DeploymentReady',
+        status: 'False',
+        reason: 'SecretNotFound',
+        message: 'noise',
+        lastTransitionTime: '2026-08-06T09:00:00.000Z',
+      },
+      condition({ lastTransitionTime: '2026-08-06T04:00:00.000Z' }),
+      {
+        type: 'Ready',
+        status: 'True',
+        reason: 'SecretResolved',
+        message: 'noise',
+        lastTransitionTime: '2026-08-06T09:00:00.000Z',
+      },
+      condition({
+        status: 'True',
+        reason: 'SecretResolved',
+        lastTransitionTime: '2026-08-06T05:00:00.000Z',
+      }),
+    ]
+    expect(resolveCredentialSurface(conditions, { managed: true })).toBe('rotate')
+    // Same four conditions, reversed: the verdict is order-independent.
+    expect(resolveCredentialSurface([...conditions].reverse(), { managed: true })).toBe('rotate')
+  })
+})
+
+describe('isRecipeOwned', () => {
+  it('is true only for an explicit managed:false spec', () => {
+    expect(isRecipeOwned({ managed: false })).toBe(true)
+    expect(isRecipeOwned({ managed: true })).toBe(false)
+    expect(isRecipeOwned({})).toBe(false)
+    expect(isRecipeOwned(undefined)).toBe(false)
   })
 })
