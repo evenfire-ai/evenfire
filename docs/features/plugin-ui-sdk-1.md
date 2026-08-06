@@ -1,11 +1,11 @@
 # Plugin UI SDK — typed, consented context bridge for sandbox-UI plugins
 
-Status: **Implemented** on `feat/plugin-ui-sdk` (M1–M5). Target surface:
-`desktop-app`. Sibling story: Side Window (out of scope here, but the broker is
-designed so it can host that surface without a contract change — §14).
+Surface: `desktop-app`. Sibling surface: the Side Window, which the broker can
+host without a contract change (§14).
 
-**§18 records where the code diverged from this document, and what is specced
-but not yet wired.** Read it before trusting a detail below; the code wins.
+This document describes the system as it behaves today. §15 lists the modules,
+and the gaps between this description and the code are named in §15.2. Where the
+two disagree, the code is authoritative.
 
 Author-facing counterpart: [`plugin-ui-sdk-authoring.md`](./plugin-ui-sdk-authoring.md).
 
@@ -311,8 +311,8 @@ export type PluginSdkEvent =
   | { type: 'theme.changed'; theme: PluginTheme }
   | { type: 'permission.changed'; capability: string; granted: boolean }
   | { type: 'session.changed'; authenticated: boolean }
-  // Added during implementation: a notification is useless if the plugin
-  // cannot tell what the user clicked (§6.8's `ref` had no return path).
+  // Carries back the opaque `ref` a notification was sent with (§6.8), so a
+  // plugin can route a click without keeping its own correlation table.
   | { type: 'notification.clicked'; ref: string | null }
 // Pre-existing, kept on its own legacy channel for compatibility (§7.2):
 // clerum:sandbox-ui:oauth-completed
@@ -549,20 +549,20 @@ in the audit trail at `debug` verbosity, and it is still listed on the plugin's
 Settings row as "Appearance (no permission needed)" so the user is never
 surprised to learn a plugin knows their theme.
 
-**Implementation note — theme lives in the renderer, and main mirrors it.**
-The renderer owns theme: `App.tsx` reads/writes `localStorage['evenfire.ui.theme']`
-(`ui/src/constants/theme.ts`) and stamps `data-theme` on `documentElement`. Main
-had no idea what it was.
+**Where theme lives.** The renderer owns it: `App.tsx` reads and writes
+`localStorage['evenfire.ui.theme']` (`ui/src/constants/theme.ts`) and stamps
+`data-theme` on `documentElement`. Main keeps a **mirror** in
+`pluginThemeStore.ts` — the renderer pushes the current value on boot and on
+every change, and main persists the last value so an embed that asks before the
+renderer has reported gets the right answer instead of a default flash. Mirror
+changes fan out to mounted embeds as `theme.changed`.
 
-This spec originally called for lifting ownership into main. **The shipped code
-does not**: `pluginThemeStore.ts` keeps a mirror that the renderer pushes to on
-boot and on every change, persisted so an embed asking before the renderer has
-reported gets the right answer instead of a default flash. The plugin-visible
-contract — `theme.read` plus the `theme.changed` event — is identical either way,
-and a true move would have to reconcile `localStorage` with a new on-disk file
-and get the boot ordering right for no observable gain. If a surface ever needs
-theme without a renderer running (a headless Side Window), that module is where
-the change lands.
+Main is deliberately not the source of truth. The plugin-visible contract is
+identical either way, and making main authoritative would mean reconciling
+`localStorage` with an on-disk file and constraining boot ordering for no
+observable gain. A surface that needs theme with no renderer running (a headless
+Side Window) is the case that would change this, and `pluginThemeStore.ts` is
+where that change belongs.
 
 ### 6.8 `notifications.notify` — get the user's attention
 
@@ -598,17 +598,22 @@ Behaviour:
 
 ### 6.9 Limits
 
-| Capability             | per min | per hour | max response                 |
-| ---------------------- | ------- | -------- | ---------------------------- |
-| `identity.read`        | 10      | 60       | 4 KB                         |
-| `org.read`             | 10      | 60       | 4 KB                         |
-| `agents.read`          | 10      | 120      | 256 KB                       |
-| `contexts.read`        | 10      | 120      | 64 KB                        |
-| `mcp.read`             | 10      | 120      | 128 KB                       |
-| `gfs.list`             | 30      | 600      | 512 KB                       |
-| `gfs.read`             | 20      | 300      | image cap (§6.6) / 2 MB text |
-| `theme.read`           | 60      | 600      | 1 KB                         |
-| `notifications.notify` | 2       | 20       | —                            |
+| Capability             | per min | per hour | max response    |
+| ---------------------- | ------- | -------- | --------------- |
+| `identity.read`        | 10      | 60       | 4 KB            |
+| `org.read`             | 10      | 60       | 4 KB            |
+| `agents.read`          | 10      | 120      | 256 KB          |
+| `contexts.read`        | 10      | 120      | 64 KB           |
+| `mcp.read`             | 10      | 120      | 128 KB          |
+| `gfs.list`             | 30      | 600      | 512 KB          |
+| `gfs.read`             | 20      | 300      | 20 MB envelope¹ |
+| `theme.read`           | 60      | 600      | 1 KB            |
+| `notifications.notify` | 2       | 20       | —               |
+
+¹ One envelope cap per capability, checked on the serialized response. The
+per-mode ceilings — 10 MB image, 2 MB text (§6.6) — are enforced inside the
+provider, where the mode is known. The envelope cap is larger than both because
+base64 inflates bytes by roughly 4/3.
 
 Plus a **global per-plugin ceiling** of 120 requests/minute across all
 capabilities, so a plugin cannot round-robin its way past the per-capability
@@ -1075,8 +1080,8 @@ Empty state: "No plugin has been granted access to your information."
 **Activity** — a tab over the audit log, newest first, filterable by plugin and
 by outcome, showing timestamp / plugin / capability / outcome / shape summary.
 Denials and rate-limits are included: a plugin that repeatedly asks for things
-the user refuses is exactly what a user should be able to notice. "Reveal log
-file" opens the containing folder.
+the user refuses is exactly what a user should be able to notice. **Clear
+activity log** empties both rotation generations.
 
 Revocation is immediate:
 
@@ -1109,6 +1114,10 @@ the rare misbehaving one.
 | T13 | Notification spoofing ("Evenfire: enter your password").          | Mandatory plugin-title prefix, plain text only, tight rate limit (§6.8).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ## 13. Testing
+
+Time-dependent behaviour — the prompt cooldown, the window-focus wait, rate-limit
+refill, audit rotation — is driven by an injectable clock and `sleep`, so each is
+asserted rather than waited out.
 
 **Unit (vitest, `desktop-app/src/__tests__/`)** — the broker's decision table is
 the highest-value target:
@@ -1167,56 +1176,55 @@ call sites:
 
 The only thing the Side Window must not do is introduce a second broker.
 
-## 15. Implementation plan
+## 15. Source layout
 
-New files (all `desktop-app/src/` unless noted):
+### 15.1 Modules
 
-| File                                                    | Purpose                                                                                                                                                                                             |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pluginSdkProtocol.ts`                                  | Shared request/response/event/error types, channel names, version.                                                                                                                                  |
-| `pluginSdkCapabilities.ts`                              | The descriptor catalog (§6).                                                                                                                                                                        |
-| `pluginSdkBroker.ts`                                    | The chokepoint (§4).                                                                                                                                                                                |
-| `pluginSurfaceRegistry.ts`                              | `webContents.id → { pluginId, surface, generation }`.                                                                                                                                               |
-| `pluginConsentStore.ts`                                 | Interface + local implementation (§10).                                                                                                                                                             |
-| `pluginConsentGate.ts`                                  | Prompt queue, budget, session denials, timeout.                                                                                                                                                     |
-| `pluginAuditLog.ts`                                     | Append-only JSONL + rotation.                                                                                                                                                                       |
-| `pluginRateLimiter.ts`                                  | Token buckets.                                                                                                                                                                                      |
-| `pluginThemeStore.ts`                                   | Theme mirrored into main (§6.7). Shipped as `pluginThemeStore.ts`, not `themeStore.ts`.                                                                                                             |
-| `pluginSdkRuntime.ts`                                   | **Added during implementation.** All Electron wiring — BrowserWindow, Notification, the sandbox-ui driver, the settings surface — so every module above stays testable without an Electron runtime. |
-| `ui/src/components/PluginConsentModal/`                 | The prompt.                                                                                                                                                                                         |
-| `ui/src/hooks/domain/usePluginPermissionsController.ts` | **Added.** TanStack Query controller for the Settings surface, per `desktop-app/ui/AGENTS.md`.                                                                                                      |
-| `ui/src/pages/SettingsPage` + `PluginPermissions*`      | Revocation + activity (§11).                                                                                                                                                                        |
-| `packages/plugin-ui-sdk/`                               | Optional npm wrapper + `.d.ts` (§7.3). **Not built** — M6.                                                                                                                                          |
+| File                                                                | Purpose                                                                                                                                                                                                   |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop-app/src/pluginSdkProtocol.ts`                              | Wire types, channel names, version, and the view types the trusted renderer consumes. The only SDK module with no Node or Electron imports, so the preload and the Vite project can both type against it. |
+| `desktop-app/src/pluginSdkCapabilities.ts`                          | The descriptor catalog (§6): consent copy, validators, providers, limits.                                                                                                                                 |
+| `desktop-app/src/pluginSdkBroker.ts`                                | The chokepoint (§4).                                                                                                                                                                                      |
+| `desktop-app/src/pluginSurfaceRegistry.ts`                          | `webContents.id → { pluginId, surface, generation }` (§8.1).                                                                                                                                              |
+| `desktop-app/src/pluginConsentStore.ts`                             | `ConsentStore` interface + local implementation (§10).                                                                                                                                                    |
+| `desktop-app/src/pluginConsentGate.ts`                              | Prompt queue, budget, session denials, timeout (§9).                                                                                                                                                      |
+| `desktop-app/src/pluginAuditLog.ts`                                 | Append-only JSONL + rotation (§10.3).                                                                                                                                                                     |
+| `desktop-app/src/pluginRateLimiter.ts`                              | Token buckets (§6.9).                                                                                                                                                                                     |
+| `desktop-app/src/pluginThemeStore.ts`                               | Theme mirrored into main (§6.7).                                                                                                                                                                          |
+| `desktop-app/src/pluginSdkRuntime.ts`                               | Every Electron dependency — BrowserWindow, Notification, the sandbox-ui driver, the settings surface — kept in one module so the rest of the SDK is testable without an Electron runtime.                 |
+| `desktop-app/src/sandboxUiEmbedPreload.ts`                          | The injected `window.clerum` surface (§7.1).                                                                                                                                                              |
+| `desktop-app/ui/src/components/PluginConsentModal/`                 | The prompt (§9.4).                                                                                                                                                                                        |
+| `desktop-app/ui/src/hooks/domain/usePluginPermissionsController.ts` | Query controller for the settings surface.                                                                                                                                                                |
+| `desktop-app/ui/src/components/PluginPermissions/`                  | Settings → Plugin permissions (§11).                                                                                                                                                                      |
 
-Modified: `sandboxUiEmbedPreload.ts` (new namespaces), `sandboxUiDriver.ts`
-(pin/unpin on mount/teardown), `ipc.ts` (broker handler + trusted resolve
-handler), `appService.ts` (thin accessors the providers call), `preload.ts` +
-`renderer.d.ts` (settings/modal IPC), `ui/src/App.tsx` (theme moves to main).
+Two wiring constraints are load-bearing and easy to undo by accident:
 
-Milestones:
+- **`ipc.ts` imports the runtime lazily** (`await import()` inside each handler).
+  A static import pulls `config.ts` into the graph, and `config.ts` loads stored
+  profiles at module scope against a real Electron `app` — which would make
+  merely registering IPC handlers depend on an initialized Electron runtime.
+- **The embed preload duplicates its channel names as literals.** It runs with
+  `sandbox: true`, where Electron's `require` is a polyfill serving only
+  `electron` and a few builtins, so a relative `require('./pluginSdkProtocol.js')`
+  throws at runtime. Type-only imports are erased and therefore safe.
+  `__tests__/pluginSdkSurface.test.ts` asserts the literals still match the
+  protocol module and that no relative value import has reappeared.
 
-- **M1 — Transport.** Protocol types, registry, broker skeleton, audit log,
-  rate limiter, `sdk.capabilities()` + `identity.read` with consent hardcoded to
-  deny. Proves the pinning and audit path end to end.
-- **M2 — Consent.** Store, gate, multi-row modal, `sdk.requestPermissions` /
-  `sdk.permissions`, prompt budget, `identity.read` live. First capability a
-  plugin can actually use. The modal is multi-row from the start — retrofitting
-  batching onto a single-capability prompt would mean rewriting the gate, the
-  audit fan-out, and the budget accounting.
-- **M3 — Catalog.** `org.read`, `agents.read`, `contexts.read`, `mcp.read`,
-  `theme.read` (main mirrors the renderer, §6.7), events.
-- **M4 — Files + attention.** `gfs.list`, `gfs.read` incl. `dataUrl` images,
-  `notifications.notify`.
-- **M5 — Revocation UI.** Settings page, activity tab, revocation events,
-  partition-GC grant cleanup. _Shipped except the GC hook — see §18._
-- **M6 — Author experience.** npm wrapper and a sample recipe under
-  `workflow-recipes/samples/` exercising every capability. _Not started._ The
-  authoring guide landed early as
-  [`plugin-ui-sdk-authoring.md`](./plugin-ui-sdk-authoring.md).
+### 15.2 Not implemented today
 
-M1+M2 are the security-critical pair and should land together behind a flag;
-M3–M4 are additive descriptors; M5 must ship before the flag flips on, because
-a grant the user cannot revoke is not consent.
+- **Grant cleanup for unreachable plugins.** `LocalConsentStore.pruneToPlugins`
+  and `PluginSdkRuntime.pruneGrantsToPlugins` exist and are unit-tested, but no
+  caller invokes them: the launch-time pass in `sandboxUiPartitionGc.ts` is not
+  wired to the consent store. A grant for a plugin the user can no longer reach
+  therefore persists, inert — the plugin cannot mount, so nothing can use it —
+  until the user revokes it. §10.5 describes the intended behaviour.
+- **Renderer tests.** The main-process half is covered; `PluginConsentModal` and
+  the Settings panel are not. The modal's Escape-denies and disabled-Allow
+  behaviour and the panel's revoke path have no automated coverage.
+- **`packages/plugin-ui-sdk/`**, the optional typed npm wrapper (§7.3). The
+  injected global is the contract, so nothing depends on the wrapper existing.
+- **A sample recipe** under `workflow-recipes/samples/` exercising every
+  capability.
 
 ## 16. Open questions
 
@@ -1224,7 +1232,7 @@ a grant the user cannot revoke is not consent.
    Today "open shared files" is one grant covering everything the user can read.
    A per-folder scope is a much better privacy story and a much worse UX (a
    prompt per file). A middle path — grant per top-level drive folder — is
-   worth prototyping before M4 freezes the descriptor.
+   worth prototyping before the descriptor's shape is depended on.
 2. **Does `identity.read` need splitting?** Some plugins want a display name and
    nothing else. `identity.read` (name only) + `identity.email` as separate
    capabilities would be more honest, at the cost of two prompts for the common
@@ -1245,16 +1253,16 @@ a grant the user cannot revoke is not consent.
    capability once per session, but the SDK cannot distinguish a real click from
    a synthetic one, so "user gesture" would be plugin-asserted and therefore
    worthless as a gate. The alternative is a "Request again" affordance on the
-   Settings row, which is trustworthy but hidden. Unresolved; M5 should not ship
-   without picking one.
+   Settings row, which is trustworthy but hidden. Unresolved.
 
 ---
 
 ## 17. Appendix A — End-user walkthrough
 
-The sections above specify mechanism. This one is the arc a single user actually
-lives through, and it is the thing to check any future change against: if an
-amendment makes Scene 2 stop being true, the amendment is wrong.
+The sections above describe mechanism. This one describes the arc a single user
+lives through. Scene 2 — a returning user who sees no modal at all — is the
+invariant the rest of the design exists to protect; a change that breaks it is a
+regression regardless of what else it improves.
 
 Cast: **Andres**, a member of the Acme team. **LeadForge**, a sandbox-UI plugin
 that wants identity, org, agents, and shared files.
@@ -1365,78 +1373,3 @@ limiting, the response minimization, and the audit log doing its work.
 The target shape of the whole experience: **one modal when he installs, one more
 the day he uses a new corner of the plugin, and a settings page he visits only
 when he gets suspicious.**
-
----
-
-## 18. Implementation notes — where the code diverged
-
-Written after M1–M5 landed. This section is the diff between what this document
-asked for and what `feat/plugin-ui-sdk` actually does. When the two disagree
-anywhere else in this file, believe this section, and believe the code over both.
-
-### 18.1 Constraints the design missed
-
-**A sandboxed preload cannot `require` a local module.** `sandboxUiEmbedPreload.ts`
-runs with `sandbox: true`, where Electron's `require` is a polyfill serving only
-`electron` and a couple of Node builtins; a relative `require('./pluginSdkProtocol.js')`
-throws at runtime. §5.1 implied the preload would import the protocol module. It
-cannot. Channel names and the version are **duplicated as literals** in the
-preload, with `__tests__/pluginSdkSurface.test.ts` asserting both that they still
-match `pluginSdkProtocol.ts` and that no relative _value_ import has crept back
-in. Type-only imports are fine — they are erased before they can become a
-`require`. The permanent fix is a bundling step for the preload; until then, the
-drift test is the guard.
-
-**`ipc.ts` must import the runtime lazily.** A static import pulled
-`pluginSdkRuntime` → `config.ts` into the graph, and `config.ts` loads stored
-profiles at module scope against a real Electron `app`. That broke 48 existing
-IPC tests, which mock Electron minimally and legitimately expect registering
-handlers not to require an initialized runtime. The handlers now `await import()`
-the runtime on first call, mirroring how `appService` defers `sandboxUiDriver`.
-
-**`renderer.d.ts` cannot reference Electron-touching modules.** The UI's tsconfig
-includes it, so importing `PluginGrantView` from `pluginSdkRuntime.ts` would drag
-Electron's types into the Vite project. `PluginGrantView` and
-`PluginAuditEntryView` therefore live in `pluginSdkProtocol.ts`, the one SDK
-module with no Node or Electron imports.
-
-**The prompt cooldown had to be injectable.** §9.5's 10 s cooldown is real
-`setTimeout` time, so a test covering it would spend ten seconds. `ConsentGateDeps`
-gained an optional `sleep`, letting tests assert the requested duration without
-paying it — the cooldown stays tested rather than disabled.
-
-### 18.2 Deliberate narrowings
-
-| Spec said                                   | Code does                                                                                                 | Why                                                                                                                                                                                |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| §6.7 theme becomes main-process state       | Renderer stays the writer; main mirrors and persists                                                      | Identical plugin-visible contract; a real move must reconcile localStorage with a new file and fix boot ordering, for no observable gain.                                          |
-| §6.9 `gfs.read` cap "image cap / 2 MB text" | One `maxResponseBytes` of 20 MB, with the 10 MB image and 2 MB text ceilings enforced inside the provider | The broker caps one serialized response per capability; per-mode ceilings belong where the mode is known. Base64 also inflates ~4/3, so the envelope cap must exceed the byte cap. |
-| §11 "Reveal log file"                       | **Clear activity log**                                                                                    | Revealing a path is a shell affordance with no obvious home in the Settings shell; clearing is the action users actually asked-for-shaped. Reveal remains open (§16 #4).           |
-
-### 18.3 Specced but not yet wired
-
-- **Partition-GC grant cleanup (§10.5).** `LocalConsentStore.pruneToPlugins` and
-  `PluginSdkRuntime.pruneGrantsToPlugins` exist and are unit-tested, but nothing
-  calls them yet: the launch-time pass in `sandboxUiPartitionGc.ts` has not been
-  hooked up. Impact is bounded — a stale grant for a plugin the user can no longer
-  reach is inert, because the plugin cannot mount — but the drop is not automatic
-  as §10.5 claims.
-- **Renderer tests (§13).** The main-process half is covered (76 tests over the
-  broker, gate, store, audit log, rate limiter, capability catalog, and preload
-  contract). `PluginConsentModal` and the Settings panel have **no tests yet** —
-  the modal's Escape-denies and disabled-Allow behaviour, and the panel's revoke
-  path, are currently only verified by reading them.
-- **npm wrapper + sample recipe (§7.3, M6).** Not started. The injected global is
-  the contract, so nothing depends on the wrapper existing.
-
-### 18.4 Additions the spec did not anticipate
-
-- **`notification.clicked` event.** §6.8 gave `notify` a `ref` "echoed back on
-  click" but §5.3 defined no event to echo it on. Added to the event union.
-- **`sdk.permissions()`** (state without prompting) was added with the batching
-  amendment and is load-bearing: it is what makes Scene 2 of §17 — a returning
-  user seeing no modal at all — actually true.
-- **`PluginRateLimiter` refunds the capability token** when only the plugin-global
-  bucket is exhausted, so a globally throttled plugin does not also burn its
-  per-capability budget. Not specified; it is the behaviour §6.9's two-layer model
-  implies.
