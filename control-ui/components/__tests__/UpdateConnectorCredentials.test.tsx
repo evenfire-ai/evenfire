@@ -901,7 +901,80 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
   })
 
-  it('reports the original create error when the retry also fails', async () => {
+  // ─── R1-H3: the retry must stay STATUS-AGNOSTIC ──────────────────────────
+  //
+  // control-api collapses the Kubernetes AlreadyExists into a bare 500 and can
+  // never emit 409 today (spec Non-goals), so a `postError.status === 409`
+  // branch would be dead code and the retry fires on ANY POST failure. The
+  // 500-only success test above cannot detect a regression that GATES the retry
+  // on 500 — the reviewer confirmed that mutation left all 28 component tests
+  // green. These two close that hole from both sides.
+
+  // FORWARD-COMPATIBILITY ONLY. control-api does NOT return 409 for a duplicate
+  // create today; this asserts the client would still recover if the server
+  // were ever fixed to send the correct status. Do not read this fixture as
+  // current server behavior — `serverError()` above is the real shape.
+  it('forward-compatibility: still falls back to the merge-patch if the create ever answers 409', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('409 - secrets "linear-credentials" already exists'), { status: 409 })
+    )
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    // The operator must reach the real set-mode progress state, not a failure.
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
+
+    // ...and all the way to the set-mode success banner.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+  })
+
+  // The other half of the same invariant: a NON-500 create failure must still
+  // produce exactly one merge-patch attempt. Gating the retry on 500 makes this
+  // zero.
+  it('attempts the merge-patch exactly once after a NON-500 create failure', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('400 Bad Request'), { status: 400 })
+    )
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+  })
+
+  // ─── R1-M1: which failure the operator is shown when BOTH legs fail ──────
+  //
+  // A 404 from the follow-up PUT is noise — the whole point of the retry is
+  // that the Secret might already exist, so "it does not exist" adds nothing to
+  // the create error the operator actually attempted.
+  it('reports the original create error when the retry fails with 404', async () => {
     mockCreateMcpSecret.mockRejectedValue(
       Object.assign(new Error('data["api-key"] must be a string'), { status: 400 })
     )
@@ -913,6 +986,48 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
 
     expect(screen.getByText(/data\["api-key"\] must be a string/)).toBeInTheDocument()
     expect(screen.queryByText(/404 - Secret not found/)).not.toBeInTheDocument()
+    // The PUT was genuinely attempted — otherwise this test would pass for the
+    // wrong reason (a retry that never ran also "reports the create error").
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+  })
+
+  // Any OTHER PUT failure describes the CURRENT state more precisely than the
+  // opaque create error does. The production pair: control-api answers a bare
+  // 500 for the AlreadyExists, then the merge-patch answers the real 409 that
+  // names the WorkflowRecipe and points at /admin/recipe-secrets. Showing the
+  // 500 hides the only actionable instruction the operator gets.
+  it('surfaces the retry error when the merge-patch fails with an actionable 409', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(
+        new Error(
+          '409 - Secret "linear-credentials" is owned by a WorkflowRecipe; rotate it through /admin/recipe-secrets'
+        ),
+        { status: 409 }
+      )
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(
+      screen.getByText(/Could not set credentials:.*owned by a WorkflowRecipe/)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/\/admin\/recipe-secrets/)).toBeInTheDocument()
+    // The opaque create error must not be what the operator is left with.
+    expect(screen.queryByText(/500 Internal Server Error/)).not.toBeInTheDocument()
+  })
+
+  it('surfaces the retry error when the merge-patch fails with 403', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('403 - secrets is forbidden in namespace "mcp-server"'), {
+        status: 403,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/Could not set credentials:.*is forbidden/)).toBeInTheDocument()
   })
 
   it('reaches the success banner once DeploymentReady turns True', async () => {

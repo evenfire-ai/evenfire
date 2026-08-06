@@ -374,10 +374,22 @@ export function UpdateConnectorCredentials({
           // status-gated branch here would be permanently dead code.
           try {
             await updateMcpSecret(envSecret!.name, data)
-          } catch {
-            // Surface the ORIGINAL create error: it describes what the operator
-            // actually attempted. A 404 from the follow-up PUT is noise.
-            throw postError
+          } catch (putError) {
+            // BOTH legs failed, so exactly one of the two errors reaches the
+            // operator. The rule:
+            //
+            //  - PUT 404 -> keep the CREATE error. The retry only exists on the
+            //    hypothesis that the Secret already exists; "it does not exist"
+            //    refutes the hypothesis and says nothing about why the create
+            //    failed, so it is pure noise.
+            //  - anything else -> surface the PUT error. It describes the
+            //    CURRENT state of the Secret more precisely than the create
+            //    error does — ownership (409 recipe-owned, which is the only
+            //    message pointing at /admin/recipe-secrets), authorization
+            //    (403), validation (400), or a server fault (5xx) — whereas
+            //    control-api's create error for the common AlreadyExists race
+            //    is an opaque bare 500.
+            throw (putError as { status?: number })?.status === 404 ? postError : putError
           }
         }
         setSecretCreated(true)
