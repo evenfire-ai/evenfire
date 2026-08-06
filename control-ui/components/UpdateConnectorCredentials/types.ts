@@ -24,13 +24,19 @@ export type UpdateConnectorCredentialsProps = {
 }
 
 /**
+ * The phases are shared by BOTH write directions, so "the write" below means
+ * the PUT to /admin/mcp-secrets/:name in rotate mode and the POST to
+ * /admin/mcp-secrets in set mode (including its merge-patch retry). Which one
+ * a given phase refers to is recorded separately, in `submittedMode`.
+ *
  * - idle:     form is editable, nothing in flight.
- * - saving:   the PUT to /admin/mcp-secrets/:name is in flight.
- * - rotating: the PUT returned 200; polling getMcpServer() for a fresh
- *             DeploymentReady condition.
- * - success:  a fresh DeploymentReady=True was observed after the PUT.
- * - failed:   the PUT itself failed, OR a fresh DeploymentReady=False was
- *             observed after the PUT.
+ * - saving:   the write is in flight.
+ * - rotating: the write returned 2xx; polling getMcpServer() for a fresh
+ *             DeploymentReady condition (the connector restarting after a
+ *             rotation, or starting for the first time after a create).
+ * - success:  a fresh DeploymentReady=True was observed after the write.
+ * - failed:   the write itself failed, OR a fresh DeploymentReady=False was
+ *             observed after it.
  * - timeout:  the bounded poll window elapsed without a fresh terminal
  *             condition. Never reported as success.
  */

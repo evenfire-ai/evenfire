@@ -224,10 +224,14 @@ export function UpdateConnectorCredentials({
             // No verdict either way inside the budget — an inconclusive
             // timeout, distinct from a diagnosed failure.
             setPhase('timeout')
+            // Diagnostic only. The "what to try next" sentence is mode-specific
+            // (nothing was rotated in set mode) and is appended by the timeout
+            // banner, which reads `submittedMode` at render time — keeping this
+            // effect free of a dependency that would restart the poll.
             setPhaseMessage(
               `The rollout did not finish within ${Math.round(POLL_TIMEOUT_MS / 1000)}s. Run ` +
                 `"kubectl get mcpserver ${serverName} -o yaml" to see the current DeploymentReady ` +
-                'condition, or try the rotation again.'
+                'condition.'
             )
           }
         }
@@ -242,8 +246,16 @@ export function UpdateConnectorCredentials({
     }
   }, [phase, rotationCutoff, serverName])
 
+  // `secretCreated` gates BOTH set-mode sources, not just the `surface` prop.
+  // It latches the moment a create succeeds, and the Secret it created exists
+  // from then on — whether the form got here from a stale `surface` prop or
+  // from a rotate PUT that 404'd (`recreateRequired`). Leaving `recreateRequired`
+  // outside the guard made it a one-way latch: nothing resets it (resetToIdle
+  // does not), so after a successful recreate the form kept "set" copy, forced
+  // every key, and offered a confirm dialog promising to create a Secret that
+  // now exists.
   const mode: 'set' | 'rotate' =
-    recreateRequired || (surface === 'set' && !secretCreated) ? 'set' : 'rotate'
+    !secretCreated && (recreateRequired || surface === 'set') ? 'set' : 'rotate'
 
   if (!envSecret) {
     return (
@@ -366,6 +378,13 @@ export function UpdateConnectorCredentials({
           // (HCC would answer SecretMissingKey). Demand every key instead.
           if ((putError as { status?: number })?.status === 404) {
             setRecreateRequired(true)
+            // A 404 is proof the Secret does NOT exist right now, so the
+            // "a create already landed" latch has to be cleared with it — it is
+            // what gates set mode. Without this, a Secret deleted a SECOND time
+            // in the same session (after a successful recreate) would leave the
+            // form on the rotate button while the error below demands every key,
+            // and every retry would just 404 again.
+            setSecretCreated(false)
             setPhase('idle')
             setValidationError('This Secret no longer exists. Enter every key to recreate it.')
             return
@@ -379,7 +398,14 @@ export function UpdateConnectorCredentials({
     } catch (e) {
       setPhase('failed')
       setPhaseMessage(e instanceof Error ? e.message : 'Failed to save credentials')
-      showToast('Failed to save credentials.', { tone: 'error' })
+      // `mode` — not the `submittedMode` state — is what this submit IS: the
+      // setSubmittedMode(mode) above does not update this closure's copy, so
+      // reading the state here would report the PREVIOUS submit's mode. Keeps
+      // the toast in step with the failure banner ("Rotation failed:" /
+      // "Could not set credentials:").
+      showToast(mode === 'set' ? 'Failed to set credentials.' : 'Failed to rotate credentials.', {
+        tone: 'error',
+      })
     }
   }
 
@@ -498,7 +524,10 @@ export function UpdateConnectorCredentials({
 
         {phase === 'timeout' ? (
           <div className="cu-banner cu-banner--warning" role="alert">
-            {phaseMessage}
+            {phaseMessage}{' '}
+            {submittedMode === 'set'
+              ? 'You can also try setting the credentials again.'
+              : 'You can also try the rotation again.'}
           </div>
         ) : null}
 

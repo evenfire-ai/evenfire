@@ -28,6 +28,28 @@ describe('resolveCredentialSurface', () => {
     ).toBe('rotate')
   })
 
+  // Pins the `type` clause on its own. Every other fixture is a SecretResolved
+  // condition, so deleting `c.type === 'SecretResolved'` from the predicate left
+  // the whole suite green: a DeploymentReady=False/SecretNotFound (or any other
+  // condition type reusing that reason) would then be read as a missing Secret
+  // and send the operator to the create form.
+  it('returns "rotate" when SecretNotFound is carried by a different condition type', () => {
+    expect(
+      resolveCredentialSurface([condition({ type: 'Ready', reason: 'SecretNotFound' })], {
+        managed: true,
+      })
+    ).toBe('rotate')
+  })
+
+  // Pins the `status` clause on its own. The clean-resolution fixture below
+  // changes `status` AND `reason` together, so the `reason` clause alone kept it
+  // green; this one varies ONLY the status.
+  it('returns "rotate" when SecretResolved holds SecretNotFound at status Unknown', () => {
+    expect(resolveCredentialSurface([condition({ status: 'Unknown' })], { managed: true })).toBe(
+      'rotate'
+    )
+  })
+
   it('returns "rotate" when the Secret resolves cleanly', () => {
     expect(
       resolveCredentialSurface([condition({ status: 'True', reason: 'SecretResolved' })], {})
