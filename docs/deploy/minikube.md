@@ -175,7 +175,8 @@ profile; run them explicitly with `E2E_RUN_SOFTWARE_CREATION=1`.
 
 ```bash
 make minikube-setup                        # Full setup; rebuilds the DB from scratch every run
-make minikube-setup ARGS="--skip-build"    # Re-deploy without rebuilding images (~1 min)
+make minikube-setup-local                  # Same, building every image instead of pulling
+make minikube-setup ARGS="--skip-build"    # Re-deploy without re-acquiring images (~1 min)
 make minikube-setup REUSE_DB=true          # Preserve the existing postgres DB volume
 make minikube-setup ARGS="--reset-db"      # Force a DB rebuild (already the default; also fixes WAL corruption)
 make minikube-setup ARGS="--force-keys"    # Regenerate all JWT signing keys
@@ -199,9 +200,17 @@ make minikube-apply-namespaces  # 2. Create namespaces (gen-keys writes Secrets 
 make minikube-deploy-crds       # 3. Install CRDs (Helm chart + CRD YAML)
 make minikube-gen-keys          # 4. Generate/keep JWT keys + auto-sync public key
 make minikube-apply-secrets     # 5. Apply the remaining secrets
-make minikube-build-images      # 6. Build Docker images
+make minikube-pull-images       # 6. Acquire images — pull (default mode)
+make minikube-build-images      #    ...or build them, in local mode only
 make minikube-deploy-all        # 7. Deploy via kustomize
 ```
+
+Step 6 is one or the other, never both: run `minikube-pull-images` on a default
+cluster and `minikube-build-images` only when you set it up with
+`make minikube-setup-local`. Whichever you run records the mode in
+`deploy/minikube/.image-manifest.json`, and `minikube-deploy-all` reads that
+file to pick the matching overlay (`minikube-ghcr` or `minikube`). Running the
+wrong one leaves the cluster deploying refs it never acquired.
 
 Steps 2 and 3 are not optional on a fresh cluster: `minikube-gen-keys` applies Secrets
 and ConfigMaps into `control-plane`, `sandbox-recipes`, `rpc-proxy` and `profiles`, which
@@ -344,29 +353,62 @@ Desktop App opens SSE stream with token T1 (TTL=300s)
 
 ## Rebuild and Update a Service
 
-### rpc-proxy (example)
+**Which image ref you have to produce depends on the cluster's mode.** On the
+default cluster every pod runs a `ghcr.io/evenfire-ai/...` ref, so building
+`clerum/rpc-proxy:test` changes nothing: no pod references that name and the
+rollout silently keeps running the release image. Check the mode first — it is
+recorded in `deploy/minikube/.image-manifest.json`, not decided by your shell:
+
+```bash
+scripts/minikube/image-mode.sh --image-source   # ghcr | local
+scripts/minikube/image-mode.sh --image-tag      # the ghcr tag (empty in local mode)
+```
+
+### The one-command path (both modes)
+
+```bash
+make minikube-pre-gate-sync GATE=<gate-name>
+```
+
+In ghcr mode this shadow-builds: it builds only the services your tree changed
+and tags each build with the exact `ghcr.io/evenfire-ai/...` ref the Deployment
+already references, which `imagePullPolicy: IfNotPresent` then picks up with no
+manifest edit. Everything else stays on the release digest, and the run prints a
+`SHADOWED:` list of what is local and what is not. The next `make minikube-setup`
+re-pulls and discards the shadow set. In local mode it rebuilds the changed
+services under their `clerum/*:test` refs, falling back to the full build when
+the changed set cannot be derived. Either way it also re-applies CRDs,
+manifests, generated config and secrets, and restarts the affected rollouts.
+
+To go back to building everything from source permanently, re-run setup as
+`make minikube-setup-local` (equivalently `IMAGE_SOURCE=local`). Every pod then
+runs `clerum/*:test` and a plain local build is what the cluster picks up.
+
+### rpc-proxy by hand (example)
 
 ```bash
 # Run from the repo root — the build context below is repo-root relative.
 
-# 1. Compile TypeScript
+# 1. Point Docker at minikube's daemon so the build lands where kubelet looks
+eval $(minikube -p clerum-test docker-env)
+
+# 2. Compile TypeScript
 npm run build --prefix rpc-proxy
 
-# 2. Build Docker image
+# 3. Build under the ref THIS cluster runs.
+#    ghcr mode — shadow the release ref (substitute the tag printed above):
+docker build -t ghcr.io/evenfire-ai/rpc-proxy:<tag> rpc-proxy/
+#    local mode:
 docker build -t clerum/rpc-proxy:test rpc-proxy/
-
-# 3. Transfer to minikube node
-docker save clerum/rpc-proxy:test > /tmp/rpc-proxy.tar
-minikube cp /tmp/rpc-proxy.tar /tmp/rpc-proxy.tar --profile clerum-test
-minikube ssh --profile clerum-test "docker rmi clerum/rpc-proxy:test 2>/dev/null; docker load -i /tmp/rpc-proxy.tar"
 
 # 4. Restart deployment
 kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 kubectl rollout status deployment/rpc-proxy -n rpc-proxy --timeout=60s
-
-# Or simpler with the Makefile:
-make minikube-build-images    # rebuild everything
 ```
+
+> A multi-node profile (`MINIKUBE_MULTI_NODE=true`) has no shared daemon to
+> build into. Build on the host, then `minikube -p clerum-test image load <ref>`
+> so every node holds it.
 
 ### Update a ConfigMap and Have the Pod Pick It Up
 
@@ -473,16 +515,25 @@ there) cannot read the public key and all workflow JWTs fail with `401 Invalid t
 | `CLERUM_WRC_SERVICE_NAME`  | not set (code fallback `workflow-recipes`) | Service name for coordinator DNS callbacks |
 
 The first two are set in `deploy/base/control-plane/workflow-recipes.yaml` (lines
-133-136). `CLERUM_WRC_SERVICE_NAME` is **not** in any manifest — it is an optional
+153-156). `CLERUM_WRC_SERVICE_NAME` is **not** in any manifest — it is an optional
 override read from the process environment, with the fallback `workflow-recipes`
 hardcoded in `workflow-recipes/src/reconciler/workflowRecipeReconciler.ts:622`.
 
-The base manifest pins the two images to the release tag; the minikube overlay
-rewrites them to `:test` through the `images:` block in
-`deploy/overlays/minikube/kustomization.yaml` (see
-`deploy/overlays/minikube/patches/dynamic-images.yaml` for why they are not
-patched by value), so in a minikube cluster the running values are
-`clerum/workflow-coordinator:test` and `clerum/mcp-host:test`.
+These are env-var values, not container images, so the plain `images:` block
+would not see them. `deploy/overlays/minikube/kustomizeconfig/imagetags.yaml`
+extends the image transformer to Deployment env-var values, which is what makes
+the rewrite apply (see `deploy/overlays/minikube/patches/dynamic-images.yaml`
+for why they are not patched by value). The running values therefore depend on
+the cluster's mode:
+
+| Mode                            | `CLERUM_COORDINATOR_IMAGE`                       | `CLERUM_MCP_HOST_IMAGE`              |
+| ------------------------------- | ------------------------------------------------ | ------------------------------------ |
+| ghcr (default, `minikube-ghcr`) | `ghcr.io/evenfire-ai/workflow-coordinator:<tag>` | `ghcr.io/evenfire-ai/mcp-host:<tag>` |
+| local (`minikube-setup-local`)  | `clerum/workflow-coordinator:test`               | `clerum/mcp-host:test`               |
+
+`<tag>` is the pin in `deploy/components/ghcr-images/kustomization.yaml`, or
+whatever `MINIKUBE_IMAGE_TAG` overrode it with for that run. Read it back with
+`scripts/minikube/image-mode.sh --image-tag`.
 
 > **Bug fixed**: previously `clerum-operator` was used as the service name. The coordinator could
 > not reach the WRC REST endpoint and all status updates returned `ECONNREFUSED`.
@@ -493,10 +544,11 @@ patched by value), so in a minikube cluster the running values are
 CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE: clerum/stdio-bridge:0.9.5
 ```
 
-Like the coordinator/mcp-host images above, the base manifest pins the release tag
-and the minikube overlay rewrites it to `:test` via the `images:` block in
-`deploy/overlays/minikube/kustomization.yaml`, so the running value in a minikube
-cluster is `clerum/stdio-bridge:test`. That image is built with
+Like the coordinator/mcp-host images above, the base manifest pins the release
+tag and the overlay rewrites it, so the running value follows the cluster's
+mode: `ghcr.io/evenfire-ai/stdio-bridge:<tag>` on a default (ghcr) cluster,
+`clerum/stdio-bridge:test` after `make minikube-setup-local`. The ghcr ref is
+pulled by `make minikube-pull-images`; the local one is built by
 `make minikube-build-images`.
 
 ### E2E Workflow Tests
@@ -845,7 +897,7 @@ make minikube-verify-images   # Reports the mode and every ref the cluster is mi
 ```
 
 ```bash
-# imageSource=ghcr: re-pull the release set at the recorded tag.
+# imageSource=ghcr: re-pull the release set at the tag this cluster runs.
 make minikube-pull-images
 make minikube-restart-all
 
@@ -854,8 +906,20 @@ make minikube-build-images
 make minikube-restart-all
 ```
 
+`minikube-pull-images` resolves the tag in one order: `MINIKUBE_IMAGE_TAG` if
+you set it, otherwise the tag recorded in `deploy/minikube/.image-manifest.json`
+by the last acquisition, otherwise the committed pin in
+`deploy/components/ghcr-images/kustomization.yaml`. So a cluster bootstrapped
+with `MINIKUBE_IMAGE_TAG=latest` re-pulls `latest` here without you repeating
+the override, and the run prints which of the three the tag came from. Check it
+ahead of time with `scripts/minikube/image-mode.sh --image-tag`.
+
+It re-pulls tags already present rather than skipping them, which is what
+discards a lingering shadow build.
+
 `make minikube-pre-gate-sync GATE=image-refresh ARGS="--force-cluster-sync"`
-does the right one for you, then re-applies the manifests.
+does the right one for you, at the tag the cluster actually runs, then
+re-applies the manifests.
 
 ### Postgres CrashLoopBackOff (WAL corruption)
 
@@ -894,7 +958,7 @@ make minikube-restart-all                 # Restart all pods to pick up new keys
 | `401: "Missing runtime edge caller context"` from chatllm                    | Call reached mcp-host without a valid `x-clerum-edge-caller` (must be `rpc-proxy`, `channel-reader` or `workflow-approval-request-reader`)                                                                                                                                         | Call through rpc-proxy instead of hitting mcp-host directly                                                                                                                      |
 | `401: "Invalid token"` in rpc-proxy when opening stream                      | Session token expired in Desktop App                                                                                                                                                                                                                                               | Close and reopen the app, do logout/login                                                                                                                                        |
 | `403: "Forbidden: user cannot access this host"`                             | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                                                                                                                                                                           | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                                                    |
-| Pod in `ImagePullBackOff`                                                    | Image not loaded in minikube                                                                                                                                                                                                                                                       | `make minikube-build-images`                                                                                                                                                     |
+| Pod in `ImagePullBackOff`                                                    | The cluster does not hold an image it was told to run                                                                                                                                                                                                                              | `make minikube-verify-images` to see the mode and the missing refs, then `make minikube-pull-images` (ghcr) or `make minikube-build-images` (local). See the section above.      |
 | Port forward dropped after pod restart                                       | Kubernetes closes the tunnel when the pod restarts                                                                                                                                                                                                                                 | `make minikube-pf-desktop`                                                                                                                                                       |
 | `409 Conflict` on first setup                                                | Previous data in postgres                                                                                                                                                                                                                                                          | `make minikube-db-reset`                                                                                                                                                         |
 | SSE stream closes with `"auth-expired"`                                      | mcp-host rejected 3 consecutive `/v1/runtime/status` polls with 401/403. Those polls carry only `x-clerum-edge-*` headers (no bearer token), so this is an edge-guard/host-access rejection, not RPC-token expiry.                                                                 | The Desktop App clears its token cache and reconnects automatically. If it repeats, check chatllm logs for `Missing runtime edge caller context` / `Runtime edge host mismatch`. |
