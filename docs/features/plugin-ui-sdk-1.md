@@ -1,8 +1,13 @@
 # Plugin UI SDK — typed, consented context bridge for sandbox-UI plugins
 
-Status: **Draft spec, not implemented.** Target surface: `desktop-app`.
-Sibling story: Side Window (out of scope here, but the broker is designed so it
-can host that surface without a contract change — §14).
+Status: **Implemented** on `feat/plugin-ui-sdk` (M1–M5). Target surface:
+`desktop-app`. Sibling story: Side Window (out of scope here, but the broker is
+designed so it can host that surface without a contract change — §14).
+
+**§18 records where the code diverged from this document, and what is specced
+but not yet wired.** Read it before trusting a detail below; the code wins.
+
+Author-facing counterpart: [`plugin-ui-sdk-authoring.md`](./plugin-ui-sdk-authoring.md).
 
 ---
 
@@ -51,7 +56,7 @@ sections in between specify how that arc is made true.
    files, plus a notification sink and theme — extensible by adding a capability
    descriptor, not by adding an IPC channel.
 3. A **consent layer**: any capability the user has not already approved for
-   *this plugin* surfaces a permission prompt naming the plugin and the exact
+   _this plugin_ surfaces a permission prompt naming the plugin and the exact
    scope. Approvals persist per (user, environment, plugin, capability).
 4. **Revocation** from Desktop settings, taking effect immediately on the
    running embed.
@@ -60,7 +65,7 @@ sections in between specify how that arc is made true.
 ### Non-goals
 
 - **No new credential path.** The SDK never hands a plugin a session token, RPC
-  token, OAuth grant, or any bearer material. It returns *data*, brokered by
+  token, OAuth grant, or any bearer material. It returns _data_, brokered by
   main, fetched with the user's own session. A plugin that wants to act as the
   user still goes through the existing OAuth (§7 of the recipe guide) or
   `backgroundAccess` broker paths.
@@ -73,17 +78,17 @@ sections in between specify how that arc is made true.
 - **No server-side consent store in v1** — but the store is behind an interface
   so v2 can sync it (decision D1, §10.6).
 - **No bypass of existing platform boundaries.** If control-api would deny the
-  user the data, the SDK denies it too; consent is an *additional* gate, never a
+  user the data, the SDK denies it too; consent is an _additional_ gate, never a
   substitute for the user's own ACL.
 
 ## 3. Decisions
 
-| # | Decision | Rationale |
-|---|---|---|
-| D1 | Consent grants + audit persist **locally now, behind a `ConsentStore` interface designed for server sync later**. | Ships without a DB migration; the IPC contract does not change when sync lands (§10.6). |
-| D2 | Capabilities are **runtime-requested, not declared in the CRD**. Undeclared ≠ denied because there is nothing to declare; the *prompt* is the gate. | Zero platform work; feature lives entirely in `desktop-app`. Cost: no pre-install disclosure and a prompt-spam surface, mitigated in §9.5 / §12. |
-| D3 | The permission prompt is an **in-app React modal in the trusted renderer**, not `dialog.showMessageBox`. | Room for real scope copy ("your name and email address"), the plugin's title and icon, and a link into the revocation page. Spoof-resistance comes from hiding the `WebContentsView` while the modal is up (§9.4). |
-| D4 | A grant is **always-until-revoked**. No "allow once", no "allow for this session". | One state per (plugin, capability): granted or not. A *denial* is session-sticky only (§9.3) so a user who mis-clicks Deny is not permanently stuck. |
+| #   | Decision                                                                                                                                            | Rationale                                                                                                                                                                                                          |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | Consent grants + audit persist **locally now, behind a `ConsentStore` interface designed for server sync later**.                                   | Ships without a DB migration; the IPC contract does not change when sync lands (§10.6).                                                                                                                            |
+| D2  | Capabilities are **runtime-requested, not declared in the CRD**. Undeclared ≠ denied because there is nothing to declare; the _prompt_ is the gate. | Zero platform work; feature lives entirely in `desktop-app`. Cost: no pre-install disclosure and a prompt-spam surface, mitigated in §9.5 / §12.                                                                   |
+| D3  | The permission prompt is an **in-app React modal in the trusted renderer**, not `dialog.showMessageBox`.                                            | Room for real scope copy ("your name and email address"), the plugin's title and icon, and a link into the revocation page. Spoof-resistance comes from hiding the `WebContentsView` while the modal is up (§9.4). |
+| D4  | A grant is **always-until-revoked**. No "allow once", no "allow for this session".                                                                  | One state per (plugin, capability): granted or not. A _denial_ is session-sticky only (§9.3) so a user who mis-clicks Deny is not permanently stuck.                                                               |
 
 ## 4. Architecture
 
@@ -202,7 +207,7 @@ sequenceDiagram
     P->>U: Re-renders without the file panel (no reload)
 ```
 
-Read the diagram for what is *absent* as much as what is present: no arrow ever
+Read the diagram for what is _absent_ as much as what is present: no arrow ever
 runs from **P** to **API**, and no credential ever travels leftward past **B**.
 The plugin's only edge is to its own preload; every hop beyond that is main
 acting on the user's behalf.
@@ -283,19 +288,19 @@ must render, not an exceptional one. Individual capability calls still return
 
 ### 5.2 Error codes
 
-| Code | Meaning | `retryable` |
-|---|---|---|
-| `unsupported_capability` | Unknown id, or a capability this host build does not implement. | false |
-| `unsupported_version` | `v` is not a version this host speaks. | false |
-| `invalid_request` | Params failed the descriptor's validator (unknown key, wrong type, over a length cap). | false |
-| `unauthenticated` | No Desktop session (user logged out, or logged out mid-call). | true |
-| `permission_denied` | The user denied this capability, or the prompt timed out (§9.3). | true |
-| `permission_revoked` | A grant existed and was revoked; distinct from `permission_denied` so a plugin can show "access was removed" rather than re-prompting. | true |
-| `rate_limited` | Per-plugin or per-capability budget exhausted. Carries a `retryAfterMs` hint in `message`. | true |
-| `not_found` | The referenced resource (e.g. a `gfs://` URI) does not exist or the user cannot see it. Deliberately conflated — see §12. | false |
-| `payload_too_large` | The result exceeds the capability's response cap (§6.8). | false |
-| `unavailable` | Upstream (control-api / external-rest-api / gfsc) failed. | true |
-| `internal` | Anything else. Details go to the desktop log, not to the plugin. | true |
+| Code                     | Meaning                                                                                                                                | `retryable` |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `unsupported_capability` | Unknown id, or a capability this host build does not implement.                                                                        | false       |
+| `unsupported_version`    | `v` is not a version this host speaks.                                                                                                 | false       |
+| `invalid_request`        | Params failed the descriptor's validator (unknown key, wrong type, over a length cap).                                                 | false       |
+| `unauthenticated`        | No Desktop session (user logged out, or logged out mid-call).                                                                          | true        |
+| `permission_denied`      | The user denied this capability, or the prompt timed out (§9.3).                                                                       | true        |
+| `permission_revoked`     | A grant existed and was revoked; distinct from `permission_denied` so a plugin can show "access was removed" rather than re-prompting. | true        |
+| `rate_limited`           | Per-plugin or per-capability budget exhausted. Carries a `retryAfterMs` hint in `message`.                                             | true        |
+| `not_found`              | The referenced resource (e.g. a `gfs://` URI) does not exist or the user cannot see it. Deliberately conflated — see §12.              | false       |
+| `payload_too_large`      | The result exceeds the capability's response cap (§6.8).                                                                               | false       |
+| `unavailable`            | Upstream (control-api / external-rest-api / gfsc) failed.                                                                              | true        |
+| `internal`               | Anything else. Details go to the desktop log, not to the plugin.                                                                       | true        |
 
 ### 5.3 Events
 
@@ -306,8 +311,11 @@ export type PluginSdkEvent =
   | { type: 'theme.changed'; theme: PluginTheme }
   | { type: 'permission.changed'; capability: string; granted: boolean }
   | { type: 'session.changed'; authenticated: boolean }
-  // Pre-existing, kept on its own legacy channel for compatibility (§7.2):
-  // clerum:sandbox-ui:oauth-completed
+  // Added during implementation: a notification is useless if the plugin
+  // cannot tell what the user clicked (§6.8's `ref` had no return path).
+  | { type: 'notification.clicked'; ref: string | null }
+// Pre-existing, kept on its own legacy channel for compatibility (§7.2):
+// clerum:sandbox-ui:oauth-completed
 ```
 
 `permission.changed` is what makes revocation feel immediate: the Settings page
@@ -350,13 +358,13 @@ export type CapabilityDescriptor<P, R> = {
 ### 6.1 `identity.read` — who the user is
 
 > **Prompt:** "**{Plugin}** wants to see who you are — your name, email address,
-> and user id."  Tier: `personal`.
+> and user id." Tier: `personal`.
 
 ```ts
 type IdentityReadResult = {
-  userId: string        // SessionMe.id
-  email: string         // SessionMe.email
-  name: string | null   // SessionMe.name
+  userId: string // SessionMe.id
+  email: string // SessionMe.email
+  name: string | null // SessionMe.name
 }
 ```
 
@@ -385,7 +393,7 @@ Source: `SessionMe.teamId / teamName / role`, with `AppService.listTeams()` as
 the fallback when the session payload is stale.
 
 **Team switching:** grants are keyed by `userId`, not by team (§10.2). After
-`AppService.switchTeam()`, an already-granted `org.read` returns the *new* team
+`AppService.switchTeam()`, an already-granted `org.read` returns the _new_ team
 without re-prompting. That is intentional — the consent was "see which workspace
 I am in", and the answer changed. A `session.changed` event fires so the plugin
 can refetch.
@@ -403,7 +411,7 @@ type AgentsReadResult = {
     name: string
     contextRef: string | null
     provider: string | null
-    mcpServers: string[]   // names only
+    mcpServers: string[] // names only
   }>
 }
 ```
@@ -484,7 +492,7 @@ Source: `AppService.listAccessibleGfsResources()` (no `resourceId`) or
 
 ```ts
 type GfsReadParams = {
-  uri: string                      // gfs://<drive>/<resource>
+  uri: string // gfs://<drive>/<resource>
   as: 'text' | 'dataUrl'
 }
 type GfsReadResult = {
@@ -500,7 +508,7 @@ URI through the API on every call (no local mirror) so a revoked GFS grant denie
 immediately at the server, independent of SDK consent.
 
 **Image rendering (the "render an image from GFS" requirement) is `gfs.read` with
-`as: 'dataUrl'`.** The embed's CSP is `img-src 'self' data:` — `blob:` is *not*
+`as: 'dataUrl'`.** The embed's CSP is `img-src 'self' data:` — `blob:` is _not_
 in the list, so an object URL would be blocked. The contract is therefore a
 `data:` URI the plugin drops straight into `<img src>`:
 
@@ -541,15 +549,20 @@ in the audit trail at `debug` verbosity, and it is still listed on the plugin's
 Settings row as "Appearance (no permission needed)" so the user is never
 surprised to learn a plugin knows their theme.
 
-**Implementation note — theme currently lives in the wrong process.** The
-renderer owns it: `App.tsx` reads/writes `localStorage['evenfire.ui.theme']`
-(`ui/src/constants/theme.ts`) and sets `data-theme` on `documentElement`. Main
-has no idea what the theme is. This capability therefore requires lifting theme
-into main as the source of truth (`themeStore.ts`, persisted alongside other
-desktop preferences), with the renderer reading it over IPC on boot and pushing
-changes back. The `theme.changed` event (§5.3) then fans out to any mounted
-embed. This is real work, not a lookup, and it is on the critical path for
-milestone M3 (§15).
+**Implementation note — theme lives in the renderer, and main mirrors it.**
+The renderer owns theme: `App.tsx` reads/writes `localStorage['evenfire.ui.theme']`
+(`ui/src/constants/theme.ts`) and stamps `data-theme` on `documentElement`. Main
+had no idea what it was.
+
+This spec originally called for lifting ownership into main. **The shipped code
+does not**: `pluginThemeStore.ts` keeps a mirror that the renderer pushes to on
+boot and on every change, persisted so an embed asking before the renderer has
+reported gets the right answer instead of a default flash. The plugin-visible
+contract — `theme.read` plus the `theme.changed` event — is identical either way,
+and a true move would have to reconcile `localStorage` with a new on-disk file
+and get the boot ordering right for no observable gain. If a surface ever needs
+theme without a renderer running (a headless Side Window), that module is where
+the change lands.
 
 ### 6.8 `notifications.notify` — get the user's attention
 
@@ -557,10 +570,10 @@ milestone M3 (§15).
 
 ```ts
 type NotifyParams = {
-  title: string        // ≤ 120 chars, plain text
-  body?: string        // ≤ 400 chars, plain text
+  title: string // ≤ 120 chars, plain text
+  body?: string // ≤ 400 chars, plain text
   /** Opaque to the host; echoed back on click so the plugin can route. */
-  ref?: string         // ≤ 256 chars
+  ref?: string // ≤ 256 chars
 }
 type NotifyResult = { delivered: boolean; reason?: 'suppressed' | 'unsupported' }
 ```
@@ -585,17 +598,17 @@ Behaviour:
 
 ### 6.9 Limits
 
-| Capability | per min | per hour | max response |
-|---|---|---|---|
-| `identity.read` | 10 | 60 | 4 KB |
-| `org.read` | 10 | 60 | 4 KB |
-| `agents.read` | 10 | 120 | 256 KB |
-| `contexts.read` | 10 | 120 | 64 KB |
-| `mcp.read` | 10 | 120 | 128 KB |
-| `gfs.list` | 30 | 600 | 512 KB |
-| `gfs.read` | 20 | 300 | image cap (§6.6) / 2 MB text |
-| `theme.read` | 60 | 600 | 1 KB |
-| `notifications.notify` | 2 | 20 | — |
+| Capability             | per min | per hour | max response                 |
+| ---------------------- | ------- | -------- | ---------------------------- |
+| `identity.read`        | 10      | 60       | 4 KB                         |
+| `org.read`             | 10      | 60       | 4 KB                         |
+| `agents.read`          | 10      | 120      | 256 KB                       |
+| `contexts.read`        | 10      | 120      | 64 KB                        |
+| `mcp.read`             | 10      | 120      | 128 KB                       |
+| `gfs.list`             | 30      | 600      | 512 KB                       |
+| `gfs.read`             | 20      | 300      | image cap (§6.6) / 2 MB text |
+| `theme.read`           | 60      | 600      | 1 KB                         |
+| `notifications.notify` | 2       | 20       | —                            |
 
 Plus a **global per-plugin ceiling** of 120 requests/minute across all
 capabilities, so a plugin cannot round-robin its way past the per-capability
@@ -766,15 +779,15 @@ One row per `(envKey, userId, pluginId, capability)`:
 
 ```ts
 type ConsentGrant = {
-  envKey: string       // partitionFor()'s env scoping, from config.getActiveEnvKey()
+  envKey: string // partitionFor()'s env scoping, from config.getActiveEnvKey()
   userId: string
-  pluginId: string     // '<recipeNs>/<recipeName>'
+  pluginId: string // '<recipeNs>/<recipeName>'
   capability: string
-  grantedAt: string    // ISO 8601
+  grantedAt: string // ISO 8601
   lastUsedAt: string | null
   /** Bumped when the descriptor's data shape widens (§9.6). */
   descriptorVersion: number
-  revision: number     // monotonic, for the v2 sync merge (§10.6)
+  revision: number // monotonic, for the v2 sync merge (§10.6)
 }
 ```
 
@@ -824,7 +837,7 @@ embed ← { ok: true, data: { … } }
 **Rows are individually declinable, and the plugin cannot mark any of them
 required.** A plugin that genuinely needs all four is free to say so in its own
 UI after the fact ("LeadForge needs access to your files to show the pipeline") —
-what it must not do is borrow the *host's* chrome to apply that pressure. A
+what it must not do is borrow the _host's_ chrome to apply that pressure. A
 "Required" badge rendered by Evenfire in Evenfire's modal reads as the platform
 vouching for the demand, and once one plugin gets it every plugin marks
 everything required. The all-or-nothing conversation belongs in the plugin's own
@@ -865,7 +878,7 @@ startup set.
 
 ### 9.3 Denial semantics
 
-D4 makes *grants* permanent-until-revoked. Denials are deliberately weaker:
+D4 makes _grants_ permanent-until-revoked. Denials are deliberately weaker:
 
 - **Deny** records no row — including a row left unchecked in a batch prompt. It
   adds `(pluginId, capability)` to an in-memory `sessionDenials` set, cleared
@@ -912,7 +925,7 @@ D2 (no CRD declaration) means a hostile plugin can ask for anything. Beyond
 session-sticky denial, the gate enforces:
 
 - At most **3 consent prompts (modals) per plugin per mount**, and at most **8
-  capability rows** in any one of them. The budget counts *modals*, not
+  capability rows** in any one of them. The budget counts _modals_, not
   capabilities — a plugin asking for its whole startup set in one batch spends
   one of three, which is why §9.2's batched path is the sanctioned one and a
   per-capability drip is not. Beyond the budget, ungranted capabilities return
@@ -922,7 +935,7 @@ session-sticky denial, the gate enforces:
 - The modal shows a persistent "This plugin has asked for permissions N times
   this session" line from the second prompt onward.
 
-Batching moves the pressure from *volume* to *breadth*: instead of four modals a
+Batching moves the pressure from _volume_ to _breadth_: instead of four modals a
 hostile plugin now writes one modal with eight rows. That is the better failure
 mode — a single screen listing everything a plugin wants is exactly the artifact
 a user can evaluate, and an eight-row modal from a note-taking plugin looks
@@ -980,9 +993,17 @@ export interface ConsentStore {
 - One line per decision:
 
 ```json
-{"ts":"2026-08-06T10:14:02.113Z","userId":"u_123","pluginId":"sandbox-recipes/leadforge",
- "capability":"identity.read","outcome":"allowed","consent":"existing_grant",
- "shape":{"fields":["userId","email","name"]},"bytes":142,"surface":"sandbox-ui-embed"}
+{
+  "ts": "2026-08-06T10:14:02.113Z",
+  "userId": "u_123",
+  "pluginId": "sandbox-recipes/leadforge",
+  "capability": "identity.read",
+  "outcome": "allowed",
+  "consent": "existing_grant",
+  "shape": { "fields": ["userId", "email", "name"] },
+  "bytes": 142,
+  "surface": "sandbox-ui-embed"
+}
 ```
 
 - **Records shape, never content.** `fields` for objects, `count` for lists,
@@ -996,7 +1017,7 @@ export interface ConsentStore {
   Settings view by default (a `theme.read` every second would drown the log the
   user actually cares about), but they are still on disk.
 
-### 10.4 What is *not* stored
+### 10.4 What is _not_ stored
 
 Prompt decisions of `deny` (in-memory only, §9.3), request params, response
 payloads, and any bearer material.
@@ -1039,10 +1060,10 @@ CSS files).
 
 **Plugin list** — one row per plugin holding ≥1 grant:
 
-| Plugin | Permissions | Last used | |
-|---|---|---|---|
-| LeadForge | Identity · Agents · Shared files | 2 minutes ago | ⋯ |
-| Sales CRM | Identity · Notifications | yesterday | ⋯ |
+| Plugin    | Permissions                      | Last used     |     |
+| --------- | -------------------------------- | ------------- | --- |
+| LeadForge | Identity · Agents · Shared files | 2 minutes ago | ⋯   |
+| Sales CRM | Identity · Notifications         | yesterday     | ⋯   |
 
 Row expands to per-capability detail: the human title, the same
 `dataDescription` string the prompt showed (so the user is re-reading exactly
@@ -1071,21 +1092,21 @@ the rare misbehaving one.
 
 ## 12. Threat model
 
-| # | Threat | Mitigation |
-|---|---|---|
-| T1 | Plugin claims to be a different plugin to reuse its grants. | Caller identity from the pinning map, never from the message (§8.1). |
-| T2 | Plugin reads context without consent. | Deny by default; the broker is the only path and consent precedes the provider call (§4). |
-| T3 | Plugin paints a fake permission dialog to phish an approval. | Embed hidden during prompts; main owns prompt copy; nonce'd `promptId`; trusted-sender resolve (§9.4). |
-| T4 | Prompt fatigue — plugin spams modals until the user clicks Allow. | 3 prompts/mount, 10 s cooldown, session-sticky denial, prompt-count line in the modal (§9.5). |
-| T5 | Plugin exfiltrates context to a third party. | Not preventable at this layer and the spec should say so plainly: once a plugin legitimately holds the user's email, it can POST it to its own backend (its own origin is allowed by `connect-src 'self'`). The mitigations are *disclosure* (the prompt states what is shared), *attribution* (the audit log records who got what), and *revocation*. Users grant to a plugin they chose to install; the SDK makes that grant visible and reversible, it does not make it enforceable after the fact. |
-| T6 | Escalation via SDK past the user's own ACL. | Every provider calls an `AppService` method with the user's session; upstream authorizes exactly as it does for the Desktop's own pages. The SDK can only ever return a subset. |
-| T7 | Resource exhaustion (polling, huge GFS reads). | Per-capability + global token buckets, response caps, short-TTL caching (§6.9). |
-| T8 | Data leak through error messages. | Fixed error-code taxonomy; upstream bodies never forwarded; `not_found` deliberately conflates "does not exist" with "you cannot see it" so the SDK is not an existence oracle for GFS resources (§5.2). |
-| T9 | Grant tampering on disk. | `0600`, atomic writes, fail-closed on unparseable input. An attacker with write access to `userData` already owns the app; this is hygiene, not a boundary. |
-| T10 | Stale grant after ACL removal. | Partition-GC-time cleanup plus the fact that an unreachable plugin cannot mount (§10.5). |
-| T11 | Late IPC from a torn-down or superseded embed. | Unpin on teardown; generation check (§8.1). |
-| T12 | Malicious image bytes via `gfs.read`. | MIME allowlist, SVG refused, magic-byte re-check, size cap, `data:` only — and the renderer is Chromium's own image decoder in a sandboxed process (§6.6). |
-| T13 | Notification spoofing ("Evenfire: enter your password"). | Mandatory plugin-title prefix, plain text only, tight rate limit (§6.8). |
+| #   | Threat                                                            | Mitigation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| T1  | Plugin claims to be a different plugin to reuse its grants.       | Caller identity from the pinning map, never from the message (§8.1).                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| T2  | Plugin reads context without consent.                             | Deny by default; the broker is the only path and consent precedes the provider call (§4).                                                                                                                                                                                                                                                                                                                                                                                                              |
+| T3  | Plugin paints a fake permission dialog to phish an approval.      | Embed hidden during prompts; main owns prompt copy; nonce'd `promptId`; trusted-sender resolve (§9.4).                                                                                                                                                                                                                                                                                                                                                                                                 |
+| T4  | Prompt fatigue — plugin spams modals until the user clicks Allow. | 3 prompts/mount, 10 s cooldown, session-sticky denial, prompt-count line in the modal (§9.5).                                                                                                                                                                                                                                                                                                                                                                                                          |
+| T5  | Plugin exfiltrates context to a third party.                      | Not preventable at this layer and the spec should say so plainly: once a plugin legitimately holds the user's email, it can POST it to its own backend (its own origin is allowed by `connect-src 'self'`). The mitigations are _disclosure_ (the prompt states what is shared), _attribution_ (the audit log records who got what), and _revocation_. Users grant to a plugin they chose to install; the SDK makes that grant visible and reversible, it does not make it enforceable after the fact. |
+| T6  | Escalation via SDK past the user's own ACL.                       | Every provider calls an `AppService` method with the user's session; upstream authorizes exactly as it does for the Desktop's own pages. The SDK can only ever return a subset.                                                                                                                                                                                                                                                                                                                        |
+| T7  | Resource exhaustion (polling, huge GFS reads).                    | Per-capability + global token buckets, response caps, short-TTL caching (§6.9).                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| T8  | Data leak through error messages.                                 | Fixed error-code taxonomy; upstream bodies never forwarded; `not_found` deliberately conflates "does not exist" with "you cannot see it" so the SDK is not an existence oracle for GFS resources (§5.2).                                                                                                                                                                                                                                                                                               |
+| T9  | Grant tampering on disk.                                          | `0600`, atomic writes, fail-closed on unparseable input. An attacker with write access to `userData` already owns the app; this is hygiene, not a boundary.                                                                                                                                                                                                                                                                                                                                            |
+| T10 | Stale grant after ACL removal.                                    | Partition-GC-time cleanup plus the fact that an unreachable plugin cannot mount (§10.5).                                                                                                                                                                                                                                                                                                                                                                                                               |
+| T11 | Late IPC from a torn-down or superseded embed.                    | Unpin on teardown; generation check (§8.1).                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| T12 | Malicious image bytes via `gfs.read`.                             | MIME allowlist, SVG refused, magic-byte re-check, size cap, `data:` only — and the renderer is Chromium's own image decoder in a sandboxed process (§6.6).                                                                                                                                                                                                                                                                                                                                             |
+| T13 | Notification spoofing ("Evenfire: enter your password").          | Mandatory plugin-title prefix, plain text only, tight rate limit (§6.8).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ## 13. Testing
 
@@ -1115,7 +1136,7 @@ the highest-value target:
   a future field silently widening a capability.
 - `gfs.read`: MIME allowlist, SVG refusal, magic-byte mismatch, size cap.
 
-**Renderer (`ui/src/**/__tests__`)** — modal renders host-owned copy for a given
+**Renderer (`ui/src/**/**tests**`)\*\* — modal renders host-owned copy for a given
 capability id; Allow/Deny/Escape/timeout resolve correctly; embed visibility
 toggles around the modal; Settings list renders grants, revoke calls through and
 updates optimistically; audit tab filters.
@@ -1135,7 +1156,7 @@ same need for context. Nothing in this spec is embed-specific except the pinning
 call sites:
 
 - `pluginSurfaceRegistry` already carries `surface: 'sandbox-ui-embed' |
-  'side-window'`; the Side Window's mount path pins and unpins the same way.
+'side-window'`; the Side Window's mount path pins and unpins the same way.
 - Grants are keyed by `pluginId`, **not** by surface — a user who granted
   LeadForge their identity in the embed should not be re-prompted when the same
   plugin appears in the Side Window. Same plugin, same user, same decision.
@@ -1150,20 +1171,22 @@ The only thing the Side Window must not do is introduce a second broker.
 
 New files (all `desktop-app/src/` unless noted):
 
-| File | Purpose |
-|---|---|
-| `pluginSdkProtocol.ts` | Shared request/response/event/error types, channel names, version. |
-| `pluginSdkCapabilities.ts` | The descriptor catalog (§6). |
-| `pluginSdkBroker.ts` | The chokepoint (§4). |
-| `pluginSurfaceRegistry.ts` | `webContents.id → { pluginId, surface, generation }`. |
-| `pluginConsentStore.ts` | Interface + local implementation (§10). |
-| `pluginConsentGate.ts` | Prompt queue, budget, session denials, timeout. |
-| `pluginAuditLog.ts` | Append-only JSONL + rotation. |
-| `pluginRateLimiter.ts` | Token buckets. |
-| `themeStore.ts` | Theme as main-process state (§6.7). |
-| `ui/src/components/PluginConsentModal/` | The prompt. |
-| `ui/src/pages/SettingsPage` + `PluginPermissions*` | Revocation + activity (§11). |
-| `packages/plugin-ui-sdk/` | Optional npm wrapper + `.d.ts` (§7.3). |
+| File                                                    | Purpose                                                                                                                                                                                             |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pluginSdkProtocol.ts`                                  | Shared request/response/event/error types, channel names, version.                                                                                                                                  |
+| `pluginSdkCapabilities.ts`                              | The descriptor catalog (§6).                                                                                                                                                                        |
+| `pluginSdkBroker.ts`                                    | The chokepoint (§4).                                                                                                                                                                                |
+| `pluginSurfaceRegistry.ts`                              | `webContents.id → { pluginId, surface, generation }`.                                                                                                                                               |
+| `pluginConsentStore.ts`                                 | Interface + local implementation (§10).                                                                                                                                                             |
+| `pluginConsentGate.ts`                                  | Prompt queue, budget, session denials, timeout.                                                                                                                                                     |
+| `pluginAuditLog.ts`                                     | Append-only JSONL + rotation.                                                                                                                                                                       |
+| `pluginRateLimiter.ts`                                  | Token buckets.                                                                                                                                                                                      |
+| `pluginThemeStore.ts`                                   | Theme mirrored into main (§6.7). Shipped as `pluginThemeStore.ts`, not `themeStore.ts`.                                                                                                             |
+| `pluginSdkRuntime.ts`                                   | **Added during implementation.** All Electron wiring — BrowserWindow, Notification, the sandbox-ui driver, the settings surface — so every module above stays testable without an Electron runtime. |
+| `ui/src/components/PluginConsentModal/`                 | The prompt.                                                                                                                                                                                         |
+| `ui/src/hooks/domain/usePluginPermissionsController.ts` | **Added.** TanStack Query controller for the Settings surface, per `desktop-app/ui/AGENTS.md`.                                                                                                      |
+| `ui/src/pages/SettingsPage` + `PluginPermissions*`      | Revocation + activity (§11).                                                                                                                                                                        |
+| `packages/plugin-ui-sdk/`                               | Optional npm wrapper + `.d.ts` (§7.3). **Not built** — M6.                                                                                                                                          |
 
 Modified: `sandboxUiEmbedPreload.ts` (new namespaces), `sandboxUiDriver.ts`
 (pin/unpin on mount/teardown), `ipc.ts` (broker handler + trusted resolve
@@ -1181,14 +1204,15 @@ Milestones:
   batching onto a single-capability prompt would mean rewriting the gate, the
   audit fan-out, and the budget accounting.
 - **M3 — Catalog.** `org.read`, `agents.read`, `contexts.read`, `mcp.read`,
-  `theme.read` (+ theme lift to main), events.
+  `theme.read` (main mirrors the renderer, §6.7), events.
 - **M4 — Files + attention.** `gfs.list`, `gfs.read` incl. `dataUrl` images,
   `notifications.notify`.
 - **M5 — Revocation UI.** Settings page, activity tab, revocation events,
-  partition-GC grant cleanup.
-- **M6 — Author experience.** npm wrapper, a sample recipe under
-  `workflow-recipes/samples/` exercising every capability, and a section in the
-  recipe authoring guide.
+  partition-GC grant cleanup. _Shipped except the GC hook — see §18._
+- **M6 — Author experience.** npm wrapper and a sample recipe under
+  `workflow-recipes/samples/` exercising every capability. _Not started._ The
+  authoring guide landed early as
+  [`plugin-ui-sdk-authoring.md`](./plugin-ui-sdk-authoring.md).
 
 M1+M2 are the security-critical pair and should land together behind a flag;
 M3–M4 are additive descriptors; M5 must ship before the flag flips on, because
@@ -1217,7 +1241,7 @@ a grant the user cannot revoke is not consent.
 6. **Recovering from a declined row inside a session.** Session-sticky denial
    (§9.3) means a plugin's own "Enable file access" button is inert until the
    user closes and reopens the plugin — which no user will guess. The clean fix
-   is to let a *user gesture inside the plugin* re-open the prompt for a declined
+   is to let a _user gesture inside the plugin_ re-open the prompt for a declined
    capability once per session, but the SDK cannot distinguish a real click from
    a synthetic one, so "user gesture" would be plugin-asserted and therefore
    worthless as a gate. The alternative is a "Request again" affordance on the
@@ -1250,11 +1274,11 @@ with all four (§7.1). Its own UI is still a skeleton — no data yet.
 The embed then **visibly blanks**, and a modal appears over it:
 
 > **LeadForge wants access to your information**
-> ☑ See who you are — *Your name, email address, and user id.*
-> ☑ See your current team — *Its name and your role in it.*
-> ☑ See the agents you have access to — *Their names and which MCP servers they use.*
-> ☑ See the shared files you have access to — *Their names, folders, and sizes. It will not be able to open them.*
-> *You can change this any time in Settings → Plugin permissions.*
+> ☑ See who you are — _Your name, email address, and user id._
+> ☑ See your current team — _Its name and your role in it._
+> ☑ See the agents you have access to — _Their names and which MCP servers they use._
+> ☑ See the shared files you have access to — _Their names, folders, and sizes. It will not be able to open them._
+> _You can change this any time in Settings → Plugin permissions._
 > ⟨Deny⟩ ⟨Allow⟩
 
 **The blanking is deliberate and users should read it as "the app is asking, not
@@ -1294,7 +1318,7 @@ inbound leads"** — mandatorily prefixed with the plugin's title so nothing can
 pose as Evenfire itself or as another plugin (§6.8, T13). Clicking it focuses the
 window and lands him in LeadForge.
 
-Had he been *looking* at LeadForge, nothing would have fired: the plugin gets
+Had he been _looking_ at LeadForge, nothing would have fired: the plugin gets
 `{ delivered: false, reason: 'suppressed' }`, because interrupting someone about
 the thing they are currently staring at is noise, not attention.
 
@@ -1302,10 +1326,10 @@ the thing they are currently staring at is noise, not attention.
 
 **Settings → Plugin permissions** (§11):
 
-| Plugin | Permissions | Last used | |
-|---|---|---|---|
-| LeadForge | Identity · Team · Agents · Shared files | 2 minutes ago | ⋯ |
-| Sales CRM | Identity · Notifications | yesterday | ⋯ |
+| Plugin    | Permissions                             | Last used     |     |
+| --------- | --------------------------------------- | ------------- | --- |
+| LeadForge | Identity · Team · Agents · Shared files | 2 minutes ago | ⋯   |
+| Sales CRM | Identity · Notifications                | yesterday     | ⋯   |
 
 Expanding LeadForge shows each capability with the same sentence from the prompt,
 `grantedAt`, `lastUsedAt`, and **Revoke**. The **Activity** tab shows what
@@ -1323,15 +1347,15 @@ plugin can say "your file access was removed" rather than re-prompting him.
 
 ### The unhappy paths
 
-| Situation | What Andres experiences | Spec |
-|---|---|---|
-| He clicks **Deny**. | LeadForge gets four `false`s and renders its own "this plugin needs access to work" state. Nothing is recorded as a permanent no; the refusal lasts until he closes and reopens the plugin. | §9.3 |
-| He then clicks LeadForge's own "Grant access" button **in the same session** — and nothing happens. | The known gap. Session-sticky denial is what stops a prompt loop, but it also makes the plugin's retry button inert until reopen, which no user will guess. | §16 #6 |
-| The plugin asks for a 4th, 5th, 6th thing in one session. | After three modals it stops being able to ask until he reopens the plugin. A well-built plugin never notices this ceiling exists. | §9.5 |
-| He switches teams. | Granted `org.read` starts returning the new team, no re-prompt. He consented to "see which workspace I'm in"; the answer changed. | §6.2 |
-| He logs out and back in. | Grants survive, keyed to his user id. A different user on the same machine starts clean. | §10.5 |
-| He opens Evenfire on his laptop instead of his desktop. | He gets the first-run modal again — grants do not travel in v1. | §10.2, §10.6 |
-| LeadForge updates and now wants a phone number inside `identity.read`. | He is re-prompted, with copy naming the new field. Silently widening an existing grant would turn all of the above into theatre. | §9.6 |
+| Situation                                                                                           | What Andres experiences                                                                                                                                                                     | Spec         |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| He clicks **Deny**.                                                                                 | LeadForge gets four `false`s and renders its own "this plugin needs access to work" state. Nothing is recorded as a permanent no; the refusal lasts until he closes and reopens the plugin. | §9.3         |
+| He then clicks LeadForge's own "Grant access" button **in the same session** — and nothing happens. | The known gap. Session-sticky denial is what stops a prompt loop, but it also makes the plugin's retry button inert until reopen, which no user will guess.                                 | §16 #6       |
+| The plugin asks for a 4th, 5th, 6th thing in one session.                                           | After three modals it stops being able to ask until he reopens the plugin. A well-built plugin never notices this ceiling exists.                                                           | §9.5         |
+| He switches teams.                                                                                  | Granted `org.read` starts returning the new team, no re-prompt. He consented to "see which workspace I'm in"; the answer changed.                                                           | §6.2         |
+| He logs out and back in.                                                                            | Grants survive, keyed to his user id. A different user on the same machine starts clean.                                                                                                    | §10.5        |
+| He opens Evenfire on his laptop instead of his desktop.                                             | He gets the first-run modal again — grants do not travel in v1.                                                                                                                             | §10.2, §10.6 |
+| LeadForge updates and now wants a phone number inside `identity.read`.                              | He is re-prompted, with copy naming the new field. Silently widening an existing grant would turn all of the above into theatre.                                                            | §9.6         |
 
 ### What he never sees
 
@@ -1341,3 +1365,78 @@ limiting, the response minimization, and the audit log doing its work.
 The target shape of the whole experience: **one modal when he installs, one more
 the day he uses a new corner of the plugin, and a settings page he visits only
 when he gets suspicious.**
+
+---
+
+## 18. Implementation notes — where the code diverged
+
+Written after M1–M5 landed. This section is the diff between what this document
+asked for and what `feat/plugin-ui-sdk` actually does. When the two disagree
+anywhere else in this file, believe this section, and believe the code over both.
+
+### 18.1 Constraints the design missed
+
+**A sandboxed preload cannot `require` a local module.** `sandboxUiEmbedPreload.ts`
+runs with `sandbox: true`, where Electron's `require` is a polyfill serving only
+`electron` and a couple of Node builtins; a relative `require('./pluginSdkProtocol.js')`
+throws at runtime. §5.1 implied the preload would import the protocol module. It
+cannot. Channel names and the version are **duplicated as literals** in the
+preload, with `__tests__/pluginSdkSurface.test.ts` asserting both that they still
+match `pluginSdkProtocol.ts` and that no relative _value_ import has crept back
+in. Type-only imports are fine — they are erased before they can become a
+`require`. The permanent fix is a bundling step for the preload; until then, the
+drift test is the guard.
+
+**`ipc.ts` must import the runtime lazily.** A static import pulled
+`pluginSdkRuntime` → `config.ts` into the graph, and `config.ts` loads stored
+profiles at module scope against a real Electron `app`. That broke 48 existing
+IPC tests, which mock Electron minimally and legitimately expect registering
+handlers not to require an initialized runtime. The handlers now `await import()`
+the runtime on first call, mirroring how `appService` defers `sandboxUiDriver`.
+
+**`renderer.d.ts` cannot reference Electron-touching modules.** The UI's tsconfig
+includes it, so importing `PluginGrantView` from `pluginSdkRuntime.ts` would drag
+Electron's types into the Vite project. `PluginGrantView` and
+`PluginAuditEntryView` therefore live in `pluginSdkProtocol.ts`, the one SDK
+module with no Node or Electron imports.
+
+**The prompt cooldown had to be injectable.** §9.5's 10 s cooldown is real
+`setTimeout` time, so a test covering it would spend ten seconds. `ConsentGateDeps`
+gained an optional `sleep`, letting tests assert the requested duration without
+paying it — the cooldown stays tested rather than disabled.
+
+### 18.2 Deliberate narrowings
+
+| Spec said                                   | Code does                                                                                                 | Why                                                                                                                                                                                |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §6.7 theme becomes main-process state       | Renderer stays the writer; main mirrors and persists                                                      | Identical plugin-visible contract; a real move must reconcile localStorage with a new file and fix boot ordering, for no observable gain.                                          |
+| §6.9 `gfs.read` cap "image cap / 2 MB text" | One `maxResponseBytes` of 20 MB, with the 10 MB image and 2 MB text ceilings enforced inside the provider | The broker caps one serialized response per capability; per-mode ceilings belong where the mode is known. Base64 also inflates ~4/3, so the envelope cap must exceed the byte cap. |
+| §11 "Reveal log file"                       | **Clear activity log**                                                                                    | Revealing a path is a shell affordance with no obvious home in the Settings shell; clearing is the action users actually asked-for-shaped. Reveal remains open (§16 #4).           |
+
+### 18.3 Specced but not yet wired
+
+- **Partition-GC grant cleanup (§10.5).** `LocalConsentStore.pruneToPlugins` and
+  `PluginSdkRuntime.pruneGrantsToPlugins` exist and are unit-tested, but nothing
+  calls them yet: the launch-time pass in `sandboxUiPartitionGc.ts` has not been
+  hooked up. Impact is bounded — a stale grant for a plugin the user can no longer
+  reach is inert, because the plugin cannot mount — but the drop is not automatic
+  as §10.5 claims.
+- **Renderer tests (§13).** The main-process half is covered (76 tests over the
+  broker, gate, store, audit log, rate limiter, capability catalog, and preload
+  contract). `PluginConsentModal` and the Settings panel have **no tests yet** —
+  the modal's Escape-denies and disabled-Allow behaviour, and the panel's revoke
+  path, are currently only verified by reading them.
+- **npm wrapper + sample recipe (§7.3, M6).** Not started. The injected global is
+  the contract, so nothing depends on the wrapper existing.
+
+### 18.4 Additions the spec did not anticipate
+
+- **`notification.clicked` event.** §6.8 gave `notify` a `ref` "echoed back on
+  click" but §5.3 defined no event to echo it on. Added to the event union.
+- **`sdk.permissions()`** (state without prompting) was added with the batching
+  amendment and is load-bearing: it is what makes Scene 2 of §17 — a returning
+  user seeing no modal at all — actually true.
+- **`PluginRateLimiter` refunds the capability token** when only the plugin-global
+  bucket is exhausted, so a globally throttled plugin does not also burn its
+  per-capability budget. Not specified; it is the behaviour §6.9's two-layer model
+  implies.
