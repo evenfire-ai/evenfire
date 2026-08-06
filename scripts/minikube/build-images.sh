@@ -20,12 +20,15 @@
 #   clerum/workflow-plugin-sdk-e2e:test <- tests/e2e/fixtures/workflow-plugin-sdk-e2e/Dockerfile
 #
 # Usage:
-#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/build-images.sh [--skip-public] [--skip-uis] [--verify-only] [--only=<svc>]
+#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/build-images.sh [--skip-public] [--skip-uis] [--verify-only] [--public-only] [--only=<svc>]
 #
 # Options:
 #   --skip-public   Skip pulling/loading public images (postgres, redis, etc.)
 #   --skip-uis      Skip Control UI, Profile UI, and Desktop App images.
 #   --verify-only   Only verify image SHAs are present in minikube
+#   --public-only   Load only the public third-party images (postgres, redis,
+#                   nginx, ...) and build nothing. The IMAGE_SOURCE=ghcr path
+#                   needs them: no clerum build runs there to pull them in.
 #   --only=<svc>    Build only the image(s) whose tag matches the substring <svc>
 #                   (e.g. --only=control-api, --only=workflow-recipes). Skips
 #                   public-image pulls and manifest regeneration.
@@ -69,6 +72,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 SKIP_PUBLIC=false
 VERIFY_ONLY=false
+PUBLIC_ONLY=false
 ONLY_SVC=""
 FAILED_IMAGES=()
 MINIKUBE_PRELOAD_BASE_IMAGES="${MINIKUBE_PRELOAD_BASE_IMAGES:-true}"
@@ -118,6 +122,7 @@ for arg in "$@"; do
     --skip-public) SKIP_PUBLIC=true ;;
     --skip-uis) SKIP_UIS=true ;;
     --verify-only) VERIFY_ONLY=true ;;
+    --public-only) PUBLIC_ONLY=true ;;
     --only=*) ONLY_SVC="${arg#--only=}" ;;
     --include-desktop-image) MINIKUBE_BUILD_DESKTOP_IMAGE=true ;;
     --include-playwright-mcp-image) MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true ;;
@@ -415,6 +420,18 @@ if [ "$VERIFY_ONLY" = true ]; then
     exit 1
   fi
   exit 0
+fi
+
+# Pull the public third-party images (postgres, redis, nginx, ...) without
+# building anything. The ghcr path needs them: no clerum image build runs
+# there, so nothing else pulls them into the daemon.
+#
+# It has to sit AFTER the `if [ -n "$ONLY_SVC" ]` normalizer near the top,
+# which forces SKIP_PUBLIC=true for any --only run; setting ONLY_SVC here
+# reaches build_image's filter (a runtime read) without tripping that.
+if [ "$PUBLIC_ONLY" = true ]; then
+  SKIP_PUBLIC=false
+  ONLY_SVC="__none__"
 fi
 
 # ---- Build function ----

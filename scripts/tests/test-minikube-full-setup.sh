@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 FAIL=0
 
 pass() { echo "PASS: $1"; }
@@ -350,6 +352,223 @@ assert_pipefail_head_guard_prevents_abort() {
   fi
 }
 
+# full-setup.sh is a 1284-line orchestrator that needs a real cluster to run,
+# so these cases read its resolved configuration rather than executing it: they
+# source the top of the script with a guard variable set, which stops it before
+# the first cluster call. That is the same seam the existing profile cases use,
+# applied to variables instead of to minikube invocations.
+#
+# The stub dir is a safety net, not decoration. Config resolution calls none of
+# docker/minikube/kubectl, so if the config-only seam is ever deleted or moved,
+# `source full-setup.sh` would otherwise drive a REAL cluster from a unit test.
+# The stubs fail loudly instead, which aborts the sourced script at Step 1 and
+# leaves the assertion reading an empty value -- a red test, never a green one.
+FULL_SETUP_STUB_DIR="$(mktemp -d)"
+for _stub in docker minikube kubectl; do
+  cat > "$FULL_SETUP_STUB_DIR/$_stub" <<STUB
+#!/usr/bin/env bash
+echo "STUB: '$_stub' must not be called while resolving full-setup.sh config" >&2
+exit 1
+STUB
+  chmod +x "$FULL_SETUP_STUB_DIR/$_stub"
+done
+unset _stub
+trap 'rm -rf "$FULL_SETUP_STUB_DIR"' EXIT
+
+full_setup_resolves() {
+  # full_setup_resolves <var> [env assignments...]
+  local var="$1"; shift
+  env "$@" PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+    bash -c 'source "$0" >/dev/null 2>&1; printf "%s" "${'"$var"'}"' \
+    "$REPO_ROOT/scripts/minikube/full-setup.sh"
+}
+
+assert_ghcr_is_the_default_image_source() {
+  local got
+  got="$(full_setup_resolves IMAGE_SOURCE)"
+  if [ "$got" = "ghcr" ]; then
+    pass "IMAGE_SOURCE defaults to ghcr"
+  else
+    fail "IMAGE_SOURCE defaulted to '${got}', expected 'ghcr'"
+  fi
+}
+
+assert_image_source_local_is_honoured() {
+  local got
+  got="$(full_setup_resolves IMAGE_SOURCE IMAGE_SOURCE=local)"
+  if [ "$got" = "local" ]; then
+    pass "IMAGE_SOURCE=local is honoured"
+  else
+    fail "IMAGE_SOURCE=local resolved to '${got}'"
+  fi
+}
+
+assert_an_unknown_image_source_is_a_hard_error() {
+  local out rc
+  out="$(env PATH="$FULL_SETUP_STUB_DIR:$PATH" IMAGE_SOURCE=gchr \
+    MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+    bash "$REPO_ROOT/scripts/minikube/full-setup.sh" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -qi "IMAGE_SOURCE" <<< "$out"; then
+    pass "an unknown IMAGE_SOURCE fails loudly instead of falling back"
+  else
+    fail "expected a hard error naming IMAGE_SOURCE; got rc=$rc out='$out'"
+  fi
+}
+
+# Only the RENDER dir moves. The kustomize dir is where the generated
+# k8s-api-ip.yaml lands and where the template lives; moving it would break
+# minikube-detect-k8s-api-ip.sh and the patchesStrategicMerge reference.
+assert_ghcr_mode_moves_only_the_render_dir() {
+  local render kustomize
+  render="$(full_setup_resolves ACTIVE_MINIKUBE_RENDER_DIR)"
+  kustomize="$(full_setup_resolves ACTIVE_MINIKUBE_KUSTOMIZE_DIR)"
+  if [[ "$render" == */overlays/minikube-ghcr ]] && [[ "$kustomize" == */overlays/minikube ]]; then
+    pass "ghcr mode renders minikube-ghcr while the kustomize dir stays overlays/minikube"
+  else
+    fail "render='${render}' kustomize='${kustomize}'"
+  fi
+}
+
+assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay() {
+  local render
+  render="$(full_setup_resolves ACTIVE_MINIKUBE_RENDER_DIR MINIKUBE_SKIP_UIS=true)"
+  if [[ "$render" == */overlays/minikube-no-uis-ghcr ]]; then
+    pass "ghcr + --skip-uis renders minikube-no-uis-ghcr"
+  else
+    fail "render dir was '${render}'"
+  fi
+}
+
+assert_local_mode_renders_the_unchanged_overlays() {
+  local a b
+  a="$(full_setup_resolves ACTIVE_MINIKUBE_RENDER_DIR IMAGE_SOURCE=local)"
+  b="$(full_setup_resolves ACTIVE_MINIKUBE_RENDER_DIR IMAGE_SOURCE=local MINIKUBE_SKIP_UIS=true)"
+  if [[ "$a" == */overlays/minikube ]] && [[ "$b" == */overlays/minikube-no-uis ]]; then
+    pass "local mode renders today's overlays unchanged"
+  else
+    fail "local render dirs were '${a}' and '${b}'"
+  fi
+}
+
+# Never `rm -rf "$(dirname "$1")"` unguarded: `dirname ""` is `.`, so an
+# assertion that failed to resolve a deploy dir would delete the caller's
+# working directory. Only remove a path that is an absolute */deploy outside
+# the repo.
+remove_override_copy() {
+  local deploy_dir="${1:-}"
+  case "$deploy_dir" in
+    /*/deploy) ;;
+    *) return 0 ;;
+  esac
+  [ "$deploy_dir" = "$REPO_ROOT/deploy" ] && return 0
+  rm -rf "$(dirname "$deploy_dir")"
+}
+
+# The override must never touch the committed tree. A single in-place `sed` on
+# deploy/components/ghcr-images/kustomization.yaml would make the operator lever
+# a second writer of the release coordinate.
+assert_the_tag_override_copies_the_tree_and_leaves_the_commit_alone() {
+  local before after deploy_dir
+  before="$(git -C "$REPO_ROOT" status --porcelain deploy/components/ghcr-images | wc -l | tr -d ' ')"
+  deploy_dir="$(full_setup_resolves ACTIVE_MINIKUBE_DEPLOY_DIR MINIKUBE_IMAGE_TAG=latest)"
+  after="$(git -C "$REPO_ROOT" status --porcelain deploy/components/ghcr-images | wc -l | tr -d ' ')"
+  if [ "$before" = "$after" ] && [ -n "$deploy_dir" ] && [[ "$deploy_dir" != "$REPO_ROOT/deploy" ]]; then
+    pass "MINIKUBE_IMAGE_TAG renders from a temp copy and leaves the committed component untouched"
+  else
+    fail "deploy dir was '${deploy_dir}' (repo deploy is $REPO_ROOT/deploy); git status lines before=$before after=$after"
+  fi
+  remove_override_copy "$deploy_dir"
+}
+
+# The whole tree must move: resources: ../minikube and
+# deploy/scripts/minikube-detect-k8s-api-ip.sh both resolve relative to the
+# deploy root, so copying only the component would break both.
+assert_the_tag_override_copy_is_a_whole_deploy_tree_with_the_new_tag() {
+  local deploy_dir tag problems=""
+  deploy_dir="$(full_setup_resolves ACTIVE_MINIKUBE_DEPLOY_DIR MINIKUBE_IMAGE_TAG=v9.9.9)"
+  [ -d "$deploy_dir/overlays/minikube" ] || problems+="no overlays/minikube in the copy; "
+  [ -d "$deploy_dir/overlays/minikube-ghcr" ] || problems+="no overlays/minikube-ghcr in the copy; "
+  [ -f "$deploy_dir/scripts/minikube-detect-k8s-api-ip.sh" ] || problems+="no deploy/scripts in the copy; "
+  # No 2>/dev/null here: if the component is missing from the copy, sed's error
+  # belongs in the transcript, not swallowed into an empty-string "mismatch".
+  tag="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\).*$/\1/p' \
+    "$deploy_dir/components/ghcr-images/kustomization.yaml" | sort -u | tr '\n' ' ')"
+  [ "$tag" = "v9.9.9 " ] || problems+="copy's newTag is '${tag}', expected 'v9.9.9 '; "
+  if [ -z "$problems" ]; then
+    pass "the override copy is a whole deploy tree with every newTag rewritten"
+  else
+    fail "$problems"
+  fi
+  remove_override_copy "$deploy_dir"
+}
+
+# "Run without --skip-build to rebuild" is wrong advice in ghcr mode: nothing
+# was built, and rebuilding is exactly what the default path exists to avoid.
+#
+# The block is extracted with awk, not `sed -n '/start/,/^else$/p'`: the sed
+# range would run past the SKIP_BUILD branch and swallow the
+# `elif [ "$IMAGE_SOURCE" = ghcr ]` acquisition arm below it, so a staleness
+# warning with no mode-awareness left in it would still match on the elif and
+# report PASS. awk stops BEFORE the terminating elif/else.
+assert_the_skip_build_staleness_advice_is_mode_aware() {
+  local sh block
+  sh="$REPO_ROOT/scripts/minikube/full-setup.sh"
+  block="$(awk '/Even with --skip-build, warn if local code is newer/{f=1}
+                f && /^(elif|else)/{exit}
+                f' "$sh")"
+  if [ -z "$block" ]; then
+    fail "could not locate the --skip-build staleness block in $sh"
+    return
+  fi
+  if grep -q 'IMAGE_SOURCE' <<< "$block" \
+     && grep -q 'minikube-pull-images\|IMAGE_SOURCE=local' <<< "$block"; then
+    pass "the --skip-build staleness warning branches on IMAGE_SOURCE"
+  else
+    fail "the --skip-build staleness block still gives build-only advice: $block"
+  fi
+}
+
+# A contributor must be able to tell from the transcript which images the
+# cluster is about to run and where the tag came from.
+assert_the_banner_names_the_source_the_tag_and_its_origin() {
+  local sh
+  sh="$REPO_ROOT/scripts/minikube/full-setup.sh"
+  local missing=""
+  grep -q 'print_image_source_banner' "$sh" || missing+="no print_image_source_banner function; "
+  grep -q 'TAG_ORIGIN' "$sh" || missing+="no TAG_ORIGIN variable; "
+  if [ -z "$missing" ]; then
+    pass "the setup prints an image-source banner naming source, tag and origin"
+  else
+    fail "$missing"
+  fi
+}
+
+assert_the_tag_origin_distinguishes_pin_from_override() {
+  local pinned overridden
+  pinned="$(full_setup_resolves TAG_ORIGIN)"
+  overridden="$(full_setup_resolves TAG_ORIGIN MINIKUBE_IMAGE_TAG=latest)"
+  if grep -qi "pin" <<< "$pinned" && grep -q "MINIKUBE_IMAGE_TAG" <<< "$overridden"; then
+    pass "TAG_ORIGIN distinguishes the committed pin from the override"
+  else
+    fail "TAG_ORIGIN was '${pinned}' (pinned) and '${overridden}' (overridden)"
+  fi
+}
+
+# The guard that keeps this file honest: a case defined but never added to the
+# call block below reports nothing at all, which reads as a green run.
+assert_every_defined_case_is_invoked() {
+  local self defined invoked missing
+  self="$REPO_ROOT/scripts/tests/test-minikube-full-setup.sh"
+  defined="$(grep -oE '^assert_[a-z_0-9]+\(\) \{' "$self" | sed -E 's/\(\) \{$//' | sort -u)"
+  invoked="$(grep -oE '^assert_[a-z_0-9]+$' "$self" | sort -u)"
+  missing="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$invoked"))"
+  if [ -z "$missing" ]; then
+    pass "every defined assert_ case is invoked in the call block"
+  else
+    fail "defined but never invoked: $(printf '%s ' $missing)"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
@@ -362,5 +581,17 @@ assert_reuse_db_normalizer_precedes_flag_loop
 assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
+assert_ghcr_is_the_default_image_source
+assert_image_source_local_is_honoured
+assert_an_unknown_image_source_is_a_hard_error
+assert_ghcr_mode_moves_only_the_render_dir
+assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay
+assert_local_mode_renders_the_unchanged_overlays
+assert_the_tag_override_copies_the_tree_and_leaves_the_commit_alone
+assert_the_tag_override_copy_is_a_whole_deploy_tree_with_the_new_tag
+assert_the_skip_build_staleness_advice_is_mode_aware
+assert_the_banner_names_the_source_the_tag_and_its_origin
+assert_the_tag_origin_distinguishes_pin_from_override
+assert_every_defined_case_is_invoked
 
 exit $FAIL
