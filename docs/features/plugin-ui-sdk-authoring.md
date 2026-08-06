@@ -39,7 +39,8 @@ if (me.ok) greet(me.data.name ?? me.data.email)
 - [ ] Handle a partial grant — render what you can, explain the rest in your own UI.
 - [ ] Handle `permission_revoked` and the `permission.changed` event live (§8).
 - [ ] Remove any form where you asked the user to re-type their name/email.
-- [ ] Images from GFS go in `<img src="{dataUrl}">`; `blob:` will not load (§7.6).
+- [ ] Images you render inline go in `<img src="{dataUrl}">`; `blob:` will not load (§7.6).
+- [ ] Links the user opens can just be `<a href="gfs://…">` — no permission needed (§7.7).
 - [ ] Nothing to add to the recipe YAML. No new Secrets. No new egress.
 
 ---
@@ -100,6 +101,7 @@ Error codes you should actually branch on:
 | `mcp.read`             | `{ servers: [{ name, agents[] }] }`                                           | "See the MCP servers you have access to…"                                    |
 | `gfs.list`             | `{ items: [{ resourceId, gfsUri, name, kind, bytes, version }], nextCursor }` | "See the shared files you have access to… It will not be able to open them." |
 | `gfs.read`             | `{ gfsUri, name, mimeType, bytes }` + `text` or `dataUrl`                     | "Open shared files you have access to…"                                      |
+| `gfs.open`             | `{ opened, reason? }`                                                         | **No prompt** — the plugin sees nothing; the user sees their own file.       |
 | `theme.read`           | `{ theme: 'light' \| 'dark' }`                                                | **No prompt** — it says nothing about the user.                              |
 | `notifications.notify` | `{ delivered, reason? }`                                                      | "Send you notifications."                                                    |
 
@@ -337,7 +339,38 @@ if (res.ok) img.src = res.data.dataUrl
 - `as: 'text'` refuses non-UTF-8 bytes rather than handing you replacement
   characters.
 
-### 7.7 `theme.read`
+### 7.7 Linking to a file — `gfs.open`
+
+`gfs.read` gets you the bytes. If you just want a **link the user can open**, use
+`gfs.open` and let the Desktop show it:
+
+```html
+<!-- Single click, no JS. The navigation policy picks it up. -->
+<a href="gfs://main/reports/q3.png">Q3 chart</a>
+```
+
+```js
+// Double-click on plain text, a button, a table cell — anywhere an anchor
+// does not fit.
+cell.addEventListener('dblclick', () => window.clerum.gfs.open(cell.dataset.uri))
+```
+
+Either way the Desktop resolves the link with the user's session and shows it:
+an image opens in a preview **over your plugin** (your embed is hidden while it
+is up, and comes back untouched on close); a folder or a non-previewable file
+navigates to the Files page instead.
+
+- **No permission needed.** You get `{ opened: true }` and nothing else — not the
+  name, not the size, not the contents. If you need the bytes, that is
+  `gfs.read`, and that does need a grant.
+- **6 calls/minute**, the tightest budget in the SDK. It paints over the user's
+  screen; do not wire it to hover or scroll.
+- `{ opened: false, reason: 'not_found' }` covers both "does not exist" and "the
+  user cannot see it" — deliberately indistinguishable.
+- Your embed is hidden while the preview is up. Do not fire it from inside an
+  animation, and do not assume your page is visible immediately after.
+
+### 7.8 `theme.read`
 
 No prompt. Pair it with the `theme.changed` event rather than polling:
 
@@ -349,7 +382,7 @@ window.clerum.sdk.on(e => {
 })
 ```
 
-### 7.8 `notifications.notify`
+### 7.9 `notifications.notify`
 
 ```js
 await window.clerum.notifications.notify({

@@ -74,6 +74,7 @@ function fakeSource(overrides: Partial<PluginSdkDataSource> = {}): PluginSdkData
       throw new Error('not stubbed')
     },
     getPluginTheme: () => 'dark',
+    openGfsResource: async () => ({ opened: true }),
     showPluginNotification: async () => ({ delivered: true }),
     ...overrides,
   }

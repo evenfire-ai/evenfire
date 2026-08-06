@@ -86,6 +86,7 @@ export interface PluginSdkDataSource {
   listGfsChildren(resourceId: string, drive?: string, cursor?: string): Promise<GfsChildrenPage>
   downloadGfsUri(uri: string): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }>
   getPluginTheme(): PluginTheme
+  openGfsResource(input: { uri: string }): Promise<{ opened: boolean; reason?: string }>
   showPluginNotification(input: {
     pluginId: string
     pluginTitle: string
@@ -403,6 +404,37 @@ export const CAPABILITIES: Record<string, CapabilityDescriptor> = {
       }
       return { ...base, as, mimeType: 'text/plain', text }
     },
+  },
+
+  'gfs.open': {
+    id: 'gfs.open',
+    descriptorVersion: 1,
+    // Unscoped, and the second capability to qualify. The rule from §6.7 is that
+    // `requiresConsent: false` needs the response to carry nothing about the
+    // user; this one adds the other half: the ACTION must be unmissable. The
+    // plugin gets back `{ opened }` and nothing else — it never learns the file's
+    // name, size, or contents. What happens is that the Desktop's own viewer
+    // opens, over the plugin, showing the user a file they already have access
+    // to, resolved with their session. Prompting "may this plugin show you your
+    // own file?" would be noise in front of an action the user can see.
+    requiresConsent: false,
+    consent: {
+      title: 'Open a shared file in the Evenfire viewer',
+      dataDescription: 'Shows you a file you already have access to. The plugin does not see it.',
+      tier: 'ambient',
+    },
+    // Tighter than the reads: this one paints over the user's screen. A plugin
+    // that spams it hides itself behind viewers, so it is largely self-limiting,
+    // but the budget makes that bounded rather than merely awkward.
+    limits: { perMinute: 6, perHour: 60, maxResponseBytes: 1024 },
+    cacheTtlMs: 0,
+    validate: raw => {
+      const record = allowKeys(raw, ['uri'])
+      const uri = requiredString(record.uri, 'uri', 2048)
+      if (!uri.startsWith('gfs://')) throw new CapabilityInputError('uri must be a gfs:// link')
+      return { uri }
+    },
+    run: async (ctx, params) => ctx.source.openGfsResource({ uri: params.uri as string }),
   },
 
   'theme.read': {

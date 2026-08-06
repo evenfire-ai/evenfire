@@ -13,6 +13,7 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
@@ -20,6 +21,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -234,6 +236,48 @@ export function App() {
       offRequested?.()
       offCancelled?.()
     }
+  }, [])
+
+  /**
+   * A plugin asked to show a shared file — either through `clerum.gfs.open()` or
+   * by the user activating a `gfs://` link it rendered. Main has already
+   * resolved it with the user's session, so this only decides where it goes:
+   * images get a preview over the plugin, everything else hands off to Files.
+   */
+  const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
+    gfsUri: string
+    name: string
+    bytes: number
+    mimeType: string
+  } | null>(null)
+  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
+      const mimeType = resource.kind === 'file' ? gfsImagePreviewMimeType(resource.name) : null
+      if (mimeType) {
+        // The embed's WebContentsView paints above renderer DOM, so it has to be
+        // hidden for the overlay to be visible at all.
+        void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
+        setPluginGfsPreview({
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          bytes: resource.bytes ?? 0,
+          mimeType,
+        })
+        return
+      }
+      // Folders and non-previewable files belong in the full browser, where the
+      // user gets breadcrumbs, download, and sharing.
+      setPendingGfsUri(resource.gfsUri)
+      vm.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    return () => off?.()
+  }, [vm.handleNavSelect])
+
+  const closePluginGfsPreview = React.useCallback(() => {
+    setPluginGfsPreview(null)
+    void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
   }, [])
 
   const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
@@ -1220,7 +1264,11 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
                               {vm.navItem === DESKTOP_ROUTES.files && (
-                                <FilesPage pushToast={vm.pushToast} />
+                                <FilesPage
+                                  pushToast={vm.pushToast}
+                                  pendingGfsUri={pendingGfsUri}
+                                  onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                               {vm.navItem === DESKTOP_ROUTES.contextDetails && (
@@ -1281,6 +1329,15 @@ export function App() {
                           <PluginConsentModal
                             request={pluginConsentPrompt}
                             onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
+                        {pluginGfsPreview ? (
+                          <GfsImagePreview
+                            byteLength={pluginGfsPreview.bytes}
+                            fileName={pluginGfsPreview.name}
+                            gfsUri={pluginGfsPreview.gfsUri}
+                            mimeType={pluginGfsPreview.mimeType}
+                            onClose={closePluginGfsPreview}
                           />
                         ) : null}
                       </DesktopStateProvider>

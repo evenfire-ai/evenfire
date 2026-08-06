@@ -576,6 +576,14 @@ declare global {
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
         onConsentCancelled: (callback: (args: { promptId: string }) => void) => () => void
+        onOpenGfsResource: (
+          callback: (args: {
+            gfsUri: string
+            name: string
+            kind: string
+            bytes: number | null
+          }) => void
+        ) => () => void
         onNotificationClicked: (
           callback: (args: { pluginId: string; ref: string | null }) => void
         ) => () => void

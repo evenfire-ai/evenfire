@@ -72,6 +72,7 @@ function source(overrides: Partial<PluginSdkDataSource> = {}): PluginSdkDataSour
       bytes: PNG.buffer.slice(PNG.byteOffset, PNG.byteOffset + PNG.byteLength) as ArrayBuffer,
     }),
     getPluginTheme: () => 'light',
+    openGfsResource: async () => ({ opened: true }),
     showPluginNotification: async () => ({ delivered: true }),
     ...overrides,
   }
@@ -103,12 +104,15 @@ describe('capability catalog invariants', () => {
     }
   })
 
-  it('marks only theme.read as consent-free', () => {
+  it('keeps the consent-free set to exactly the two justified capabilities', () => {
     const unscoped = Object.values(CAPABILITIES)
       .filter(descriptor => !descriptor.requiresConsent)
       .map(descriptor => descriptor.id)
+      .sort()
     // Any addition here is a decision to hand a plugin something without asking.
-    expect(unscoped).toEqual(['theme.read'])
+    // `theme.read` returns nothing about the user; `gfs.open` returns only
+    // whether a viewer opened, and the action itself is unmissable on screen.
+    expect(unscoped).toEqual(['gfs.open', 'theme.read'])
   })
 
   it('sorts prompt rows most-sensitive-first', () => {
@@ -284,5 +288,26 @@ describe('notifications.notify', () => {
       }
     )
     expect(seen.pluginTitle).toBe('Plugin')
+  })
+})
+
+describe('gfs.open', () => {
+  it('returns only whether a viewer opened, never anything about the file', async () => {
+    const result = await run('gfs.open', { uri: 'gfs://main/a.png' })
+    // The plugin must not learn the name, size, or contents from an open call.
+    expect(result).toEqual({ opened: true })
+  })
+
+  it('rejects a non-gfs uri and unexpected params', () => {
+    const descriptor = getCapability('gfs.open')
+    expect(() => descriptor?.validate({ uri: 'https://evil.example/x' })).toThrow()
+    expect(() => descriptor?.validate({ uri: 'gfs://main/a', as: 'dataUrl' })).toThrow()
+    expect(() => descriptor?.validate({})).toThrow()
+  })
+
+  it('is budgeted more tightly than the reads, because it paints over the user', () => {
+    const open = getCapability('gfs.open')
+    const read = getCapability('gfs.read')
+    expect(open?.limits.perMinute).toBeLessThan(read?.limits.perMinute ?? 0)
   })
 })

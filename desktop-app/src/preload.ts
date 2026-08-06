@@ -473,6 +473,16 @@ const clerum = Object.freeze({
       ipcRenderer.on('pluginSdk:consentCancelled', listener)
       return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
     },
+    onOpenGfsResource: (
+      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+      ) => callback(args)
+      ipcRenderer.on('pluginSdk:openGfsResource', listener)
+      return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)
+    },
     onNotificationClicked: (callback: (args: { pluginId: string; ref: string | null }) => void) => {
       const listener = (_event: unknown, args: { pluginId: string; ref: string | null }) =>
         callback(args)

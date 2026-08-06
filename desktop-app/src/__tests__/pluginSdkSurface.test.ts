@@ -20,6 +20,7 @@ import {
   unpinPluginSurface,
   unpinPluginSurfacesOfKind,
 } from '../pluginSurfaceRegistry.js'
+import { classifyEmbedNavigation } from '../sandboxUiPartitionPolicies.js'
 
 // `import.meta` is unavailable in this CommonJS build; resolve from cwd, which
 // vitest sets to the desktop-app package root.
@@ -152,5 +153,31 @@ describe('embed preload contract', () => {
     for (const id of CAPABILITY_IDS) {
       expect(source, `preload has no wrapper for ${id}`).toContain(`'${id}'`)
     }
+  })
+})
+
+describe('gfs:// links from an embed', () => {
+  const PREFIX = 'https://proxy.example/api/v1/sandbox-ui/ns/plugin/view'
+
+  it('classifies a gfs link as an open request instead of dropping it', () => {
+    expect(classifyEmbedNavigation('gfs://main/reports/q3.png', PREFIX)).toEqual({
+      kind: 'gfs_open',
+      uri: 'gfs://main/reports/q3.png',
+    })
+  })
+
+  it('still drops every other non-http scheme', () => {
+    for (const url of ['file:///etc/passwd', 'data:text/html,<h1>x', 'javascript:alert(1)']) {
+      expect(classifyEmbedNavigation(url, PREFIX).kind, url).toBe('drop')
+    }
+  })
+
+  it('drops an absurdly long gfs uri rather than forwarding it', () => {
+    expect(classifyEmbedNavigation(`gfs://main/${'a'.repeat(4096)}`, PREFIX).kind).toBe('drop')
+  })
+
+  it('leaves in-app navigation and external links alone', () => {
+    expect(classifyEmbedNavigation(`${PREFIX}/dashboard`, PREFIX).kind).toBe('allow')
+    expect(classifyEmbedNavigation('https://example.com', PREFIX).kind).toBe('external')
   })
 })

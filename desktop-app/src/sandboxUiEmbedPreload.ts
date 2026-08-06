@@ -110,6 +110,9 @@ contextBridge.exposeInMainWorld(
       list: (params?: { drive?: string; resourceId?: string; cursor?: string }) =>
         capability('gfs.list', params ?? {}),
       read: (params: { uri: string; as: 'text' | 'dataUrl' }) => capability('gfs.read', params),
+      /** Show a shared file in the Desktop's own viewer. Same effect as the
+       *  user clicking an `<a href="gfs://…">` the plugin rendered. */
+      open: (uri: string) => capability('gfs.open', { uri }),
     }),
     theme: Object.freeze({ get: () => capability('theme.read') }),
     notifications: Object.freeze({

@@ -2986,6 +2986,12 @@ export class AppService {
         tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
         args.onClosed?.()
       },
+      onGfsOpen: uri => {
+        const active = tryGetPluginSdkRuntime()
+        const surface = driver.getActiveSandboxUi()
+        if (!active || !surface) return
+        void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
+      },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,

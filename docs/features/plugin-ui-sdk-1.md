@@ -533,6 +533,43 @@ Rules for `as: 'dataUrl'`:
 
 `as: 'text'` has its own cap (§6.8) and refuses non-UTF-8 bytes.
 
+#### `gfs.open` — show a file in the Desktop's own viewer
+
+> No prompt. Tier: `ambient`, `requiresConsent: false`.
+
+```ts
+type GfsOpenParams = { uri: string }
+type GfsOpenResult = { opened: boolean; reason?: string }
+```
+
+A plugin that renders a `gfs://` link wants the obvious thing to happen when the
+user activates it. Two paths reach the same place:
+
+- `<a href="gfs://main/reports/q3.png">` — the embed's navigation policy
+  classifies it as `gfs_open` and hands it to the host
+  (`sandboxUiPartitionPolicies.ts`). No JS required.
+- `clerum.gfs.open(uri)` — for double-click handlers, buttons, and table cells
+  where an anchor does not fit.
+
+The host resolves the URI with the **user's** session, then either opens the
+image over the plugin (the embed is hidden, as for a consent prompt) or, for a
+folder or a file with no preview, navigates to **Files** focused on that
+resource. On close the plugin comes back exactly as it was.
+
+The link path routes through the same capability as the SDK call, so both share
+one rate budget and one audit line — otherwise a plugin could dodge the budget
+by rendering anchors.
+
+**Why this needs no grant.** The plugin receives `{ opened }` and nothing else:
+not the name, not the size, not the bytes. What happens is that the user is shown
+their own file, fetched with their own session, in the Desktop's own viewer. This
+is the second half of the §6.7 rule — the response carries nothing about the
+user, **and** the action is unmissable on screen. It is budgeted at 6/min, the
+tightest of the reads, because it paints over the user's work.
+
+An unauthorized resource and a missing one both come back
+`{ opened: false, reason: 'not_found' }`, so this is not an existence oracle.
+
 ### 6.7 `theme.read` — Desktop appearance (unscoped)
 
 > No prompt. Tier: `ambient`, `requiresConsent: false`.
@@ -541,10 +578,12 @@ Rules for `as: 'dataUrl'`:
 type ThemeReadResult = { theme: 'light' | 'dark' }
 ```
 
-This is the one capability that does not prompt, and the exception needs a stated
+One of two capabilities that do not prompt, and the exception needs a stated
 principle rather than a shrug: **`requiresConsent: false` is permitted only when
-the response contains no information about the user, their org, or their data —
-only about the Desktop's own presentation.** Theme qualifies. It is still logged
+the response contains no information about the user, their org, or their data.**
+Theme qualifies — it describes the Desktop's own presentation. `gfs.open` (§6.6)
+qualifies on the same rule plus a second condition: its effect is unmissable on
+screen, so it cannot be used covertly. It is still logged
 in the audit trail at `debug` verbosity, and it is still listed on the plugin's
 Settings row as "Appearance (no permission needed)" so the user is never
 surprised to learn a plugin knows their theme.
@@ -660,6 +699,7 @@ window.clerum = {
   gfs: {
     list(p?: GfsListParams): Promise<PluginSdkResponse<GfsListResult>>
     read(p: GfsReadParams): Promise<PluginSdkResponse<GfsReadResult>>
+    open(uri: string): Promise<PluginSdkResponse<GfsOpenResult>>
   }
   theme:    { get(): Promise<PluginSdkResponse<ThemeReadResult>> }
   notifications: { notify(p: NotifyParams): Promise<PluginSdkResponse<NotifyResult>> }

@@ -281,7 +281,57 @@ export class PluginSdkRuntime {
         service.listGfsChildren(resourceId, drive, cursor),
       downloadGfsUri: uri => service.downloadGfsUri(uri),
       getPluginTheme: () => this.theme.get(),
+      openGfsResource: input => this.openGfsResource(input.uri),
       showPluginNotification: input => this.showNotification(input),
+    }
+  }
+
+  /**
+   * Resolve a `gfs://` link with the USER's session and hand it to the trusted
+   * renderer to display. The plugin gets back only whether it opened: it never
+   * sees the name, size, or bytes, and an unauthorized or missing resource is
+   * the same "could not open" either way, so this is not an existence oracle.
+   *
+   * Reached two ways, both landing here so they share the rate budget and the
+   * audit line: `clerum.gfs.open(uri)` through the broker, and a plain
+   * `<a href="gfs://…">` intercepted by the embed's navigation policy.
+   */
+  async openGfsResource(uri: string): Promise<{ opened: boolean; reason?: string }> {
+    const link = String(uri || '').trim()
+    if (!link.startsWith('gfs://')) return { opened: false, reason: 'invalid_uri' }
+    const win = this.deps.getMainWindow()
+    if (!win || win.isDestroyed()) return { opened: false, reason: 'unavailable' }
+
+    let resource
+    try {
+      resource = await this.deps.service.resolveGfsUri(link)
+    } catch (err) {
+      console.warn('[PluginSDK] gfs.open resolve failed:', err)
+      return { opened: false, reason: 'not_found' }
+    }
+
+    this.sendToRenderer('pluginSdk:openGfsResource', {
+      gfsUri: resource.gfsUri ?? link,
+      name: resource.name,
+      kind: resource.kind,
+      bytes: typeof resource.bytes === 'number' ? resource.bytes : null,
+    })
+    return { opened: true }
+  }
+
+  /**
+   * Entry point for the `<a href="gfs://…">` path. The broker owns rate limiting
+   * and auditing for `clerum.gfs.open`, so a link click has to route through it
+   * too — otherwise a plugin could dodge the budget by rendering anchors.
+   */
+  async openGfsResourceFromNavigation(webContentsId: number, uri: string): Promise<void> {
+    const result = await this.broker.request(webContentsId, {
+      v: 1,
+      capability: 'gfs.open',
+      params: { uri },
+    })
+    if (!result.ok) {
+      console.warn('[PluginSDK] gfs link open refused:', result.error.code)
     }
   }
 
