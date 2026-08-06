@@ -147,6 +147,18 @@ export function mergeAuthoritativeServerMessages(
     localByServerMessage.set(serverMessage, localMessage)
   }
 
+  // Drop-only sibling of markLocalReplacement: evicts a turnless idle echo from
+  // the output WITHOUT associating it to any server row (no localByServerMessage
+  // write). No server row changes content or presence, so this can never
+  // reintroduce R1-B1 — property #1 still guards every numbered server row (§6.1).
+  const dropLocalEcho = (localMessage: ChatMessage) => {
+    const index = existing.indexOf(localMessage)
+    if (index < 0 || consumedLocalMessages.has(localMessage)) return
+    consumedLocalMessages.add(localMessage)
+    removed.push(localMessage)
+    removedIndexes.add(index)
+  }
+
   for (const serverMessage of authoritative) {
     const slot = serverSlotKey(serverMessage)
     const sameSlot = existing.find(
@@ -240,6 +252,39 @@ export function mergeAuthoritativeServerMessages(
     const candidateTurns = new Set<number>()
     for (const candidate of authoritativeCandidates) {
       candidateTurns.add(messageServerTurnNumber(candidate)!)
+    }
+
+    // Idle echo collapse, gated by content (§6.1, R2-H1). When no incoming server
+    // row of this role is free to host the idle optimistic (candidateTurns empty)
+    // AND it is bracketed on both sides by numbered turns (slot saturation — the
+    // core case is the consecutive same-role sandwich Q = P + 1), the bubble is
+    // the residual echo of an already-materialised numbered turn. We drop it
+    // (drop-only) ONLY when its content matches a numbered neighbour of the same
+    // role that is already in the output — so its text still survives in that
+    // numbered row and nothing observable is lost. We compare against `next` first
+    // (the higher turn, the R2-H1 echo semantics) and fall back to `prev`.
+    //
+    // The content gate is what makes this safe versus a content-blind positional
+    // rule: an orphan of a task that never registered a server turn (cancelled-in-
+    // queue, budget-denied, persistTurnStart failure — verified in mcp-host) stays
+    // turnless idle non-durable and, with divergent content, is NOT collapsed, so
+    // no local text is lost. Declared residual FP: a user message whose content is
+    // identical to an adjacent same-role numbered turn AND is an orphan of a
+    // turn-less task is dropped — a rare loss of a duplicate-content message,
+    // unavoidable without an identity discriminator the server does not provide.
+    if (candidateTurns.size === 0) {
+      const previousNumbered = previousNumberedMessages[index]
+      const nextNumbered = nextNumberedMessages[index]
+      if (previousNumbered && nextNumbered) {
+        const echoNeighbour =
+          nextNumbered.role === message.role && nextNumbered.content === message.content
+            ? nextNumbered
+            : previousNumbered.role === message.role && previousNumbered.content === message.content
+              ? previousNumbered
+              : undefined
+        if (echoNeighbour) dropLocalEcho(message)
+      }
+      continue
     }
     if (candidateTurns.size !== 1) continue
 

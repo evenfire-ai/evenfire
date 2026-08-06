@@ -1255,3 +1255,185 @@ describe('mergeAuthoritativeServerMessages unique claim (D-1 ↔ D-2)', () => {
     expect(ids).toHaveLength(3)
   })
 })
+
+describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, prop #7)', () => {
+  // Models the active -> idle transition the real flow performs across TWO merge
+  // calls with different activeTaskIds:
+  //   1. active reconcile persists the numbered server turn NEXT TO the still-live
+  //      optimistic bubble (D-3, what fix 229369e4 now does).
+  //   2. the task leaves activeTaskIds (idle).
+  //   3. the idle reconcile MUST collapse the residual optimistic echo — but only
+  //      because its content matches the adjacent numbered turn (gate (b)).
+  // Assertion is on the observable id list the user sees (T4).
+  it('collapses the transient duplicate once the task leaves activeTaskIds (exact repro)', () => {
+    // Server window derived from the real producer (T1): no hand-built rows.
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'second', started_at: new Date(3).toISOString() },
+    ])
+
+    // Disk after the ACTIVE reconcile of task-2: the numbered turn-2-user the fix
+    // now persists sits as the immediate numbered neighbour of the still-turnless
+    // optimistic bubble, whose content ('second') mirrors turn-2-user.
+    const activePersisted: ChatMessage[] = [
+      { id: 'turn-1-user', role: 'user', content: 'first', timestamp: 1, serverTurnNumber: 1 },
+      { id: 'optimistic-task-2', role: 'user', content: 'second', timestamp: 2, task_id: 'task-2' },
+      { id: 'turn-2-user', role: 'user', content: 'second', timestamp: 3, serverTurnNumber: 2 },
+    ]
+
+    // While task-2 is still active the duplicate is tolerated (§3 / D-3).
+    const activeMerge = mergeAuthoritativeServerMessages(activePersisted, incoming, {
+      activeTaskIds: new Set(['task-2']),
+    })
+    expect(activeMerge.map(m => m.id)).toContain('optimistic-task-2')
+    expect(activeMerge.map(m => m.id)).toEqual(
+      expect.arrayContaining(['turn-1-user', 'turn-2-user'])
+    )
+
+    // Transition to idle: task-2 has left activeTaskIds. The echo collapses because
+    // its content == turn-2-user; both server turns remain. FAILS against 229369e4.
+    const idleMerge = mergeAuthoritativeServerMessages(activePersisted, incoming, {
+      activeTaskIds: new Set(),
+    })
+    expect(idleMerge.map(m => m.id)).toEqual(['turn-1-user', 'turn-2-user'])
+
+    // Convergence: re-applying the merge does not re-materialise the echo.
+    const reMerge = mergeAuthoritativeServerMessages(idleMerge, incoming, {
+      activeTaskIds: new Set(),
+    })
+    expect(reMerge.map(m => m.id)).toEqual(['turn-1-user', 'turn-2-user'])
+  })
+
+  it('does NOT drop an idle orphan whose content diverges from its numbered neighbours (gate (b))', () => {
+    // The key test of remediation (b): an accepted task that never registered a
+    // server turn (cancelled-in-queue / budget-denied / persistTurnStart failure,
+    // verified in mcp-host) leaves a turnless idle non-durable user message. When
+    // it lands sandwiched between two consecutive same-role numbered turns, the
+    // content-blind positional rule would delete it — LOSING local text. The
+    // content gate keeps it because its content ('B') matches neither neighbour.
+    // Server turns are derived from the real producer (T1).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'A', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'C', started_at: new Date(3).toISOString() },
+    ])
+    const [turn1User, turn2User] = incoming
+    const existing: ChatMessage[] = [
+      turn1User!,
+      { id: 'orphan-user', role: 'user', content: 'B', timestamp: 2, task_id: 'done-task' },
+      turn2User!,
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+
+    // The orphan survives (at worst a duplicate) — no local text is lost.
+    expect(merged.map(m => m.id)).toContain('orphan-user')
+    expect(merged.find(m => m.id === 'orphan-user')).toEqual(
+      expect.objectContaining({ content: 'B' })
+    )
+    // Non-reintroduction of R1-B1: both numbered server rows survive.
+    expect(merged.map(m => m.id)).toEqual(expect.arrayContaining(['turn-1-user', 'turn-2-user']))
+  })
+
+  it('does NOT collapse an optimistic-live bubble even when slot-saturated (I-5 gate)', () => {
+    // Same sandwich shape and matching content as the exact repro, but the task is
+    // ACTIVE: the in-flight bubble must remain visible in the UI (§1/§3, I-5).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'second', started_at: new Date(3).toISOString() },
+    ])
+    const existing: ChatMessage[] = [
+      { id: 'turn-1-user', role: 'user', content: 'first', timestamp: 1, serverTurnNumber: 1 },
+      { id: 'optimistic-task-2', role: 'user', content: 'second', timestamp: 2, task_id: 'task-2' },
+      { id: 'turn-2-user', role: 'user', content: 'second', timestamp: 3, serverTurnNumber: 2 },
+    ]
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(['task-2']),
+    })
+    expect(merged.map(m => m.id)).toContain('optimistic-task-2')
+  })
+
+  it('property: a same-role sandwiched idle echo collapses, an orphan survives, and no numbered row is lost', () => {
+    const durableIds = (messages: ChatMessage[]) =>
+      messages.filter(m => m.role === 'system' || m.isError || m.preserveLocal).map(m => m.id)
+    const numberedIds = (messages: ChatMessage[]) =>
+      messages.filter(m => messageServerTurnNumber(m) !== undefined).map(m => m.id)
+
+    const scenarioArb = fc.record({
+      start: fc.integer({ min: 1, max: 6 }),
+      role: fc.constantFrom<'user' | 'assistant'>('user', 'assistant'),
+      // true -> echo (content mirrors the higher numbered neighbour), false -> orphan.
+      isEcho: fc.boolean(),
+      // If active, the bubble is optimistic-live and must never collapse (I-5).
+      active: fc.boolean(),
+    })
+
+    fc.assert(
+      fc.property(scenarioArb, ({ start, role, isEcho, active }) => {
+        const turns = [
+          { number: start, user_input: `q${start}`, started_at: new Date(start).toISOString() },
+          {
+            number: start + 1,
+            user_input: `q${start + 1}`,
+            started_at: new Date(start + 1).toISOString(),
+          },
+        ]
+        // Keep only the requested role slot so the bubble is truly sandwiched by
+        // two consecutive same-role numbered turns (Q = P + 1). turnsToChatMessages
+        // emits an assistant slot only when a response is present; there is none
+        // here, so for the assistant role there is no sandwich to build.
+        const numbered = turnsToChatMessages(turns).filter(m => m.role === role)
+        if (numbered.length !== 2) return
+        const [low, high] = numbered
+        const bubbleContent = isEcho ? high!.content : `orphan-${start}`
+        const bubble: ChatMessage = {
+          id: 'sandwiched-bubble',
+          role,
+          content: bubbleContent,
+          timestamp: 999,
+          task_id: 'the-task',
+        }
+        const existing: ChatMessage[] = [low!, bubble, high!]
+        const incoming = numbered
+
+        const activeTaskIds = active ? new Set(['the-task']) : new Set<string>()
+        const merged = mergeAuthoritativeServerMessages(existing, incoming, { activeTaskIds })
+        const ids = merged.map(m => m.id)
+
+        // Prop #7 liveness: an idle content-echo collapses; a live bubble (I-5) and
+        // a content-divergent orphan both survive (gate (b) — no local text lost).
+        if (isEcho && !active) {
+          expect(ids).not.toContain('sandwiched-bubble')
+        } else {
+          expect(ids).toContain('sandwiched-bubble')
+        }
+
+        // Prop #1: no numbered server row is ever suppressed (R1-B1 guard).
+        for (const server of incoming) {
+          if (messageServerTurnNumber(server) !== undefined) {
+            expect(ids).toContain(server.id)
+          }
+        }
+        // Prop #3: no duplicate ids.
+        expect(new Set(ids).size).toBe(ids.length)
+        // Prop #2: numbered output ordered by (turn, roleRank).
+        const orderKeys = merged
+          .filter(m => messageServerTurnNumber(m) !== undefined)
+          .map(m => [messageServerTurnNumber(m)!, roleRank(m.role)] as const)
+        for (let index = 1; index < orderKeys.length; index += 1) {
+          const [previousTurn, previousRank] = orderKeys[index - 1]!
+          const [turn, rank] = orderKeys[index]!
+          expect(previousTurn < turn || (previousTurn === turn && previousRank <= rank)).toBe(true)
+        }
+        // Prop #4: durable locals never lost (none here, but the invariant holds).
+        for (const id of durableIds(existing)) expect(ids).toContain(id)
+        // Prop #5 idempotence + Prop #6 composability at the seam.
+        const remerged = mergeAuthoritativeServerMessages(merged, incoming, { activeTaskIds })
+        expect(remerged).toEqual(merged)
+        expect(numberedIds(remerged)).toEqual(numberedIds(merged))
+      }),
+      { numRuns: 20000 }
+    )
+  }, 120000)
+})
