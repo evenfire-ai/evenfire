@@ -217,7 +217,12 @@ export class WakeAndHoldCoordinator {
     const activeEntry = entry
     return await new Promise<WakeHoldOutcome>(resolve => {
       const id = ++this.waiterSeq
-      const waiter: Waiter = { id, resolve, timer: null as unknown as NodeJS.Timeout, settled: false }
+      const waiter: Waiter = {
+        id,
+        resolve,
+        timer: null as unknown as NodeJS.Timeout,
+        settled: false,
+      }
       waiter.timer = setTimeout(() => {
         if (waiter.settled) return
         waiter.settled = true

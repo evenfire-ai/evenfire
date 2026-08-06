@@ -111,6 +111,7 @@ export class BedrockConverseDriver implements SingleTurnProvider {
     return {
       content: extractText(response) ?? '',
       usage: mapUsage(response),
+      usage_reported: hasAuthoritativeUsage(response),
       finish_reason: mapStopReason(response.stopReason),
     }
   }
@@ -260,6 +261,21 @@ function mapUsage(response: BedrockConverseResponse): CompletionResponse['usage'
     output_tokens: output,
     total_tokens: u.totalTokens ?? input + output,
   }
+}
+
+function hasAuthoritativeUsage(response: BedrockConverseResponse): boolean {
+  const usage = response.usage
+  const input = usage?.inputTokens
+  const output = usage?.outputTokens
+  return (
+    usage != null &&
+    typeof input === 'number' &&
+    Number.isInteger(input) &&
+    input >= 0 &&
+    typeof output === 'number' &&
+    Number.isInteger(output) &&
+    output >= 0
+  )
 }
 
 function mapStopReason(reason: string | undefined): FinishReason {

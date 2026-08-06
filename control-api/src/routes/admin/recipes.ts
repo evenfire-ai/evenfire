@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { CONTENT_TYPES } from '../../http/contentTypes.js'
@@ -14,6 +15,10 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import {
+  ensureRegistryPullSecrets,
+  platformWorkloadNamespaces,
+} from '../../services/registryPullSecretService.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import {
@@ -22,6 +27,10 @@ import {
 } from '../../services/workflowRecipeLimits.js'
 import { buildWrcWorkflowArtifactsUrl } from '../../services/workflows/wrcClient.js'
 import { signWrcDelegationToken } from '../../utils/auth/delegationToken.js'
+import {
+  pullSecretErrorResponse,
+  recipeReferencesPlatformImage,
+} from './registryPullSecretProvisioning.js'
 
 // Timeout for the proxied artifact fetch — short enough that a hung WRC
 // cannot tie up a control-api worker indefinitely, long enough that a
@@ -228,8 +237,19 @@ function sensitiveInputRefsInEnvValue(value: unknown): string[] {
   return [...refs]
 }
 
+/**
+ * Names a recipe may not reference or write.
+ *
+ * `wf-` covers the coordinator/runtime Secrets the platform materializes per recipe.
+ * `evenfire-registry-pull` is the org's registry pull credential: control-api writes it
+ * into the platform workload namespaces and WRC injects the reference itself, AFTER the
+ * #637 ownership filter — so a declared copy is stripped and re-injected anyway, and the
+ * same name in an `envSecret` would read that credential into a container's environment.
+ * Reject it here rather than appear to honor a declaration we ignore
+ * (docs/architecture/registry-pull-secret-recipe-workloads.md §6.1).
+ */
 function isPlatformManagedWorkflowSecretName(name: string): boolean {
-  return name.startsWith('wf-')
+  return name.startsWith('wf-') || name === EVENFIRE_REGISTRY_PULL_SECRET_NAME
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1609,6 +1629,22 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(400).json({ error: 'at least one secret key/value is required' })
         return
       }
+      // This endpoint writes `type: Opaque` (below). The kubelet only honors
+      // `kubernetes.io/dockerconfigjson` / `dockercfg` Secrets for image pulls, so a
+      // pull-secret-shaped payload written here would be accepted, stored, and then
+      // SILENTLY ignored at pull time — surfacing much later as an unexplained
+      // ImagePullBackOff. Refuse it instead of writing an object that cannot work.
+      if (Object.keys(stringData).some(k => k === '.dockerconfigjson' || k === '.dockercfg')) {
+        res.status(400).json({
+          error:
+            'this endpoint creates Opaque secrets, which Kubernetes ignores for image pulls. ' +
+            'Images on the evenfire registry are handled automatically — no pull secret is ' +
+            'needed. For a third-party registry, create a kubernetes.io/dockerconfigjson ' +
+            'Secret in the workload namespace and label it clerum.io/owner-recipe=<recipe>.',
+          key: '.dockerconfigjson',
+        })
+        return
+      }
       const ownershipParse = parseWorkflowSecretOwnershipBody(body)
       if (!ownershipParse.ok) {
         res.status(400).json({ error: ownershipParse.error })
@@ -1719,6 +1755,23 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         return
       }
       const pendingCredentials = workflowSecretResult.pendingCredentials
+      // Provision the platform pull credential before the CRD that will need it.
+      //
+      // A recipe authored here is indistinguishable, at reconcile time, from one installed
+      // off the registry: WRC injects the pull-secret reference into any workload whose
+      // image is ours, so an unprovisioned Secret means ImagePullBackOff behind a 201.
+      // Recipe workloads split across all three platform namespaces by kind, hence the
+      // full set — one pass, one mint (see registryPullSecretService). Idempotent and
+      // mint-free once every namespace already holds a current credential.
+      if (recipeReferencesPlatformImage(body.spec ?? {})) {
+        try {
+          await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+        } catch (err) {
+          const mapped = pullSecretErrorResponse(err)
+          res.status(mapped.status).json(mapped.body)
+          return
+        }
+      }
       // The CRD always goes to RECIPE_CRD_NAMESPACE. Any namespace present in
       // the author YAML is deliberately discarded here because infra owns
       // placement; WorkflowRecipe YAML is not a namespace contract.
@@ -1799,6 +1852,22 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       // Discover the canonical recipe resource and update it in sandbox-recipes.
       try {
         const { ns, resource } = await findRecipeNamespace(req.params.name)
+        // Same guard as create: an update is how a recipe FIRST acquires a platform image
+        // (edit the workload's image, keep the name), and the stored CRD is what WRC
+        // reconciles. Provision AFTER the existence lookup, so a PUT naming a recipe that
+        // does not exist 404s without minting — the mint is rotate-on-call, and it would
+        // revoke the org key every other namespace's Secret is already carrying. And
+        // before the write, never after — a failure must leave the persisted recipe as
+        // it was.
+        if (recipeReferencesPlatformImage(body.spec ?? {})) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (provisionErr) {
+            const mapped = pullSecretErrorResponse(provisionErr)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
         const currentLabels = isPlainObject(resource)
           ? stringLabels(isPlainObject(resource.metadata) ? resource.metadata.labels : undefined)
           : undefined

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResolvedServerConnection } from '../../types.js'
+// vi.mock is hoisted above imports, so the static import resolves the mock.
+import { probeHostReadyViaHealth } from '../wakeAndHold.js'
 
 // The wake-and-hold readiness probe must use mcp-host's UNAUTHENTICATED
 // /v1/runtime/health endpoint (Issue #791 §11.3), which comes up before MCP
@@ -12,9 +14,6 @@ const restMock = vi.hoisted(() => ({
 }))
 
 vi.mock('../mcpHostRestService.js', () => restMock)
-
-// vi.mock is hoisted above imports, so the static import resolves the mock.
-import { probeHostReadyViaHealth } from '../wakeAndHold.js'
 
 const HOST: ResolvedServerConnection = {
   name: 'chatllm',

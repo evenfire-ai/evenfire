@@ -138,7 +138,7 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
     // Panel title is "Connectors" (the "Marketplace" tab labels the section); no count.
-    expect(screen.getByText('Connectors')).toBeInTheDocument()
+    expect(screen.getByText('Connectors', { selector: '.cu-panel-title' })).toBeInTheDocument()
     expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 
@@ -168,7 +168,7 @@ describe('RegistryCatalog tabs and columns', () => {
     }
   })
 
-  it('shows the top-level Marketplace tab, no public Plugins tab', async () => {
+  it('provides canonical tabs for connectors and plugins', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
@@ -177,7 +177,10 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
+      'href',
+      '/marketplace/plugins'
+    )
   })
 
   it('links entry names to their shareable detail routes', async () => {

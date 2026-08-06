@@ -66,6 +66,14 @@ data:
   # allowlist applies to any explicitly self-hosted deployment with a registry
   # URL configured, regardless of whether auth is active, and control-api
   # refuses to start if the configured URL is not allowlisted.
+  #
+  # This key is the SINGLE definition of the registry URL for the whole
+  # control plane: workflow-recipes projects it via configMapKeyRef in the BASE
+  # Deployment (deploy/base/control-plane/workflow-recipes.yaml) instead of
+  # keeping a second copy, so this overlay only supplies the value. Both
+  # services must agree, because WRC decides which images are ours — and
+  # therefore get the platform pull credential — by comparing the image host
+  # against this URL's host. Change it here and WRC follows.
   CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'
   REGISTRY_CONNECTION_MODE: 'self-hosted'
   # The Publisher UI (Sidebar entry + /publisher route) defaults ON for every

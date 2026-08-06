@@ -38,6 +38,8 @@ configurations:
 # Build local images with `eval $(minikube docker-env) && docker build -t
 # clerum/<svc>:test ./<svc>`. To roll a new local tag, change `newTag: test`
 # below in ONE place and re-render with `kubectl kustomize`.
+# Every entry below must have a matching row in deploy/images.json --
+# scripts/tests/test-images-manifest.sh enforces it.
 images:
   - name: clerum/channel-reader
     newTag: test
@@ -82,8 +84,9 @@ patchesStrategicMerge:
   - patches/image-pull-policy.yaml
   - patches/service-tokens.yaml
   - patches/nginx-workflow-approval-gateway.yaml
-  # Registry env vars for workflow-recipes (in-cluster URL, auth off).
-  # control-api gets registry env via configmaps/control-api-config.yaml.
+  # Registry auth off for workflow-recipes. The registry URL is NOT patched here:
+  # the base Deployment projects it from configmaps/control-api-config.yaml, the
+  # one key that also feeds control-api.
   - patches/registry-env.yaml
   # Multi-document YAML must use patchesStrategicMerge — kubectl's embedded
   # kustomize (e.g. v4.5.x) rejects the same files under `patches:` with:

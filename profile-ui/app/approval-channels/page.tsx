@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
+import { useProfileAccess } from '@components/ProfileAccessContext'
+import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { SelectControl } from '@components/SelectControl'
 import { useToast } from '@components/Toast'
@@ -17,27 +19,13 @@ import {
 } from '@lib/api'
 import {
   activeApprovalAccounts,
-  listApprovalChannelTargets,
   listWorkflowApprovalMediums,
   preferredAccountOptionLabel,
 } from '@lib/approvalChannels'
-import type {
-  ApprovalChannelTarget,
-  WorkflowApprovalMediumAccount,
-} from '@/app/types/approvalChannels'
+import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import type { Me, NotificationPreferences } from '@/app/types/profile'
 
-type LoadState = 'idle' | 'loading' | 'ready' | 'error'
-
-function LoadingSkeleton() {
-  return (
-    <div className="profile-skeleton" role="status" aria-label="Loading">
-      <span className="profile-skeleton__line profile-skeleton__line--medium" />
-      <span className="profile-skeleton__line" />
-      <span className="profile-skeleton__line profile-skeleton__line--short" />
-    </div>
-  )
-}
+type LoadState = 'loading' | 'ready' | 'error'
 
 function settingsPathForMedium(medium: string): string {
   if (medium === 'slack') return PROFILE_ROUTES.settings.social('slack')
@@ -48,11 +36,11 @@ function settingsPathForMedium(medium: string): string {
 function ApprovalChannelsContent() {
   const router = useRouter()
   const { showToast } = useToast()
+  const { approvalTargets: targets, refreshApprovalTargets } = useProfileAccess()
   const [me, setMe] = useState<Me | null>(null)
   const [accounts, setAccounts] = useState<WorkflowApprovalMediumAccount[]>([])
-  const [targets, setTargets] = useState<ApprovalChannelTarget[]>([])
   const [preferences, setPreferences] = useState<NotificationPreferences | null>(null)
-  const [state, setState] = useState<LoadState>('idle')
+  const [state, setState] = useState<LoadState>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -66,18 +54,17 @@ function ApprovalChannelsContent() {
   const selectedAccount = activeAccounts.find(account => account.id === selectedPreferredAccountId)
   const manageMedium = selectedAccount?.medium || activeAccounts[0]?.medium || 'telegram'
 
-  async function loadAll() {
+  async function loadAll(forceAccess = false) {
     setState('loading')
     setError('')
     try {
-      const [current, nextTargets, nextAccounts, nextPreferences] = await Promise.all([
+      const [current, , nextAccounts, nextPreferences] = await Promise.all([
         getMe() as Promise<Me>,
-        listApprovalChannelTargets(),
+        refreshApprovalTargets({ force: forceAccess }),
         listWorkflowApprovalMediums(),
         getNotificationPreferences(),
       ])
       setMe(current)
-      setTargets(nextTargets)
       setAccounts(nextAccounts)
       setPreferences(nextPreferences)
       setState('ready')
@@ -138,7 +125,7 @@ function ApprovalChannelsContent() {
             <Button
               variant="secondary"
               className="cu-btn--icon cu-btn--toolbar"
-              onClick={loadAll}
+              onClick={() => void loadAll(true)}
               disabled={busy || state === 'loading'}
               aria-label={
                 state === 'loading' ? 'Refreshing approval channels' : 'Refresh approval channels'
@@ -149,7 +136,12 @@ function ApprovalChannelsContent() {
           </div>
         </header>
 
-        {state === 'loading' ? <LoadingSkeleton /> : null}
+        {state === 'loading' ? (
+          <ProfileBodySkeleton
+            label="Loading approval channels"
+            sections={[{ title: 'Preferred approval channel', actions: ['Manage'], rows: 3 }]}
+          />
+        ) : null}
         {error ? <div className="message message--error">{error}</div> : null}
 
         {state !== 'loading' && preferences && targets.length > 0 ? (

@@ -53,4 +53,35 @@ describe('describePluginWorkloadSdkCapability', () => {
     expect(result?.tone).toBe('neutral')
     expect(result?.title).toBe('Plugin Workload SDK capability is disabled')
   })
+
+  it('distinguishes awaiting policy from a disabled feature', () => {
+    expect(
+      describePluginWorkloadSdkCapability({
+        state: 'awaiting_policy',
+        promptBridge: true,
+        clientNotifications: false,
+        validatedAt: null,
+        message: 'Grant required',
+      })
+    ).toEqual({
+      label: 'SDK: awaiting policy',
+      tone: 'neutral',
+      title: 'Grant required',
+    })
+  })
+
+  it('preserves a degraded diagnostic instead of labeling the capability disabled', () => {
+    expect(
+      describePluginWorkloadSdkCapability({
+        state: 'degraded',
+        promptBridge: true,
+        clientNotifications: false,
+        validatedAt: null,
+      })
+    ).toEqual({
+      label: 'SDK: degraded',
+      tone: 'neutral',
+      title: 'Plugin Workload SDK capability is degraded',
+    })
+  })
 })

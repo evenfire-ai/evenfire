@@ -10,6 +10,11 @@
  * - stdio workloads: managed: true — HCC owns Deployment (stdio-bridge sidecar)
  */
 import * as k8s from '@kubernetes/client-node'
+import {
+  EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+  isPlatformRegistryImage,
+} from '@clerum/workflow-runtime-core'
+import { loadConfig } from '../config'
 import { WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { CRD_GROUP, CRD_VERSION } from './crdConstants'
 import { getErrorCode } from './k8sErrors'
@@ -231,6 +236,16 @@ export function buildMcpServerManifest(
   const projectableImagePullSecrets = (workload.imagePullSecrets ?? []).filter(secretName =>
     transportSecretProjectable(secretAccess, secretName)
   )
+  // The PLATFORM pull credential is injected AFTER the ownership filter for any workload
+  // whose image is hosted on our own registry (see resourceBuilder for the full rationale:
+  // control-api provisions it, it is intentionally unlabeled to the #637 model, and making
+  // it recipe-referencable would either deny it or expose it as an envSecret).
+  if (
+    isPlatformRegistryImage(workload.image, loadConfig().registryUrl) &&
+    !projectableImagePullSecrets.includes(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+  ) {
+    projectableImagePullSecrets.push(EVENFIRE_REGISTRY_PULL_SECRET_NAME)
+  }
 
   return {
     apiVersion: `${CRD_GROUP}/${CRD_VERSION}`,

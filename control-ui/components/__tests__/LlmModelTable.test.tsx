@@ -204,7 +204,7 @@ describe('LlmModelTable filters', () => {
     })
     expect(screen.queryByText('No models match this filter.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Expand Google models' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Expand google models' })).toBeInTheDocument()
   })
 
   it('shows the filtered empty state when no row matches', () => {

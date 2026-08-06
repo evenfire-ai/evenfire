@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import {
   type BackfillNamespaces,
   type BackfillRecipe,
@@ -130,6 +131,60 @@ describe('planSecretOwnershipBackfill', () => {
     ]
     const plan = planSecretOwnershipBackfill(recipes, NS, reader({ 'sandbox-recipes/regcred': {} }))
     expect(plan.stamp).toEqual([
+      { namespace: 'sandbox-recipes', secret: 'regcred', ownerRecipe: 'r' },
+    ])
+  })
+
+  // The platform registry pull credential is control-api-owned infrastructure. It carries
+  // `clerum.io/managed-by: control-api` and NEITHER ownership label, so it reads as
+  // legacy-unlabeled here. A recipe referencing the reserved name — persisted before the
+  // reserved-name validation, or applied straight with kubectl — would otherwise make
+  // `--apply` stamp `clerum.io/owner-recipe` on it, which flips
+  // isSecretAccessibleByRecipe to true and stops the #637 gate from denying and tearing
+  // down that workload. Never a candidate, in any bucket.
+  it('never plans the platform registry pull secret, even with exactly one referencer', () => {
+    const recipes: BackfillRecipe[] = [
+      {
+        name: 'squatter',
+        workloads: [{ id: 'api', imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME] }],
+      },
+    ]
+    const plan = planSecretOwnershipBackfill(
+      recipes,
+      NS,
+      reader({
+        [`sandbox-recipes/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}`]: {
+          'clerum.io/managed-by': 'control-api',
+        },
+      })
+    )
+    expect(plan).toEqual({ stamp: [], ambiguous: [], alreadyLabeled: [], missing: [] })
+  })
+
+  it('still stamps genuine unlabeled secrets alongside the excluded platform one', () => {
+    const recipes: BackfillRecipe[] = [
+      {
+        name: 'r',
+        workloads: [
+          {
+            id: 'api',
+            imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME, 'regcred'],
+            envSecret: { name: 'app-env' },
+          },
+        ],
+      },
+    ]
+    const plan = planSecretOwnershipBackfill(
+      recipes,
+      NS,
+      reader({
+        [`sandbox-recipes/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}`]: {},
+        'sandbox-recipes/regcred': {},
+        'sandbox-recipes/app-env': {},
+      })
+    )
+    expect(plan.stamp).toEqual([
+      { namespace: 'sandbox-recipes', secret: 'app-env', ownerRecipe: 'r' },
       { namespace: 'sandbox-recipes', secret: 'regcred', ownerRecipe: 'r' },
     ])
   })

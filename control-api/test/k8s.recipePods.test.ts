@@ -3,7 +3,7 @@ import type * as k8s from '@kubernetes/client-node'
 import { listRecipePodsAcrossNamespaces } from '../src/k8s.js'
 
 // listPodsForRecipe used to call listPodForAllNamespaces (cluster-scoped).
-// On MCC shared tenants control-api only has namespaced RBAC, so the K8s API
+// On managed shared tenants control-api only has namespaced RBAC, so the K8s API
 // returned 403 and the Workloads tab showed "500" + "no pod" for everything.
 // The helper must list per-namespace and tolerate per-namespace 403/404 so a
 // missing grant degrades to "fewer pods" instead of failing the whole call.

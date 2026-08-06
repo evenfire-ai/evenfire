@@ -13,6 +13,7 @@ import {
   MessageToolStep,
   PendingApprovalLite,
   RpcAllowedServersResult,
+  SandboxUiApp,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -21,6 +22,8 @@ import {
   SessionsListResult,
   SetHostModelResult,
 } from './types.js'
+
+export type { SandboxUiApp } from './types.js'
 
 /**
  * The runtime rejected a model that is not in the operator allowlist (R2/R3).
@@ -354,17 +357,6 @@ async function parseApprovalDecisionResponse(response: Response): Promise<Approv
 
 function url(path: string): string {
   return `${config.rpcProxyBaseUrl.replace(/\/+$/, '')}${path}`
-}
-
-export type SandboxUiApp = {
-  appRef: string
-  title?: string
-  description?: string
-  icon?: string
-  defaultPath: string
-  ready: boolean
-  phase: string | null
-  updatedAt: string | null
 }
 
 /**

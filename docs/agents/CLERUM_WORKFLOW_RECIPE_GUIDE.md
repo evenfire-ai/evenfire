@@ -1440,6 +1440,48 @@ Enforced by the WRC reconciler (not CEL, so the rejection arrives as a status co
 
 Plus field-level patterns: `metadata.name` DNS-1123 ≤ 63, `workloadRef` DNS-1123 ≤ 63, `port` ∈ [1, 65535], `icon` data URI regex, `defaultPath` regex.
 
+### 11.5 Platform-managed Secret names (S*)
+
+| Code | Rule |
+|---|---|
+| S1 | No `secretRef` may name a platform-managed Secret. Today that is `evenfire-registry-pull`, the image-pull credential for the evenfire registry. It applies to every reference kind: `workloads[].imagePullSecrets`, `workloads[].envSecret`, snippet secrets, and `oauthClients[]` refs. Rejected with `422`, rule `workflowWorkloadSecretRefReserved` (or the `workflowSnippetSecret…` / `workflowOauthClientSecret…` variant for those kinds). |
+
+**Why you never declare it.** Images on the evenfire registry are private to the
+publishing org, so every install is an authenticated pull. The installing
+deployment mints its own pull credential from its own registry identity and
+writes it as `evenfire-registry-pull` into `mcp-server`, `sandbox-recipes` and
+`sandbox-ui`. The reference is then attached for you: control-api writes it onto
+the `McpServer` for connectors, and workflow-recipes injects it into the rendered
+pod template for recipe workloads. Injection is keyed on the image host matching
+the deployment's `CLERUM_REGISTRY_URL`, so it covers evenfire-registry images
+only.
+
+The reference has to be injected rather than declared. A recipe-declared Secret
+name is classified by the ownership filter (issue #637) and stripped, because the
+recipe does not own that Secret. Declaring the name would therefore fail even if
+it were allowed, which is why it is rejected outright instead.
+
+Consequences for a recipe author:
+
+- Publishing a private image on the evenfire registry needs **no** credential
+  field in the recipe. The entry stays portable.
+- `imagePullSecrets` remains available for a **third-party** private registry
+  (GHCR, Docker Hub). Name your own Secret there as usual.
+- The Secret is deliberately not labelled `clerum.io/shared` or
+  `clerum.io/owner-recipe`, so no recipe's `envSecret` can read it. It is a
+  pull-only credential and is not reachable as an environment variable.
+
+If a pod on an evenfire-registry image lands in `ImagePullBackOff`, check whether
+the reference was attached at all:
+
+```bash
+kubectl get pod <pod> -n sandbox-recipes -o jsonpath='{.spec.imagePullSecrets}'
+```
+
+Empty on a recipe workload means injection did not fire, which in practice means
+control-api and workflow-recipes disagree on `CLERUM_REGISTRY_URL`. Both read the
+same `control-api-config` key by default.
+
 ---
 
 ## 12. Common pitfalls
@@ -1693,7 +1735,7 @@ Failure modes that surface ONLY at the pod layer (not in WRC status):
 
 | Pod-level failure | Likely cause | Where it surfaces |
 |---|---|---|
-| `ImagePullBackOff` / `ErrImagePull` | Image not publicly pullable; missing `imagePullSecrets`; image truly doesn't exist. | Pod events, container `state.waiting.message`. |
+| `ImagePullBackOff` / `ErrImagePull` | Image not publicly pullable; missing `imagePullSecrets`; image truly doesn't exist. For an image on the **evenfire registry**, the platform credential was not attached — check `kubectl get pod <p> -o jsonpath='{.spec.imagePullSecrets}'` (§11.5). | Pod events, container `state.waiting.message`. |
 | `CreateContainerConfigError` | A **required** `envSecret` key references a missing Secret or missing key. (Keys marked `optional: true` are skipped at reconcile time — see §4.1.1 — so they never reach this state.) | Pod events: `secret "X" not found` / `couldn't find key K in Secret X`. |
 | `CrashLoopBackOff` | App crashes on startup — usually unresolved env vars, bad config, DB unreachable. | Pod logs. |
 | Stuck in `ContainerCreating` past sandbox setup | CNI plugin failure, missing PVC, fsGroup mismatch, missing mount target. | Pod events. |
@@ -1771,7 +1813,7 @@ The image must satisfy all of:
 
 | Requirement | Why | How to verify |
 |---|---|---|
-| **Publicly pullable** (no auth). | `imagePullSecrets` defeats portability. | `docker logout && docker pull <image>` from a fresh shell. If it fails with `repository does not exist or may require 'docker login'`, your registry repo is **private**, not nonexistent — Docker Hub creates new repos as private by default. Flip to Public in the repo's *Settings → Visibility* (Docker Hub) or *Package settings → Change visibility* (GHCR). Your push succeeding tells you nothing about visibility. |
+| **Publicly pullable** (no auth) **unless it is on the evenfire registry**. | A pull credential the installer has to create by hand defeats portability. Images on the evenfire registry are exempt: the installing deployment provisions its own credential and attaches it automatically (see §11.5), so a private evenfire-registry image stays portable. | `docker logout && docker pull <image>` from a fresh shell. If it fails with `repository does not exist or may require 'docker login'`, your registry repo is **private**, not nonexistent — Docker Hub creates new repos as private by default. For a third-party registry, flip to Public in the repo's *Settings → Visibility* (Docker Hub) or *Package settings → Change visibility* (GHCR). Your push succeeding tells you nothing about visibility. |
 | **Immutable semver tag** (`1.0.0`, not `:latest` / `:dev`). | `latest` floats; installers can't reproduce builds; K8s won't re-pull on restart without `imagePullPolicy: Always` (which slows every restart). | `docker buildx imagetools inspect <image>` shows a content digest. |
 | **Multi-arch: `linux/amd64` + `linux/arm64`.** | Prod clusters amd64; dev laptops Apple Silicon. Single-arch → `exec format error` on the wrong arch. | `docker buildx imagetools inspect <image>` lists both platforms. |
 | **Non-root.** | All three namespaces (`sandbox-ui`, `sandbox-recipes`, `mcp-server`) enforce PodSecurity baseline; root pods are rejected. UI workloads have additional CSP / sandbox constraints — see §6.4. | `docker run --rm <image> id` → UID ≠ 0. |
@@ -1826,7 +1868,7 @@ Before writing `spec.description`, enumerate every Secret reference in your YAML
 | `webhooks[].verification.secretRef` | HMAC signing secret OR static bearer. | All schemes except `jwt-bearer-jwks`. Webhooks with `optional: true` (§8.6) keep the field but tolerate a missing Secret — the webhook stays dormant (`410 integration_not_configured`) until the Secret is created. |
 | `webhooks[].verification.setupHandshake.secretRef` | Provider verify token (e.g. Meta `hub.verify_token`). | Only with `meta-hub-challenge`. |
 | `workloads[].envSecret` | Env-var-shaped runtime credentials (one Secret, N keys). Keys with `optional: true` (§4.1.1) may be deferred to post-install setup. | Required keys: when the workload needs them. Optional keys: only when the operator wants to enable that integration. |
-| `workloads[].imagePullSecrets` | Private-registry pull credentials. | Discouraged for published recipes — document loudly if used. |
+| `workloads[].imagePullSecrets` | Pull credentials for a **third-party** private registry (GHCR, Docker Hub). | Discouraged for published recipes — document loudly if used. Do **not** use it for images on the evenfire registry: `evenfire-registry-pull` is a reserved name and declaring it fails the install with `422 workflowWorkloadSecretRefReserved` (§11.5). |
 
 For each Secret in the inventory, your description MUST answer these five questions:
 

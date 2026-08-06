@@ -1,0 +1,18 @@
+# Extends kustomize's built-in image transformer to also scan env-var values
+# in Deployment podspecs. Without this, env vars like CONTEXT_MAPPER_HOST_IMAGE
+# (used by HCC/WRC at runtime to spawn child pods — see patches/dynamic-images.yaml)
+# are invisible to the `images:` block, so entries for clerum/mcp-host,
+# clerum/stdio-bridge, and clerum/workflow-coordinator would be silently ignored
+# (orphans). With this FieldSpec, those 3 entries become active rewrites — the
+# `images:` block becomes the single source of truth for every clerum/* tag in
+# the minikube overlay, including the dynamically-spawned pod images.
+#
+# Safety: kustomize matches by `name:` prefix, so env vars whose values are NOT
+# image refs (e.g. CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS=standard) are
+# left untouched — only values starting with one of the `images: name` entries
+# get rewritten.
+#
+# Reference: https://kubectl.docs.kubernetes.io/references/kustomize/builtinimagetransformer/
+images:
+  - path: spec/template/spec/containers/env/value
+    kind: Deployment

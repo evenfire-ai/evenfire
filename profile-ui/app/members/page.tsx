@@ -6,6 +6,8 @@ import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { useProfileAccess } from '@components/ProfileAccessContext'
+import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle, IconRefresh, IconTrash } from '@components/icons'
@@ -13,13 +15,12 @@ import { PROFILE_ROUTES } from '@constants/routes'
 import {
   cancelManagedInvitation,
   deleteManagedUser,
-  getManageableTeams,
   getManagedInvitations,
   getManagedMembers,
   isSilentApiError,
   resendManagedInvitation,
 } from '@lib/api'
-import type { ManageableTeam, ManagedMember, ManagedPendingInvitation } from '@/app/types/profile'
+import type { ManagedMember, ManagedPendingInvitation } from '@/app/types/profile'
 import { canDeleteMemberAccount, displayMemberName, memberDeleteTooltip } from './memberHelpers'
 
 type LoadState = 'loading' | 'ready' | 'error'
@@ -28,25 +29,24 @@ export default function MembersPage() {
   const router = useRouter()
   const { authState } = useAuth()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const { manageableTeams, refreshManageableTeams } = useProfileAccess()
   const { showToast } = useToast()
   const [state, setState] = useState<LoadState>('loading')
   const [members, setMembers] = useState<ManagedMember[]>([])
   const [invitations, setInvitations] = useState<ManagedPendingInvitation[]>([])
-  const [manageableTeams, setManageableTeams] = useState<ManageableTeam[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const currentUserId = authState.me?.id || ''
 
-  async function loadMembers() {
+  async function loadMembers(forceAccess = false) {
     setState('loading')
     setError('')
     try {
-      const [teamsResponse, membersResponse, invitationsResponse] = await Promise.all([
-        getManageableTeams(),
+      const [, membersResponse, invitationsResponse] = await Promise.all([
+        refreshManageableTeams({ force: forceAccess }),
         getManagedMembers(),
         getManagedInvitations(),
       ])
-      setManageableTeams(Array.isArray(teamsResponse.items) ? teamsResponse.items : [])
       setMembers(Array.isArray(membersResponse.items) ? membersResponse.items : [])
       setInvitations(Array.isArray(invitationsResponse.items) ? invitationsResponse.items : [])
       setState('ready')
@@ -130,7 +130,7 @@ export default function MembersPage() {
               <Button
                 variant="secondary"
                 className="cu-btn--icon cu-btn--toolbar"
-                onClick={loadMembers}
+                onClick={() => void loadMembers(true)}
                 disabled={busy || state === 'loading'}
                 aria-label={state === 'loading' ? 'Refreshing members' : 'Refresh members'}
               >
@@ -145,7 +145,15 @@ export default function MembersPage() {
             </div>
           </header>
 
-          {state === 'loading' ? <div className="message message--plain">Loading...</div> : null}
+          {state === 'loading' ? (
+            <ProfileBodySkeleton
+              label="Loading members"
+              sections={[
+                { title: 'Pending invitations', rows: 2 },
+                { title: 'Members', rows: 4 },
+              ]}
+            />
+          ) : null}
           {error ? <div className="message message--error">{error}</div> : null}
 
           {state !== 'loading' && manageableTeams.length === 0 ? (
@@ -215,72 +223,74 @@ export default function MembersPage() {
             </section>
           ) : null}
 
-          <section className="section members-section">
-            <div className="members-table-wrap">
-              <table className="members-table">
-                <thead>
-                  <tr>
-                    <th>Member</th>
-                    <th>Email</th>
-                    <th>Teams</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {members.map(member => {
-                    const deleteAllowed = canDeleteMemberAccount(member, currentUserId)
-                    return (
-                      <tr key={member.id}>
-                        <td>
-                          <button
-                            type="button"
-                            className="table-link"
-                            onClick={() => router.push(PROFILE_ROUTES.members.detail(member.id))}
-                          >
-                            {displayMemberName(member)}
-                          </button>
-                        </td>
-                        <td>
-                          <span className="member-email">
-                            <span>{member.email}</span>
-                            {member.passwordPendingFromAcceptedInvitation ? (
-                              <span
-                                className="member-email__alert"
-                                title="Invitation accepted, but this member still needs to set a password."
-                                aria-label="Invitation accepted, password setup pending"
-                              >
-                                <IconAlertTriangle width={14} height={14} />
-                              </span>
-                            ) : null}
-                          </span>
-                        </td>
-                        <td>{member.teams.length}</td>
-                        <td>
-                          <div className="row-actions">
+          {state !== 'loading' ? (
+            <section className="section members-section">
+              <div className="members-table-wrap">
+                <table className="members-table">
+                  <thead>
+                    <tr>
+                      <th>Member</th>
+                      <th>Email</th>
+                      <th>Teams</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {members.map(member => {
+                      const deleteAllowed = canDeleteMemberAccount(member, currentUserId)
+                      return (
+                        <tr key={member.id}>
+                          <td>
                             <button
                               type="button"
-                              className="icon-button icon-button--danger"
-                              onClick={() => void deleteMemberAccount(member)}
-                              disabled={busy || !deleteAllowed}
-                              title={memberDeleteTooltip(member, currentUserId)}
-                              aria-label={`Delete ${displayMemberName(member)}`}
+                              className="table-link"
+                              onClick={() => router.push(PROFILE_ROUTES.members.detail(member.id))}
                             >
-                              <IconTrash />
+                              {displayMemberName(member)}
                             </button>
-                          </div>
-                        </td>
+                          </td>
+                          <td>
+                            <span className="member-email">
+                              <span>{member.email}</span>
+                              {member.passwordPendingFromAcceptedInvitation ? (
+                                <span
+                                  className="member-email__alert"
+                                  title="Invitation accepted, but this member still needs to set a password."
+                                  aria-label="Invitation accepted, password setup pending"
+                                >
+                                  <IconAlertTriangle width={14} height={14} />
+                                </span>
+                              ) : null}
+                            </span>
+                          </td>
+                          <td>{member.teams.length}</td>
+                          <td>
+                            <div className="row-actions">
+                              <button
+                                type="button"
+                                className="icon-button icon-button--danger"
+                                onClick={() => void deleteMemberAccount(member)}
+                                disabled={busy || !deleteAllowed}
+                                title={memberDeleteTooltip(member, currentUserId)}
+                                aria-label={`Delete ${displayMemberName(member)}`}
+                              >
+                                <IconTrash />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                    {state === 'ready' && members.length === 0 ? (
+                      <tr>
+                        <td colSpan={4}>No members are visible for your teams.</td>
                       </tr>
-                    )
-                  })}
-                  {state === 'ready' && members.length === 0 ? (
-                    <tr>
-                      <td colSpan={4}>No members are visible for your teams.</td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </section>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
 
           {confirmDialog}
         </div>

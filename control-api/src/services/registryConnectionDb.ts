@@ -6,6 +6,11 @@ import {
   deriveOAuthEncryptionKey,
   encryptOAuthSecret,
 } from '../oauth/encryption.js'
+import {
+  invalidateRegistryIdentityCaches,
+  isRegistryIdentityCacheGenerationCurrent,
+  withCurrentRegistryIdentity,
+} from './registryIdentityCache.js'
 
 /**
  * Thrown when no voucher signing key/kid is resolvable (route maps to 500
@@ -57,10 +62,12 @@ interface RawRow {
 // immediately on the local process.
 const CONNECTION_CACHE_TTL_MS = 15_000
 let cached: RegistryConnectionRow | null | undefined
+let cachedGeneration = -1
 let cachedAt = 0
 
 export function __resetRegistryConnectionCacheForTests(): void {
   cached = undefined
+  cachedGeneration = -1
   cachedAt = 0
 }
 
@@ -71,38 +78,53 @@ function encKey(): Buffer {
 export async function getRegistryConnection(
   db: DbClient = pool
 ): Promise<RegistryConnectionRow | null> {
-  if (cached !== undefined && Date.now() - cachedAt < CONNECTION_CACHE_TTL_MS) return cached
-  const res = await db.query(
-    `SELECT deployment_id, key_id, public_key_pem, private_key_encrypted, client_id,
-            client_secret_encrypted, org_name, requested_org_name, contact_email, status, registry_url
-       FROM registry_connection
-      ORDER BY created_at DESC
-      LIMIT 1`
-  )
-  const raw = res.rows[0] as RawRow | undefined
-  if (!raw) {
-    cached = null
-    cachedAt = Date.now()
-    return null
-  }
-  const key = encKey()
-  cached = {
-    deploymentId: raw.deployment_id,
-    keyId: raw.key_id,
-    publicKeyPem: raw.public_key_pem,
-    privateKeyPem: decryptOAuthSecret(key, raw.private_key_encrypted),
-    clientId: raw.client_id,
-    clientSecret: raw.client_secret_encrypted
-      ? decryptOAuthSecret(key, raw.client_secret_encrypted)
-      : null,
-    orgName: raw.org_name,
-    requestedOrgName: raw.requested_org_name,
-    contactEmail: raw.contact_email,
-    status: raw.status,
-    registryUrl: raw.registry_url,
-  }
-  cachedAt = Date.now()
-  return cached
+  return withCurrentRegistryIdentity(async generation => {
+    if (
+      cached !== undefined &&
+      cachedGeneration === generation &&
+      Date.now() - cachedAt < CONNECTION_CACHE_TTL_MS
+    ) {
+      return cached
+    }
+    const res = await db.query(
+      `SELECT deployment_id, key_id, public_key_pem, private_key_encrypted, client_id,
+              client_secret_encrypted, org_name, requested_org_name, contact_email, status, registry_url
+         FROM registry_connection
+        ORDER BY created_at DESC
+        LIMIT 1`
+    )
+    const raw = res.rows[0] as RawRow | undefined
+    if (!raw) {
+      if (isRegistryIdentityCacheGenerationCurrent(generation)) {
+        cached = null
+        cachedGeneration = generation
+        cachedAt = Date.now()
+      }
+      return null
+    }
+    const key = encKey()
+    const row = {
+      deploymentId: raw.deployment_id,
+      keyId: raw.key_id,
+      publicKeyPem: raw.public_key_pem,
+      privateKeyPem: decryptOAuthSecret(key, raw.private_key_encrypted),
+      clientId: raw.client_id,
+      clientSecret: raw.client_secret_encrypted
+        ? decryptOAuthSecret(key, raw.client_secret_encrypted)
+        : null,
+      orgName: raw.org_name,
+      requestedOrgName: raw.requested_org_name,
+      contactEmail: raw.contact_email,
+      status: raw.status,
+      registryUrl: raw.registry_url,
+    }
+    if (isRegistryIdentityCacheGenerationCurrent(generation)) {
+      cached = row
+      cachedGeneration = generation
+      cachedAt = Date.now()
+    }
+    return row
+  })
 }
 
 export async function upsertPendingConnection(
@@ -147,6 +169,7 @@ export async function upsertPendingConnection(
   if (db) await run(db)
   else await withTransaction(run)
   cached = undefined
+  invalidateRegistryIdentityCaches()
 }
 
 export async function markConnected(
@@ -167,12 +190,15 @@ export async function markConnected(
     [input.clientId, encSecret, input.orgName, input.deploymentId]
   )
   cached = undefined
-  return (res.rowCount ?? 0) > 0
+  const wrote = (res.rowCount ?? 0) > 0
+  if (wrote) invalidateRegistryIdentityCaches()
+  return wrote
 }
 
 export async function deleteConnection(db: DbClient = pool): Promise<void> {
   await db.query(`DELETE FROM registry_connection`)
   cached = undefined
+  invalidateRegistryIdentityCaches()
 }
 
 /** Mode-aware voucher signing material (spec §14.2). */

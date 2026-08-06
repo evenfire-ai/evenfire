@@ -6,7 +6,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
 import { privateWorkflowContextName } from '../reconciler/workflowContext'
-import type { WorkflowRecipeGfsScope } from '../types'
+import type { PluginWorkloadSdkSpec, WorkflowRecipeGfsScope } from '../types'
 import { truncateRfc1123WithHash } from './networkPolicyFactory'
 import {
   PLUGIN_WORKLOAD_SDK_PORT,
@@ -26,6 +26,49 @@ import { AgentSpec, WorkflowConfig } from './types'
 
 /** Directory where the mcp-host mounts per-caller SDK bearer tokens (Secret volume). */
 export const PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR = '/var/run/clerum/plugin-workload-sdk/tokens'
+export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
+export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
+
+export function declaredPluginWorkloadSdkCapabilities(
+  spec: PluginWorkloadSdkSpec | undefined
+): PluginWorkloadSdkCapability[] {
+  if (!spec) return []
+  return PLUGIN_WORKLOAD_SDK_CAPABILITIES.filter(capability => spec[capability] !== undefined)
+}
+
+/**
+ * Annotation carrying the immutable contract used by an eager SDK mcp-host.
+ * Bare Pods have no Deployment template hash, so reconciliation must carry
+ * its own content address for safe same-image migrations.
+ */
+export const PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION =
+  'clerum.io/plugin-workload-sdk-runtime-contract-hash'
+
+function canonicalizeRuntimeContract(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRuntimeContract)
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return Object.fromEntries(
+      Object.keys(record)
+        .filter(key => record[key] !== undefined)
+        .sort()
+        .map(key => [key, canonicalizeRuntimeContract(record[key])])
+    )
+  }
+  return value
+}
+
+/**
+ * Hash only the PodSpec: metadata names, UIDs, timestamps, and the hash
+ * annotation itself are intentionally excluded. The spec contains the
+ * image, runtime mode/env, ports, volumes, service-account settings, probes,
+ * security context, and propagated runtime inputs that define the eager host
+ * contract.
+ */
+export function pluginWorkloadSdkRuntimeContractHash(pod: k8s.V1Pod): string {
+  const canonical = JSON.stringify(canonicalizeRuntimeContract({ spec: pod.spec }))
+  return createHash('sha256').update(canonical).digest('hex')
+}
 
 /**
  * Allowlist of env vars forwarded from the WRC controller's process.env into
@@ -551,12 +594,17 @@ export interface McpHostPodOptions {
    * mcp-host). MCP_HOST_POD_NAMESPACE is injected unconditionally — the
    * downward API leg of the gate must exist even when the flag is off.
    */
+  /** Exact SDK families projected from the reviewed WorkflowRecipe. */
+  pluginWorkloadSdkCapabilities?: readonly PluginWorkloadSdkCapability[]
+  /** Compatibility input for existing workflow mcp-host callers. */
   pluginWorkloadSdkEnabled?: boolean
+  /** Runtime contract used by mcp-host usage attribution. */
+  pluginWorkloadSdkRuntimeMode?: 'workflow' | 'sdk-only'
 }
 
 export function buildMcpHostPod(
   recipeName: string,
-  agent: AgentSpec,
+  agent: AgentSpec | undefined,
   config: WorkflowConfig,
   approvalRecipeName: string | undefined,
   approvalRecipeNamespace: string | undefined,
@@ -566,6 +614,14 @@ export function buildMcpHostPod(
   options: McpHostPodOptions
 ): k8s.V1Pod {
   const mountWorkflowOutput = options.mountWorkflowOutput
+  const runtimeMode = options.pluginWorkloadSdkRuntimeMode ?? 'workflow'
+  const pluginWorkloadSdkCapabilities =
+    options.pluginWorkloadSdkCapabilities ??
+    (options.pluginWorkloadSdkEnabled ? PLUGIN_WORKLOAD_SDK_CAPABILITIES : [])
+  const pluginWorkloadSdkEnabled = pluginWorkloadSdkCapabilities.length > 0
+  if (runtimeMode === 'sdk-only' && !pluginWorkloadSdkEnabled) {
+    throw new Error('sdk-only mcp-host runtime requires pluginWorkloadSdkEnabled=true')
+  }
   if (mountWorkflowOutput && !workflowOutputClaimName) {
     throw new Error('workflowOutputClaimName is required for workflow mcp-host pods')
   }
@@ -579,7 +635,7 @@ export function buildMcpHostPod(
     mountWorkflowOutput && workflowOutputClaimName
       ? buildWorkflowOutputAffinity(workflowOutputClaimName)
       : undefined
-  return {
+  const pod: k8s.V1Pod = {
     apiVersion: 'v1',
     kind: 'Pod',
     metadata: {
@@ -620,7 +676,10 @@ export function buildMcpHostPod(
             capabilities: { drop: ['ALL'] },
           },
           env: [
-            { name: 'CLERUM_WORKFLOW_ENABLED', value: 'true' },
+            {
+              name: 'CLERUM_WORKFLOW_ENABLED',
+              value: runtimeMode === 'workflow' ? 'true' : 'false',
+            },
             { name: 'CLERUM_HOST_NAME', value: `${config.sandboxNamespace}/${recipeName}` },
             { name: 'CLERUM_WORKFLOW_RECIPE', value: recipeName },
             { name: 'CLERUM_WORKFLOW_NAMESPACE', value: config.sandboxNamespace },
@@ -656,8 +715,12 @@ export function buildMcpHostPod(
                 },
               },
             },
-            { name: 'CLERUM_MODEL_PROVIDER', value: agent.provider },
-            { name: 'CLERUM_MODEL', value: agent.model },
+            ...(agent
+              ? [
+                  { name: 'CLERUM_MODEL_PROVIDER', value: agent.provider },
+                  { name: 'CLERUM_MODEL', value: agent.model },
+                ]
+              : []),
             // mcpHost runtime tokens — mcp-host uses these to call the approval gateway.
             // Coordinator does NOT get these env vars (least privilege).
             {
@@ -682,6 +745,12 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_GATEWAY_URL',
               value: 'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092',
             },
+            // PromptBridge resolves exactly one signed target credential per
+            // attempt through WRC. Notification-only hosts are provider-free
+            // and deliberately receive no broker URL.
+            ...(pluginWorkloadSdkCapabilities.includes('promptBridge')
+              ? [{ name: 'CLERUM_WRC_URL', value: config.wrcEndpoint }]
+              : []),
             {
               name: 'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
               value: MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE_PATH,
@@ -700,9 +769,17 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_POD_NAMESPACE',
               valueFrom: { fieldRef: { fieldPath: 'metadata.namespace' } },
             },
-            ...(options.pluginWorkloadSdkEnabled
+            ...(pluginWorkloadSdkEnabled
               ? [
                   { name: 'PLUGIN_WORKLOAD_SDK_ENABLED', value: 'true' },
+                  {
+                    name: 'PLUGIN_WORKLOAD_SDK_CAPABILITIES',
+                    value: pluginWorkloadSdkCapabilities.join(','),
+                  },
+                  {
+                    name: 'PLUGIN_WORKLOAD_SDK_RUNTIME_MODE',
+                    value: runtimeMode,
+                  },
                   {
                     name: 'PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR',
                     value: PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR,
@@ -734,7 +811,7 @@ export function buildMcpHostPod(
                   },
                 ]
               : []),
-            ...(options.pluginWorkloadSdkEnabled
+            ...(pluginWorkloadSdkEnabled
               ? [
                   {
                     name: 'plugin-workload-sdk-tokens',
@@ -749,13 +826,21 @@ export function buildMcpHostPod(
             limits: { cpu: '2000m', memory: '2Gi' },
           },
           readinessProbe: {
-            httpGet: { path: '/v1/runtime/health', port: 8080 },
+            // SDK-only mcp-hosts are bootstrapped by WRC after the Pod becomes
+            // a Service endpoint. `/health` intentionally remains 503 until
+            // that identity handshake completes, so probing it here would
+            // create a permanent Ready -> bootstrap -> Ready deadlock.
+            httpGet: {
+              path:
+                runtimeMode === 'sdk-only' ? '/v1/runtime/bootstrap-ready' : '/v1/runtime/health',
+              port: 8080,
+            },
             initialDelaySeconds: 5,
             periodSeconds: 10,
             failureThreshold: 6,
           },
           livenessProbe: {
-            httpGet: { path: '/v1/runtime/health', port: 8080 },
+            httpGet: { path: '/v1/runtime/live', port: 8080 },
             initialDelaySeconds: 15,
             periodSeconds: 30,
           },
@@ -775,7 +860,7 @@ export function buildMcpHostPod(
               },
             ]
           : []),
-        ...(options.pluginWorkloadSdkEnabled
+        ...(pluginWorkloadSdkEnabled
           ? [
               {
                 name: 'plugin-workload-sdk-tokens',
@@ -786,6 +871,17 @@ export function buildMcpHostPod(
       ],
     },
   }
+  if (pluginWorkloadSdkEnabled) {
+    pod.metadata = {
+      ...pod.metadata,
+      annotations: {
+        ...(pod.metadata?.annotations ?? {}),
+        [PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION]:
+          pluginWorkloadSdkRuntimeContractHash(pod),
+      },
+    }
+  }
+  return pod
 }
 
 export function buildMcpHostHeadlessService(

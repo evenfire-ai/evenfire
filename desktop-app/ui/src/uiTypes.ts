@@ -15,6 +15,7 @@ export type ActiveSandboxUiApp = {
   label: string
   icon?: string
   defaultPath: string
+  routePath?: string
 }
 export type Tone = 'info' | 'success' | 'error' | 'warn'
 export type ThemeMode = 'dark' | 'light'

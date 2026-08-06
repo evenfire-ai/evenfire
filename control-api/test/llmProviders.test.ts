@@ -4,6 +4,7 @@ import {
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_IDS,
   PROVIDER_NON_SECRET_ENV,
+  isCredentialSlotOwnedByProvider,
   isLlmProviderId,
 } from '@clerum/llm-providers'
 
@@ -103,6 +104,17 @@ describe('credential slots', () => {
       'aws-secret-access-key',
     ])
     expect(PROVIDER_CREDENTIAL_SLOTS.bedrock.every(s => s.required)).toBe(true)
+  })
+
+  it('uses one ownership rule for additive and structured provider slots', () => {
+    expect(isCredentialSlotOwnedByProvider('openai', 'openai-api-key-fallback-a')).toBe(true)
+    expect(isCredentialSlotOwnedByProvider('zai', 'zai-api-key-fallback-a')).toBe(true)
+    expect(isCredentialSlotOwnedByProvider('bedrock', 'aws-access-key-id-fallback')).toBe(false)
+    expect(isCredentialSlotOwnedByProvider('bedrock', 'aws-access-key-id')).toBe(true)
+    expect(isCredentialSlotOwnedByProvider('vertex', 'vertex-service-account-json-fallback')).toBe(
+      false
+    )
+    expect(isCredentialSlotOwnedByProvider('vertex', 'vertex-service-account-json')).toBe(true)
   })
 })
 

@@ -24,6 +24,9 @@ import {
   ProfileSettingsOpenOptions,
   ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
+  SandboxUiApp,
+  SandboxUiDeepLinkEnvelope,
+  SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
@@ -438,10 +441,13 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
+        rendererReady: () => Promise<void>
       }
       window: {
-        getVisibility: () => Promise<{ visible: boolean }>
-        onVisibilityChange: (callback: (state: { visible: boolean }) => void) => () => void
+        getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        onVisibilityChange: (
+          callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
       }
       system: {
         /** GAP-D1 (§4.5-4): OS resume / screen unlock tick — reconcile in-flight chats. */
@@ -514,26 +520,22 @@ declare global {
       }
       sandboxUi: {
         listApps: () => Promise<{
-          apps: Array<{
-            appRef: string
-            title?: string
-            description?: string
-            icon?: string
-            defaultPath: string
-            ready: boolean
-            phase: string | null
-            updatedAt: string | null
-          }>
+          apps: SandboxUiApp[]
         }>
         mintSession: (recipeNs: string, recipeName: string) => Promise<{ setCookie: string }>
         open: (args: {
           recipeNs: string
           recipeName: string
           defaultPath?: string
+          routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        copyDeepLink: (teamId?: string) => Promise<{ url: string }>
+        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        clearPendingDeepLinks: () => Promise<void>
+        acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number
           y: number
@@ -543,6 +545,7 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void

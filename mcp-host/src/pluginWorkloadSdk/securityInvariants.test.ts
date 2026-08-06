@@ -33,22 +33,40 @@ function deepKeys(value: unknown, acc: Set<string> = new Set()): Set<string> {
 
 describe('Plugin Workload SDK — §6.2 response-shape security invariants', () => {
   it('promptBridge result contains no provider key, token, or user-info', async () => {
+    const target = {
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+    }
     const controlApiClient = {
+      ensurePromptBridgeCapabilities: vi.fn().mockResolvedValue(undefined),
       authorizePromptBridge: vi.fn().mockResolvedValue({
+        contractVersion: 2,
         invocationId: 'inv-1',
         replay: false,
+        providerCallRequired: true,
         status: 'in_progress',
         model: 'glm-4.7',
         // Even if control-api leaked a key into the authorization envelope,
         // the handler must not surface it in the result.
         modelPolicy: { provider: 'zai', model: 'glm-4.7', apiKey: 'sk-provider-secret' },
+        selectedTarget: target,
+        authorizedTargets: [target],
+        attemptGeneration: 1,
+        policyRevision: 1,
+        policyHash: 'a'.repeat(64),
         maxOutputTokens: null,
       }),
+      reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
       reportInvocationStatus: vi.fn().mockResolvedValue(undefined),
     } as unknown as PluginWorkloadSdkControlApiClient
     const llmBridge = {
       complete: vi.fn().mockResolvedValue({
         model: 'glm-4.7',
+        servedTarget: target,
+        fallbackUsed: false,
+        llmSecretName: 'zai-secret',
         content: 'the summary',
         usage: { inputTokens: 4, outputTokens: 2 },
         finishReason: 'complete',
@@ -76,11 +94,12 @@ describe('Plugin Workload SDK — §6.2 response-shape security invariants', () 
     for (const forbidden of FORBIDDEN_SUBSTRINGS) {
       expect(serialized).not.toContain(forbidden)
     }
-    // Credential selection invariant: no provider/apiKey fields on the result.
+    // Provider identity is deliberately returned as non-secret servedTarget
+    // telemetry; credential values/tickets and policy internals must not leak.
     const keys = deepKeys(result)
     expect(keys.has('apiKey')).toBe(false)
-    expect(keys.has('provider')).toBe(false)
     expect(keys.has('modelPolicy')).toBe(false)
+    expect(keys.has('credentialTicket')).toBe(false)
     // User-info invariant: no user identity fields surface.
     for (const userInfoField of ['userId', 'email', 'phone', 'teamId', 'sender']) {
       expect(keys.has(userInfoField)).toBe(false)

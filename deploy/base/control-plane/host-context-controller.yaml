@@ -13,6 +13,22 @@ metadata:
     app: host-context-controller
 spec:
   replicas: 1
+  # HCC's /ready stays 503 until its initial fleet reconciliation finishes, so time-to-Ready
+  # scales with the McpServer/Context fleet rather than with process start. clerum-dev took
+  # 651s on 2026-08-05 at 108 McpServers / 22 Contexts.
+  #
+  # Unset, this defaults to 600s, and that default is what actually governed the deploy:
+  # `kubectl rollout status` aborts the instant the controller sets ProgressDeadlineExceeded,
+  # so provision-gfs-runtime.sh's --timeout could never exceed the deadline remaining. The
+  # clock also starts several steps earlier, at apply-inter-service-tokens.sh's `rollout
+  # restart` of HCC, so the wait inherits only what is left. On 2026-08-05 that was 600-160
+  # = 440s against a 480s timeout: the timeout raised in #202 never bound, and the deploy
+  # failed 50s before HCC came Ready.
+  #
+  # 1200s covers the 900s wait plus a 300s head-start allowance. This is a mitigation, not
+  # the fix — evenfire-ai/evenfire#205 decouples readiness from fleet convergence, after
+  # which both numbers should come back down.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: host-context-controller

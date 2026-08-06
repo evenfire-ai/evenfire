@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui'
@@ -2267,7 +2268,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
                         (ns: {secret.targetNamespaces.join(', ')})
                       </span>
                       {isEdit ? (
-                        <a
+                        <Link
                           href={CONTROL_ROUTES.secrets.editRecipe(secret.secretName)}
                           style={{
                             marginLeft: 12,
@@ -2276,7 +2277,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
                           }}
                         >
                           Edit stored values →
-                        </a>
+                        </Link>
                       ) : (
                         <span
                           style={{
