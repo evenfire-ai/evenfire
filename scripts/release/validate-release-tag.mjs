@@ -3,9 +3,9 @@
 // runs locally and on the release-prep PR, before any tag exists.
 //
 // It deliberately does NOT check that the artifacts exist. The v<version>
-// images would be built by a future release-images.yml workflow on the tag
-// (not yet added to this repo), so they cannot pre-exist here. Existence
-// checking is that future workflow's job, not this one's.
+// images are created by .github/workflows/release-images.yml ON THE TAG, so
+// they cannot pre-exist here -- asserting existence would make every
+// release-prep PR red. Existence is that workflow's half of the split checker.
 //
 //   node scripts/release/validate-release-tag.mjs --version 0.6.0
 import process from 'node:process'
@@ -32,10 +32,10 @@ const failures = []
 for (const coordinate of COORDINATES) {
   const actual = coordinate.read(ROOT)
 
-  // A switch with a default is deliberate: an unrecognized `assert` kind
-  // (e.g. a `pointer` row added before its check is implemented) must fail
-  // loudly, naming the coordinate and the kind, rather than silently falling
-  // through every case the way independent `if`s with no `else` would.
+  // A switch with a default is deliberate: an unrecognized `assert` kind (a
+  // new row landing before its check is implemented) must fail loudly, naming
+  // the coordinate and the kind, rather than silently falling through every
+  // case the way independent `if`s with no `else` would.
   switch (coordinate.assert) {
     case 'equals': {
       if (actual !== version) {
@@ -65,6 +65,26 @@ for (const coordinate of COORDINATES) {
       if (actual !== expected) {
         failures.push(
           `${coordinate.name}=${actual}, expected ${expected} from ${coordinate.counterPackage}`
+        )
+      }
+      break
+    }
+
+    case 'pointer': {
+      // The pin is v-prefixed; the release version is not. `read` returns the
+      // DISTINCT set joined by '/', so a half-applied rewrite ("v0.6.0/v0.5.0")
+      // fails here rather than passing on whichever row happened to be first.
+      //
+      // Equality only. The v<version> images are created by release-images.yml
+      // ON THE TAG, so they cannot pre-exist when this runs on the release-prep
+      // PR; asserting existence here would make every release-prep PR red.
+      const expected = `v${version}`
+      if (actual !== expected) {
+        failures.push(
+          `${coordinate.name}=${actual || '(empty)'}, expected ${expected}` +
+            (actual.includes('/')
+              ? ' (the component carries MIXED tags, so a previous rewrite was half-applied)'
+              : '')
         )
       }
       break
