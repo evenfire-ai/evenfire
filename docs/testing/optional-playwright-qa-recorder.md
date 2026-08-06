@@ -68,39 +68,65 @@ launch/login/proof plumbing in `qa-recorder-helpers.ts`, uses the exact QA
 identity from `.env.qa-recorder` (no first-available fallback), and records a
 WebM + PNG under `.local-notes/qa-recorder/runs/desktop-app/`.
 
-| Journey | Spec | Notes |
-| --- | --- | --- |
-| Auth & session | `qa-recorder-auth.spec.ts` | Sign-in, authenticated shell, logout. Read-only. |
-| Navigation | `qa-recorder-navigation.spec.ts` | Sidebar, footer Settings/Resources menus, page shells. Read-only. |
-| Agents | `qa-recorder-agents.spec.ts` | Fleet, exact `chatllm` row, workspace routes. Read-only. |
-| Connectors | `qa-recorder-connectors.spec.ts` | MCP/connector health inventory. Read-only. |
-| Contexts | `qa-recorder-contexts.spec.ts` | List + detail tabs (`development`/`moneymaking`). Read-only. |
-| Shared files | `qa-recorder-shared-files.spec.ts` | Filesystem + directory browser. Read-only. |
-| Teams | `qa-recorder-teams.spec.ts` | Teams directory + detail tabs. Read-only. |
-| Plugins | `qa-recorder-plugins.spec.ts` | Inventory, detail, runs/artifacts. Trigger gated by `QA_RECORDER_CONFIRM_MUTATIONS`. |
-| Apps | `qa-recorder-apps.spec.ts` | Catalog + embedded session. Read-only. |
-| Settings | `qa-recorder-settings.spec.ts` | Appearance, notifications, configuration. Endpoint switch gated by `QA_RECORDER_CONFIRM_MUTATIONS`. |
-| Inbox & search | `qa-recorder-inbox-search.spec.ts` | Inbox, notifications, global search. Read-only. |
-| Chat | `qa-recorder-chat.spec.ts` | Composer, thread, task progress. Requires `QA_RECORDER_CONFIRM_CHAT=1`. |
+| Journey        | Spec                               | Notes                                                                                               |
+| -------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Auth & session | `qa-recorder-auth.spec.ts`         | Sign-in, authenticated shell, logout. Read-only.                                                    |
+| Navigation     | `qa-recorder-navigation.spec.ts`   | Sidebar, footer Settings/Resources menus, page shells. Read-only.                                   |
+| Agents         | `qa-recorder-agents.spec.ts`       | Fleet, exact `chatllm` row, workspace routes. Read-only.                                            |
+| Connectors     | `qa-recorder-connectors.spec.ts`   | MCP/connector health inventory. Read-only.                                                          |
+| Contexts       | `qa-recorder-contexts.spec.ts`     | List + detail tabs (`development`/`moneymaking`). Read-only.                                        |
+| Shared files   | `qa-recorder-shared-files.spec.ts` | Filesystem + directory browser. Read-only.                                                          |
+| Teams          | `qa-recorder-teams.spec.ts`        | Teams directory + detail tabs. Read-only.                                                           |
+| Plugins        | `qa-recorder-plugins.spec.ts`      | Inventory, detail, runs/artifacts. Trigger gated by `QA_RECORDER_CONFIRM_MUTATIONS`.                |
+| Apps           | `qa-recorder-apps.spec.ts`         | Catalog + embedded session. Read-only.                                                              |
+| Settings       | `qa-recorder-settings.spec.ts`     | Appearance, notifications, configuration. Endpoint switch gated by `QA_RECORDER_CONFIRM_MUTATIONS`. |
+| Inbox & search | `qa-recorder-inbox-search.spec.ts` | Inbox, notifications, global search. Read-only.                                                     |
+| Chat           | `qa-recorder-chat.spec.ts`         | Composer, thread, task progress. Requires `QA_RECORDER_CONFIRM_CHAT=1`.                             |
 
 The combined `qa-recorder-settings-chat.spec.ts` smoke (Settings tabs + one chat
 message) is unchanged. Read-only journeys need no confirmation flag; every
 journey still calls the loopback health guard on both API URLs. Run one journey
 with its namespaced command (below) or all of them with `npm run qa:recorder:all`.
 
+### Plugin Workload SDK Desktop gate
+
+`plugin-workload-sdk-sandbox-ui.spec.ts` is an explicit, manual-only gate. The
+normal Desktop Playwright suite intentionally skips it unless
+`E2E_PLUGIN_SDK_DESKTOP=1`; a skipped optional recorder is not a green SDK
+validation result. Run the dedicated Make target only after the branch-owned
+profile port map is exported and the operator has approved the one real
+prompt/notification journey:
+
+```bash
+E2E_PLUGIN_SDK_WRITE_CONFIRM=1 \
+CONTROL_UI_BASE_URL=http://127.0.0.1:<random-control-ui-port> \
+CONTROL_API_BASE_URL=http://127.0.0.1:<random-control-api-port> \
+EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:<random-external-rest-port> \
+RPC_PROXY_BASE_URL=http://127.0.0.1:<random-rpc-port> \
+KUBECONTEXT=<branch-profile-context> \
+make test-e2e-plugin-workload-sdk-desktop
+```
+
+The target sets the opt-in flag only for this spec, requires non-default
+branch-owned URLs, and compares them with the exact `ports.env` generated for
+the selected branch profile. It runs the actual Electron/WebContentsView
+journey and fails before building if the profile map is missing or belongs to a
+different context. It does not start Minikube or create grants; those
+prerequisites must already be provided by the T2/T3 profile lane.
+
 ## Repository isolation
 
 The recorder adds new commands; it does not alter any existing command:
 
-| Package       | Optional command                    | Purpose                               |
-| ------------- | ----------------------------------- | ------------------------------------- |
-| `control-ui`  | `npm run qa:recorder:install`       | Download recorder-only Chromium       |
-| `control-ui`  | `npm run qa:recorder:agent-create`  | Record the agent creation journey     |
+| Package       | Optional command                    | Purpose                                                                                                                                                                                     |
+| ------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `control-ui`  | `npm run qa:recorder:install`       | Download recorder-only Chromium                                                                                                                                                             |
+| `control-ui`  | `npm run qa:recorder:agent-create`  | Record the agent creation journey                                                                                                                                                           |
 | `control-ui`  | `npm run qa:recorder:<journey>`     | Record one headful journey (`login`, `navigation`, `agents`, `contexts`, `connectors`, `external-channels`, `llm-models`, `users-teams`, `cost-usage`, `traces`, `settings`, `marketplace`) |
-| `control-ui`  | `npm run qa:recorder:all`           | Record every Control UI recorder journey |
-| `desktop-app` | `npm run qa:recorder:settings-chat` | Build and record the Settings+Chat Electron journey |
-| `desktop-app` | `npm run qa:recorder:<journey>` | Build and record one headful journey (`auth`, `navigation`, `agents`, `connectors`, `contexts`, `shared-files`, `teams`, `plugins`, `apps`, `settings`, `inbox-search`, `chat`) |
-| `desktop-app` | `npm run qa:recorder:all` | Build and record every Desktop recorder journey |
+| `control-ui`  | `npm run qa:recorder:all`           | Record every Control UI recorder journey                                                                                                                                                    |
+| `desktop-app` | `npm run qa:recorder:settings-chat` | Build and record the Settings+Chat Electron journey                                                                                                                                         |
+| `desktop-app` | `npm run qa:recorder:<journey>`     | Build and record one headful journey (`auth`, `navigation`, `agents`, `connectors`, `contexts`, `shared-files`, `teams`, `plugins`, `apps`, `settings`, `inbox-search`, `chat`)             |
+| `desktop-app` | `npm run qa:recorder:all`           | Build and record every Desktop recorder journey                                                                                                                                             |
 
 The normal `test`, `build`, `test:e2e:playwright`, and `test:e2e:all` commands
 retain their existing behavior. The dedicated configs match only their

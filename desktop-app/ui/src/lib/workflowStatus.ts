@@ -29,6 +29,20 @@ export function describePluginWorkloadSdkCapability(
       title: `Plugin Workload SDK capability validated (${families.join(', ') || 'none'})`,
     }
   }
+  if (capability.state === 'awaiting_policy') {
+    return {
+      label: 'SDK: awaiting policy',
+      tone: 'neutral',
+      title: capability.message || 'Plugin Workload SDK is awaiting operator policy',
+    }
+  }
+  if (capability.state === 'degraded') {
+    return {
+      label: 'SDK: degraded',
+      tone: 'neutral',
+      title: capability.message || 'Plugin Workload SDK capability is degraded',
+    }
+  }
   return {
     label: 'SDK: disabled',
     tone: 'neutral',

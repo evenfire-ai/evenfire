@@ -32,6 +32,10 @@ const ingressPolicy = (config: NetworkPolicyConfig) =>
   sdkPolicies(config).find(p => p.metadata?.name?.endsWith('-sdk-ingress'))
 const egressPolicy = (config: NetworkPolicyConfig) =>
   sdkPolicies(config).find(p => p.metadata?.name?.endsWith('-sdk-egress'))
+const brokerPolicy = (config: NetworkPolicyConfig) =>
+  buildWorkflowNetworkPolicies(config).find(p =>
+    p.metadata?.name?.endsWith('-mcp-host-to-wrc-sdk-broker')
+  )
 
 describe('Plugin Workload SDK NetworkPolicies', () => {
   it('emits no SDK policies when the capability access flag is unset', () => {
@@ -49,6 +53,28 @@ describe('Plugin Workload SDK NetworkPolicies', () => {
       'test-wf-workload-to-mcp-host-sdk-egress',
       'test-wf-workload-to-mcp-host-sdk-ingress',
     ])
+  })
+
+  it('opens the SDK mcp-host credential broker only to WRC', () => {
+    const policy = brokerPolicy({ ...baseConfig, pluginWorkloadSdkSandboxAccess: true })!
+    expect(policy.spec?.podSelector?.matchLabels).toEqual({
+      'clerum.io/recipe': 'test-wf',
+      'clerum.io/component': 'workflow-mcp-host',
+    })
+    expect(policy.spec?.egress).toEqual([
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'control-plane' },
+            },
+            podSelector: { matchLabels: { app: 'workflow-recipes' } },
+          },
+        ],
+        ports: [{ port: 8082, protocol: 'TCP' }],
+      },
+    ])
+    expect(brokerPolicy({ ...baseConfig, pluginWorkloadSdkSandboxAccess: false })).toBeUndefined()
   })
 
   it('does NOT emit SDK policies on the coordinator-only path (includeMcpHost false)', () => {

@@ -281,6 +281,48 @@ describe('OpenAI finish_reason mapping', () => {
   })
 })
 
+describe('OpenAI token limit parameter compatibility', () => {
+  it('uses max_completion_tokens for the GPT-5 family', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini')
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }], { max_tokens: 8 })
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    expect(callArgs.max_completion_tokens).toBe(8)
+    expect(callArgs).not.toHaveProperty('max_tokens')
+  })
+
+  it('keeps max_tokens for established native models', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }], { max_tokens: 8 })
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    expect(callArgs.max_tokens).toBe(8)
+    expect(callArgs).not.toHaveProperty('max_completion_tokens')
+  })
+
+  it('uses max_completion_tokens for GPT-5 tool calls', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini')
+
+    await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'Use the tool' }],
+      [{ name: 'search', description: 'Search docs', parameters: {} }],
+      { max_tokens: 8 }
+    )
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    expect(callArgs.max_completion_tokens).toBe(8)
+    expect(callArgs).not.toHaveProperty('max_tokens')
+  })
+})
+
 describe('OpenAI token usage mapping', () => {
   it('should map prompt_tokens/completion_tokens to input_tokens/output_tokens', async () => {
     const mockClient = createMockOpenAIClient()
@@ -297,5 +339,19 @@ describe('OpenAI token usage mapping', () => {
       output_tokens: 18,
       total_tokens: 60,
     })
+    expect(result.usage_reported).toBe(true)
+  })
+
+  it('marks missing provider usage as non-authoritative instead of exact zero', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue({
+      choices: [{ message: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+    })
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+
+    const result = await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }])
+
+    expect(result.usage_reported).toBe(false)
+    expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0, total_tokens: 0 })
   })
 })

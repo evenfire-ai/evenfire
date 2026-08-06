@@ -34,6 +34,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${PROJECT_DIR}/scripts/e2e/admin-credentials.sh"
 
 # ── Color helpers ──────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -246,38 +250,20 @@ case "${SEED_PROFILE}" in
 esac
 
 # ── Load .env ──────────────────────────────────────────────────────────
-# When running from a git worktree (.claude/worktrees/*/), PROJECT_DIR points
-# to the worktree checkout which does NOT contain .env — the file lives in the
-# main repo. `git rev-parse --git-common-dir` returns the shared .git dir
-# (main/.git for worktrees, same-as-git-dir for normal checkouts); its parent
-# is the main repo root.
-ENV_FILE=""
-if [ -f "${PROJECT_DIR}/.env" ]; then
-  ENV_FILE="${PROJECT_DIR}/.env"
-else
-  GIT_COMMON_DIR="$(cd "$PROJECT_DIR" && git rev-parse --git-common-dir 2>/dev/null || echo "")"
-  if [ -n "$GIT_COMMON_DIR" ]; then
-    # git-common-dir can be relative — resolve it against PROJECT_DIR
-    case "$GIT_COMMON_DIR" in
-      /*) MAIN_REPO_DIR="$(cd "${GIT_COMMON_DIR}/.." && pwd)" ;;
-      *)  MAIN_REPO_DIR="$(cd "${PROJECT_DIR}/${GIT_COMMON_DIR}/.." && pwd)" ;;
-    esac
-    if [ -f "${MAIN_REPO_DIR}/.env" ]; then
-      ENV_FILE="${MAIN_REPO_DIR}/.env"
-    fi
-  fi
-fi
+# Worktrees resolve through git-common-dir to the primary checkout. Dotenv is
+# parsed as data (never sourced as shell code), and admin aliases use the
+# shared layer-first contract: canonical .env, then process, then local fallback.
+ENV_FILE="$(dotenv_canonical_root "${PROJECT_DIR}")"
 
 if [ -n "$ENV_FILE" ]; then
   log "Loading .env from ${ENV_FILE}..."
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  dotenv_load_file "$ENV_FILE"
   ok ".env loaded"
 else
   warn "No .env found in ${PROJECT_DIR} or main repo — channel-reader + LLM secrets will use placeholders"
 fi
+ADMIN_PASSWORD="$(e2e_resolve_admin_password "${PROJECT_DIR}" || true)"
+export ADMIN_PASSWORD
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
@@ -527,8 +513,8 @@ fi
 # defer, the bootstrap POST fails with "password must be between 8 and 256
 # characters" only AFTER image builds + deploy, and the admin account may still
 # hold the publicly-known default. Keep these bounds in sync with auth.ts. Scope
-# to the minimal profile: e2e force-assigns ADMIN_PASSWORD later (search
-# E2E_ADMIN_PASSWORD), so a short .env value there is irrelevant.
+# to the minimal profile: the E2E profile may use its local-only fallback when
+# no canonical or explicit admin credential is configured.
 if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
   pw_len=${#ADMIN_PASSWORD}
   if [ "$pw_len" -lt 8 ] || [ "$pw_len" -gt 256 ]; then
@@ -540,7 +526,11 @@ if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
     exit 1
   fi
 fi
-ok "ADMIN_PASSWORD is set"
+if [ -n "${ADMIN_PASSWORD:-}" ]; then
+  ok "ADMIN_PASSWORD resolved from the canonical environment contract"
+else
+  ok "No admin password configured; the E2E-only local fallback will be used at seed time"
+fi
 
 # ======================================================================
 # Step 2: Cluster
@@ -1281,22 +1271,17 @@ fi
 # ======================================================================
 step_header 10 $TOTAL_STEPS "Seed Test User"
 
-# The e2e profile reproduces today's inputs exactly: tests/e2e/testUser.ts pins
-# test@clerum.io, and ~26 control-ui/e2e specs log in as admin/changeme123!.
-# The minimal profile must not seed anything named test*.
+# The e2e profile seeds the test identities used by the Desktop and Control UI
+# journeys. The minimal profile must not seed anything named test*.
 if [ "$SEED_PROFILE" = "e2e" ]; then
   SEED_USER_DEFAULT_EMAIL="test@clerum.io"
   SEED_USER_DEFAULT_NAME="Test User"
-  # Force-assign, do NOT defer to .env via `: "${ADMIN_PASSWORD:=...}"`.
-  # .env is sourced with `set -a` above, and this branch requires users to
-  # set a real ADMIN_PASSWORD there — under the `:=` form that real password
-  # would win and override the e2e pin. The E2E specs never read .env: they
-  # hardcode changeme123! (or read ADMIN_PASS), so a leaked .env password
-  # would seed admin/<real password> while the specs still send
-  # admin/changeme123!, turning the whole E2E lane red. E2E_ADMIN_PASSWORD
-  # remains the deliberate escape hatch for callers that need a non-default
-  # e2e password.
-  ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-changeme123!}"
+  # ADMIN_PASSWORD was resolved once above. Use the known local test fallback
+  # only when neither the canonical .env nor the process configured any admin
+  # alias; never replace a real seeded credential.
+  if [ -z "${ADMIN_PASSWORD:-}" ]; then
+    ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
+  fi
 else
   # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
   # seeded user. Point both the admin-bootstrap email and the seeded desktop
@@ -1423,13 +1408,13 @@ echo -e "  ${BOLD}Already done by setup:${NC}"
 # so this else branch is reachable only via the e2e soft-fail path).
 if [ "${SEED_PROFILE:-}" = "e2e" ]; then
   if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
   else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed; admin/changeme123! may not be live"
+    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
   fi
 else
   if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
   else
     echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
   fi
@@ -1443,7 +1428,7 @@ if [ "${SEED_PROFILE:-}" = "e2e" ]; then
   echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
 else
   if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
+    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
   else
     echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
   fi

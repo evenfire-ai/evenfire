@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   deletePluginWorkloadSdkGrant,
+  getPluginWorkloadSdkLegacyInventory,
   getPluginWorkloadSdkQuota,
+  listLlmHostSecrets,
   listPluginWorkloadSdkGrants,
   searchPluginWorkloadSdkInvocations,
   upsertPluginWorkloadSdkGrant,
@@ -19,6 +21,16 @@ afterEach(() => {
 })
 
 describe('Plugin Workload SDK admin api — URL shape', () => {
+  it('loads credential slot names from host Secrets, never recipe-scoped Secrets', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { items: [{ name: 'chatllm-api-keys', keys: [] }] }))
+    await listLlmHostSecrets()
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/admin/secrets')
+    expect(url).not.toContain('/recipe-secrets')
+  })
+
   it('listPluginWorkloadSdkGrants hits the grants endpoint with cookie credentials', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
@@ -40,6 +52,16 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
     expect(url).toContain('recipeName=r1')
   })
 
+  it('loads the read-only legacy grant inventory for explicit operator review', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { legacyPromptBridgeGrants: 1, items: [] }))
+    await getPluginWorkloadSdkLegacyInventory()
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/admin/plugin-workload-sdk/legacy-inventory')
+    expect(init.credentials).toBe('include')
+  })
+
   it('upsertPluginWorkloadSdkGrant POSTs the grant payload as JSON', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
@@ -50,6 +72,15 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
       capabilityFamily: 'promptBridge',
       provider: 'zai',
       allowedModels: ['glm-4.7'],
+      promptTargets: [
+        {
+          targetRef: 'primary-zai',
+          provider: 'zai',
+          model: 'glm-4.7',
+          credentialSlot: 'zai-api-key',
+        },
+      ],
+      defaultTargetRef: 'primary-zai',
     })
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('/api/v1/admin/plugin-workload-sdk/grants')
@@ -59,6 +90,9 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
       capabilityFamily: 'promptBridge',
       provider: 'zai',
       allowedModels: ['glm-4.7'],
+      promptTargets: [
+        expect.objectContaining({ targetRef: 'primary-zai', credentialSlot: 'zai-api-key' }),
+      ],
     })
   })
 

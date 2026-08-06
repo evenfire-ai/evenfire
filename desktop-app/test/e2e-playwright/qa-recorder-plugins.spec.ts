@@ -26,8 +26,8 @@ import {
 // the `.input-contract-form`, and the `Trigger`/`Triggering...` button.
 
 test('optional QA recorder: Desktop plugins journey', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined

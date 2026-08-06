@@ -103,6 +103,12 @@ export function shouldPatchRecipeStatus(
   if (recipe.status?.message !== result.message) return true
   if (workloadStatusesChanged(recipe, result)) return true
 
+  // Merge-patching status maps preserves fields omitted by the next patch.
+  // Keep the SDK capability message aligned with its owned condition so a
+  // previous status-only refresh cannot leave a contradictory
+  // `state=validated` + `message=bootstrap not ready` record behind.
+  if (pluginWorkloadSdkStatusMessageChanged(recipe)) return true
+
   if (
     ownedConditionsChanged(recipe.status?.conditions, result.internalDependencyConditions, [
       'InternalDependenciesReady',
@@ -116,6 +122,16 @@ export function shouldPatchRecipeStatus(
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
 
   return false
+}
+
+function pluginWorkloadSdkStatusMessageChanged(recipe: WorkflowRecipeCRD): boolean {
+  const capability = recipe.status?.pluginWorkloadSdk
+  if (!capability) return false
+  const condition = recipe.status?.conditions?.find(
+    candidate => candidate.type === 'PluginWorkloadSdkCapability'
+  )
+  if (typeof condition?.message !== 'string') return false
+  return capability.message !== condition.message
 }
 
 function workflowRunIdForTelemetry(recipe: WorkflowRecipeCRD): string | undefined {
@@ -273,7 +289,15 @@ export function workflowNeedsRuntimeCredentialRefresh(recipe: WorkflowRecipeCRD)
 
 export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD): boolean {
   const isWorkflow = (recipe.spec.steps ?? []).length > 0
-  if (!isWorkflow || recipe.metadata.deletionTimestamp) return false
+  if (recipe.metadata.deletionTimestamp) return false
+
+  // SDK-only recipes are deliberately stepless, but their eager mcp-host and
+  // bootstrap proof still need the full reconciler lane. The generic workload
+  // status-refresh path cannot represent that proof and would overwrite a
+  // validated SDK capability with BootstrapNotReady while leaving phase=active.
+  // Keep this level-triggered retry independent from workflowExecution.
+  if (!isWorkflow && recipe.spec.pluginWorkloadSdk) return true
+  if (!isWorkflow) return false
 
   const workflowPhase = recipe.status?.workflowExecution?.phase
   if (workflowPhase === 'initializing' || workflowPhase === 'recovering') return true
@@ -306,6 +330,10 @@ export function workflowNeedsTerminalRunTeardown(recipe: WorkflowRecipeCRD): boo
 export function workflowNeedsWorkloadStatusRefresh(recipe: WorkflowRecipeCRD): boolean {
   if (recipe.metadata.deletionTimestamp) return false
   if ((recipe.spec.steps ?? []).length > 0) return false
+  // SDK-only recipes have capability state (including the eager bootstrap
+  // proof) that is owned by the full reconciler. A status-only workload read
+  // has no proof to carry and would corrupt the persisted SDK projection.
+  if (recipe.spec.pluginWorkloadSdk) return false
   if ((recipe.spec.workloads ?? []).length === 0) return false
 
   return recipe.status?.phase === 'active' || recipe.status?.phase === 'degraded'
@@ -957,7 +985,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         }
         if (workflowNeedsInfrastructureReconcile(latest)) {
           await this.eventQueue.enqueue(recipeName, () =>
-            this.handleRecipeEvent('MODIFIED', latest)
+            // Infrastructure retries are timer-driven with an unchanged CRD
+            // generation. Force the full reconcile; otherwise the watcher
+            // classifies this synthetic MODIFIED event as status-only and
+            // returns before re-running the eager SDK bootstrap lane.
+            this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
           )
         }
       } catch (error) {
