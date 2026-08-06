@@ -14,9 +14,11 @@
 #   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/pull-images.sh [--only=<svc>]
 #
 # Env:
-#   MINIKUBE_IMAGE_TAG        Override the committed pin (render-time only,
-#                             never committed). Use `latest` to exercise the
-#                             pull path before a release tag exists.
+#   MINIKUBE_IMAGE_TAG        Override the recorded/committed tag (render-time
+#                             only, never committed). Use `latest` to exercise
+#                             the pull path before a release tag exists.
+#   MINIKUBE_SKIP_UIS         true -> do not pull control-ui/profile-ui, which
+#                             the -no-uis overlays delete anyway (see below).
 #   MINIKUBE_PROFILE          Target profile (default: clerum-test)
 #   MINIKUBE_MULTI_NODE       true -> pull on the host + `minikube image load`
 #   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6)
@@ -56,6 +58,11 @@
 #      involved. The one manifest still naming a local MCP-server ref
 #      (instances-e2e/airtable-server.yaml, SEED_PROFILE=e2e only) is served by
 #      an opt-in local build instead -- see MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE.
+#
+#   3. --skip-uis / MINIKUBE_SKIP_UIS drops control-ui and profile-ui from the
+#      pull list, mirroring build-images.sh's identical filter. The
+#      -no-uis-ghcr overlay DELETES both Deployments, so pulling them costs
+#      ~470 MiB of transfer and disk for images no pod will ever reference.
 # ======================================================================
 
 set -euo pipefail
@@ -69,12 +76,20 @@ PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-6}"
 MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-3}"
 MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-5}"
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
-COMPONENT="${PROJECT_DIR}/deploy/components/ghcr-images/kustomization.yaml"
 ONLY_SVC=""
+
+# Same normalizer and same flag name build-images.sh uses, so the two halves of
+# `--skip-uis` cannot disagree about what the word means.
+SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
+case "${SKIP_UIS}" in
+  true | 1 | yes) SKIP_UIS=true ;;
+  *) SKIP_UIS=false ;;
+esac
 
 for arg in "$@"; do
   case "$arg" in
     --only=*) ONLY_SVC="${arg#--only=}" ;;
+    --skip-uis) SKIP_UIS=true ;;
   esac
 done
 
@@ -91,32 +106,28 @@ warn() { echo -e "${YELLOW}  WARN${NC} -- $*"; }
 err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
 
 # ---- Resolve the effective tag -------------------------------------------
-# The committed component is the single source of truth. MINIKUBE_IMAGE_TAG is
-# an operator lever applied to this run only, never a second writer.
-read_pinned_tag() {
-  [ -f "$COMPONENT" ] || {
-    err "ghcr component not found at ${COMPONENT}"
-    exit 1
-  }
-  local tags
-  tags="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$COMPONENT" | sort -u)"
-  if [ -z "$tags" ]; then
-    err "no newTag: line in ${COMPONENT}; there is no pin to pull"
-    exit 1
-  fi
-  if [ "$(printf '%s\n' "$tags" | wc -l | tr -d ' ')" != "1" ]; then
-    err "mixed newTag values in ${COMPONENT}: $(printf '%s ' $tags)"
-    exit 1
-  fi
-  printf '%s' "$tags"
-}
+# THE TAG FOLLOWS THE CLUSTER, NOT JUST THE COMMIT. Reading the committed pin
+# here (with MINIKUBE_IMAGE_TAG as the only override) ignored the tag the last
+# acquisition actually recorded, so `make minikube-pull-images` on a cluster
+# bootstrapped with `MINIKUBE_IMAGE_TAG=latest` went and pulled the pinned
+# v0.6.0 -- which is 404 on ghcr until the tag is cut. That command is the
+# remedy the docs and this script's own failure text point people at, so it
+# failed precisely when someone followed the advice.
+#
+# image_mode_ghcr_tag applies override -> recorded -> pin, the same precedence
+# build-images.sh --verify-only and pre-gate-sync.sh already use. It is called
+# rather than image_mode_tag because pulling IS a ghcr acquisition: this script
+# records imageSource "ghcr" when it finishes, so a cluster whose current
+# record says "local" must still resolve a tag instead of an empty string.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
 
-if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
-  IMAGE_TAG="$MINIKUBE_IMAGE_TAG"
-  TAG_ORIGIN="MINIKUBE_IMAGE_TAG override"
-else
-  IMAGE_TAG="$(read_pinned_tag)"
-  TAG_ORIGIN="committed pin in deploy/components/ghcr-images/kustomization.yaml"
+IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
+TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
+if [ -z "$IMAGE_TAG" ] || [ -z "$TAG_ORIGIN" ]; then
+  err "could not resolve a ghcr tag to pull (tag='${IMAGE_TAG}' origin='${TAG_ORIGIN}')"
+  err "Set MINIKUBE_IMAGE_TAG=<tag> explicitly, or fix deploy/components/ghcr-images/kustomization.yaml."
+  exit 1
 fi
 
 # ---- Resolve the pull list ----------------------------------------------
@@ -140,6 +151,9 @@ fi
 echo -e "\n${BOLD}=== Pulling Published Images (${IMAGE_TAG}) ===${NC}"
 log "tag ${IMAGE_TAG} (${TAG_ORIGIN})"
 log "profile ${PROFILE}, parallelism ${PULL_PARALLELISM}"
+if [ "$SKIP_UIS" = true ]; then
+  log "skipping control-ui and profile-ui (--skip-uis); the -no-uis overlay deletes both Deployments"
+fi
 
 # ---- Point the Docker CLI at minikube's daemon when safe -----------------
 if [ "$MINIKUBE_MULTI_NODE" = false ]; then
@@ -218,6 +232,14 @@ while IFS="$(printf '\t')" read -r name local_ref; do
   [ -n "$name" ] || continue
   if [ -n "$ONLY_SVC" ] && [[ "$name" != *"$ONLY_SVC"* ]] && [[ "$local_ref" != *"$ONLY_SVC"* ]]; then
     continue
+  fi
+  # Exact names, not a substring: the -no-uis overlays delete exactly the
+  # control-ui and profile-ui workloads, and a looser match would silently drop
+  # any future image whose name happens to contain "ui".
+  if [ "$SKIP_UIS" = true ]; then
+    case "$name" in
+      control-ui | profile-ui) continue ;;
+    esac
   fi
   selected=$((selected + 1))
   slot=$((slot + 1))

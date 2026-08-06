@@ -132,6 +132,10 @@ esac
 
 # ghcr (default): pull published ghcr.io/evenfire-ai images and render the
 # -ghcr overlays. local: build every image from source, today's behaviour.
+#
+# This is what an ACQUIRING run would do. A --skip-build run acquires nothing,
+# so it re-resolves the mode from what the cluster actually holds -- see the
+# image_mode_source block after the flag loop.
 IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
 case "$IMAGE_SOURCE" in
   ghcr|local) ;;
@@ -206,9 +210,12 @@ Environment:
                          Optional deploy cache root; when set, kustomize uses
                          <dir>/overlays/minikube instead of PROJECT_DIR/deploy
   IMAGE_SOURCE           ghcr (default) pulls published ghcr.io/evenfire-ai
-                         images; local builds every image from source
-  MINIKUBE_IMAGE_TAG     Render-time override of the committed ghcr pin, applied
-                         to a temp copy of deploy/ and never committed. Use
+                         images; local builds every image from source. Ignored
+                         with --skip-build, which acquires nothing and so
+                         follows what the cluster already holds
+  MINIKUBE_IMAGE_TAG     Render-time override applied to a temp copy of deploy/
+                         and never committed. Without it the tag is whatever the
+                         last acquisition recorded, else the committed pin. Use
                          'latest' before a release tag exists
 
   Loads .env from project root if present. Supported variables:
@@ -248,6 +255,39 @@ case "${SEED_PROFILE}" in
   minimal|e2e) ;;
   *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
 esac
+
+# ── The mode follows the cluster on a run that acquires nothing ────────
+#
+# THE OVERLAY MUST FOLLOW THE IMAGES ON THE NODE, NOT THIS SHELL. --skip-build
+# re-deploys WITHOUT pulling or building anything, so the only truthful source
+# for "which images does this cluster run" is what the last acquisition
+# recorded. Taking IMAGE_SOURCE instead rendered the -ghcr overlays over a
+# locally built cluster -- every Deployment then names a ghcr ref nothing ever
+# pulled, i.e. cluster-wide ImagePullBackOff -- and the mirror image (clerum/*
+# refs over a pulled cluster) is the same bug with the operands swapped. It is
+# not a rare path: `make minikube-setup` ALWAYS passes IMAGE_SOURCE (the
+# Makefile defaults it to ghcr), so the environment can never be read as "the
+# operator asked for this".
+#
+# On an ACQUIRING run the environment still decides, because that run is about
+# to rewrite the record -- otherwise `make minikube-setup-local` over a pulled
+# cluster could never switch a cluster back to local builds.
+#
+# image_mode_source falls back to the environment when nothing is recorded, so
+# the FIRST run on a fresh cluster is unchanged; this is the same resolver
+# `make minikube-deploy-all` and `build-images.sh --verify-only` already use.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+if [ "$SKIP_BUILD" = true ]; then
+  RECORDED_IMAGE_SOURCE="$(image_mode_source "$PROJECT_DIR")" || exit 1
+  if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
+    warn "This cluster's images were acquired as IMAGE_SOURCE=${RECORDED_IMAGE_SOURCE} (deploy/minikube/.image-manifest.json)."
+    warn "--skip-build acquires nothing, so the overlay follows the cluster, not IMAGE_SOURCE=${IMAGE_SOURCE}."
+    warn "To change the mode, re-run WITHOUT --skip-build so the images are actually re-acquired."
+    IMAGE_SOURCE="$RECORDED_IMAGE_SOURCE"
+    export IMAGE_SOURCE
+  fi
+fi
 
 # ── Load .env ──────────────────────────────────────────────────────────
 # Worktrees resolve through git-common-dir to the primary checkout. Dotenv is
@@ -332,16 +372,29 @@ fi
 
 # The effective tag and where it came from, for the banner and for every error
 # message that has to tell an operator what to change.
+#
+# Reading the committed pin here ignored the tag the cluster actually holds: on
+# the documented `MINIKUBE_IMAGE_TAG=latest make minikube-setup` bootstrap, any
+# LATER run (which has no such variable) reported and acted on v0.6.0 against a
+# cluster running :latest. image_mode_ghcr_tag applies override -> recorded ->
+# pin, the same precedence pull-images.sh and build-images.sh --verify-only
+# use; the `= ghcr` branch above is this file's mode gate, which is why the
+# ungated ghcr resolver is the right one to call.
+#
+# The pin is read from PROJECT_DIR, not ACTIVE_MINIKUBE_DEPLOY_DIR: the two
+# differ only when MINIKUBE_IMAGE_TAG rewrote a copy, and that override already
+# wins ahead of any pin.
 EFFECTIVE_IMAGE_TAG=""
 TAG_ORIGIN=""
 if [ "$IMAGE_SOURCE" = ghcr ]; then
-  if [ -n "$MINIKUBE_IMAGE_TAG" ]; then
-    EFFECTIVE_IMAGE_TAG="$MINIKUBE_IMAGE_TAG"
-    TAG_ORIGIN="MINIKUBE_IMAGE_TAG override (not committed)"
-  else
-    EFFECTIVE_IMAGE_TAG="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' \
-      "${ACTIVE_MINIKUBE_DEPLOY_DIR}/components/ghcr-images/kustomization.yaml" | sort -u | head -1)"
-    TAG_ORIGIN="committed pin in deploy/components/ghcr-images/kustomization.yaml"
+  EFFECTIVE_IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
+  TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
+  # Never continue on an empty tag: every ref built from it would be tagless,
+  # and the banner would confidently print nothing at all.
+  if [ -z "$EFFECTIVE_IMAGE_TAG" ] || [ -z "$TAG_ORIGIN" ]; then
+    err "could not resolve the ghcr image tag (tag='${EFFECTIVE_IMAGE_TAG}' origin='${TAG_ORIGIN}')"
+    err "Set MINIKUBE_IMAGE_TAG=<tag>, or fix deploy/components/ghcr-images/kustomization.yaml."
+    exit 1
   fi
 fi
 
@@ -774,12 +827,24 @@ elif [ "$IMAGE_SOURCE" = ghcr ]; then
   # them: `make minikube-setup-e2e`.
 
   log "Pulling published images (${EFFECTIVE_IMAGE_TAG}) into minikube..."
+  # --skip-uis is forwarded for the same reason the local build path passes it:
+  # the -no-uis-ghcr overlay DELETES the control-ui and profile-ui Deployments,
+  # so pulling them spends ~470 MiB of transfer and disk on images no pod will
+  # ever reference.
+  PULL_IMAGE_ARGS=()
+  if [ "$SKIP_UIS" = true ]; then
+    PULL_IMAGE_ARGS+=(--skip-uis)
+  fi
+  # `${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}`: expanding an EMPTY array as
+  # `"${arr[@]}"` is an unbound-variable abort under `set -u` in bash 3.2, which
+  # is what /bin/bash on macOS still is.
+  #
   # `${MINIKUBE_MULTI_NODE:-false}`, not `$MINIKUBE_MULTI_NODE`: this script
   # never assigns that variable (every other use site defaults it inline), so
   # the bare form is an unbound-variable abort under `set -u` on the default
   # single-node path.
   MINIKUBE_PROFILE="$PROFILE" MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
-    bash "${SCRIPT_DIR}/pull-images.sh"
+    bash "${SCRIPT_DIR}/pull-images.sh" ${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}
   ok "All published images pulled"
 else
   log "Building and loading images into minikube..."

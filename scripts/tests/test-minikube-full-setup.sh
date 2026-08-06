@@ -383,6 +383,69 @@ full_setup_resolves() {
     "$REPO_ROOT/scripts/minikube/full-setup.sh"
 }
 
+# ---------------------------------------------------------------------------
+# A PROJECT_DIR whose recorded image manifest the test controls
+# ---------------------------------------------------------------------------
+#
+# full-setup.sh now resolves both the image MODE (on --skip-build) and the ghcr
+# TAG from deploy/minikube/.image-manifest.json, and it derives PROJECT_DIR from
+# its own location -- so the only way to hand it a chosen manifest is to run a
+# COPY of the script from a copied tree.
+#
+# That copy is not optional even for the cases that want no manifest at all:
+# the file is gitignored, so CI never has one and any machine that has run a
+# real `make minikube-setup` always does. Running against $REPO_ROOT would make
+# "does the banner print the committed pin?" answer differently on a laptop
+# than in CI. Every manifest-sensitive case below runs from a copy with the
+# manifest either removed or written explicitly.
+make_full_setup_copy() {
+  # make_full_setup_copy <dir> [manifest-json]
+  local d=$1 manifest=${2:-}
+  mkdir -p "$d/repo"
+  cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
+  cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
+  # `git init`, not decoration. full-setup.sh calls dotenv_canonical_root under
+  # `set -e`, and its last statement is `[[ -f .env ]] && printf` -- which
+  # returns 1, aborting the caller, when the tree is neither a git repo nor
+  # carries a .env. A plain copy is exactly that; a git checkout without a .env
+  # (which is what CI runs) takes the branch above it and returns 0. Initialising
+  # one here matches CI AND keeps the copy independent of whatever .env the
+  # developer's primary checkout happens to hold.
+  git init -q "$d/repo"
+  rm -f "$d/repo/deploy/minikube/.image-manifest.json"
+  if [ -n "$manifest" ]; then
+    mkdir -p "$d/repo/deploy/minikube"
+    printf '%s' "$manifest" > "$d/repo/deploy/minikube/.image-manifest.json"
+  fi
+}
+
+# The two fields image-mode.sh reads, in the shape both writers emit.
+recorded_manifest() {
+  # recorded_manifest <imageSource> <imageTag>
+  printf '{\n  "generated": "2026-08-06T00:00:00Z",\n  "profile": "clerum-test",\n  "imageSource": "%s",\n  "imageTag": "%s",\n  "images": {}\n}\n' \
+    "$1" "$2"
+}
+
+# full_setup_copy_resolves <dir> <var> <flags> [env assignments...]
+# <flags> is the (unquoted, test-controlled) flag string handed to the sourced
+# script, e.g. --skip-build; pass '' for none.
+full_setup_copy_resolves() {
+  local d="$1" var="$2" flags="$3"; shift 3
+  env "$@" PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+    bash -c 'source "$0" '"$flags"' >/dev/null 2>&1; printf "%s" "${'"$var"'}"' \
+    "$d/repo/scripts/minikube/full-setup.sh"
+}
+
+# full_setup_copy_output <dir> <flags> [env assignments...] -- the banner and
+# warnings the run prints, which is what an operator actually sees.
+full_setup_copy_output() {
+  local d="$1" flags="$2"; shift 2
+  # $flags is a test-controlled literal, deliberately word-split.
+  # shellcheck disable=SC2086
+  env "$@" PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+    bash "$d/repo/scripts/minikube/full-setup.sh" $flags 2>&1
+}
+
 assert_ghcr_is_the_default_image_source() {
   local got
   got="$(full_setup_resolves IMAGE_SOURCE)"
@@ -584,10 +647,16 @@ assert_the_skip_build_staleness_advice_is_mode_aware() {
 # `full_setup_resolves` above) and asserts on the CAPTURED STDOUT the banner
 # writes -- observed output, not source text -- so a deleted call site prints
 # nothing and the assertion fails.
+#
+# Runs from a copy with NO recorded manifest (see make_full_setup_copy): the
+# tag now falls back to the committed pin only when nothing is recorded, and
+# the manifest is gitignored, so against $REPO_ROOT this case would assert the
+# pin in CI and the last-pulled tag on a developer machine.
 assert_the_banner_prints_the_image_source_tag_and_origin() {
-  local out committed_tag problem=""
-  out="$(env PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
-    bash "$REPO_ROOT/scripts/minikube/full-setup.sh" 2>&1)"
+  local d out committed_tag problem=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  out="$(full_setup_copy_output "$d" '')"
   committed_tag="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\).*$/\1/p' \
     "$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml" | sort -u | head -1)"
   grep -q 'Images: PULLED from ghcr.io/evenfire-ai' <<< "$out" || problem+="banner did not name the image source; "
@@ -598,17 +667,249 @@ assert_the_banner_prints_the_image_source_tag_and_origin() {
   else
     fail "$problem got: $out"
   fi
+  rm -rf "$d"
 }
 
 assert_the_tag_origin_distinguishes_pin_from_override() {
-  local pinned overridden
-  pinned="$(full_setup_resolves TAG_ORIGIN)"
-  overridden="$(full_setup_resolves TAG_ORIGIN MINIKUBE_IMAGE_TAG=latest)"
+  local d pinned overridden
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  pinned="$(full_setup_copy_resolves "$d" TAG_ORIGIN '')"
+  overridden="$(full_setup_copy_resolves "$d" TAG_ORIGIN '' MINIKUBE_IMAGE_TAG=latest)"
   if grep -qi "pin" <<< "$pinned" && grep -q "MINIKUBE_IMAGE_TAG" <<< "$overridden"; then
     pass "TAG_ORIGIN distinguishes the committed pin from the override"
   else
     fail "TAG_ORIGIN was '${pinned}' (pinned) and '${overridden}' (overridden)"
   fi
+  rm -rf "$d"
+}
+
+# ---------------------------------------------------------------------------
+# THE MODE AND THE TAG FOLLOW THE CLUSTER
+# ---------------------------------------------------------------------------
+
+# FIX: --skip-build acquires nothing, so the overlay must follow the images
+# already on the node. Taking IMAGE_SOURCE instead rendered the -ghcr overlays
+# over a locally built cluster, pointing every Deployment at a ghcr ref nothing
+# had pulled. It is not a rare path: `make minikube-setup` ALWAYS passes
+# IMAGE_SOURCE=ghcr (the Makefile defaults it), which is exactly the value used
+# here.
+#
+# Semantic mutation coverage: `if false && [ "$SKIP_BUILD" = true ]`, or
+# swapping `!=` for `=` in the recorded-vs-requested comparison, or inverting
+# image_mode_source's `[ -n "$recorded" ]` -- each one puts the ghcr overlay
+# back and this fails.
+assert_skip_build_follows_the_recorded_image_source() {
+  local d render problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest local "")"
+  render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR --skip-build IMAGE_SOURCE=ghcr)"
+  [[ "$render" == */overlays/minikube ]] || problems+="a local-recorded cluster rendered '${render}'; "
+
+  # And the mirror image, so the fix cannot be "always render the local
+  # overlay": a ghcr-recorded cluster redeployed from an IMAGE_SOURCE=local
+  # shell must render the ghcr overlay.
+  rm -rf "$d"; d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest ghcr latest)"
+  render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR --skip-build IMAGE_SOURCE=local)"
+  [[ "$render" == */overlays/minikube-ghcr ]] || problems+="a ghcr-recorded cluster rendered '${render}'; "
+
+  if [ -z "$problems" ]; then
+    pass "--skip-build renders the overlay the cluster's recorded images need, in both directions"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# The operator has to be told, or a redeploy that quietly ignores IMAGE_SOURCE
+# is indistinguishable from one that honoured it.
+assert_skip_build_says_it_is_following_the_cluster() {
+  local d out problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest local "")"
+  out="$(full_setup_copy_output "$d" --skip-build IMAGE_SOURCE=ghcr)"
+  grep -q 'acquired as IMAGE_SOURCE=local' <<< "$out" || problems+="no warning naming the recorded mode; "
+  grep -q 'BUILT LOCALLY from source' <<< "$out" || problems+="the banner did not follow the recorded mode; "
+
+  # Silence when there is nothing to say: a matching mode must not warn, or the
+  # warning becomes noise everyone learns to ignore.
+  rm -rf "$d"; d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest ghcr latest)"
+  out="$(full_setup_copy_output "$d" --skip-build IMAGE_SOURCE=ghcr)"
+  grep -q 'acquired as IMAGE_SOURCE=' <<< "$out" && problems+="warned even though the modes agree; "
+
+  if [ -z "$problems" ]; then
+    pass "--skip-build warns when it overrides IMAGE_SOURCE, and stays quiet when it does not"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# The anti-regression for `make minikube-setup-local` over a pulled cluster: a
+# run that ACQUIRES images is about to rewrite the record, so the environment
+# still decides. Mutation: drop the `[ "$SKIP_BUILD" = true ]` guard and this
+# resolves ghcr from the record, making a mode switch impossible.
+assert_an_acquiring_run_still_honours_image_source() {
+  local d render problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest ghcr latest)"
+  render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR '' IMAGE_SOURCE=local)"
+  [[ "$render" == */overlays/minikube ]] || problems+="IMAGE_SOURCE=local over a ghcr record rendered '${render}'; "
+
+  rm -rf "$d"; d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest local "")"
+  render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR '' IMAGE_SOURCE=ghcr)"
+  [[ "$render" == */overlays/minikube-ghcr ]] || problems+="IMAGE_SOURCE=ghcr over a local record rendered '${render}'; "
+
+  if [ -z "$problems" ]; then
+    pass "a run that acquires images still honours IMAGE_SOURCE, so a cluster can change modes"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# The fresh-cluster path: on a FIRST run there is no manifest at all, so the
+# env default must still apply -- including under --skip-build. Mutation: make
+# image_mode_source ignore its env fallback and both halves break.
+assert_a_cluster_with_no_record_keeps_the_env_default() {
+  local d ghcr_render local_render problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  ghcr_render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR --skip-build)"
+  local_render="$(full_setup_copy_resolves "$d" ACTIVE_MINIKUBE_RENDER_DIR --skip-build IMAGE_SOURCE=local)"
+  [[ "$ghcr_render" == */overlays/minikube-ghcr ]] || problems+="default rendered '${ghcr_render}'; "
+  [[ "$local_render" == */overlays/minikube ]] || problems+="IMAGE_SOURCE=local rendered '${local_render}'; "
+  if [ -z "$problems" ]; then
+    pass "with nothing recorded, --skip-build still follows the IMAGE_SOURCE default and override"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# FIX: EFFECTIVE_IMAGE_TAG came from the committed pin and ignored the tag the
+# cluster recorded, so after the documented `MINIKUBE_IMAGE_TAG=latest make
+# minikube-setup` bootstrap every LATER run reported and acted on v0.6.0
+# against a cluster running :latest.
+#
+# Mutation coverage: swap the precedence in image_mode_ghcr_tag (pin before
+# record), or invert its `[ -n "$recorded" ]`, and this reads the pin.
+assert_the_effective_tag_comes_from_the_record_not_the_pin() {
+  local d tag origin pin problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest ghcr recorded-test-tag)"
+  tag="$(full_setup_copy_resolves "$d" EFFECTIVE_IMAGE_TAG '')"
+  origin="$(full_setup_copy_resolves "$d" TAG_ORIGIN '')"
+  pin="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\).*$/\1/p' \
+    "$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml" | sort -u | head -1)"
+  [ "$tag" = "recorded-test-tag" ] || problems+="EFFECTIVE_IMAGE_TAG was '${tag}', expected the recorded tag (pin is '${pin}'); "
+  grep -q 'deploy/minikube/.image-manifest.json' <<< "$origin" || problems+="TAG_ORIGIN was '${origin}', which does not name the manifest; "
+  if [ -z "$problems" ]; then
+    pass "EFFECTIVE_IMAGE_TAG is the tag the cluster recorded, and TAG_ORIGIN names the manifest"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# The floor and the override, so the precedence is pinned from both ends.
+assert_the_effective_tag_precedence_is_override_then_record_then_pin() {
+  local d pin from_pin from_override problems=""
+  pin="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\).*$/\1/p' \
+    "$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml" | sort -u | head -1)"
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  from_pin="$(full_setup_copy_resolves "$d" EFFECTIVE_IMAGE_TAG '')"
+  [ -n "$pin" ] && [ "$from_pin" = "$pin" ] || problems+="with nothing recorded the tag was '${from_pin}', expected the pin '${pin}'; "
+
+  rm -rf "$d"; d="$(mktemp -d)"
+  make_full_setup_copy "$d" "$(recorded_manifest ghcr recorded-test-tag)"
+  from_override="$(full_setup_copy_resolves "$d" EFFECTIVE_IMAGE_TAG '' MINIKUBE_IMAGE_TAG=v9.9.9)"
+  [ "$from_override" = "v9.9.9" ] || problems+="MINIKUBE_IMAGE_TAG did not beat the record; got '${from_override}'; "
+
+  if [ -z "$problems" ]; then
+    pass "the effective tag is MINIKUBE_IMAGE_TAG, else the recorded tag, else the committed pin"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+# ---------------------------------------------------------------------------
+# --skip-uis reaches the PULL path
+# ---------------------------------------------------------------------------
+#
+# The -no-uis-ghcr overlay deletes both UI Deployments, so pulling control-ui
+# and profile-ui costs ~470 MiB for images nothing references. The local build
+# path has always passed --skip-uis through; the pull path did not.
+#
+# Step 5's ghcr arm needs a cluster to run, so the REAL arm is extracted and
+# eval'd with a stub pull-images.sh that records its argv. That is evaluated
+# behaviour, not a grep for the flag's name somewhere in the file: deleting the
+# `if [ "$SKIP_UIS" = true ]` guard, or inverting it, changes what the stub is
+# called with.
+extract_full_setup_pull_invocation() {
+  awk '
+    /log "Pulling published images/ { cap = 1 }
+    cap { print }
+    cap && /ok "All published images pulled"/ { exit }
+  ' "$1"
+}
+
+run_full_setup_pull_invocation() {
+  local d=$1 skip_uis=$2 script
+  mkdir -p "$d/bin"
+  cat > "$d/bin/pull-images.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'pull-images.sh %s\n' "$*" >>"${TEST_LOG_FILE:?}"
+exit 0
+STUB
+  chmod +x "$d/bin/pull-images.sh"
+  script="$d/pull-arm.sh"
+  {
+    printf 'set -euo pipefail\n'
+    printf 'log() { printf "LOG:%%s\\n" "$*"; }\n'
+    printf 'ok() { printf "OK:%%s\\n" "$*"; }\n'
+    printf 'SCRIPT_DIR=%q\n' "$d/bin"
+    printf 'PROFILE="clerum-test"\n'
+    printf 'EFFECTIVE_IMAGE_TAG="v0.0.0-test"\n'
+    printf 'SKIP_UIS=%q\n' "$skip_uis"
+    extract_full_setup_pull_invocation "$REPO_ROOT/scripts/minikube/full-setup.sh"
+  } > "$script"
+  TEST_LOG_FILE="$d/ops.log" bash "$script" 2>&1
+}
+
+assert_the_pull_path_forwards_skip_uis() {
+  local d out rc problems=""
+  d="$(mktemp -d)"
+  if [ -z "$(extract_full_setup_pull_invocation "$REPO_ROOT/scripts/minikube/full-setup.sh")" ]; then
+    fail "could not locate the ghcr pull invocation in full-setup.sh"
+    rm -rf "$d"
+    return
+  fi
+
+  out="$(run_full_setup_pull_invocation "$d" true)"; rc=$?
+  [ "$rc" -eq 0 ] || problems+="the extracted pull arm exited ${rc} with SKIP_UIS=true: ${out}; "
+  grep -q '^pull-images.sh --skip-uis$' "$d/ops.log" \
+    || problems+="SKIP_UIS=true did not forward --skip-uis (log: $(cat "$d/ops.log")); "
+
+  # The complement, so the fix cannot be "always pass --skip-uis". Also proves
+  # the empty-array expansion does not abort under `set -u`.
+  rm -rf "$d"; d="$(mktemp -d)"
+  out="$(run_full_setup_pull_invocation "$d" false)"; rc=$?
+  [ "$rc" -eq 0 ] || problems+="the extracted pull arm exited ${rc} with SKIP_UIS=false: ${out}; "
+  grep -q '^pull-images.sh $' "$d/ops.log" \
+    || problems+="SKIP_UIS=false did not call the puller with no flags (log: $(cat "$d/ops.log")); "
+
+  if [ -z "$problems" ]; then
+    pass "the ghcr pull path forwards --skip-uis only when SKIP_UIS is set (evaluated argv)"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -765,6 +1066,13 @@ assert_the_banner_prints_the_image_source_tag_and_origin
 assert_the_tag_origin_distinguishes_pin_from_override
 assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
 assert_the_unoverridden_path_generates_the_api_ip_patch_once
+assert_skip_build_follows_the_recorded_image_source
+assert_skip_build_says_it_is_following_the_cluster
+assert_an_acquiring_run_still_honours_image_source
+assert_a_cluster_with_no_record_keeps_the_env_default
+assert_the_effective_tag_comes_from_the_record_not_the_pin
+assert_the_effective_tag_precedence_is_override_then_record_then_pin
+assert_the_pull_path_forwards_skip_uis
 assert_every_defined_case_is_invoked
 
 exit $FAIL

@@ -135,17 +135,22 @@ image_mode_pinned_tag() {
   printf '%s' "$tags"
 }
 
-# The ghcr tag this cluster runs: the explicit override, else what the last
-# acquisition recorded, else the committed pin. Empty in local mode, where there
-# is no ghcr coordinate at all.
-image_mode_tag() {
-  local project_dir="${1:-$IMAGE_MODE_PROJECT_DIR}" mode recorded tag
-  if ! mode="$(image_mode_source "$project_dir")"; then
-    return 1
-  fi
-  if [ "$mode" != ghcr ]; then
-    return 0
-  fi
+# THE ghcr tag precedence, with no mode gate: the explicit override, else what
+# the last acquisition recorded, else the committed pin.
+#
+# Callers that have already decided they are dealing with ghcr images use this
+# one. scripts/minikube/pull-images.sh is the reason it exists separately from
+# image_mode_tag: pulling IS a ghcr acquisition (it rewrites the manifest with
+# imageSource "ghcr" when it finishes), so a cluster whose CURRENT record says
+# "local" must still resolve a tag to pull rather than the empty string the
+# mode gate would return. scripts/minikube/full-setup.sh is the same shape --
+# its own `[ "$IMAGE_SOURCE" = ghcr ]` branch is the gate.
+#
+# There is exactly one copy of this precedence; image_mode_tag delegates to it
+# rather than repeating it, because two copies is how the consumers came to
+# disagree in the first place.
+image_mode_ghcr_tag() {
+  local project_dir="${1:-$IMAGE_MODE_PROJECT_DIR}" recorded tag
   if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
     tag="$MINIKUBE_IMAGE_TAG"
   else
@@ -167,6 +172,41 @@ image_mode_tag() {
       ;;
   esac
   printf '%s' "$tag"
+}
+
+# Where image_mode_ghcr_tag's answer came from, as operator-facing text.
+#
+# It lives next to the resolution it describes so the two cannot drift: an
+# error that tells someone to change the committed pin when the value actually
+# came from the recorded manifest sends them to edit the wrong file, and the
+# edit does nothing.
+image_mode_tag_origin() {
+  local project_dir="${1:-$IMAGE_MODE_PROJECT_DIR}" recorded
+  if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
+    printf '%s' 'MINIKUBE_IMAGE_TAG override (not committed)'
+    return 0
+  fi
+  if ! recorded="$(image_mode_manifest_field "$project_dir" 2)"; then
+    return 1
+  fi
+  if [ -n "$recorded" ]; then
+    printf '%s' 'tag recorded in deploy/minikube/.image-manifest.json (what this cluster last acquired)'
+    return 0
+  fi
+  printf '%s' 'committed pin in deploy/components/ghcr-images/kustomization.yaml'
+}
+
+# The ghcr tag this cluster runs. Empty in local mode, where there is no ghcr
+# coordinate at all.
+image_mode_tag() {
+  local project_dir="${1:-$IMAGE_MODE_PROJECT_DIR}" mode
+  if ! mode="$(image_mode_source "$project_dir")"; then
+    return 1
+  fi
+  if [ "$mode" != ghcr ]; then
+    return 0
+  fi
+  image_mode_ghcr_tag "$project_dir"
 }
 
 # When the last image acquisition happened. A `make minikube-setup` between two

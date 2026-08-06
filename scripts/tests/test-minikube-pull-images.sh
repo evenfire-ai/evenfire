@@ -74,15 +74,40 @@ STUB
   chmod +x "$d/bin/docker" "$d/bin/minikube"
 }
 
-# Runs the script in an isolated PROJECT_DIR that is a copy of the real repo's
-# deploy/ + scripts/, so it reads the REAL deploy/images.json and the REAL
-# component pin rather than a fixture that could drift from them.
-run_puller() {
-  local d=$1; shift
-  make_stubs "$d"
+# Copies the real repo's deploy/ + scripts/ into an isolated PROJECT_DIR, so
+# every case reads the REAL deploy/images.json and the REAL component pin
+# rather than a fixture that could drift from them.
+#
+# deploy/minikube/.image-manifest.json is REMOVED from the copy unless a case
+# asks for one. It is gitignored, so CI never has it and a developer machine
+# that has run a real setup always does -- and since the puller now prefers the
+# RECORDED tag over the pin, leaving it in would make every pinned-tag case
+# here pass or fail depending on whose laptop it ran on.
+#
+# Usage: copy_repo <dir> [manifest-json]
+copy_repo() {
+  local d=$1 manifest=${2:-}
   mkdir -p "$d/repo"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
+  rm -f "$d/repo/deploy/minikube/.image-manifest.json"
+  if [ -n "$manifest" ]; then
+    mkdir -p "$d/repo/deploy/minikube"
+    printf '%s' "$manifest" > "$d/repo/deploy/minikube/.image-manifest.json"
+  fi
+}
+
+# What pull-images.sh and build-images.sh actually write, trimmed to the two
+# fields image-mode.sh reads. Usage: recorded_manifest <imageSource> <imageTag>
+recorded_manifest() {
+  printf '{\n  "generated": "2026-08-06T00:00:00Z",\n  "profile": "clerum-test",\n  "imageSource": "%s",\n  "imageTag": "%s",\n  "images": {}\n}\n' \
+    "$1" "$2"
+}
+
+run_puller() {
+  local d=$1; shift
+  make_stubs "$d"
+  copy_repo "$d"
   run_puller_prepared "$d" "$@"
 }
 
@@ -193,9 +218,7 @@ assert_the_alias_honours_local_tag_and_local_name() {
   local d out
   d="$(mktemp -d)"
   make_stubs "$d"
-  mkdir -p "$d/repo"
-  cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
-  cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
+  copy_repo "$d"
 
   # Append a published+deployed row whose local ref differs from its name in
   # BOTH dimensions. node, not sed: the manifest is JSON and a text patch would
@@ -454,6 +477,192 @@ assert_a_partial_failure_says_the_tag_exists_and_advises_a_retry() {
   rm -rf "$d"
 }
 
+# ---------------------------------------------------------------------------
+# WHICH TAG THIS CLUSTER PULLS
+# ---------------------------------------------------------------------------
+# The puller used to read MINIKUBE_IMAGE_TAG else the committed pin, and never
+# the tag the last acquisition RECORDED. On the documented bootstrap
+# (`MINIKUBE_IMAGE_TAG=latest make minikube-setup`), a later
+# `make minikube-pull-images` therefore went looking for the pinned v0.6.0 --
+# which is 404 on ghcr until the tag is cut. That command is the remedy the
+# docs and this script's own failure text point people at, so it failed exactly
+# when someone followed the advice.
+
+# The committed pin, read from the real tree so this cannot drift the next time
+# a release is cut.
+committed_pin() {
+  sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' \
+    "$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml" | sort -u | head -1
+}
+
+# Mutation coverage: swap the precedence in image_mode_ghcr_tag so the pin is
+# consulted before the recorded value (or turn `[ -n "$recorded" ]` into
+# `[ -z "$recorded" ]`) and the pulled ref becomes the pin -- both asserted
+# here, in both directions.
+assert_the_recorded_tag_beats_the_committed_pin() {
+  local d out pin
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr recorded-test-tag)"
+  out="$(run_puller_prepared "$d" --only=control-api)"
+  pin="$(committed_pin)"
+  if grep -q '^pull ghcr\.io/evenfire-ai/control-api:recorded-test-tag$' "$d/ops.log" \
+     && ! grep -q "^pull ghcr\.io/evenfire-ai/control-api:${pin}\$" "$d/ops.log"; then
+    pass "the tag recorded by the last acquisition beats the committed pin"
+  else
+    fail "expected a pull at recorded-test-tag and none at the pin '${pin}': $out"
+  fi
+  rm -rf "$d"
+}
+
+# The other half of the precedence: an explicit override still wins over the
+# record, so an operator can move a cluster forward off a bad tag. Mutation:
+# reorder image_mode_ghcr_tag to consult the record first and this pulls
+# recorded-test-tag instead.
+assert_minikube_image_tag_beats_the_recorded_tag() {
+  local d out
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr recorded-test-tag)"
+  export MINIKUBE_IMAGE_TAG=override-test-tag
+  out="$(run_puller_prepared "$d" --only=control-api)"
+  unset MINIKUBE_IMAGE_TAG
+  if grep -q '^pull ghcr\.io/evenfire-ai/control-api:override-test-tag$' "$d/ops.log" \
+     && ! grep -q '^pull ghcr\.io/evenfire-ai/control-api:recorded-test-tag$' "$d/ops.log"; then
+    pass "MINIKUBE_IMAGE_TAG beats the recorded tag"
+  else
+    fail "expected a pull at override-test-tag and none at recorded-test-tag: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The floor of the precedence, and the fresh-clone path: with nothing recorded
+# the committed pin is what gets pulled. Mutation: drop the pin fallback (or
+# return the empty recorded value) and the pull ref loses its tag entirely.
+assert_the_committed_pin_is_used_when_nothing_is_recorded() {
+  local d out pin
+  d="$(mktemp -d)"
+  pin="$(committed_pin)"
+  if [ -z "$pin" ]; then
+    fail "could not read the committed pin from the real component"
+    rm -rf "$d"
+    return
+  fi
+  out="$(run_puller "$d" --only=control-api)"
+  if grep -q "^pull ghcr\.io/evenfire-ai/control-api:${pin}\$" "$d/ops.log"; then
+    pass "with nothing recorded, the committed pin (${pin}) is what gets pulled"
+  else
+    fail "expected a pull at the committed pin '${pin}': $out"
+  fi
+  rm -rf "$d"
+}
+
+# Pulling IS a ghcr acquisition -- this script rewrites the manifest with
+# imageSource "ghcr" when it finishes -- so a cluster whose CURRENT record says
+# "local" must still resolve a tag. Routing this through image_mode_tag (which
+# gates on the recorded mode and returns empty for "local") instead of
+# image_mode_ghcr_tag makes `make minikube-pull-images` fail on exactly the
+# cluster an operator is trying to switch over to published images.
+#
+# Mutation: call image_mode_tag here instead and the run exits non-zero having
+# pulled nothing.
+assert_a_locally_built_cluster_still_resolves_a_tag_to_pull() {
+  local d out rc pin
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  # What a full local build writes: mode local, and the ghcr coordinate cleared.
+  copy_repo "$d" "$(recorded_manifest local "")"
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  pin="$(committed_pin)"
+  if [ "$rc" -eq 0 ] && grep -q "^pull ghcr\.io/evenfire-ai/control-api:${pin}\$" "$d/ops.log"; then
+    pass "a cluster recorded as locally built still pulls, at the committed pin"
+  else
+    fail "expected rc=0 and a pull at '${pin}' on a local-recorded cluster; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# An error that names the committed pin when the tag actually came from the
+# manifest sends the operator to edit a file that has no effect on the run.
+# Mutation: hardcode the pin wording in image_mode_tag_origin and the manifest
+# filename disappears from the failure text.
+assert_a_failure_names_the_manifest_when_the_tag_came_from_the_record() {
+  local d out rc
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr recorded-test-tag)"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:recorded-test-tag"
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_MISSING_TAGS MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  if [ "$rc" -ne 0 ] \
+     && grep -q "came from the tag recorded in deploy/minikube/.image-manifest.json" <<< "$out" \
+     && ! grep -q "came from the committed pin" <<< "$out"; then
+    pass "a failure at a recorded tag names the manifest, not the committed pin"
+  else
+    fail "expected the failure to name the recorded manifest as the tag origin; got rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# ---------------------------------------------------------------------------
+# --skip-uis
+# ---------------------------------------------------------------------------
+# The -no-uis-ghcr overlay DELETES the control-ui and profile-ui Deployments,
+# so pulling them spends ~470 MiB of transfer and disk on images no pod will
+# ever reference.
+
+# Mutation: `if false && [ "$SKIP_UIS" = true ]` around the filter, or `!=`
+# for `=`, and the two UI pulls reappear. The control-api half is what stops a
+# filter that drops everything from passing.
+assert_skip_uis_drops_the_ui_images_from_the_pull() {
+  local d out uis backend
+  d="$(mktemp -d)"
+  out="$(run_puller "$d" --skip-uis)"
+  uis="$(grep -cE '^pull ghcr\.io/evenfire-ai/(control-ui|profile-ui):' "$d/ops.log" || true)"
+  backend="$(grep -cE '^pull ghcr\.io/evenfire-ai/control-api:' "$d/ops.log" || true)"
+  if [ "$uis" -eq 0 ] && [ "$backend" -ge 1 ]; then
+    pass "--skip-uis pulls neither control-ui nor profile-ui, and still pulls the backend images"
+  else
+    fail "expected 0 UI pulls and >=1 control-api pull, got uis=$uis backend=$backend: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The complement, so the filter cannot be "never pull the UIs".
+assert_the_uis_are_pulled_when_skip_uis_is_not_set() {
+  local d out uis
+  d="$(mktemp -d)"
+  out="$(run_puller "$d")"
+  uis="$(grep -cE '^pull ghcr\.io/evenfire-ai/(control-ui|profile-ui):' "$d/ops.log" || true)"
+  if [ "$uis" -eq 2 ]; then
+    pass "without --skip-uis both UI images are pulled"
+  else
+    fail "expected 2 UI pulls on the default path, got $uis: $out"
+  fi
+  rm -rf "$d"
+}
+
+# The env spelling full-setup.sh and build-images.sh already share. Mutation:
+# drop MINIKUBE_SKIP_UIS from the SKIP_UIS default and this pulls the UIs.
+assert_minikube_skip_uis_env_is_honoured() {
+  local d out uis
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d"
+  export MINIKUBE_SKIP_UIS=true
+  out="$(run_puller_prepared "$d")"
+  unset MINIKUBE_SKIP_UIS
+  uis="$(grep -cE '^pull ghcr\.io/evenfire-ai/(control-ui|profile-ui):' "$d/ops.log" || true)"
+  if [ "$uis" -eq 0 ]; then
+    pass "MINIKUBE_SKIP_UIS=true drops the UI images without the flag"
+  else
+    fail "expected 0 UI pulls under MINIKUBE_SKIP_UIS=true, got $uis: $out"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pull-images.sh"
@@ -481,6 +690,14 @@ assert_a_permanently_failing_pull_stops_after_the_retry_bound
 assert_a_pull_failure_surfaces_the_captured_diagnostic_trimmed
 assert_a_failure_at_the_latest_override_never_suggests_the_tag_that_just_failed
 assert_a_partial_failure_says_the_tag_exists_and_advises_a_retry
+assert_the_recorded_tag_beats_the_committed_pin
+assert_minikube_image_tag_beats_the_recorded_tag
+assert_the_committed_pin_is_used_when_nothing_is_recorded
+assert_a_locally_built_cluster_still_resolves_a_tag_to_pull
+assert_a_failure_names_the_manifest_when_the_tag_came_from_the_record
+assert_skip_uis_drops_the_ui_images_from_the_pull
+assert_the_uis_are_pulled_when_skip_uis_is_not_set
+assert_minikube_skip_uis_env_is_honoured
 assert_every_defined_case_is_invoked
 
 exit $FAIL
