@@ -30,6 +30,7 @@ vi.mock('../src/config.js', () => ({
   config: {
     gfscBaseUrl: 'http://gfsc.gfs.svc:8087',
     gfscWriteBaseUrl: 'http://gfsc-writer.gfs.svc:8087',
+    gfscProxyTimeoutMs: 300_000,
     // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
     hostsNamespace: 'mcp-host',
   },
@@ -1028,6 +1029,7 @@ describe('user resource mutations via gfsc proxy', () => {
         method: 'POST',
         headers: expect.objectContaining({ 'content-type': 'application/json' }),
         body: JSON.stringify({ name: 'docs', kind: 'directory' }),
+        signal: expect.any(AbortSignal),
       }
     )
   })
@@ -1060,8 +1062,45 @@ describe('user resource mutations via gfsc proxy', () => {
         method: 'DELETE',
         headers: expect.objectContaining({ 'content-type': 'application/json' }),
         body: JSON.stringify({ ifMatch: 3 }),
+        signal: expect.any(AbortSignal),
       }
     )
+  })
+
+  it('returns 504 gfsc_timeout when the gfsc mutation fetch times out', async () => {
+    auth()
+    const fetchMock = vi.fn(async () => {
+      const err = new Error('The operation was aborted due to timeout')
+      err.name = 'TimeoutError'
+      throw err
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app)
+      .post(`/external/gfs/resources/${R}/children`)
+      .set('x-user-session-token', 'sess')
+      .send({ name: 'docs', kind: 'file', contentBase64: 'AAAA' })
+    expect(res.status).toBe(504)
+    expect(res.body).toEqual({ error: 'gfsc_timeout' })
+  })
+
+  it('forwards a gfsc 5xx on a user mutation verbatim (never a silent 500)', async () => {
+    auth()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: false, error: { code: 'internal' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app)
+      .post(`/external/gfs/resources/${R}/children`)
+      .set('x-user-session-token', 'sess')
+      .send({ name: 'docs', kind: 'file', contentBase64: 'AAAA' })
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'internal' } })
   })
 })
 
