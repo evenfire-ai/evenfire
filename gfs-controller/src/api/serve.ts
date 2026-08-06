@@ -156,9 +156,30 @@ function requireRid(raw: string): string {
   }
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Record<string, string>
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(body));
+}
+
+/**
+ * When a response is written BEFORE the request body was fully received (e.g.
+ * payload_too_large aborts the read mid-stream), the connection cannot be
+ * reused: unread bytes are still in flight and Node resets the socket after
+ * the response. Without advertising `Connection: close`, a pooling client
+ * (undici in control-api's gfs proxy) queues its next request onto the
+ * about-to-die socket and gets ECONNRESET → a spurious 502 gfsc_unreachable
+ * (reproduced live: 413 → immediately-following proxied request failed
+ * deterministically). `req.complete` is Node's own "entire message received"
+ * flag; `=== false` keeps plain-object test doubles (complete: undefined)
+ * and fully-consumed bodies on normal keep-alive.
+ */
+function abortConnectionHeader(req: IncomingMessage): Record<string, string> | undefined {
+  return req.complete === false ? { Connection: "close" } : undefined;
 }
 
 export class GfsServingHandler {
@@ -191,7 +212,10 @@ export class GfsServingHandler {
     const resourceWrite = isWrite && this.deps.writeService && resourceMatch
       && (method === "DELETE" || Boolean(this.deps.audit));
     if ((copyMatch && !copyWrite) || (method === "PATCH" && !renameWrite) || (method !== "GET" && !resourceWrite && !copyWrite)) {
-      sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } });
+      // This 404 can be written before a request body was consumed (e.g. a
+      // POST with a body to an unsupported verb/route) — same socket-poisoning
+      // risk as the catch path below, so it carries the same close semantics.
+      sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } }, abortConnectionHeader(req));
       return true;
     }
 
@@ -230,7 +254,7 @@ export class GfsServingHandler {
           }`
         );
       }
-      if (!res.headersSent) sendJson(res, status, body);
+      if (!res.headersSent) sendJson(res, status, body, abortConnectionHeader(req));
       else res.end(); // a content stream already started; just terminate
     } finally {
       cancelCopyTimer?.();

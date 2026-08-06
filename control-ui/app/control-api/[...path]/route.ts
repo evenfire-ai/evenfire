@@ -17,11 +17,9 @@ const MAX_PROXY_TIMEOUT_MS = 2_147_483_647
 // raise it; an absent, non-integer, non-positive, or out-of-range value falls back to
 // the default.
 //
-// NOTE: currently LATENT — `/control-api/*` is served by the next.config.js rewrite
-// (afterFiles precedence shadows this catch-all route handler), so this timeout does
-// not govern prod today. It becomes effective once the proxy is consolidated onto this
-// handler (tracked follow-up); the client-side upload timeout in lib/api.ts is what
-// unblocks prod now.
+// This handler OWNS `/control-api/*`: the next.config.js rewrite for that path was
+// removed (it routed through Next's internal proxy, which silently truncates request
+// bodies at 10MiB and hard-caps at a 30s proxyTimeout). Do not reintroduce the rewrite.
 function resolveProxyTimeoutMs(): number {
   const raw = process.env.CONTROL_API_PROXY_TIMEOUT_MS
   const parsed = raw ? Number(raw) : Number.NaN
@@ -30,13 +28,22 @@ function resolveProxyTimeoutMs(): number {
     : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
 }
 
+// Headers this proxy must never forward upstream. Beyond the classic RFC 9110
+// hop-by-hop set, undici's fetch() refuses to send `Expect` at all — forwarding it
+// throws `NotSupportedError: expect header not supported` and turns any upload
+// > ~1MB from curl-like clients (which auto-add `Expect: 100-continue`) into a 502.
+// Browsers can never send `Expect` (it is a fetch/XHR forbidden request header), but
+// a correct proxy strips it regardless. `content-length` and `host` are recomputed
+// by undici for the upstream request.
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'content-length',
+  'expect',
   'host',
   'keep-alive',
   'proxy-authenticate',
   'proxy-authorization',
+  'proxy-connection',
   'te',
   'trailer',
   'transfer-encoding',
@@ -111,6 +118,19 @@ async function proxyControlApi(
         : 'control-api proxy request failed'
     const status =
       err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError') ? 504 : 502
+    // Fail-loud: surface the underlying cause (undici wraps the real reason in
+    // err.cause) so a proxy failure is never undiagnosable from the pod logs.
+    console.error('[control-api proxy] request failed', {
+      url: upstreamUrl,
+      method: req.method,
+      status,
+      message,
+      name: err instanceof Error ? err.name : undefined,
+      cause:
+        err instanceof Error && 'cause' in err
+          ? String((err as { cause?: unknown }).cause)
+          : undefined,
+    })
     return NextResponse.json({ error: message }, { status })
   }
 }

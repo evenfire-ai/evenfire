@@ -515,6 +515,46 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("413 payload_too_large advertises Connection: close (request body not fully received)", async () => {
+    // When readJsonBody aborts mid-stream (body over MAX_WRITE_BODY_BYTES), the
+    // client is still sending: the socket cannot be reused and Node will reset
+    // it. Without `Connection: close`, a pooling client (undici in control-api's
+    // gfs proxy) queues its NEXT request onto the poisoned socket and gets
+    // ECONNRESET -> 502 gfsc_unreachable (reproduced live: 413 then-immediate
+    // request failed deterministically). Real IncomingMessage semantics:
+    // `complete` is false while the body has not been fully received.
+    const res = new FakeRes();
+    const { d, calls } = writeDeps();
+    const oversized = "A".repeat(16 * 1024 * 1024 + 4);
+    const request = reqBody(`/v1/resources/${RID}/content`, {
+      method: "PUT",
+      auth: "Bearer t",
+      rawBody: `{"contentBase64":"${oversized}","ifMatch":2}`,
+    });
+    (request as unknown as { complete: boolean }).complete = false;
+    await run(d, request, res);
+    expect(res.statusCode).toBe(413);
+    expect((res.json as { error: { code: string } }).error.code).toBe("payload_too_large");
+    expect(res.headers["Connection"]).toBe("close");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does NOT close the connection on an error whose request body WAS fully received", async () => {
+    // A fully-consumed body (here: valid JSON, invalid base64) leaves the socket
+    // clean — keep-alive must survive, only the mid-stream abort case may close.
+    const res = new FakeRes();
+    const { d } = writeDeps();
+    const request = reqBody(`/v1/resources/${RID}/content`, {
+      method: "PUT",
+      auth: "Bearer t",
+      body: { contentBase64: "@@@not-base64@@@", ifMatch: 2 },
+    });
+    (request as unknown as { complete: boolean }).complete = true;
+    await run(d, request, res);
+    expect(res.statusCode).toBe(400);
+    expect(res.headers["Connection"]).toBeUndefined();
+  });
+
   it("412 precondition_failed: an AGENT replace WITHOUT If-Match is rejected before the store", async () => {
     const res = new FakeRes();
     const { d, calls } = writeDeps();

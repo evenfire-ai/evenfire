@@ -125,10 +125,16 @@ spec:
         resources:
           limits:
             cpu: 300m
-            memory: 256Mi
+            # GFS uploads arrive base64-in-JSON and are fully buffered: one 10.7MB
+            # upload holds ~5 transient copies (express raw buffer, JSON.parse input,
+            # parsed contentBase64 string, JSON.stringify output, undici write buffer)
+            # ≈ +60MiB over the ~86MiB idle baseline. Measured live: 4 concurrent
+            # 10.7MB uploads OOMKilled (exit 137) the pod at 256Mi; 512Mi holds ≥4
+            # concurrent worst-case (16MiB, the gfsc write cap) uploads with margin.
+            memory: 512Mi
           requests:
             cpu: 50m
-            memory: 64Mi
+            memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
