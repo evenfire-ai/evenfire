@@ -59,10 +59,19 @@ for row in "${IMAGES[@]}"; do
   # Verify the INDEX we are about to promote is multi-arch. Existence alone
   # would let a single-platform copy through, which is the exact gap this
   # workstream exists to close.
-  platforms="$(crane manifest "$REGISTRY/$name@$digest" \
-    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-        const m=JSON.parse(s).manifests||[];
-        console.log(m.map(x=>x.platform?.architecture).filter(a=>a&&a!=="unknown").sort().join(","))})')"
+  #
+  # Guarded the same way as the resolver call above: a bare assignment here
+  # let a transient `crane manifest` failure or a node parse error abort the
+  # WHOLE loop under `set -euo pipefail`, instead of marking just this one
+  # image failed and continuing -- the opposite of the pattern one line up,
+  # and it makes a partial-promotion state MORE likely, not less.
+  if ! platforms="$(crane manifest "$REGISTRY/$name@$digest" \
+        | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+            const m=JSON.parse(s).manifests||[];
+            console.log(m.map(x=>x.platform?.architecture).filter(a=>a&&a!=="unknown").sort().join(","))})')"; then
+    echo "::error::$name: could not verify the multi-arch manifest at $digest (crane manifest or the platform parse failed)"
+    failed=1; continue
+  fi
   # Subset match, not exact equality against "amd64,arm64": check-image-
   # visibility.mjs's guard already treats a third platform as still
   # multi-arch (it checks .includes for each of amd64/arm64), and an index

@@ -233,6 +233,115 @@ assert_a_single_arch_index_is_rejected() {
   rm -rf "$d"
 }
 
+# A two-image manifest, real copies of the three release scripts, and one
+# commit on a v0.2.0 tag -- same real-copy reasoning as make_repo above, just
+# with two source dirs and two manifest rows so a per-image failure has a
+# sibling to keep promoting.
+make_repo_two_images() {
+  local d=$1
+  mkdir -p "$d/widget-a" "$d/widget-b" "$d/scripts/release" "$d/deploy"
+  cp "$REPO_ROOT/scripts/release/images-manifest.mjs" "$d/scripts/release/"
+  cp "$REPO_ROOT/scripts/release/resolve-release-images.mjs" "$d/scripts/release/"
+  cp "$REPO_ROOT/scripts/release/promote-release-images.sh" "$d/scripts/release/"
+  cp "$REPO_ROOT/scripts/release/release-coordinates.mjs" "$d/scripts/release/"
+  cat > "$d/deploy/images.json" <<'JSON'
+{
+  "images": [
+    {
+      "name": "widget-a",
+      "path": "widget-a",
+      "source_paths": ["widget-a/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "widget-b",
+      "path": "widget-b",
+      "source_paths": ["widget-b/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    }
+  ]
+}
+JSON
+  ( cd "$d" && git init -q .
+    echo one > widget-a/a.ts && echo one > widget-b/a.ts
+    git add -A && git -c user.email=t@t -c user.name=t commit -qm one
+    git tag v0.2.0 )
+}
+
+# make_stub_manifest_fails_for <dir> <revision> <failing-image-name>
+# Like make_stub above, but `crane manifest` fails outright (rather than
+# returning a payload) on the SECOND call made against one named image --
+# simulating the transient registry failure or malformed response this guard
+# exists to survive without aborting the whole run.
+#
+# `crane manifest "$REGISTRY/$name@$digest"` is called with the exact same
+# arguments TWICE per image: once inside resolve-release-images.mjs (to read
+# the revision annotation) and once more by promote-release-images.sh itself
+# (the arch-verification line this case targets). A stub that fails on every
+# call for the named image can't tell those two call sites apart -- proven by
+# writing exactly that first and watching this case pass even with the
+# arch-check guard reverted, because the resolver's own (already-guarded)
+# manifest read failed first and never reached the line under test. Only
+# failing the SECOND call isolates the arch-check's own crane invocation.
+make_stub_manifest_fails_for() {
+  local dir=$1 revision=$2 failing=$3
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/crane" <<STUB
+#!/usr/bin/env bash
+COPY_LOG="$dir/copy-log"
+CALL_COUNT_FILE="$dir/$failing-manifest-calls"
+case "\$1" in
+  digest)   echo "sha256:widgetdigest00000000000000000000000000000000000000000000000000" ;;
+  manifest)
+    case "\$2" in
+      *"$failing@"*)
+        n=\$(( \$(cat "\$CALL_COUNT_FILE" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$CALL_COUNT_FILE"
+        if [ "\$n" -eq 1 ]; then
+          echo '{"annotations":{"org.opencontainers.image.revision":"$revision"},"manifests":[{"platform":{"architecture":"amd64"}},{"platform":{"architecture":"arm64"}}]}'
+        else
+          echo "crane stub: transient manifest fetch failure for $failing (call \$n)" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo '{"annotations":{"org.opencontainers.image.revision":"$revision"},"manifests":[{"platform":{"architecture":"amd64"}},{"platform":{"architecture":"arm64"}}]}'
+        ;;
+    esac
+    ;;
+  copy)     echo "\$2 \$3" >> "\$COPY_LOG"; echo "copied \$2 -> \$3" ;;
+  *)        exit 1 ;;
+esac
+STUB
+  chmod +x "$dir/bin/crane"
+}
+
+assert_an_arch_verification_failure_for_one_image_does_not_abort_the_loop() {
+  local d; d="$(mktemp -d)"; make_repo_two_images "$d"
+  local head; head="$( cd "$d" && git rev-parse HEAD )"
+  # widget-b's `crane manifest` call fails outright; widget-a's succeeds.
+  # Before this was guarded with the same `if ! ...; then failed=1; continue;
+  # fi` shape as the resolver call one line up, this bare assignment aborted
+  # the WHOLE loop under `set -euo pipefail` the instant widget-b's pipe
+  # failed -- so a transient registry hiccup on one image would have silently
+  # skipped promoting every image after it too, the opposite of the
+  # continue-on-one-failure pattern the resolver call already follows.
+  make_stub_manifest_fails_for "$d" "$head" "widget-b"
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN=true RELEASE_REF=v0.2.0 \
+        bash scripts/release/promote-release-images.sh 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] \
+      && grep -q 'would promote widget-a@' <<< "$out" \
+      && ! grep -q 'would promote widget-b@' <<< "$out" \
+      && grep -q 'widget-b:' <<< "$out"; then
+    pass "an arch-verification failure for one image doesn't abort the loop; the other image still promotes, run still exits nonzero"
+  else
+    fail "expected widget-a promoted, widget-b named as failed, nonzero exit; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists -- same pattern as
   # test-resolve-release-images.sh and test-release-coordinates.sh.
@@ -254,6 +363,7 @@ assert_the_real_promotion_copies_to_the_v_prefixed_tag
 assert_an_empty_image_list_fails_loudly
 assert_stable_does_not_move_for_a_pre_release
 assert_a_single_arch_index_is_rejected
+assert_an_arch_verification_failure_for_one_image_does_not_abort_the_loop
 assert_every_defined_case_is_invoked
 
 exit $FAIL

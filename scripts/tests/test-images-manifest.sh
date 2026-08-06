@@ -162,6 +162,46 @@ JSON
   rm -rf "$d"
 }
 
+# check-image-visibility.mjs interpolates image.name straight into GHCR
+# token/manifest URLs, and promote-release-images.sh interpolates it into
+# shell `crane` refs -- a name with characters either of those would treat
+# specially (path separators, whitespace, shell metacharacters) must be
+# rejected at the one place both consumers read from, not discovered by
+# either consumer individually.
+#
+# Same real-copy-into-a-throwaway-tree reasoning as
+# assert_a_published_image_with_no_source_paths_is_rejected above.
+assert_an_invalid_image_name_is_rejected() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/scripts/release" "$d/deploy"
+  cp "$REPO_ROOT/scripts/release/images-manifest.mjs" "$d/scripts/release/"
+  cat > "$d/deploy/images.json" <<'JSON'
+{
+  "images": [
+    {
+      "name": "widget/../evil",
+      "path": "widget",
+      "source_paths": ["widget/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    }
+  ]
+}
+JSON
+  local out rc
+  out="$( cd "$d" && node -e '
+    import("./scripts/release/images-manifest.mjs").catch(err => {
+      console.log(err.message)
+      process.exit(1)
+    })' 2>&1 )" && rc=0 || rc=1
+  if [ "$rc" -ne 0 ] && grep -qi "not a valid image name" <<< "$out"; then
+    pass "an invalid image name is rejected at load time"
+  else
+    fail "expected a named failure about an invalid image name; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_unpublished_images_are_exactly_the_known_three() {
   local got
   got="$(node -e '
@@ -514,6 +554,7 @@ assert_every_published_image_has_a_build_matrix_entry
 assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_a_published_image_with_no_source_paths_is_rejected
+assert_an_invalid_image_name_is_rejected
 assert_unpublished_images_are_exactly_the_known_three
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row

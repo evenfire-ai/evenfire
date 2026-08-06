@@ -59,20 +59,59 @@ assert_a_revision_that_is_an_ancestor_resolves() {
 
 assert_a_non_ancestor_revision_is_rejected() {
   local d; d="$(mktemp -d)"; make_repo "$d"
-  make_stub "$d" "sha256:abc" "0000000000000000000000000000000000000000"
-  # Check for the ancestor guard's own wording, not just a nonzero exit: the
-  # bogus revision below is also an unresolvable git object, so if the
-  # ancestor check itself were removed, the very next step (the source-paths
-  # diff) would independently choke on that same bogus revision and exit
-  # nonzero too. A bare rc-only assertion can't tell "the ancestor guard
-  # fired" apart from "something downstream happened to crash instead."
-  local out
+  # A revision that genuinely shares no history with tagSha -- an orphan
+  # branch in the SAME repo, so the commit really exists as an object (the
+  # existence check added below must NOT fire) and the two are truly
+  # unrelated (neither an ancestor nor a descendant of the other), unlike a
+  # bogus SHA that is not an object at all (covered separately below).
+  local default_branch unrelated
+  default_branch="$( cd "$d" && git branch --show-current )"
+  unrelated="$( cd "$d" && git checkout -q --orphan unrelated-history \
+      && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m unrelated \
+      && git rev-parse HEAD )"
+  ( cd "$d" && git checkout -q "$default_branch" )
+  make_stub "$d" "sha256:abc" "$unrelated"
+  # Check for the diverged-history guard's own wording, not just a nonzero
+  # exit: an unrelated commit is also not an ancestor either direction, so if
+  # the ancestor checks themselves were removed, the very next step (the
+  # source-paths diff) would independently choke on an unrelated revision and
+  # exit nonzero too. A bare rc-only assertion can't tell "the diverged-
+  # history guard fired" apart from "something downstream happened to crash
+  # instead."
+  local out rc
   out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
         --image control-api --source-paths 'control-api/**' --tag-sha HEAD 2>&1 )" && rc=0 || rc=1
-  if [ "$rc" -ne 0 ] && grep -qi "ancestor" <<< "$out"; then
-    pass "a revision that is not an ancestor of the release is rejected"
+  if [ "$rc" -ne 0 ] && grep -qi "diverged history" <<< "$out"; then
+    pass "a revision that truly shares no ancestry with the release commit is rejected as diverged history"
   else
-    fail "expected a named failure about the revision not being an ancestor; got rc=$rc out='$out'"
+    fail "expected a named failure about diverged history; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+# Distinct from the diverged-history case above: this revision is not an
+# object in the checkout AT ALL (a shallow clone, an unfetched ref, or a
+# stray hand-edited annotation), so before the git cat-file -e existence
+# check was added, BOTH --is-ancestor calls threw here exactly the same way
+# they do for genuinely diverged history, and the resolver misreported this
+# as "diverged history" even though there was no comparison to make -- the
+# annotation just names a commit this checkout has never heard of.
+assert_a_revision_absent_from_the_checkout_is_rejected_with_an_accurate_message() {
+  local d; d="$(mktemp -d)"; make_repo "$d"
+  make_stub "$d" "sha256:abc" "0000000000000000000000000000000000000000"
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
+        --image control-api --source-paths 'control-api/**' --tag-sha HEAD 2>&1 )" && rc=0 || rc=1
+  # "has no such commit" is this guard's own wording. "shares no ancestry" is
+  # the OLD diverged-history die message's distinguishing phrase -- its
+  # absence here proves this hit the new existence check, not the ancestor
+  # comparison (the new message names "diverged history" too, but only to
+  # contrast against it, so grepping for that phrase alone can't tell the two
+  # guards apart).
+  if [ "$rc" -ne 0 ] && grep -qi "has no such commit" <<< "$out" && ! grep -qi "shares no ancestry" <<< "$out"; then
+    pass "a revision absent from the checkout is rejected with an accurate message, not misattributed as diverged history"
+  else
+    fail "expected a named 'has no such commit' failure without the diverged-history guard's wording; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -215,6 +254,7 @@ assert_every_defined_case_is_invoked() {
 
 assert_a_revision_that_is_an_ancestor_resolves
 assert_a_non_ancestor_revision_is_rejected
+assert_a_revision_absent_from_the_checkout_is_rejected_with_an_accurate_message
 assert_a_descendant_revision_is_rejected_with_accurate_advice
 assert_a_source_change_after_the_revision_is_rejected
 assert_a_missing_revision_annotation_fails_loudly

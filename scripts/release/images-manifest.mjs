@@ -30,6 +30,14 @@ function load() {
   }
   for (const image of parsed.images) {
     if (!image.name) throw new Error(`${MANIFEST_PATH}: an entry has no name`)
+    // check-image-visibility.mjs interpolates image.name straight into GHCR
+    // URLs, and promote-release-images.sh interpolates it into shell `crane`
+    // refs -- both trusted consumers of a trusted in-repo file, but validating
+    // the shape here once defends every consumer instead of relying on each
+    // one to notice a malformed name on its own.
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(image.name)) {
+      throw new Error(`${MANIFEST_PATH}: ${image.name} is not a valid image name`)
+    }
     if (typeof image.published !== 'boolean') {
       throw new Error(`${MANIFEST_PATH}: ${image.name} must set published explicitly`)
     }

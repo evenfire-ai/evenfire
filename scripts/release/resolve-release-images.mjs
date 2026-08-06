@@ -70,6 +70,24 @@ if (!revision) {
   )
 }
 
+// A well-formed revision that simply is not an object in this checkout (a
+// shallow clone, an unfetched ref, or a stray hand-edited annotation) makes
+// BOTH --is-ancestor calls below throw -- with nothing to distinguish it from
+// genuinely diverged history, this used to fall through to the "diverged
+// history" message even though there was no comparison to make at all.
+// Existence is checked first, and separately, so that message stays reserved
+// for when it is actually true.
+try {
+  sh('git', ['cat-file', '-e', `${revision}^{commit}`])
+} catch {
+  die(
+    `${image}: the published image records revision ${revision}, but this checkout has no such commit ` +
+      `at all -- distinct from diverged history, where the commit exists yet neither side descends from ` +
+      `the other. A shallow clone, an unfetched ref, or a stray hand-edited annotation could all cause ` +
+      `this; fetch the missing commit (or its full history) into this checkout and retry.`
+  )
+}
+
 try {
   sh('git', ['merge-base', '--is-ancestor', revision, tagSha])
 } catch {
