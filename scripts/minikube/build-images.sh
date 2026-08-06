@@ -535,6 +535,22 @@ if [ "$PUBLIC_ONLY" = true ]; then
   ONLY_SVC="__none__"
 fi
 
+# Section banner for the build phases below.
+#
+# On the default IMAGE_SOURCE=ghcr path, full-setup.sh calls this script as
+# `--public-only`, which forces ONLY_SVC to a sentinel that matches no image:
+# every build_image call below returns without building. Printing
+# "=== Building Core Services ===" there tells a developer watching the setup
+# that 28 images are being built when none are, which is the exact confusion
+# the pull-by-default work exists to remove. Suppress the banners on the path
+# that builds nothing.
+build_section() {
+  if [ "$PUBLIC_ONLY" = true ]; then
+    return 0
+  fi
+  echo -e "\n${BOLD}=== $1 ===${NC}"
+}
+
 # ---- Build function ----
 build_image() {
   local name=$1 dir=$2 tag=$3 dockerfile=${4:-""}
@@ -634,7 +650,7 @@ reuse_image_as_tag() {
 
 # ---- Build all services ----
 
-echo -e "\n${BOLD}=== Building Core Services ===${NC}"
+build_section "Building Core Services"
 
 build_image "hcc" \
   "${PROJECT_DIR}" \
@@ -741,7 +757,7 @@ build_image "workspace-files-controller" \
   "${PROJECT_DIR}/workspace-files-controller" \
   "clerum/workspace-files-controller:test"
 
-echo -e "\n${BOLD}=== Building UI Services ===${NC}"
+build_section "Building UI Services"
 
 if [ "$SKIP_UIS" = true ]; then
   warn "Skipping Control UI, Profile UI, and Desktop App image builds (--skip-uis)."
@@ -777,7 +793,7 @@ fi
 #                            ref must already be in the daemon. full-setup.sh
 #                            sets MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE for exactly
 #                            that branch and nothing else.
-echo -e "\n${BOLD}=== Building MCP Servers ===${NC}"
+build_section "Building MCP Servers"
 
 if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
   build_image "airtable-mcp" \
@@ -801,7 +817,7 @@ else
   warn "Skipping optional Playwright MCP local image. The default minikube overlay does not deploy clerum/playwright-mcp-server:test; GKE publishes this image as playwright-server:<tag>."
 fi
 
-echo -e "\n${BOLD}=== Building Test Fixtures ===${NC}"
+build_section "Building Test Fixtures"
 
 build_image "mock-mcp" \
   "${PROJECT_DIR}/tests/e2e/fixtures/mock-mcp-server" \
@@ -912,9 +928,17 @@ fi
 ok "Manifest: deploy/minikube/.image-manifest.json"
 
 # ---- Summary ----
-echo -e "\n${BOLD}=== Build Summary ===${NC}"
+# Same reason as build_section: on the --public-only (IMAGE_SOURCE=ghcr) path
+# nothing was built, so "All images built" is a false report of the run.
+if [ "$PUBLIC_ONLY" = true ]; then
+  echo -e "\n${BOLD}=== Public Image Summary ===${NC}"
+else
+  echo -e "\n${BOLD}=== Build Summary ===${NC}"
+fi
 if [ ${#FAILED_IMAGES[@]} -eq 0 ]; then
-  if [ "$MINIKUBE_MULTI_NODE" = true ]; then
+  if [ "$PUBLIC_ONLY" = true ]; then
+    echo -e "${GREEN}${BOLD}Public third-party images loaded into minikube '${PROFILE}'. No images were built.${NC}"
+  elif [ "$MINIKUBE_MULTI_NODE" = true ]; then
     echo -e "${GREEN}${BOLD}All images built and loaded into multi-node minikube '${PROFILE}'.${NC}"
   else
     echo -e "${GREEN}${BOLD}All images built directly in minikube '${PROFILE}' (no transfer needed).${NC}"

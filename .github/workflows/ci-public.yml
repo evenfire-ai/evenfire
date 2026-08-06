@@ -369,6 +369,12 @@ jobs:
       - name: Test the minikube image verifier (recorded mode, E2E fixtures)
         run: bash scripts/tests/test-minikube-verify-images.sh
 
+      # The ghcr path calls build-images.sh as --public-only, which builds
+      # nothing. This proves it no longer narrates builds it never performs,
+      # and that the local build path still announces every phase.
+      - name: Test the build-images section banners
+        run: bash scripts/tests/test-minikube-build-section-headers.sh
+
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
