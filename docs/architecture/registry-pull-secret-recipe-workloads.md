@@ -6,10 +6,14 @@ this document's install-time trigger decision (provisioning is now a standing in
 because a `WorkflowRecipe` can be created without control-api while WRC injects the
 pull-secret reference regardless); and **§13.5, the runtime acceptance gate, by a live
 cluster E2E: `tests/e2e/integration/registry-pull-secret-runtime.test.ts`** (§11, §13.5).
-Two earlier carve-outs remain recorded in place and are still true: WRC injection is
-deliberately **not** mode-gated, so the operator contract changes on managed clusters too
-(§9), and the `POST /admin/recipes/secrets` `Opaque` fix (§6.5) did **not** ship — the
-third-party BYO-registry path is still the silent failure described there.
+Two earlier carve-outs remain recorded in place: WRC injection is deliberately **not**
+mode-gated, so the operator contract changes on managed clusters too (§9); and §6.5 shipped
+only **partially** — the *minimum bar* (reject a pull-secret-shaped payload instead of
+writing an object the kubelet ignores) is in `recipes.ts` and covered by
+`routes.adminRecipes.test.ts`, so the third-party BYO-registry path is **no longer a silent
+failure** — it is a 400 naming the supported path. What did **not** ship is the structured
+`kind:'imagePull'` endpoint that would let the server build the dockerconfigjson from
+`registry`/`username`/`password`; until then BYO users still create that Secret by hand.
 **Date:** 2026-08-04
 **Area:** control-api · workflow-recipes (WRC) · workflow-runtime-core · image pull · self-hosted
 **Follows:** [`registry-pull-secret-self-provisioning.md`](registry-pull-secret-self-provisioning.md)
@@ -418,10 +422,12 @@ This reuses the same blob builder the platform path already has
 `username: '_'` form to an arbitrary username. The user supplies a registry, a username and
 a token — never base64.
 
-**Minimum bar if the structured endpoint is deferred:** reject a request that is evidently
-trying to create a pull Secret (a `.dockerconfigjson` key, or a docker-config-shaped
-payload) with an error naming the supported path. Accepting it and writing an object the
-kubelet ignores is the one outcome that must not remain.
+**Minimum bar if the structured endpoint is deferred — ✅ SHIPPED.** Reject a request that
+is evidently trying to create a pull Secret (a `.dockerconfigjson` / `.dockercfg` key) with
+an error naming the supported path, rather than writing an object the kubelet ignores.
+Implemented at `control-api/src/routes/admin/recipes.ts` (the `stringData` key check ahead
+of the `type: 'Opaque'` write) and covered in `routes.adminRecipes.test.ts`. The structured
+endpoint above remains deferred (§12-1).
 
 ---
 
