@@ -768,7 +768,9 @@ elif [ "$IMAGE_SOURCE" = ghcr ]; then
   # --only= runs (its header comment claims otherwise; the code at the bottom
   # of the script is unconditional). So every build-images.sh call has to come
   # BEFORE the pull, or it clobbers the puller's manifest -- the one file the
-  # --skip-build staleness check reads -- with a mostly-NOT_BUILT map.
+  # --skip-build staleness check reads -- with a mostly-NOT_BUILT map. (The
+  # `imageSource` key survives that clobber either way: an --only= run carries
+  # the recorded value forward rather than claiming the cluster is local.)
   #
   # No clerum image build runs on this path, so nothing else pulls the public
   # third-party images (postgres, redis, nginx, ...) into the daemon.

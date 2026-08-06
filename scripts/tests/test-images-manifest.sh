@@ -536,26 +536,22 @@ assert_all_three_image_lists_agree() {
 # fed `while read` nothing, `missing` stayed empty, and this case could never
 # fail -- verified by commenting out an invocation and seeing it still print
 # PASS while under-reporting its own invoked count.
-# build-images.sh --verify-only must check the ref the CLUSTER will run, which
-# depends on IMAGE_SOURCE. Checking clerum/* in ghcr mode reports "all images
-# present" against images no pod references, which is worse than no check.
-assert_verify_only_resolves_the_ref_per_mode() {
-  local sh out
-  sh="$REPO_ROOT/scripts/minikube/build-images.sh"
-  out=""
-  grep -q 'IMAGE_SOURCE' "$sh" || out+="build-images.sh does not read IMAGE_SOURCE; "
-  grep -q 'pullInGhcrMode' "$sh" || out+="build-images.sh does not derive its verify set from pullInGhcrMode(); "
-  grep -q 'VERIFY_IMAGES' "$sh" || out+="build-images.sh has no separate VERIFY_IMAGES set; "
-  if [ -z "$out" ]; then
-    pass "build-images.sh derives a mode-aware verify set from the manifest"
-  else
-    fail "$out"
-  fi
-}
+# NOTE: the case that used to sit here grepped build-images.sh for the strings
+# IMAGE_SOURCE, pullInGhcrMode and VERIFY_IMAGES. It died the moment the
+# derivation moved into minikubeVerifyRefs() -- while `if (false && ...)` around
+# the same derivation would have left it green. Its intent, "--verify-only
+# checks the ref the CLUSTER runs", is now covered by execution instead: the
+# derivation by the minikubeVerifyRefs cases below, and the end-to-end
+# behaviour (including which mode is chosen) by
+# scripts/tests/test-minikube-verify-images.sh, which runs the real script
+# against a stubbed daemon holding one mode's refs only.
 
-# The rule has to hold in BOTH modes, not just ghcr: doc-generator-mcp,
-# workflow-custom-sdk-e2e and workflow-plugin-sdk-e2e are published:false, so
-# they are locally built and locally verified even when IMAGE_SOURCE=ghcr.
+# The rule has to hold in BOTH modes, not just ghcr: the published:false images
+# have no ghcr counterpart at all, so whenever they are verified they are
+# verified under their local clerum/* ref, IMAGE_SOURCE notwithstanding.
+# (WHETHER each one is verified in ghcr mode is a separate question, settled by
+# e2e_only in the cases below: doc-generator-mcp is built on both paths, the two
+# sdk-e2e fixtures only by `make minikube-setup-e2e`.)
 assert_the_verify_set_splits_on_published_not_on_mode() {
   local output rc
   output="$(node -e '
@@ -579,6 +575,150 @@ assert_the_verify_set_splits_on_published_not_on_mode() {
     fail "verify-set derivation failed: $output"
   elif [ -z "$output" ]; then
     pass "for every minikube-deployed image, ghcr-vs-local verification splits on published"
+  else
+    fail "$output"
+  fi
+}
+
+# `make minikube-setup` (default ghcr, SEED_PROFILE=minimal) builds exactly one
+# unpublished image, doc-generator-mcp. The two sdk-e2e fixtures are built by
+# `make minikube-setup-e2e` alone and no pull can supply them (published:false),
+# so demanding them on the default path fails a healthy cluster with a remedy
+# that can never work.
+#
+# The expected refs are spelled out rather than re-derived from the manifest:
+# a test that recomputes minikubeVerifyRefs()'s own rule proves nothing.
+assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const refs = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST" })
+      const problems = []
+      const deployed = m.IMAGES.filter(i => i.deployed_to_minikube).length
+      for (const gone of ["workflow-custom-sdk-e2e", "workflow-plugin-sdk-e2e"]) {
+        if (refs.some(r => r.includes(gone))) problems.push(`${gone} is still demanded in ghcr mode`)
+      }
+      if (!refs.includes("clerum/doc-generator-mcp:v1")) {
+        problems.push("doc-generator-mcp dropped; it IS built on the default ghcr path")
+      }
+      if (!refs.includes("ghcr.io/evenfire-ai/control-api:vTEST")) {
+        problems.push("a published image is not verified at its ghcr ref")
+      }
+      if (refs.length !== deployed - 2) {
+        problems.push(`expected ${deployed - 2} refs, got ${refs.length}`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "the default ghcr verify set drops the two E2E fixtures and nothing else"
+  else
+    fail "$output"
+  fi
+}
+
+# The exclusion is an opt-out, not a deletion. `make minikube-setup-e2e` builds
+# both fixtures, and a full LOCAL build builds every fixture unconditionally --
+# origin/dev verified them, and dropping them there would lose real coverage.
+assert_the_e2e_opt_in_and_local_mode_both_keep_the_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const problems = []
+      const wanted = ["clerum/workflow-custom-sdk-e2e:test", "clerum/workflow-plugin-sdk-e2e:test"]
+      const optedIn = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST", includeE2eFixtures: true })
+      for (const ref of wanted) {
+        if (!optedIn.includes(ref)) problems.push(`ghcr+opt-in is missing ${ref}`)
+      }
+      const local = m.minikubeVerifyRefs({ mode: "local" })
+      for (const ref of wanted) {
+        if (!local.includes(ref)) problems.push(`local mode is missing ${ref}`)
+      }
+      if (local.some(r => r.startsWith("ghcr.io/"))) problems.push("local mode emitted a ghcr ref")
+      if (local.length !== m.IMAGES.filter(i => i.deployed_to_minikube).length) {
+        problems.push(`local mode dropped an image: ${local.length} refs`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "both the e2e opt-in and local mode keep the E2E fixtures in the verify set"
+  else
+    fail "$output"
+  fi
+}
+
+# A mode this function cannot serve must throw, not fall through to some
+# default: a silent fallback would emit `...:undefined` refs, and every one of
+# them would then be reported MISSING against a healthy cluster.
+assert_verify_refs_refuses_a_mode_or_tag_it_cannot_serve() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const problems = []
+      const mustThrow = (label, fn) => {
+        try {
+          const refs = fn()
+          problems.push(`${label} returned ${refs.length} refs instead of throwing`)
+        } catch {
+          /* expected */
+        }
+      }
+      mustThrow("an unknown mode", () => m.minikubeVerifyRefs({ mode: "gcr", tag: "vTEST" }))
+      mustThrow("a missing mode", () => m.minikubeVerifyRefs({}))
+      mustThrow("ghcr with no tag", () => m.minikubeVerifyRefs({ mode: "ghcr" }))
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "an unknown mode and a tagless ghcr call both throw"
+  else
+    fail "$output"
+  fi
+}
+
+# e2e_only removes a ref from the default verify set, so a published image must
+# never carry it -- that would silently stop verifying an image every cluster
+# pulls.
+assert_e2e_only_images_are_unpublished_minikube_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const flagged = m.IMAGES.filter(i => i.e2e_only)
+      const problems = []
+      const names = flagged.map(i => i.name).sort().join(",")
+      if (names !== "workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e") {
+        problems.push(`unexpected e2e_only set: ${names || "<none>"}`)
+      }
+      for (const i of flagged) {
+        if (i.published) problems.push(`${i.name} is published AND e2e_only`)
+        if (!i.deployed_to_minikube) problems.push(`${i.name} is e2e_only but not deployed_to_minikube`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "e2e_only read failed: $output"
+  elif [ -z "$output" ]; then
+    pass "e2e_only marks exactly the two unpublished minikube E2E fixtures"
   else
     fail "$output"
   fi
@@ -608,8 +748,11 @@ assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_all_three_image_lists_agree
-assert_verify_only_resolves_the_ref_per_mode
 assert_the_verify_set_splits_on_published_not_on_mode
+assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures
+assert_the_e2e_opt_in_and_local_mode_both_keep_the_fixtures
+assert_verify_refs_refuses_a_mode_or_tag_it_cannot_serve
+assert_e2e_only_images_are_unpublished_minikube_fixtures
 assert_every_defined_case_is_invoked
 
 exit $FAIL

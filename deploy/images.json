@@ -260,13 +260,15 @@
       "name": "workflow-custom-sdk-e2e",
       "path": "tests/e2e/fixtures/custom-workflow-coordinator",
       "published": false,
-      "deployed_to_minikube": true
+      "deployed_to_minikube": true,
+      "e2e_only": true
     },
     {
       "name": "workflow-plugin-sdk-e2e",
       "path": "tests/e2e/fixtures/workflow-plugin-sdk-e2e",
       "published": false,
-      "deployed_to_minikube": true
+      "deployed_to_minikube": true,
+      "e2e_only": true
     },
     {
       "name": "doc-generator-mcp",

@@ -220,6 +220,12 @@ fi
 # Same shape build-images.sh writes. scripts/minikube/full-setup.sh:608 uses
 # this file as a `find -newer` staleness marker, and its absence makes the ghcr
 # path look like "images were never built".
+#
+# `imageSource` is not decoration: `build-images.sh --verify-only` reads it back
+# to decide whether to verify ghcr.io/evenfire-ai/* or clerum/* refs. Without a
+# recorded mode it falls back to the IMAGE_SOURCE env default (ghcr), which is
+# how a locally built cluster came to be reported as "25 of 28 images missing".
+# This writer only ever pulls, so the value is always "ghcr".
 MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
 mkdir -p "$(dirname "$MANIFEST_FILE")"
 {

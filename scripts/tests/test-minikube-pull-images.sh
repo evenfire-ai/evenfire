@@ -203,6 +203,10 @@ assert_it_writes_the_image_manifest_consumers_read() {
     const problems = []
     if (typeof j.generated !== "string" || !j.generated) problems.push("generated")
     if (typeof j.profile !== "string" || !j.profile) problems.push("profile")
+    // Not decoration: build-images.sh --verify-only reads imageSource back to
+    // decide whether to check ghcr.io/evenfire-ai/* or clerum/* refs. Without
+    // it, verify falls back to the IMAGE_SOURCE env default.
+    if (j.imageSource !== "ghcr") problems.push(`imageSource=${JSON.stringify(j.imageSource)}`)
     if (!j.images || typeof j.images !== "object") problems.push("images")
     else {
       const keys = Object.keys(j.images)

@@ -366,6 +366,9 @@ jobs:
       - name: Test the minikube image puller
         run: bash scripts/tests/test-minikube-pull-images.sh
 
+      - name: Test the minikube image verifier (recorded mode, E2E fixtures)
+        run: bash scripts/tests/test-minikube-verify-images.sh
+
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 

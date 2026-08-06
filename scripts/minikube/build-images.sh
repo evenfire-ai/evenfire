@@ -32,6 +32,12 @@
 #   --only=<svc>    Build only the image(s) whose tag matches the substring <svc>
 #                   (e.g. --only=control-api, --only=workflow-recipes). Skips
 #                   public-image pulls and manifest regeneration.
+#   --include-e2e-fixtures
+#                  --verify-only: also demand the two E2E-only fixtures
+#                  (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) in ghcr
+#                  mode. Only `make minikube-setup-e2e` builds them there, so
+#                  the default ghcr verify set leaves them out.
+#                  MINIKUBE_SEED_PROFILE=e2e implies this.
 #   --include-desktop-image
 #                  Include clerum/mcp-host-desktop:test in full builds.
 #   --include-playwright-mcp-image
@@ -93,6 +99,12 @@ esac
 # always builds clerum/* locally when asked to build. In ghcr mode the cluster
 # runs ghcr.io/evenfire-ai/* refs (deploy/components/ghcr-images), so verifying
 # clerum/* would report "all images present" against images no pod references.
+#
+# This env var is only the FALLBACK for --verify-only. What a cluster actually
+# runs is decided by whichever writer last performed a full image acquisition,
+# and that is recorded in .image-manifest.json (see recorded_image_source
+# below). Trusting the env default here is what made `make minikube-verify-
+# images` report "25 of 28 images missing" on a healthy locally built cluster.
 IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
 case "$IMAGE_SOURCE" in
   ghcr|local) ;;
@@ -100,6 +112,38 @@ case "$IMAGE_SOURCE" in
 esac
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
 GHCR_COMPONENT="${PROJECT_DIR}/deploy/components/ghcr-images/kustomization.yaml"
+
+# Written by this script's manifest writer and by pull-images.sh; read back by
+# --verify-only. Declared here, not next to the writer at the bottom, because
+# the verify path (which exits before the writer) needs it too.
+MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+
+# The mode the cluster's images were actually acquired in. Prints nothing when
+# the manifest is absent, unparseable, or records anything other than
+# ghcr|local -- callers then fall back to the IMAGE_SOURCE env var.
+recorded_image_source() {
+  [ -f "$MANIFEST_FILE" ] || return 0
+  node -e '
+    const fs = require("node:fs")
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    } catch {
+      process.exit(0)
+    }
+    if (parsed.imageSource === "ghcr" || parsed.imageSource === "local") {
+      process.stdout.write(parsed.imageSource)
+    }
+  ' "$MANIFEST_FILE"
+}
+
+# The two E2E-only fixtures are built by `make minikube-setup-e2e` alone, which
+# sets SEED_PROFILE=e2e. Honour that as well as the explicit flag so a verify
+# run after an e2e setup checks what that setup actually built.
+INCLUDE_E2E_FIXTURES=false
+if [ "${MINIKUBE_SEED_PROFILE:-}" = "e2e" ]; then
+  INCLUDE_E2E_FIXTURES=true
+fi
 
 # The effective ghcr tag: MINIKUBE_IMAGE_TAG if set (a render-time operator
 # lever), otherwise the committed pin, which is the single source of truth.
@@ -124,6 +168,7 @@ for arg in "$@"; do
     --verify-only) VERIFY_ONLY=true ;;
     --public-only) PUBLIC_ONLY=true ;;
     --only=*) ONLY_SVC="${arg#--only=}" ;;
+    --include-e2e-fixtures) INCLUDE_E2E_FIXTURES=true ;;
     --include-desktop-image) MINIKUBE_BUILD_DESKTOP_IMAGE=true ;;
     --include-playwright-mcp-image) MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true ;;
   esac
@@ -342,15 +387,39 @@ fi
 # The verify set is NOT ALL_IMAGES. ALL_IMAGES is the BUILD list (its ordering
 # and Dockerfile arguments are hand-written per call). What must be verified is
 # the ref each pod will actually pull, which splits on `published`, not on the
-# mode: a published+deployed image runs from ghcr in ghcr mode, and every
-# unpublished one (doc-generator-mcp, workflow-custom-sdk-e2e,
-# workflow-plugin-sdk-e2e) is built and verified locally in BOTH modes.
+# mode: a published+deployed image runs from ghcr in ghcr mode, and the
+# unpublished ones are built locally and verified under their clerum/* ref.
+#
+# doc-generator-mcp is unpublished but built on BOTH paths (full-setup.sh runs
+# `--only=doc-generator-mcp` before the pull), so it is always verified. The
+# two e2e_only fixtures are NOT: on the ghcr path nothing builds them, so
+# demanding them there fails a healthy default cluster with a remedy that can
+# never supply them (they are published:false, so no pull can fetch them). They
+# come back with --include-e2e-fixtures / MINIKUBE_SEED_PROFILE=e2e, and in
+# local mode, where a full build builds every fixture.
 if [ "$VERIFY_ONLY" = true ]; then
+  # What the cluster RUNS decides what gets verified. The env var is only a
+  # fallback for a cluster nothing has built or pulled into yet.
+  VERIFY_SOURCE_ORIGIN="the IMAGE_SOURCE environment variable (no image manifest yet)"
+  RECORDED_IMAGE_SOURCE="$(recorded_image_source)"
+  if [ -n "$RECORDED_IMAGE_SOURCE" ]; then
+    if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
+      log "deploy/minikube/.image-manifest.json records imageSource=${RECORDED_IMAGE_SOURCE};"
+      log "verifying that, not the '${IMAGE_SOURCE}' this shell would have used."
+    fi
+    IMAGE_SOURCE="$RECORDED_IMAGE_SOURCE"
+    VERIFY_SOURCE_ORIGIN="deploy/minikube/.image-manifest.json"
+  fi
+
   echo -e "\n${BOLD}=== Verifying Images in Minikube (IMAGE_SOURCE=${IMAGE_SOURCE}) ===${NC}"
+  log "mode from ${VERIFY_SOURCE_ORIGIN}"
 
   GHCR_TAG=""
   if [ "$IMAGE_SOURCE" = ghcr ]; then
     GHCR_TAG="$(resolve_ghcr_tag)"
+    if [ "$INCLUDE_E2E_FIXTURES" = false ]; then
+      log "excluding the E2E-only fixtures; 'make minikube-setup-e2e' builds them (SEED_PROFILE=e2e to check them)"
+    fi
   fi
 
   VERIFY_IMAGES=()
@@ -359,21 +428,16 @@ if [ "$VERIFY_ONLY" = true ]; then
     VERIFY_IMAGES+=("$ref")
   done < <(node -e '
     import("'"$PROJECT_DIR"'/scripts/release/images-manifest.mjs").then(m => {
-      const mode = process.argv[1]
-      const tag = process.argv[2]
-      const ghcr = new Set(m.pullInGhcrMode().map(i => i.name))
-      for (const image of m.IMAGES) {
-        if (!image.deployed_to_minikube) continue
-        if (mode === "ghcr" && ghcr.has(image.name)) {
-          process.stdout.write(`ghcr.io/evenfire-ai/${image.name}:${tag}\n`)
-        } else {
-          process.stdout.write(`${m.localRef(image)}\n`)
-        }
-      }
+      const refs = m.minikubeVerifyRefs({
+        mode: process.argv[1],
+        tag: process.argv[2],
+        includeE2eFixtures: process.argv[3] === "true",
+      })
+      for (const ref of refs) process.stdout.write(`${ref}\n`)
     }).catch(err => {
       process.stderr.write(`images-manifest read failed: ${err.message}\n`)
       process.exit(1)
-    })' "$IMAGE_SOURCE" "$GHCR_TAG")
+    })' "$IMAGE_SOURCE" "$GHCR_TAG" "$INCLUDE_E2E_FIXTURES")
 
   # An empty verify set means the manifest read failed or the mode is wrong.
   # "0 of 0 images missing" is not a pass.
@@ -412,8 +476,11 @@ if [ "$VERIFY_ONLY" = true ]; then
     echo -e "${GREEN}${BOLD}All ${#VERIFY_IMAGES[@]} images present in minikube.${NC}"
   else
     echo -e "${RED}${BOLD}${fail_count} of ${#VERIFY_IMAGES[@]} images missing!${NC}"
+    # The remedy follows the mode this cluster was actually built in. Telling a
+    # locally built cluster to pull would replace its clerum/*:test tags with
+    # release images -- a fix that breaks exactly what it claims to repair.
     if [ "$IMAGE_SOURCE" = ghcr ]; then
-      echo -e "${RED}Run: make minikube-pull-images${NC}"
+      echo -e "${RED}Run: make minikube-pull-images   (tag ${GHCR_TAG})${NC}"
     else
       echo -e "${RED}Run: make minikube-build-images${NC}"
     fi
@@ -732,13 +799,33 @@ if [ "$SKIP_PUBLIC" = false ]; then
 fi
 
 # ---- Generate build manifest JSON ----
-MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+# MANIFEST_FILE is declared at the top of the script; the verify path needs it
+# too and exits long before this point.
 mkdir -p "$(dirname "$MANIFEST_FILE")"
 echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
+
+# How this cluster's images were acquired, read back by --verify-only.
+# pull-images.sh writes "ghcr"; this script only ever BUILDS, so a full run
+# writes "local" regardless of the IMAGE_SOURCE env var, which describes what
+# the cluster renders, not what just happened here.
+#
+# A partial run (--only=<svc>, and --public-only, which sets ONLY_SVC) acquires
+# a subset and must not redefine the mode: `make minikube-setup-e2e` builds two
+# fixtures with --only AFTER the ghcr pull, and `make minikube-setup` builds
+# doc-generator-mcp with --only BEFORE it. Carry the recorded value forward
+# instead, and fall back to the env var only when nothing is recorded yet.
+MANIFEST_IMAGE_SOURCE="local"
+if [ -n "$ONLY_SVC" ]; then
+  MANIFEST_IMAGE_SOURCE="$(recorded_image_source)"
+  if [ -z "$MANIFEST_IMAGE_SOURCE" ]; then
+    MANIFEST_IMAGE_SOURCE="$IMAGE_SOURCE"
+  fi
+fi
 {
   echo "{"
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
   echo "  \"profile\": \"${PROFILE}\","
+  echo "  \"imageSource\": \"${MANIFEST_IMAGE_SOURCE}\","
   echo "  \"images\": {"
   count=0
   total=${#ALL_IMAGES[@]}

@@ -193,8 +193,9 @@ minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator 
 	@scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 
 .PHONY: minikube-verify-images
-minikube-verify-images: ## Verify every image the cluster runs is present (checks ghcr refs in ghcr mode, clerum/* in local mode)
+minikube-verify-images: ## Verify every image the cluster runs is present. The mode comes from deploy/minikube/.image-manifest.json (what was actually built/pulled), not from IMAGE_SOURCE; SEED_PROFILE=e2e also checks the two E2E fixtures.
 	@IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" \
 		scripts/minikube/build-images.sh --verify-only
 
 .PHONY: minikube-verify
