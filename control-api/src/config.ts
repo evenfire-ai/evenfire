@@ -185,6 +185,10 @@ type Config = {
   gfscBaseUrl: string
   // In-cluster base URL of the writer-only gfsc Service for mutations.
   gfscWriteBaseUrl: string
+  // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the
+  // browser client (GFS_UPLOAD_TIMEOUT_MS) and the control-ui server proxy
+  // (CONTROL_API_PROXY_TIMEOUT_MS): all default 300000. Raise all three together.
+  gfscProxyTimeoutMs: number
   // ClusterIP service URL template for the per-SFS wfc. {hash} is replaced
   // with the 10-char sfsHash that HCC's sharedFileSystemReconciler computes.
   // The template ends without a trailing slash; the proxy concatenates the
@@ -208,6 +212,14 @@ function assertNotPlaceholder(label: string, value: string): void {
       `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
     )
   }
+}
+
+// Parse a millisecond timeout env: must be a positive integer within the
+// setTimeout/AbortSignal safe range (2^31-1); anything else falls back to the
+// default (never lets NaN/overflow reach AbortSignal.timeout).
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback
 }
 
 function parseInternalTokens(input: string): string[] {
@@ -798,6 +810,7 @@ export const config: Config = {
   gfscBaseUrl: process.env.CONTROL_API_GFSC_BASE_URL || 'http://gfsc.gfs.svc.cluster.local:8087',
   gfscWriteBaseUrl:
     process.env.CONTROL_API_GFSC_WRITE_BASE_URL || 'http://gfsc-writer.gfs.svc.cluster.local:8087',
+  gfscProxyTimeoutMs: parseTimeoutMs(process.env.CONTROL_API_GFSC_PROXY_TIMEOUT_MS, 300_000),
   // {hash} = first 10 chars of sha256(`${ns}/${name}`); see sharedFileSystemHash
   // in host-context-controller/src/k8s/sharedFileSystemFactory.ts.
   wfcServiceUrlTemplate:

@@ -59,14 +59,55 @@ export function registerGfsProxyRoute(router: Router): void {
         headers['content-type'] = 'application/json'
       }
 
-      const upstreamRes = await fetch(target, {
-        method: req.method,
-        headers,
-        body:
-          req.method === 'GET' || req.method === 'HEAD'
-            ? undefined
-            : JSON.stringify(req.body ?? {}),
-      })
+      let upstreamRes: Response
+      try {
+        upstreamRes = await fetch(target, {
+          method: req.method,
+          headers,
+          body:
+            req.method === 'GET' || req.method === 'HEAD'
+              ? undefined
+              : JSON.stringify(req.body ?? {}),
+          // Homologous with the browser client and control-ui proxy (all 300s by
+          // default). Without this the fetch had NO timeout: a slow/large upload or
+          // a hung gfsc would pin the connection indefinitely.
+          signal: AbortSignal.timeout(config.gfscProxyTimeoutMs),
+        })
+      } catch (err) {
+        // Never silent: a failed or timed-out gfsc fetch is logged with the target.
+        const timedOut = err instanceof Error && err.name === 'TimeoutError'
+        rootLogger.error(
+          { err, target, method: req.method, timeoutMs: config.gfscProxyTimeoutMs },
+          timedOut
+            ? 'gfs operator proxy: gfsc fetch timed out'
+            : 'gfs operator proxy: gfsc fetch failed'
+        )
+        res
+          .status(timedOut ? 504 : 502)
+          .json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+        return
+      }
+
+      if (upstreamRes.status >= 400) {
+        // Error envelopes are small JSON: buffer, LOG (so a gfsc 5xx is never
+        // undiagnosable at this hop again — the base64 RangeError 500 was invisible
+        // here before), then forward the body verbatim.
+        const errorBody = await upstreamRes.text()
+        const logCtx = {
+          target,
+          method: req.method,
+          status: upstreamRes.status,
+          body: errorBody.slice(0, 2048),
+        }
+        if (upstreamRes.status >= 500)
+          rootLogger.error(logCtx, 'gfs operator proxy: gfsc upstream error')
+        else rootLogger.warn(logCtx, 'gfs operator proxy: gfsc upstream client error')
+        res.status(upstreamRes.status)
+        const contentType = upstreamRes.headers.get('content-type')
+        if (contentType) res.setHeader('content-type', contentType)
+        res.send(errorBody)
+        return
+      }
 
       res.status(upstreamRes.status)
       for (const header of PASSTHROUGH_RESPONSE_HEADERS) {

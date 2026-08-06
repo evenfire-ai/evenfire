@@ -71,8 +71,18 @@ export interface ServingDeps {
   now?: () => number;
 }
 
-/** Largest mutation body gfsc accepts before failing loud with payload_too_large. */
-const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+/**
+ * Largest mutation body gfsc accepts before failing loud with payload_too_large.
+ * Configurable via GFS_MAX_WRITE_BODY_BYTES so ops can raise it beyond the 16MiB
+ * default (which already fits base64(10MB) ≈ 13.98MB). A non-integer or
+ * non-positive value falls back to the default (fail-safe; never NaN).
+ * NOTE: to take effect on the gfsc pod this env must be plumbed through the
+ * host-context-controller gfsc template (deferred — inert while the default holds).
+ */
+const MAX_WRITE_BODY_BYTES = ((): number => {
+  const raw = Number(process.env.GFS_MAX_WRITE_BODY_BYTES);
+  return Number.isInteger(raw) && raw > 0 ? raw : 16 * 1024 * 1024;
+})();
 const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 
@@ -210,6 +220,16 @@ export class GfsServingHandler {
       }
     } catch (err) {
       const { status, body } = toResponse(err);
+      if (status >= 500) {
+        // A 5xx must never be invisible: an unknown throw (e.g. the base64
+        // RangeError that produced a bogus `internal` 500) previously left no
+        // trace anywhere in the system. Log code + stack (never the body/content).
+        console.error(
+          `[gfsc] ${method} ${req.url ?? "?"} -> ${status} ${body.error.code}: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`
+        );
+      }
       if (!res.headersSent) sendJson(res, status, body);
       else res.end(); // a content stream already started; just terminate
     } finally {
@@ -592,8 +612,13 @@ function readContentBuffer(body: Record<string, unknown>): Buffer {
 
 function decodeBase64Content(encoded: string): Buffer {
   if (encoded.length === 0) return Buffer.alloc(0);
-  const standardBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  if (!standardBase64.test(encoded)) {
+  // Canonical base64: length is a multiple of 4, only base64 chars, and padding
+  // ('=' x0-2) only at the very end. This uses a single character-class star,
+  // which V8 compiles to a linear loop. The previous `/(?:[A-Za-z0-9+/]{4})*.../`
+  // used a GROUPED quantifier that pushes an Irregexp backtrack frame per 4-char
+  // group and threw `RangeError: Maximum call stack size exceeded` above ~4.47M
+  // chars (~3.2MB raw) — surfacing as a bogus 500 `internal` on any large upload.
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
     throw new GfsError("path_invalid", "'contentBase64' must be valid base64");
   }
   return Buffer.from(encoded, "base64");

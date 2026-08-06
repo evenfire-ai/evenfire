@@ -79,6 +79,11 @@ spec:
           value: "mcp-host,sandbox-recipes"
         - name: CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        # control-api→gfsc proxy fetch timeout (ms). Homologous with the browser
+        # client and the control-ui server proxy (all 300s). Raise all three
+        # together or none. Guards large GFS uploads from a premature cut.
+        - name: CONTROL_API_GFSC_PROXY_TIMEOUT_MS
+          value: "300000"
         - name: CONTROL_API_PG_CONNECTION_STRING
           valueFrom:
             secretKeyRef:

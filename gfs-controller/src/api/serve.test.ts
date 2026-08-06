@@ -476,6 +476,27 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect((calls[0].input as { content: Buffer }).content.toString("utf8")).toBe("new");
   });
 
+  it("200 replace accepts a large (>4.47MB) base64 body without a regex stack overflow", async () => {
+    // 5MiB raw -> ~6.99MB base64, well past the ~4.47MB-char threshold where the
+    // previous grouped-quantifier regex /(?:[A-Za-z0-9+/]{4})*.../ overflowed V8's
+    // regexp backtrack stack (RangeError -> bogus 500 `internal` on any large upload).
+    const rawBytes = 5 * 1024 * 1024;
+    const largeBase64 = Buffer.alloc(rawBytes, 0x41).toString("base64");
+    const res = new FakeRes();
+    const { d, calls } = writeDeps();
+    await run(
+      d,
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { contentBase64: largeBase64, ifMatch: 2 },
+      }),
+      res
+    );
+    expect(res.statusCode).toBe(200);
+    expect((calls[0].input as { content: Buffer }).content.length).toBe(rawBytes);
+  });
+
   it("400 path_invalid for invalid encoded file content", async () => {
     const res = new FakeRes();
     const { d, calls, authzOps } = writeDeps();
