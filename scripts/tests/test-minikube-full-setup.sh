@@ -505,41 +505,98 @@ assert_the_tag_override_copy_is_a_whole_deploy_tree_with_the_new_tag() {
 # "Run without --skip-build to rebuild" is wrong advice in ghcr mode: nothing
 # was built, and rebuilding is exactly what the default path exists to avoid.
 #
-# The block is extracted with awk, not `sed -n '/start/,/^else$/p'`: the sed
-# range would run past the SKIP_BUILD branch and swallow the
-# `elif [ "$IMAGE_SOURCE" = ghcr ]` acquisition arm below it, so a staleness
-# warning with no mode-awareness left in it would still match on the elif and
-# report PASS. awk stops BEFORE the terminating elif/else.
+# A grep-only check over the OLD wide awk range (from the "Even with
+# --skip-build" comment down to the terminating elif/else) is satisfied by
+# text that lives entirely in the manifest-ABSENT sibling sub-block
+# ("Run without --skip-build, or 'make minikube-pull-images'..."), so it stays
+# green even if the manifest-PRESENT ghcr/local arms below are swapped or
+# deleted outright (both verified live). The range is narrowed here to just
+# the manifest-PRESENT "NEWEST_SRC found" if/else/fi -- anchored on the
+# mode-independent `-n "$NEWEST_SRC"` text, with the closing `fi` found by
+# depth-counting `; then`/`fi` pairs rather than by line number or
+# indentation -- and then the extracted REAL source is `eval`'d with stub
+# warn()/log() functions and IMAGE_SOURCE set to each mode in turn. That is
+# genuine evaluated behaviour: a swap of the `= ghcr` operand (or a deletion
+# of the arms) changes what gets printed for a given mode, not just what text
+# is reachable somewhere in the block.
+extract_full_setup_staleness_arms_block() {
+  local sh="$1"
+  awk '
+    $0 ~ /-n "\$NEWEST_SRC"/ && !cap { cap = 1; depth = 0 }
+    cap {
+      print
+      line = $0
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line ~ /; *then$/) depth++
+      if (line == "fi") { depth--; if (depth == 0) exit }
+    }
+  ' "$sh"
+}
+
+run_full_setup_staleness_block() {
+  local mode="$1" block="$2" tmpfile out
+  tmpfile="$(mktemp)"
+  {
+    printf 'warn() { printf "WARN:%%s\\n" "$*"; }\n'
+    printf 'log() { printf "LOG:%%s\\n" "$*"; }\n'
+    printf '%s\n' "$block"
+  } > "$tmpfile"
+  out="$(IMAGE_SOURCE="$mode" NEWEST_SRC=fake/newer/file EFFECTIVE_IMAGE_TAG=v1.2.3 bash "$tmpfile" 2>&1)"
+  rm -f "$tmpfile"
+  printf '%s' "$out"
+}
+
 assert_the_skip_build_staleness_advice_is_mode_aware() {
-  local sh block
+  local sh block ghcr_out local_out problem=""
   sh="$REPO_ROOT/scripts/minikube/full-setup.sh"
-  block="$(awk '/Even with --skip-build, warn if local code is newer/{f=1}
-                f && /^(elif|else)/{exit}
-                f' "$sh")"
+  block="$(extract_full_setup_staleness_arms_block "$sh")"
   if [ -z "$block" ]; then
-    fail "could not locate the --skip-build staleness block in $sh"
+    fail "could not locate the --skip-build staleness NEWEST_SRC arms in $sh"
     return
   fi
-  if grep -q 'IMAGE_SOURCE' <<< "$block" \
-     && grep -q 'minikube-pull-images\|IMAGE_SOURCE=local' <<< "$block"; then
-    pass "the --skip-build staleness warning branches on IMAGE_SOURCE"
+
+  ghcr_out="$(run_full_setup_staleness_block ghcr "$block")"
+  local_out="$(run_full_setup_staleness_block local "$block")"
+
+  grep -q 'pre-gate-sync' <<< "$ghcr_out" || problem+="ghcr advice (evaluated) is missing the pre-gate-sync mention; "
+  grep -q 'minikube-setup-local' <<< "$ghcr_out" || problem+="ghcr advice (evaluated) is missing the minikube-setup-local mention; "
+  grep -qi 'rebuild' <<< "$ghcr_out" && problem+="ghcr advice (evaluated) wrongly says rebuild: $ghcr_out; "
+
+  grep -qi 'rebuild' <<< "$local_out" || problem+="local advice (evaluated) is missing rebuild guidance: $local_out; "
+  grep -q 'pre-gate-sync' <<< "$local_out" && problem+="local advice (evaluated) wrongly mentions pre-gate-sync: $local_out; "
+
+  if [ -z "$problem" ]; then
+    pass "the --skip-build staleness warning branches on IMAGE_SOURCE (evaluated per mode, not just mentioned)"
   else
-    fail "the --skip-build staleness block still gives build-only advice: $block"
+    fail "$problem"
   fi
 }
 
 # A contributor must be able to tell from the transcript which images the
 # cluster is about to run and where the tag came from.
-assert_the_banner_names_the_source_the_tag_and_its_origin() {
-  local sh
-  sh="$REPO_ROOT/scripts/minikube/full-setup.sh"
-  local missing=""
-  grep -q 'print_image_source_banner' "$sh" || missing+="no print_image_source_banner function; "
-  grep -q 'TAG_ORIGIN' "$sh" || missing+="no TAG_ORIGIN variable; "
-  if [ -z "$missing" ]; then
-    pass "the setup prints an image-source banner naming source, tag and origin"
+#
+# Grepping the source for `print_image_source_banner` and `TAG_ORIGIN` only
+# proves those names exist SOMEWHERE in the file -- the function definition
+# and the TAG_ORIGIN= assignments satisfy both greps even if the call site
+# that actually invokes the banner is deleted (verified live: removing the
+# bare `print_image_source_banner` call still leaves both greps green). This
+# instead runs the real script through the existing config-only seam (see
+# `full_setup_resolves` above) and asserts on the CAPTURED STDOUT the banner
+# writes -- observed output, not source text -- so a deleted call site prints
+# nothing and the assertion fails.
+assert_the_banner_prints_the_image_source_tag_and_origin() {
+  local out committed_tag problem=""
+  out="$(env PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+    bash "$REPO_ROOT/scripts/minikube/full-setup.sh" 2>&1)"
+  committed_tag="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\).*$/\1/p' \
+    "$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml" | sort -u | head -1)"
+  grep -q 'Images: PULLED from ghcr.io/evenfire-ai' <<< "$out" || problem+="banner did not name the image source; "
+  [ -n "$committed_tag" ] && grep -q "tag: *${committed_tag}" <<< "$out" || problem+="banner did not print the committed tag '${committed_tag}'; "
+  grep -q 'origin: *committed pin in deploy/components/ghcr-images/kustomization.yaml' <<< "$out" || problem+="banner did not name the tag's origin; "
+  if [ -z "$problem" ]; then
+    pass "the setup prints an image-source banner naming source, tag and origin (observed stdout)"
   else
-    fail "$missing"
+    fail "$problem got: $out"
   fi
 }
 
@@ -590,7 +647,7 @@ assert_local_mode_renders_the_unchanged_overlays
 assert_the_tag_override_copies_the_tree_and_leaves_the_commit_alone
 assert_the_tag_override_copy_is_a_whole_deploy_tree_with_the_new_tag
 assert_the_skip_build_staleness_advice_is_mode_aware
-assert_the_banner_names_the_source_the_tag_and_its_origin
+assert_the_banner_prints_the_image_source_tag_and_origin
 assert_the_tag_origin_distinguishes_pin_from_override
 assert_every_defined_case_is_invoked
 
