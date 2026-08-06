@@ -684,7 +684,12 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     await submitSet(ALL_KEYS)
 
     expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
-    expect(screen.queryByText(/Rotation failed/i)).not.toBeInTheDocument()
+    // A successful retry must actually land the submit in the set-mode
+    // in-flight state, not merely avoid the ROTATE failure copy (which can
+    // never render in set mode regardless of outcome — see index.tsx:479-481 —
+    // so asserting its absence alone would pass vacuously).
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
   })
 
   it('reports the original create error when the retry also fails', async () => {
