@@ -48,7 +48,7 @@ function applyProdEnv(env: Record<string, string | undefined>): void {
   env.CONTROL_API_OAUTH_STATE_HMAC_SECRET = randomBytes(32).toString('hex')
   env.CONTROL_API_OAUTH_ENCRYPTION_KEY = randomBytes(32).toString('hex')
   env.CONTROL_API_INTERNAL_SERVICE_TOKENS =
-    'external-rest-api=prod-external-rest-api-token,rpc-proxy=prod-rpc-proxy-token,webhook-proxy=prod-webhook-proxy-token'
+    'external-rest-api=prod-external-rest-api-token,rpc-proxy=prod-rpc-proxy-token,webhook-proxy=prod-webhook-proxy-token,auth-proxy=prod-auth-proxy-token'
 }
 
 describe('config: production voucher key guard', () => {

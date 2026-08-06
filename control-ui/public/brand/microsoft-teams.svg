@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="4 4 36 38">
+  <title>Microsoft Teams</title>
+  <path fill="url(#a)" d="M22 20h12a6 6 0 0 1 6 6v10a6 6 0 0 1-12 0V26a6 6 0 0 0-6-6"/>
+  <path fill="url(#b)" d="M8 24a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6v12a6 6 0 0 0 6 6H18A10 10 0 0 1 8 32z"/>
+  <path fill="url(#c)" fill-opacity=".7" d="M8 24a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6v12a6 6 0 0 0 6 6H18A10 10 0 0 1 8 32z"/>
+  <path fill="url(#d)" fill-opacity=".7" d="M8 24a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6v12a6 6 0 0 0 6 6H18A10 10 0 0 1 8 32z"/>
+  <circle cx="33" cy="13" r="5" fill="url(#e)"/>
+  <circle cx="33" cy="13" r="5" fill="url(#f)" fill-opacity=".46"/>
+  <circle cx="33" cy="13" r="5" fill="url(#g)" fill-opacity=".4"/>
+  <circle cx="18" cy="10" r="6" fill="url(#h)"/>
+  <circle cx="18" cy="10" r="6" fill="url(#i)" fill-opacity=".6"/>
+  <circle cx="18" cy="10" r="6" fill="url(#j)" fill-opacity=".5"/>
+  <rect width="16" height="16" x="4" y="23" fill="url(#k)" rx="3.25"/>
+  <rect width="16" height="16" x="4" y="23" fill="url(#l)" fill-opacity=".7" rx="3.25"/>
+  <path fill="#fff" d="M15.48 28.1h-2.45v7.47h-2.06V28.1H8.52v-1.67h6.96z"/>
+  <defs>
+    <radialGradient id="a" cx="0" cy="0" r="1" gradientTransform="matrix(13.48 0 0 33.27 39.8 22.17)" gradientUnits="userSpaceOnUse"><stop stop-color="#a98aff"/><stop offset=".14" stop-color="#8c75ff"/><stop offset=".565" stop-color="#5f50e2"/><stop offset=".9" stop-color="#3c2cb8"/></radialGradient>
+    <radialGradient id="b" cx="0" cy="0" r="1" gradientTransform="rotate(68.15 -7.72 14.71)scale(32.75 33.12)" gradientUnits="userSpaceOnUse"><stop stop-color="#85c2ff"/><stop offset=".69" stop-color="#7588ff"/><stop offset="1" stop-color="#6459fe"/></radialGradient>
+    <linearGradient id="c" x1="20.59" x2="20.59" y1="18" y2="42" gradientUnits="userSpaceOnUse"><stop offset=".8" stop-color="#6864f6" stop-opacity="0"/><stop offset="1" stop-color="#5149de"/></linearGradient>
+    <radialGradient id="d" cx="0" cy="0" r="1" gradientTransform="rotate(113.33 8.09 17.64)scale(19.22 15.43)" gradientUnits="userSpaceOnUse"><stop stop-color="#bd96ff"/><stop offset=".687" stop-color="#bd96ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="e" cx="0" cy="0" r="1" gradientTransform="matrix(0 -10 12.62 0 33 11.57)" gradientUnits="userSpaceOnUse"><stop offset=".268" stop-color="#6868f7"/><stop offset="1" stop-color="#3923b1"/></radialGradient>
+    <radialGradient id="f" cx="0" cy="0" r="1" gradientTransform="rotate(40.05 0 44.87)scale(7.15 10.34)" gradientUnits="userSpaceOnUse"><stop offset=".271" stop-color="#a1d3ff"/><stop offset=".813" stop-color="#a1d3ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g" cx="0" cy="0" r="1" gradientTransform="rotate(-41.66 32.12 -43.42)scale(8.51 20.88)" gradientUnits="userSpaceOnUse"><stop stop-color="#e3acfd"/><stop offset=".816" stop-color="#9fa2ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="h" cx="0" cy="0" r="1" gradientTransform="matrix(0 -12 15.15 0 18 8.29)" gradientUnits="userSpaceOnUse"><stop offset=".268" stop-color="#8282ff"/><stop offset="1" stop-color="#3923b1"/></radialGradient>
+    <radialGradient id="i" cx="0" cy="0" r="1" gradientTransform="rotate(40.05 -3.15 21.42)scale(8.58 12.4)" gradientUnits="userSpaceOnUse"><stop offset=".271" stop-color="#a1d3ff"/><stop offset=".813" stop-color="#a1d3ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="j" cx="0" cy="0" r="1" gradientTransform="rotate(-41.66 20.38 -26.52)scale(10.22 25.06)" gradientUnits="userSpaceOnUse"><stop stop-color="#e3acfd"/><stop offset=".816" stop-color="#9fa2ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="k" cx="0" cy="0" r="1" gradientTransform="rotate(45 -25.76 16.33)scale(22.63)" gradientUnits="userSpaceOnUse"><stop offset=".047" stop-color="#688eff"/><stop offset=".947" stop-color="#230f94"/></radialGradient>
+    <radialGradient id="l" cx="0" cy="0" r="1" gradientTransform="matrix(0 11.2 -13.07 0 12 32.6)" gradientUnits="userSpaceOnUse"><stop offset=".571" stop-color="#6965f6" stop-opacity="0"/><stop offset="1" stop-color="#8f8fff"/></radialGradient>
+  </defs>
+</svg>

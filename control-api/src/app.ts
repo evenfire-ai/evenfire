@@ -14,12 +14,14 @@ import { createAdminAuthRouter } from './routes/admin/auth.js'
 import { createAdminRouter } from './routes/admin/index.js'
 import { createWorkflowsAdminRouter } from './routes/admin/workflows/index.js'
 import { createAuthRoutes } from './routes/auth/index.js'
+import { createIdentityProviderCallbackRouter } from './routes/external/identityProviderCallback.js'
 import { createExternalRouter } from './routes/external/index.js'
 import { createOAuthCallbackRouter } from './routes/external/oauthCallback.js'
 import { createGfsRouter } from './routes/gfs/index.js'
 import { createHealthRouter } from './routes/health.js'
 import { createInternalAdministrativeEventsRouter } from './routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEvents.js'
+import { createInternalAuthCallbackRouter } from './routes/internal/authCallback.js'
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from './routes/internal/infrastructureTelemetryEvents.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
@@ -186,12 +188,14 @@ export function createApp(gateway: K8sGateway) {
   api.use(createInternalUsageEventsRouter())
   api.use(createInternalPluginWorkloadSdkRouter())
   api.use(createInternalBudgetsCheckRouter())
+  api.use(createInternalAuthCallbackRouter(gateway))
   api.use(createInternalWebhooksRouter(gateway))
   api.use(createInternalWorkflowApprovalReaderRouter(gateway))
   // OAuth callback receives provider redirects; auth is the signed `state`
   // parameter, not a Clerum cookie or service token. Mounted BEFORE
   // requireInternalToken so the public can hit it.
   api.use(createOAuthCallbackRouter(gateway))
+  api.use(createIdentityProviderCallbackRouter())
   api.use(createAuthRoutes(gateway))
   // Recipe OAuth broker — background workloads present a per-recipe broker
   // token (Bearer, aud=oauth-broker). Auth is the broker token itself, not a

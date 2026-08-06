@@ -1,6 +1,13 @@
 {
   "images": [
     {
+      "name": "auth-proxy",
+      "path": "auth-proxy",
+      "source_paths": ["auth-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
       "name": "channel-reader",
       "path": "channel-reader",
       "source_paths": ["channel-reader/**"],

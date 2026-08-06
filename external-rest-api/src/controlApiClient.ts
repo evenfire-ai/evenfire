@@ -216,32 +216,3 @@ export async function controlApiStreamRequest(
   }
   return response
 }
-
-/**
- * PUBLIC passthrough GET to control-api. Unlike the other helpers this does NOT
- * parse JSON, attach a user session, or throw on a non-2xx status — it relays
- * control-api's response verbatim (status, content-type, body). Used by the OAuth
- * callback route, where the provider redirects the user's browser to a public,
- * state-authenticated control-api endpoint that returns an HTML page on success
- * or a JSON error otherwise. `rawQueryString` (leading '?') is appended as-is so
- * the signed `state` and `code` are never re-encoded.
- */
-export async function controlApiPassthroughGet(
-  path: string,
-  rawQueryString: string
-): Promise<{ status: number; contentType: string; body: string }> {
-  const base = config.controlApiBaseUrl.replace(/\/+$/, '')
-  const normalizedPath = path.startsWith('/') ? path : `/${path}`
-  const response = await fetch(`${base}${normalizedPath}${rawQueryString}`, {
-    method: 'GET',
-    headers: {
-      authorization: `Bearer ${config.controlApiServiceToken}`,
-      'x-service-token': config.controlApiServiceName,
-    },
-  })
-  return {
-    status: response.status,
-    contentType: response.headers.get('content-type') ?? 'text/plain; charset=utf-8',
-    body: await response.text(),
-  }
-}

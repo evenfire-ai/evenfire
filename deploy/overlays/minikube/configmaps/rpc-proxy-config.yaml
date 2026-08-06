@@ -25,38 +25,38 @@ metadata:
   labels:
     app: rpc-proxy
 data:
-  RPC_PROXY_PORT: "8094"
+  RPC_PROXY_PORT: '8094'
   # Comma-separated CORS origins: Control UI (3000) + external-rest-api (8091).
-  RPC_PROXY_CORS_ORIGIN: "http://localhost:3000,http://localhost:8091"
-  RPC_PROXY_JWT_ISSUER: "control-api"
-  RPC_PROXY_JWT_AUDIENCE: "rpc-proxy"
-  RPC_PROXY_CONTROL_API_BASE_URL: "http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1"
-  RPC_PROXY_CONTROL_API_CACHE_TTL_MS: "30000"
-  RPC_PROXY_UPSTREAM_TIMEOUT_MS: "60000"
-  RPC_PROXY_MAX_TOKEN_LENGTH: "4096"
-  RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB: "250"
-  RPC_PROXY_ALLOWED_METHOD_PATTERN: "^[a-zA-Z0-9_./:-]{1,120}$"
-  RPC_PROXY_STREAM_MAX_LIFETIME_MS: "600000"
-  RPC_PROXY_STREAM_INTERVAL_MS: "3000"
-  RPC_PROXY_STREAM_KEEPALIVE_MS: "15000"
-  RPC_PROXY_STREAM_MAX_CONCURRENT: "1000"
-  RPC_PROXY_STREAM_MAX_PER_USER: "3"
-  RPC_PROXY_STREAM_MAX_PER_USER_HOST: "1"
-  RPC_PROXY_STREAM_IDLE_TIMEOUT_MS: "60000"
-  RPC_PROXY_ACTIVITY_STREAM_MAX_LIFETIME_MS: "600000"
-  RPC_PROXY_ACTIVITY_STREAM_KEEPALIVE_MS: "15000"
-  RPC_PROXY_ACTIVITY_STREAM_IDLE_TIMEOUT_MS: "60000"
-  RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT: "1000"
-  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER: "3"
-  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST: "3"
-  RPC_PROXY_HCC_BASE_URL: "http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081"
-  RPC_PROXY_HOST_NAMESPACE: "mcp-host"
-  RPC_PROXY_DESKTOP_COOKIE_SECRET: "minikube-desktop-cookie-secret-32bytes"
-  RPC_PROXY_DESKTOP_API_TOKEN: "minikube-desktop-api-token-shared-xxxxxxxx"
+  RPC_PROXY_CORS_ORIGIN: 'http://localhost:3000,http://localhost:8091'
+  RPC_PROXY_JWT_ISSUER: 'control-api'
+  RPC_PROXY_JWT_AUDIENCE: 'rpc-proxy'
+  RPC_PROXY_CONTROL_API_BASE_URL: 'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1'
+  RPC_PROXY_CONTROL_API_CACHE_TTL_MS: '30000'
+  RPC_PROXY_UPSTREAM_TIMEOUT_MS: '60000'
+  RPC_PROXY_MAX_TOKEN_LENGTH: '4096'
+  RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB: '250'
+  RPC_PROXY_ALLOWED_METHOD_PATTERN: '^[a-zA-Z0-9_./:-]{1,120}$'
+  RPC_PROXY_STREAM_MAX_LIFETIME_MS: '600000'
+  RPC_PROXY_STREAM_INTERVAL_MS: '3000'
+  RPC_PROXY_STREAM_KEEPALIVE_MS: '15000'
+  RPC_PROXY_STREAM_MAX_CONCURRENT: '1000'
+  RPC_PROXY_STREAM_MAX_PER_USER: '3'
+  RPC_PROXY_STREAM_MAX_PER_USER_HOST: '1'
+  RPC_PROXY_STREAM_IDLE_TIMEOUT_MS: '60000'
+  RPC_PROXY_ACTIVITY_STREAM_MAX_LIFETIME_MS: '600000'
+  RPC_PROXY_ACTIVITY_STREAM_KEEPALIVE_MS: '15000'
+  RPC_PROXY_ACTIVITY_STREAM_IDLE_TIMEOUT_MS: '60000'
+  RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT: '1000'
+  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER: '3'
+  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST: '3'
+  RPC_PROXY_HCC_BASE_URL: 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
+  RPC_PROXY_HOST_NAMESPACE: 'mcp-host'
+  RPC_PROXY_DESKTOP_COOKIE_SECRET: 'minikube-desktop-cookie-secret-32bytes'
+  RPC_PROXY_DESKTOP_API_TOKEN: 'minikube-desktop-api-token-shared-xxxxxxxx'
   # Spec §11.5 sandbox-ui session cookie HMAC key. ≥32 bytes per
   # rpc-proxy/src/config.ts validation.
-  RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: "minikube-sandbox-ui-cookie-secret-32by"
-  # Spec §9.9 OAuth callback URL base — control-api's public host as the
+  RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: 'minikube-sandbox-ui-cookie-secret-32by'
+  # Spec §9.9 OAuth callback URL base — auth-proxy's public host as the
   # user's browser sees it. In minikube this is the port-forward at
-  # localhost:8090; in production the cluster's public ingress.
-  RPC_PROXY_OAUTH_CALLBACK_BASE_URL: "http://localhost:8090"
+  # localhost:8096; in production the cluster's public auth ingress.
+  RPC_PROXY_OAUTH_CALLBACK_BASE_URL: 'http://127.0.0.1:8096'

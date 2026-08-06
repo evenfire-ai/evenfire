@@ -21,6 +21,18 @@ const clerum = Object.freeze({
     deleteRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:deleteRuntimeConfig', { optionId }),
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
+    getIdentityProviders: () => ipcRenderer.invoke('auth:getIdentityProviders'),
+    startMicrosoftIdentityProviderLogin: (connectionId: string) =>
+      ipcRenderer.invoke('auth:startMicrosoftIdentityProviderLogin', { connectionId }),
+    completeIdentityProviderLogin: (code: string) =>
+      ipcRenderer.invoke('auth:completeIdentityProviderLogin', { code }),
+    consumeIdentityProviderLoginCode: () =>
+      ipcRenderer.invoke('auth:consumeIdentityProviderLoginCode'),
+    onIdentityProviderLoginCode: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:identityProviderLoginCodeAvailable', listener)
+      return () => ipcRenderer.off('auth:identityProviderLoginCodeAvailable', listener)
+    },
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),

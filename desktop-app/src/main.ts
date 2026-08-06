@@ -264,6 +264,23 @@ function handleEvenfireUrl(rawUrl: string): void {
     return
   }
 
+  if (hostname === 'auth' && parsed.pathname === '/microsoft/callback') {
+    const code = parsed.searchParams.get('code') || ''
+    const providerError = parsed.searchParams.get('error') || ''
+    const providerErrorMessage = parsed.searchParams.get('errorMessage') || ''
+    if (!code && !providerError) return
+    appService.queueIdentityProviderLoginCode(
+      code || `error:${providerErrorMessage || 'Microsoft sign-in could not be completed.'}`
+    )
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      mainWindow.webContents.send('auth:identityProviderLoginCodeAvailable')
+    }
+    return
+  }
+
   if (hostname !== 'desktop-setup') return
 
   const email = parsed.searchParams.get('email') || ''

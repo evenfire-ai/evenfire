@@ -10084,6 +10084,27 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   margin-top: 2px;
 }
 
+.auth-provider-login .ui-button img {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+}
+
+.auth-login-loading {
+  min-height: 156px;
+  display: grid;
+  place-items: center;
+}
+
+.auth-login-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 3px solid rgba(var(--edge-rgb), 0.35);
+  border-top-color: var(--accent);
+  animation: auth-button-spin 0.75s linear infinite;
+}
+
 .auth-button-loading {
   display: inline-flex;
   align-items: center;

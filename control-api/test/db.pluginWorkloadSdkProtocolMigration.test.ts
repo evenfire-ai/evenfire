@@ -70,16 +70,19 @@ describe('plugin workload SDK protocol migration', () => {
     expect(contractEntries).toEqual([['plugin_workload_sdk_credential_ticket_jtis', 'legacy_dml']])
   })
 
-  it('registers the credential-ticket ACL repair as migration 0089', () => {
+  it('keeps the credential-ticket ACL repair before the identity-provider migration', () => {
     const dbPath = join(dirname(fileURLToPath(import.meta.url)), '../src/db.ts')
     const source = readFileSync(dbPath, 'utf8')
 
     expect(source).toMatch(
       /version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',\s+apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess/
     )
-    expect(
-      source.indexOf("version: '0089_plugin_workload_sdk_credential_ticket_runtime_access'")
-    ).toBe(source.lastIndexOf("version: '"))
+    const credentialRepairIndex = source.indexOf(
+      "version: '0089_plugin_workload_sdk_credential_ticket_runtime_access'"
+    )
+    const identityProviderIndex = source.indexOf("version: '0090_identity_provider_connections'")
+    expect(credentialRepairIndex).toBeLessThan(identityProviderIndex)
+    expect(identityProviderIndex).toBe(source.lastIndexOf("version: '"))
   })
 
   it('preserves only complete ordered active policies while adding the attempt ledger', async () => {

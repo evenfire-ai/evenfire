@@ -8,6 +8,8 @@ import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
 import { PROFILE_ROUTES } from '@constants/routes'
+import { getIdentityProviders, startMicrosoftIdentityProviderLogin } from '@lib/api'
+import type { PublicIdentityProviderConnection } from '@/app/types/identityProviders'
 import type { LoginPanelProps } from './types'
 
 export function LoginPanel({
@@ -18,6 +20,10 @@ export function LoginPanel({
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [providers, setProviders] = useState<PublicIdentityProviderConnection[]>([])
+  const [selectedProviderId, setSelectedProviderId] = useState('')
+  const [loadingProviders, setLoadingProviders] = useState(true)
+  const [usePassword, setUsePassword] = useState(false)
   const forgotPasswordHref = PROFILE_ROUTES.forgotPassword({
     email: email.trim().toLowerCase(),
   })
@@ -26,6 +32,45 @@ export function LoginPanel({
     const queryEmail = new URLSearchParams(window.location.search).get('email')
     if (queryEmail) setEmail(queryEmail.trim().toLowerCase())
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadProviders() {
+      try {
+        const response = await getIdentityProviders()
+        if (cancelled) return
+        const items = response.items || []
+        setProviders(items)
+        setSelectedProviderId(items[0]?.id || '')
+        setUsePassword(items.length === 0)
+      } catch {
+        if (!cancelled) setUsePassword(true)
+      } finally {
+        if (!cancelled) setLoadingProviders(false)
+      }
+    }
+    void loadProviders()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function handleMicrosoftLogin() {
+    if (!selectedProviderId) return
+    setIsSubmitting(true)
+    setError('')
+    try {
+      const response = await startMicrosoftIdentityProviderLogin({
+        connectionId: selectedProviderId,
+        flow: 'profile_login',
+        returnUrl: `${window.location.origin}/auth/provider-callback`,
+      })
+      window.location.assign(response.authorizeUrl)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Microsoft login failed')
+      setIsSubmitting(false)
+    }
+  }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -59,41 +104,105 @@ export function LoginPanel({
               <p className="cu-sidebar__subtitle">Profile Portal</p>
             </div>
           </div>
-          <p className="cu-code-hint">{description}</p>
-          <form onSubmit={handleLogin}>
-            <div className="cu-field">
-              <label htmlFor="profile-login-email">Email</label>
-              <TextInput
-                id="profile-login-email"
-                type="email"
-                value={email}
-                onChange={event => setEmail(event.target.value)}
-                autoComplete="username"
-                required
-              />
+          <p className="cu-code-hint">
+            {providers.length > 0 && !usePassword
+              ? 'Sign in with your work or school account.'
+              : description}
+          </p>
+          {!loadingProviders && providers.length > 0 && !usePassword ? (
+            <div className="cu-provider-login">
+              {providers.length > 1 ? (
+                <div className="cu-field">
+                  <label htmlFor="profile-login-provider">Organization</label>
+                  <select
+                    id="profile-login-provider"
+                    className="cu-input"
+                    value={selectedProviderId}
+                    onChange={event => setSelectedProviderId(event.target.value)}
+                    disabled={isSubmitting}
+                  >
+                    {providers.map(provider => (
+                      <option value={provider.id} key={provider.id}>
+                        {provider.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+              <Button
+                type="button"
+                className="cu-btn--block cu-provider-login__button"
+                disabled={isSubmitting || !selectedProviderId}
+                onClick={() => void handleMicrosoftLogin()}
+              >
+                <Image
+                  src="/brand/microsoft.svg"
+                  alt=""
+                  width={21}
+                  height={21}
+                  aria-hidden="true"
+                />
+                {isSubmitting ? 'Opening Microsoft...' : 'Connect with Microsoft'}
+              </Button>
+              <button
+                type="button"
+                className="text-link cu-auth-secondary-action"
+                onClick={() => setUsePassword(true)}
+                disabled={isSubmitting}
+              >
+                Use password instead
+              </button>
             </div>
-            <div className="cu-field">
-              <label htmlFor="profile-login-password">Password</label>
-              <TextInput
-                id="profile-login-password"
-                type="password"
-                value={password}
-                onChange={event => setPassword(event.target.value)}
-                autoComplete="current-password"
-                required
-              />
+          ) : null}
+          {usePassword ? (
+            <form onSubmit={handleLogin}>
+              <div className="cu-field">
+                <label htmlFor="profile-login-email">Email</label>
+                <TextInput
+                  id="profile-login-email"
+                  type="email"
+                  value={email}
+                  onChange={event => setEmail(event.target.value)}
+                  autoComplete="username"
+                  required
+                />
+              </div>
+              <div className="cu-field">
+                <label htmlFor="profile-login-password">Password</label>
+                <TextInput
+                  id="profile-login-password"
+                  type="password"
+                  value={password}
+                  onChange={event => setPassword(event.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+              <Button
+                type="submit"
+                className="cu-btn--block"
+                disabled={isSubmitting || !email.trim() || !password}
+              >
+                {isSubmitting ? 'Signing in...' : 'Sign in'}
+              </Button>
+            </form>
+          ) : null}
+          {usePassword ? (
+            <div className="cu-auth-secondary-actions">
+              <Link className="text-link cu-auth-secondary-link" href={forgotPasswordHref}>
+                Forgot password
+              </Link>
+              {providers.length > 0 ? (
+                <button
+                  type="button"
+                  className="text-link cu-auth-secondary-action"
+                  onClick={() => setUsePassword(false)}
+                >
+                  Use Microsoft instead
+                </button>
+              ) : null}
             </div>
-            <Button
-              type="submit"
-              className="cu-btn--block"
-              disabled={isSubmitting || !email.trim() || !password}
-            >
-              {isSubmitting ? 'Signing in...' : 'Sign in'}
-            </Button>
-          </form>
-          <Link className="text-link cu-auth-secondary-link" href={forgotPasswordHref}>
-            Forgot password
-          </Link>
+          ) : null}
         </div>
       </div>
 

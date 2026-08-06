@@ -188,6 +188,163 @@ export async function googleLoginData(input: { email: string; name?: string; pic
   })
 }
 
+export async function identityProviderLoginData(input: {
+  provider: 'microsoft'
+  connectionId: string
+  externalSubject: string
+  email: string
+  userPrincipalName: string
+  displayName: string
+  invitationId?: string | null
+}) {
+  return withTransaction(async db => {
+    const connection = await db.query(
+      `SELECT 1
+         FROM identity_provider_connections
+        WHERE id = $1
+          AND provider = $2
+          AND status = 'connected'
+          AND allow_member_login = TRUE
+          AND (client_secret_expires_at IS NULL OR client_secret_expires_at > NOW())
+        LIMIT 1`,
+      [input.connectionId, input.provider]
+    )
+    if ((connection.rowCount ?? 0) === 0) return null
+
+    const existingIdentity = await db.query(
+      `SELECT ipi.user_id, u.email, u.name, u.picture
+         FROM identity_provider_identities ipi
+         JOIN users u ON u.id = ipi.user_id
+        WHERE ipi.connection_id = $1
+          AND ipi.external_subject = $2
+        LIMIT 1`,
+      [input.connectionId, input.externalSubject]
+    )
+
+    let user = existingIdentity.rows[0] as
+      | { user_id: string; email: string; name: string | null; picture: string | null }
+      | undefined
+
+    if (!user) {
+      const invitationId = String(input.invitationId || '').trim()
+      if (!invitationId) return null
+      const invitation = await db.query(
+        `SELECT i.accepted_user_id, i.email, i.identity_provider_upn
+           FROM invitations i
+          WHERE i.id = $1
+            AND i.status = 'accepted'
+            AND i.identity_provider = $2
+            AND i.identity_provider_connection_id = $3
+            AND (i.identity_provider_subject IS NULL OR i.identity_provider_subject = $4)
+          LIMIT 1
+          FOR UPDATE`,
+        [invitationId, input.provider, input.connectionId, input.externalSubject]
+      )
+      const invitationRow = invitation.rows[0] as
+        | { accepted_user_id: string | null; email: string; identity_provider_upn: string | null }
+        | undefined
+      if (!invitationRow?.accepted_user_id) return null
+      const expectedNames = new Set(
+        [invitationRow.email, invitationRow.identity_provider_upn]
+          .map(value =>
+            String(value || '')
+              .trim()
+              .toLowerCase()
+          )
+          .filter(Boolean)
+      )
+      const actualNames = [input.email, input.userPrincipalName]
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean)
+      if (!actualNames.some(value => expectedNames.has(value))) return null
+      if (
+        invitationRow.identity_provider_upn &&
+        !actualNames.includes(invitationRow.identity_provider_upn.trim().toLowerCase())
+      ) {
+        return null
+      }
+
+      const userResult = await db.query(
+        `UPDATE users
+            SET name = COALESCE(NULLIF($2, ''), name),
+                updated_at = NOW()
+          WHERE id = $1
+        RETURNING id AS user_id, email, name, picture`,
+        [invitationRow.accepted_user_id, input.displayName]
+      )
+      user = userResult.rows[0] as {
+        user_id: string
+        email: string
+        name: string | null
+        picture: string | null
+      }
+      const identityLink = await db.query(
+        `INSERT INTO identity_provider_identities(
+           provider, connection_id, user_id, external_subject, email,
+           user_principal_name, display_name, last_login_at
+         )
+         VALUES($1, $2, $3, $4, $5, $6, $7, NOW())
+         ON CONFLICT (connection_id, external_subject)
+         DO UPDATE SET email = EXCLUDED.email,
+                       user_principal_name = EXCLUDED.user_principal_name,
+                       display_name = EXCLUDED.display_name,
+                       last_login_at = NOW()
+         WHERE identity_provider_identities.user_id = EXCLUDED.user_id
+         RETURNING user_id`,
+        [
+          input.provider,
+          input.connectionId,
+          user.user_id,
+          input.externalSubject,
+          input.email.trim().toLowerCase(),
+          input.userPrincipalName.trim().toLowerCase(),
+          input.displayName,
+        ]
+      )
+      if ((identityLink.rowCount ?? 0) !== 1) {
+        throw Object.assign(new Error('Microsoft identity is already linked to another member'), {
+          status: 409,
+        })
+      }
+      await db.query(
+        `UPDATE invitations
+            SET identity_provider_linked_at = NOW()
+          WHERE id = $1`,
+        [invitationId]
+      )
+    } else {
+      await db.query(
+        `UPDATE identity_provider_identities
+            SET email = $3,
+                user_principal_name = $4,
+                display_name = $5,
+                last_login_at = NOW()
+          WHERE connection_id = $1
+            AND external_subject = $2`,
+        [
+          input.connectionId,
+          input.externalSubject,
+          input.email.trim().toLowerCase(),
+          input.userPrincipalName.trim().toLowerCase(),
+          input.displayName,
+        ]
+      )
+    }
+
+    const membership = await findFirstActiveMembership(db, user.user_id)
+    return {
+      user: {
+        id: user.user_id,
+        email: user.email,
+        name: user.name,
+        picture: user.picture,
+      },
+      membership: ((membership.rows[0] as MembershipRow | undefined) ||
+        teamlessMemberMembership()) as MembershipRow,
+    }
+  })
+}
+
 export async function passwordLoginData(input: { email: string; password: string }) {
   return withTransaction(async db => {
     const result = await db.query(

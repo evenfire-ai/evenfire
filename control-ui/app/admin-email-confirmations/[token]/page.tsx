@@ -61,7 +61,9 @@ export default async function ConfirmControlAdminEmailPage({
           {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
           <a
             className="cu-btn cu-btn--primary cu-btn--block cu-login-submit"
-            href={CONTROL_ROUTES.settings.root}
+            href={CONTROL_ROUTES.settings.accountWith({
+              emailConfirmation: confirmationState,
+            })}
           >
             Return to settings
           </a>

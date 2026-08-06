@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
@@ -42,6 +43,8 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  IdentityProviderConnection,
+  LoginResult,
   PasswordLoginResult,
   PendingApprovalLite,
   PendingWorkflowApproval,
@@ -73,6 +76,24 @@ import {
 // requested scopes against the caller's grants before issuance, so requesting
 // the wake scope never widens a caller who was not granted it.
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
+
+export function validateMicrosoftAuthorizeUrl(rawValue: string): string {
+  let url: URL
+  try {
+    url = new URL(rawValue)
+  } catch {
+    throw new Error('Microsoft sign-in returned an invalid authorization URL')
+  }
+  if (
+    url.origin !== 'https://login.microsoftonline.com' ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
+    throw new Error('Microsoft sign-in returned an untrusted authorization URL')
+  }
+  return url.toString()
+}
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   const value = rawValue.trim()
@@ -287,6 +308,8 @@ export class AppService {
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
+  private pendingIdentityProviderLoginCode: string | null = null
+  private pendingIdentityProviderFlowBinding: string | null = null
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
   private readonly prewarmReemitLoopHostRefs = new Set<string>()
   private hostStatusStreams = new Map<
@@ -582,8 +605,7 @@ export class AppService {
     }
   }
 
-  private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
-    const result = await this.authClient.passwordLogin(email, password)
+  private async completeLogin(result: LoginResult): Promise<SessionState> {
     this.sessionToken = result.token
     this.me = result.me
     await bindChatStoreForUser(result.me.id, getActiveEnvKey())
@@ -594,6 +616,10 @@ export class AppService {
     this.rpcTokenManager.clear()
     await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
     return { authenticated: true, me: result.me }
+  }
+
+  private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
+    return this.completeLogin(await this.authClient.passwordLogin(email, password))
   }
 
   async getDependenciesHealth(): Promise<DependencyHealth> {
@@ -652,17 +678,57 @@ export class AppService {
   }
 
   async googleLogin(idToken: string): Promise<SessionState> {
-    const result = await this.authClient.googleLogin(idToken)
-    this.sessionToken = result.token
-    this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
-    return { authenticated: true, me: result.me }
+    return this.completeLogin(await this.authClient.googleLogin(idToken))
+  }
+
+  async listIdentityProviders(): Promise<{ items: IdentityProviderConnection[] }> {
+    hydrateDesktopRuntimeConfig()
+    if (!isDesktopRuntimeConfigured()) return { items: [] }
+    await this.resolveRuntimeConfigIfNeeded()
+    return this.authClient.listIdentityProviders()
+  }
+
+  async startMicrosoftIdentityProviderLogin(
+    connectionId: string
+  ): Promise<{ authorizeUrl: string }> {
+    hydrateDesktopRuntimeConfig()
+    if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+    await this.resolveRuntimeConfigIfNeeded()
+    const flowBinding = randomBytes(32).toString('base64url')
+    this.pendingIdentityProviderFlowBinding = flowBinding
+    let result: { authorizeUrl: string }
+    try {
+      result = await this.authClient.startMicrosoftIdentityProviderLogin(connectionId, flowBinding)
+    } catch (error) {
+      this.pendingIdentityProviderFlowBinding = null
+      throw error
+    }
+    const { shell } = await import('electron')
+    await shell.openExternal(validateMicrosoftAuthorizeUrl(result.authorizeUrl))
+    return result
+  }
+
+  async completeIdentityProviderLogin(code: string): Promise<SessionState> {
+    hydrateDesktopRuntimeConfig()
+    if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+    await this.resolveRuntimeConfigIfNeeded()
+    const flowBinding = this.pendingIdentityProviderFlowBinding
+    if (!flowBinding) throw new Error('Microsoft sign-in was not started by this desktop app')
+    const session = await this.completeLogin(
+      await this.authClient.exchangeIdentityProviderLoginCode(code, flowBinding)
+    )
+    this.pendingIdentityProviderFlowBinding = null
+    return session
+  }
+
+  queueIdentityProviderLoginCode(code: string): void {
+    this.pendingIdentityProviderLoginCode = code.trim() || null
+  }
+
+  consumeIdentityProviderLoginCode(): string | null {
+    const code = this.pendingIdentityProviderLoginCode
+    this.pendingIdentityProviderLoginCode = null
+    return code
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{

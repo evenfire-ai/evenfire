@@ -568,7 +568,7 @@ ensure_seed_user_and_team() {
   admin_get "$CAPI_BASE/admin/users?$(jq -rn --arg q "$email" '$q|@uri' | sed 's/^/q=/')" \
     "GET /admin/users"
   ENSURE_USER_ID="$(echo "$ADMIN_GET_BODY" | jq -r --arg e "$email" \
-    '.items[]? | select((.email // "") == $e) | .id' | head -n1)"
+    '.items[]? | select(((.email // "") | ascii_downcase) == ($e | ascii_downcase)) | .id' | head -n1)"
 
   if [ -z "$ENSURE_USER_ID" ]; then
     admin_post "$CAPI_BASE/admin/users" \
@@ -582,15 +582,38 @@ ensure_seed_user_and_team() {
   ADMIN_GET_BODY=""
   admin_get "$CAPI_BASE/admin/users/$ENSURE_USER_ID/teams" \
     "GET /admin/users/:userId/teams"
-  ENSURE_TEAM_ID="$(echo "$ADMIN_GET_BODY" | jq -r '.items[0].id // empty')"
+  ENSURE_TEAM_ID="$(echo "$ADMIN_GET_BODY" | jq -r --arg n "$team_name" \
+    '.items[]? | select(((.name // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase) == ($n | gsub("^\\s+|\\s+$"; "") | ascii_downcase)) | .id' | head -n1)"
 
   if [ -z "$ENSURE_TEAM_ID" ]; then
-    admin_post "$CAPI_BASE/admin/teams" \
-      "$(jq -cn --arg u "$ENSURE_USER_ID" --arg n "$team_name" '{userId: $u, name: $n}')" \
-      "POST /admin/teams"
-    ENSURE_TEAM_ID="$(echo "$ADMIN_POST_BODY" | jq -r '.id // empty')"
+    ADMIN_GET_BODY=""
+    admin_get "$CAPI_BASE/admin/teams" "GET /admin/teams"
+    ENSURE_TEAM_ID="$(echo "$ADMIN_GET_BODY" | jq -r --arg n "$team_name" \
+      '.items[]? | select(((.name // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase) == ($n | gsub("^\\s+|\\s+$"; "") | ascii_downcase)) | .id' | head -n1)"
+  fi
+
+  if [ -z "$ENSURE_TEAM_ID" ]; then
+    local create_response create_code
+    create_response="$(curl -sS -w '\n%{http_code}' -X POST "$CAPI_BASE/admin/teams" \
+      "${AUTH_CURL[@]}" -d "$(jq -cn --arg n "$team_name" '{name: $n}')" || true)"
+    create_code="$(echo "$create_response" | tail -n1)"
+    if [[ "$create_code" =~ ^2 ]]; then
+      ENSURE_TEAM_ID="$(echo "$create_response" | sed '$d' | jq -r '.id // empty')"
+      ok "POST /admin/teams → $create_code"
+    elif [ "$create_code" = "409" ]; then
+      admin_get "$CAPI_BASE/admin/teams" "GET /admin/teams after concurrent create"
+      ENSURE_TEAM_ID="$(echo "$ADMIN_GET_BODY" | jq -r --arg n "$team_name" \
+        '.items[]? | select(((.name // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase) == ($n | gsub("^\\s+|\\s+$"; "") | ascii_downcase)) | .id' | head -n1)"
+      ok "Team already existed; reusing it"
+    else
+      die "POST /admin/teams → $create_code body=$(echo "$create_response" | sed '$d')"
+    fi
   fi
   [ -n "$ENSURE_TEAM_ID" ] || die "Could not create or find team for $email"
+
+  admin_post "$CAPI_BASE/admin/teams/$ENSURE_TEAM_ID/members" \
+    "$(jq -cn --arg u "$ENSURE_USER_ID" '{userId: $u, role: "admin"}')" \
+    "POST /admin/teams/:teamId/members"
   ok "Team  id=${ENSURE_TEAM_ID:0:8}…"
 }
 

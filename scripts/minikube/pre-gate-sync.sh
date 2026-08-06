@@ -321,6 +321,7 @@ preflight_host_lifecycle_probe
 cluster_fingerprint="$(
   {
     fingerprint_dir control-api
+    fingerprint_dir auth-proxy
     fingerprint_dir external-rest-api
     fingerprint_dir rpc-proxy
     fingerprint_dir mcp-host
@@ -362,6 +363,7 @@ fi
 
 run_if_changed packages/workflow-runtime-core "npm test && npm run build"
 ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"
+run_if_changed auth-proxy "npm test"
 run_if_changed control-api "npm test"
 run_if_changed external-rest-api "npm test"
 run_if_changed rpc-proxy "npm test"
@@ -465,9 +467,13 @@ if [[ "${cluster_changed}" == "true" ]]; then
 
   assert_workflow_gateway_prompt_bridge_finalization_route
 
+  MINIKUBE_PROFILE="${PROFILE}" \
+    bash "${SCRIPT_DIR}/sync-auth-callback-base-url.sh"
+
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui
+  rollout_if_present auth-ingress auth-proxy
   rollout_if_present profiles external-rest-api
   rollout_if_present rpc-proxy rpc-proxy
   rollout_namespace_deployments mcp-host

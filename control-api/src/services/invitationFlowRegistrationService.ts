@@ -1,6 +1,16 @@
 import { config } from '../config.js'
 import { memberRegistrationServiceRequest } from '../memberRegistrationServiceClient.js'
 
+export type InvitationDeliveryInput = {
+  email: string
+  invitationUuid: string
+  teamName: string | null
+  teamNames: string[]
+  purpose: 'member_invitation' | 'password_reset'
+  issuedAt: string
+  expiresAt: string
+}
+
 export async function registerAndSendInvitation(
   email: string,
   invitationUuid: string,
@@ -32,6 +42,35 @@ export async function registerAndSendInvitation(
       },
     }
   )
+}
+
+export async function registerAndSendInvitations(
+  invitations: readonly InvitationDeliveryInput[]
+): Promise<{ results: Array<{ invitationUuid: string; sent: boolean; error?: string }> }> {
+  const results: Array<{ invitationUuid: string; sent: boolean; error?: string }> = []
+  for (const invitation of invitations) {
+    try {
+      await registerAndSendInvitation(
+        invitation.email,
+        invitation.invitationUuid,
+        invitation.teamName,
+        invitation.issuedAt,
+        invitation.expiresAt,
+        {
+          purpose: invitation.purpose,
+          teamNames: invitation.teamNames,
+        }
+      )
+      results.push({ invitationUuid: invitation.invitationUuid, sent: true })
+    } catch (error) {
+      results.push({
+        invitationUuid: invitation.invitationUuid,
+        sent: false,
+        error: error instanceof Error ? error.message : 'Invitation delivery failed',
+      })
+    }
+  }
+  return { results }
 }
 
 export async function validateInvitationFlowToken(

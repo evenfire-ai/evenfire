@@ -41,6 +41,8 @@ configurations:
 # Every entry below must have a matching row in deploy/images.json --
 # scripts/tests/test-images-manifest.sh enforces it.
 images:
+  - name: clerum/auth-proxy
+    newTag: test
   - name: clerum/channel-reader
     newTag: test
   - name: clerum/workflow-approval-request-reader

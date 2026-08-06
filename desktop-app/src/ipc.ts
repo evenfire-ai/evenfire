@@ -166,6 +166,25 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.googleLogin(sanitizeString(payload?.idToken))
   })
+  ipcMain.handle('auth:getIdentityProviders', async event => {
+    assertTrustedSender(event)
+    return service.listIdentityProviders()
+  })
+  ipcMain.handle(
+    'auth:startMicrosoftIdentityProviderLogin',
+    async (event, payload: { connectionId: string }) => {
+      assertTrustedSender(event)
+      return service.startMicrosoftIdentityProviderLogin(sanitizeString(payload?.connectionId))
+    }
+  )
+  ipcMain.handle('auth:completeIdentityProviderLogin', async (event, payload: { code: string }) => {
+    assertTrustedSender(event)
+    return service.completeIdentityProviderLogin(sanitizeString(payload?.code))
+  })
+  ipcMain.handle('auth:consumeIdentityProviderLoginCode', async event => {
+    assertTrustedSender(event)
+    return service.consumeIdentityProviderLoginCode()
+  })
   ipcMain.handle(
     'auth:passwordLogin',
     async (event, payload: { email: string; password: string }) => {

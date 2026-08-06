@@ -46,6 +46,7 @@ jobs:
         # TEST_SERVICES in the root Makefile — a service in one but not the other
         # means its tests run in only half the places contributors look.
         service:
+          - auth-proxy
           - mcp-host
           - channel-reader
           - host-context-controller
@@ -341,6 +342,9 @@ jobs:
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
+
+      - name: Test branch-profile OAuth callback URL
+        run: bash scripts/tests/test-auth-proxy-profile-callback.sh
 
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh

@@ -166,6 +166,7 @@ type Config = {
   // exchange so it matches the authorize step regardless of the internal proxy
   // chain's Host header. Empty → fall back to the request Host (local dev).
   oauthCallbackBaseUrl: string
+  identityProviderOAuthCleanupIntervalMs: number
   // SharedFileSystem — namespace housing both the CRD and the per-SFS
   // workspace-files-controller Service.
   sharedFilesystemsNamespace: string
@@ -489,7 +490,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,auth-proxy=dev-auth-proxy-token,workflow-approval-reader=dev-wa-reader-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',
@@ -778,6 +779,9 @@ export const config: Config = {
   // Optional: when set, used verbatim as the origin of the public OAuth callback
   // URL (the redirect_uri). Empty → derive from the request Host (local dev).
   oauthCallbackBaseUrl: process.env.CONTROL_API_OAUTH_CALLBACK_BASE_URL ?? '',
+  identityProviderOAuthCleanupIntervalMs: Number(
+    process.env.CONTROL_API_IDENTITY_PROVIDER_OAUTH_CLEANUP_INTERVAL_MS || 5 * 60_000
+  ),
   // SharedFileSystem feature defaults — keep these aligned with the wfc
   // service's WSF_* env names and with HCC's CONTEXT_MAPPER_WFC_* defaults.
   //

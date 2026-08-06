@@ -136,8 +136,8 @@ export function AdminBridgeAlerts() {
     if (alert.kind === 'email') {
       router.push(
         alert.status.admin.pendingEmailChange
-          ? CONTROL_ROUTES.settings.root
-          : CONTROL_ROUTES.settings.withFocus('email')
+          ? CONTROL_ROUTES.settings.account
+          : CONTROL_ROUTES.settings.accountWith({ focus: 'email' })
       )
       closeAlert()
       return

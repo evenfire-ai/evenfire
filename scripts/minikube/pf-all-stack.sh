@@ -22,7 +22,7 @@ load_branch_profile_ports_env() {
       key="${BASH_REMATCH[1]}"
       value="${BASH_REMATCH[2]}"
       case "${key}" in
-        PORT_BASE|CONTROL_UI_PORT|PROFILE_UI_PORT|CONTROL_API_PORT|EXTERNAL_REST_API_PORT|MEMBER_REGISTRATION_SERVICE_PORT|RPC_PROXY_PORT|REGISTRY_API_PORT|WORKFLOW_APPROVAL_READER_PORT|MCP_HOST_PORT)
+        PORT_BASE|CONTROL_UI_PORT|PROFILE_UI_PORT|CONTROL_API_PORT|EXTERNAL_REST_API_PORT|AUTH_PROXY_PORT|MEMBER_REGISTRATION_SERVICE_PORT|RPC_PROXY_PORT|REGISTRY_API_PORT|WORKFLOW_APPROVAL_READER_PORT|MCP_HOST_PORT)
           printf -v "${key}" '%s' "${value}"
           ;;
         *)
@@ -33,7 +33,7 @@ load_branch_profile_ports_env() {
     elif [[ "${line}" =~ ^([A-Z_]+)=http://127\.0\.0\.1:([0-9]{2,5})$ ]]; then
       key="${BASH_REMATCH[1]}"
       case "${key}" in
-        CONTROL_UI_URL|CONTROL_UI_BASE_URL|PROFILE_UI_URL|PROFILE_UI_BASE_URL|CONTROL_API_URL|CONTROL_API_BASE_URL|EXTERNAL_REST_API_URL|EXTERNAL_REST_API_BASE_URL|MEMBER_REGISTRATION_SERVICE_URL|MEMBER_REGISTRATION_SERVICE_BASE_URL|RPC_PROXY_URL|RPC_PROXY_BASE_URL|REGISTRY_API_URL|REGISTRY_API_BASE_URL|WORKFLOW_APPROVAL_READER_URL|WORKFLOW_APPROVAL_READER_BASE_URL|MCP_HOST_URL|MCP_HOST_BASE_URL)
+        CONTROL_UI_URL|CONTROL_UI_BASE_URL|PROFILE_UI_URL|PROFILE_UI_BASE_URL|CONTROL_API_URL|CONTROL_API_BASE_URL|EXTERNAL_REST_API_URL|EXTERNAL_REST_API_BASE_URL|AUTH_PROXY_URL|AUTH_PROXY_BASE_URL|MEMBER_REGISTRATION_SERVICE_URL|MEMBER_REGISTRATION_SERVICE_BASE_URL|RPC_PROXY_URL|RPC_PROXY_BASE_URL|REGISTRY_API_URL|REGISTRY_API_BASE_URL|WORKFLOW_APPROVAL_READER_URL|WORKFLOW_APPROVAL_READER_BASE_URL|MCP_HOST_URL|MCP_HOST_BASE_URL)
           ;;
         *)
           echo "ERROR: unsupported URL variable in ${file}: ${key}" >&2
@@ -65,6 +65,7 @@ CONTROL_UI_PORT="${CONTROL_UI_PORT:-3000}"
 PROFILE_UI_PORT="${PROFILE_UI_PORT:-3001}"
 CONTROL_API_PORT="${CONTROL_API_PORT:-8090}"
 EXTERNAL_REST_API_PORT="${EXTERNAL_REST_API_PORT:-8091}"
+AUTH_PROXY_PORT="${AUTH_PROXY_PORT:-8096}"
 RPC_PROXY_PORT="${RPC_PROXY_PORT:-8094}"
 REGISTRY_API_PORT="${REGISTRY_API_PORT:-8085}"
 WORKFLOW_APPROVAL_READER_PORT="${WORKFLOW_APPROVAL_READER_PORT:-8098}"
@@ -101,6 +102,7 @@ require_random_port_for_branch_profile CONTROL_UI_PORT "${CONTROL_UI_PORT}" 3000
 require_random_port_for_branch_profile PROFILE_UI_PORT "${PROFILE_UI_PORT}" 3001
 require_random_port_for_branch_profile CONTROL_API_PORT "${CONTROL_API_PORT}" 8090
 require_random_port_for_branch_profile EXTERNAL_REST_API_PORT "${EXTERNAL_REST_API_PORT}" 8091
+require_random_port_for_branch_profile AUTH_PROXY_PORT "${AUTH_PROXY_PORT}" 8096
 require_random_port_for_branch_profile RPC_PROXY_PORT "${RPC_PROXY_PORT}" 8094
 require_random_port_for_branch_profile REGISTRY_API_PORT "${REGISTRY_API_PORT}" 8085
 require_random_port_for_branch_profile WORKFLOW_APPROVAL_READER_PORT "${WORKFLOW_APPROVAL_READER_PORT}" 8098
@@ -201,6 +203,7 @@ start_pf control-ui control-plane control-ui "${CONTROL_UI_PORT}:3000" "http://1
 start_optional_pf profile-ui profiles profile-ui "${PROFILE_UI_PORT}:3001" "http://127.0.0.1:${PROFILE_UI_PORT}"
 start_pf control-api control-plane control-api "${CONTROL_API_PORT}:8090" "http://127.0.0.1:${CONTROL_API_PORT}/health"
 start_pf external-rest-api profiles external-rest-api "${EXTERNAL_REST_API_PORT}:8091" "http://127.0.0.1:${EXTERNAL_REST_API_PORT}/health"
+start_optional_pf auth-proxy auth-ingress auth-proxy "${AUTH_PROXY_PORT}:8096" "http://127.0.0.1:${AUTH_PROXY_PORT}/healthz"
 start_pf rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_PORT}:8094" "http://127.0.0.1:${RPC_PROXY_PORT}/health"
 start_optional_pf registry-api registry registry-api "${REGISTRY_API_PORT}:8085" "http://127.0.0.1:${REGISTRY_API_PORT}/health"
 start_optional_deployment_pf workflow-approval-request-reader channels clerum-workflow-approval-request-reader workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}:8098" "http://127.0.0.1:${WORKFLOW_APPROVAL_READER_PORT}/health"

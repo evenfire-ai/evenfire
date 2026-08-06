@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  TeamNameConflictError,
   addMemberToTeam,
   adminDeleteTeam,
   adminDeleteUser,
@@ -8,6 +9,7 @@ import {
   getTeamById,
   listAllTeams,
   listMembers,
+  renameTeam,
   softDeleteMember,
   updateMemberRole,
 } from '../src/services/directory/index.js'
@@ -78,7 +80,7 @@ describe('services/directory team management unit tests', () => {
   })
 
   it('createTeam creates only the team shell without member rows', async () => {
-    dbMocks.poolQuery.mockResolvedValue({
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockResolvedValueOnce({
       rows: [{ id: 'team-1', name: 'Core Team' }],
       rowCount: 1,
     })
@@ -86,25 +88,68 @@ describe('services/directory team management unit tests', () => {
     const result = await createTeam('Core Team')
 
     expect(result).toEqual({ id: 'team-1', name: 'Core Team' })
-    expect(dbMocks.poolQuery).toHaveBeenCalledTimes(1)
-    expect(dbMocks.poolQuery).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO teams'), [
-      'Core Team',
-    ])
+    expect(dbMocks.txQuery).toHaveBeenCalledTimes(2)
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['Core Team']
+    )
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('INSERT INTO teams'),
+      ['Core Team']
+    )
+  })
+
+  it('createTeam rejects a duplicate normalized team name', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+    await expect(createTeam(' core team ')).rejects.toBeInstanceOf(TeamNameConflictError)
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['core team']
+    )
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('WHERE NOT EXISTS'),
+      ['core team']
+    )
+  })
+
+  it('renameTeam rejects a duplicate normalized team name', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
+
+    await expect(renameTeam('team-1', ' core team ')).rejects.toBeInstanceOf(TeamNameConflictError)
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['core team']
+    )
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('existing.id <> $1'),
+      ['team-1', 'core team']
+    )
   })
 
   it('createTeamForUser adds the creator as admin', async () => {
-    dbMocks.poolQuery
-      .mockResolvedValueOnce({
-        rows: [{ id: 'team-1', name: 'Core Team' }],
-        rowCount: 1,
-      })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockResolvedValueOnce({
+      rows: [{ id: 'team-1', name: 'Core Team' }],
+      rowCount: 1,
+    })
+    dbMocks.poolQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
     const result = await createTeamForUser('user-1', 'Core Team')
 
     expect(result).toEqual({ id: 'team-1', name: 'Core Team' })
     expect(dbMocks.poolQuery).toHaveBeenNthCalledWith(
-      2,
+      1,
       expect.stringContaining(`VALUES($1, $2, 'admin', 'active')`),
       ['team-1', 'user-1']
     )

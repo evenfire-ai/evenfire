@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { RequestHandler, Router } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -24,6 +24,11 @@ import { K8sNotFoundError } from '../../services/resourceService.js'
  */
 export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
   const router = Router()
+  router.get('/oauth-callback/:oauthClientId', createOAuthCallbackHandler(gateway))
+  return router
+}
+
+export function createOAuthCallbackHandler(gateway: K8sGateway): RequestHandler {
   const encryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 
   const recipeReader: RecipeReader = {
@@ -69,7 +74,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
   // per recipe instance / catalog version. No namespace check is needed here: the
   // recipe namespace comes from the unforgeable state, and both authorize-url
   // minters only sign sandbox-namespace states.
-  router.get('/oauth-callback/:oauthClientId', async (req, res, next) => {
+  return async (req, res, next) => {
     try {
       const { oauthClientId } = req.params
       const code = typeof req.query.code === 'string' ? req.query.code : ''
@@ -124,9 +129,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
     } catch (err) {
       next(err)
     }
-  })
-
-  return router
+  }
 }
 
 export function buildPublicCallbackUrl(

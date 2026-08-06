@@ -11,7 +11,6 @@ import { createInvitationsRouter } from './routes/invitations.js'
 import { createMeRouter } from './routes/me.js'
 import { createMembersRouter } from './routes/members.js'
 import { createNotificationsRouter } from './routes/notifications.js'
-import { createOauthCallbackRouter } from './routes/oauthCallback.js'
 import { createOauthGrantsRouter } from './routes/oauthGrants.js'
 import { createRpcRouter } from './routes/rpc.js'
 import { createTeamRouter } from './routes/team.js'
@@ -46,8 +45,6 @@ export function createApp() {
   api.use(createNotificationsRouter())
   api.use(createUserApprovalDecisionsRouter())
   api.use(createOauthGrantsRouter())
-  // PUBLIC (no auth) — provider redirect target; passthrough to control-api.
-  api.use(createOauthCallbackRouter())
   api.use(createWorkflowApprovalMediumsRouter())
   api.use(createExternalWorkflowsRouter())
   app.use('/api/v1', api)

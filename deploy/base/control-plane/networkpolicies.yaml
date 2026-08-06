@@ -9,8 +9,8 @@ metadata:
 spec:
   podSelector: {}
   policyTypes:
-  - Ingress
-  - Egress
+    - Ingress
+    - Egress
 ---
 # ─── L1: DNS egress (all pods) ────────────────────────────────────────────────
 apiVersion: networking.k8s.io/v1
@@ -23,17 +23,17 @@ metadata:
 spec:
   podSelector: {}
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
 ---
 # ─── L1: K8s API egress (operators: HCC, WRC, control-api) ──────────────────
 # HCC and WRC manage CRDs/pods across namespaces via the K8s API server.
@@ -58,18 +58,18 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-    - key: app
-      operator: In
-      values: [host-context-controller, workflow-recipes, control-api, trace-maintenance-worker]
+      - key: app
+        operator: In
+        values: [host-context-controller, workflow-recipes, control-api, trace-maintenance-worker]
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 443
-      protocol: TCP
-    to:
-    - ipBlock:
-        cidr: 10.109.0.1/32
+    - ports:
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.109.0.1/32
 ---
 # ─── L2: control-api ↔ control-postgres (database) ───────────────────────────
 apiVersion: networking.k8s.io/v1
@@ -82,19 +82,19 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-    - key: app
-      operator: In
-      values: [control-api, trace-maintenance-worker]
+      - key: app
+        operator: In
+        values: [control-api, trace-maintenance-worker]
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 5432
-      protocol: TCP
-    to:
-    - podSelector:
-        matchLabels:
-          app: control-postgres
+    - ports:
+        - port: 5432
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app: control-postgres
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -108,17 +108,17 @@ spec:
     matchLabels:
       app: control-postgres
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - podSelector:
-        matchExpressions:
-        - key: app
-          operator: In
-          values: [control-api, trace-maintenance-worker]
-    ports:
-    - port: 5432
-      protocol: TCP
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [control-api, trace-maintenance-worker]
+      ports:
+        - port: 5432
+          protocol: TCP
 ---
 # ─── gfs: gfsc (gfs namespace) → control-postgres (permission store) ──────────
 # gfsc re-checks the permission store on every op and fails closed (503) if it
@@ -139,18 +139,18 @@ spec:
     matchLabels:
       app: control-postgres
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: gfs
-      podSelector:
-        matchLabels:
-          app: gfs-controller
-    ports:
-    - port: 5432
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gfs
+          podSelector:
+            matchLabels:
+              app: gfs-controller
+      ports:
+        - port: 5432
+          protocol: TCP
 ---
 # ─── gfs: control-api → gfsc (gfs namespace) data plane ──────────────────────
 # control-api reverse-proxies operator (routes/gfs/proxy.ts) AND end-user
@@ -172,18 +172,18 @@ spec:
     matchLabels:
       app: control-api
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 8087
-      protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: gfs
-      podSelector:
-        matchLabels:
-          app: gfs-controller
+    - ports:
+        - port: 8087
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gfs
+          podSelector:
+            matchLabels:
+              app: gfs-controller
 ---
 # ─── Phase 4/5 DB-first: workflow-recipes ↔ control-postgres ──────────────────
 # WRC opens a sticky Postgres session for: pg_advisory_lock leader election,
@@ -202,15 +202,15 @@ spec:
     matchLabels:
       app: workflow-recipes
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 5432
-      protocol: TCP
-    to:
-    - podSelector:
-        matchLabels:
-          app: control-postgres
+    - ports:
+        - port: 5432
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app: control-postgres
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -224,15 +224,15 @@ spec:
     matchLabels:
       app: control-postgres
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: workflow-recipes
-    ports:
-    - port: 5432
-      protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app: workflow-recipes
+      ports:
+        - port: 5432
+          protocol: TCP
 ---
 # ─── L2: control-api ingress from profiles + internal services ────────────────
 apiVersion: networking.k8s.io/v1
@@ -247,66 +247,75 @@ spec:
     matchLabels:
       app: control-api
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: profiles
-      podSelector:
-        matchLabels:
-          app: profile-control-funnel
-    - podSelector:
-        matchLabels:
-          app: control-api-rpc-gateway
-    - podSelector:
-        matchLabels:
-          app: control-ui
-    - podSelector:
-        matchLabels:
-          app: nginx-workflow-approval-gateway
-    # UAR §12 + D11: provisioners (WRC + HCC) call control-api:8090
-    # directly for approval-token issuance. mcp-host pods do NOT — they
-    # always traverse the approval gateway above.
-    - podSelector:
-        matchLabels:
-          app: workflow-recipes
-    - podSelector:
-        matchLabels:
-          app: host-context-controller
-    # webhook-proxy → control-api for the webhook registry endpoint
-    # (/api/v1/internal/webhook/registry/...). Authenticated with the
-    # `webhook-proxy` internal-service token.
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: webhook-ingress
-      podSelector:
-        matchLabels:
-          app: webhook-proxy
-    # workflow-approval-request-reader → control-api for the Figure D
-    # cross-bot can-approve consulta endpoint
-    # (/api/v1/internal/workflow-approval-reader/approvals/:id/can-approve).
-    # Authenticated with the `workflow-approval-reader` internal-service token.
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: channels
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/name: workflow-approval-request-reader
-    # Path B — background-OAuth workloads in sandbox-recipes reach the broker
-    # route POST /api/v1/recipe-oauth/token. Restricted to opted-in workloads
-    # via the matching egress NP `wf-<recipe>-oauth-broker-egress` that WRC
-    # emits per recipe; the route's own `requireBrokerToken` middleware
-    # (strict aud=oauth-broker, sub=recipe binding) is the real auth gate.
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: sandbox-recipes
-      podSelector:
-        matchLabels:
-          clerum.io/oauth-broker-client: "true"
-    ports:
-    - port: 8090
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: profiles
+          podSelector:
+            matchLabels:
+              app: profile-control-funnel
+        - podSelector:
+            matchLabels:
+              app: control-api-rpc-gateway
+        - podSelector:
+            matchLabels:
+              app: control-ui
+        - podSelector:
+            matchLabels:
+              app: nginx-workflow-approval-gateway
+        # UAR §12 + D11: provisioners (WRC + HCC) call control-api:8090
+        # directly for approval-token issuance. mcp-host pods do NOT — they
+        # always traverse the approval gateway above.
+        - podSelector:
+            matchLabels:
+              app: workflow-recipes
+        - podSelector:
+            matchLabels:
+              app: host-context-controller
+        # webhook-proxy → control-api for the webhook registry endpoint
+        # (/api/v1/internal/webhook/registry/...). Authenticated with the
+        # `webhook-proxy` internal-service token.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: webhook-ingress
+          podSelector:
+            matchLabels:
+              app: webhook-proxy
+        # auth-proxy → control-api for provider OAuth callbacks
+        # (/api/v1/internal/auth-callback/...). Authenticated with the
+        # `auth-proxy` internal-service token.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: auth-ingress
+          podSelector:
+            matchLabels:
+              app: auth-proxy
+        # workflow-approval-request-reader → control-api for the Figure D
+        # cross-bot can-approve consulta endpoint
+        # (/api/v1/internal/workflow-approval-reader/approvals/:id/can-approve).
+        # Authenticated with the `workflow-approval-reader` internal-service token.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: channels
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: workflow-approval-request-reader
+        # Path B — background-OAuth workloads in sandbox-recipes reach the broker
+        # route POST /api/v1/recipe-oauth/token. Restricted to opted-in workloads
+        # via the matching egress NP `wf-<recipe>-oauth-broker-egress` that WRC
+        # emits per recipe; the route's own `requireBrokerToken` middleware
+        # (strict aud=oauth-broker, sub=recipe binding) is the real auth gate.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandbox-recipes
+          podSelector:
+            matchLabels:
+              clerum.io/oauth-broker-client: "true"
+      ports:
+        - port: 8090
+          protocol: TCP
 ---
 # ─── L2: control-ui ingress from the cloudflared tunnel + egress to control-api
 apiVersion: networking.k8s.io/v1
@@ -321,27 +330,27 @@ spec:
     matchLabels:
       app: control-ui
   policyTypes:
-  - Ingress
-  - Egress
+    - Ingress
+    - Egress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: ingress
-      podSelector:
-        matchLabels:
-          app: cloudflared
-    ports:
-    - port: 3000
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+          podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - port: 3000
+          protocol: TCP
   egress:
-  - ports:
-    - port: 8090
-      protocol: TCP
-    to:
-    - podSelector:
-        matchLabels:
-          app: control-api
+    - ports:
+        - port: 8090
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app: control-api
 ---
 # ─── L2: control-api → external OAuth (Google token validation) ───────────────
 # OAuth/OIDC endpoints can resolve to dynamic public IPs. This policy allows
@@ -363,15 +372,15 @@ spec:
     matchLabels:
       app: control-api
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 443
-      protocol: TCP
-    to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-        except: []
+    - ports:
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: []
 ---
 # Mirror of control-api-external-egress for WRC: needed so workflow-recipes can
 # reach registry.evenfire.ai (anycast hostname, app-layer pinning). The
@@ -391,15 +400,15 @@ spec:
     matchLabels:
       app: workflow-recipes
   policyTypes:
-  - Egress
+    - Egress
   egress:
-  - ports:
-    - port: 443
-      protocol: TCP
-    to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-        except: []
+    - ports:
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: []
 ---
 # ─── L2 (existing): control-api-rpc-gateway ──────────────────────────────────
 apiVersion: networking.k8s.io/v1
@@ -412,42 +421,42 @@ spec:
     matchLabels:
       app: control-api-rpc-gateway
   policyTypes:
-  - Ingress
-  - Egress
+    - Ingress
+    - Egress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: rpc-proxy
-      podSelector:
-        matchLabels:
-          app: rpc-proxy
-    ports:
-    - port: 8090
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: rpc-proxy
+          podSelector:
+            matchLabels:
+              app: rpc-proxy
+      ports:
+        - port: 8090
+          protocol: TCP
   egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: control-plane
-      podSelector:
-        matchLabels:
-          app: control-api
-    ports:
-    - port: 8090
-      protocol: TCP
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
-    ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - port: 8090
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
 ---
 # ─── L2: nginx-workflow-approval-gateway ──────────────────────────────────────
 # Allows workflow mcp-host pods (sandbox-recipes) to call the bounded
@@ -465,55 +474,55 @@ spec:
     matchLabels:
       app: nginx-workflow-approval-gateway
   policyTypes:
-  - Ingress
-  - Egress
+    - Ingress
+    - Egress
   ingress:
-  - from:
-    # Recipe-hosted mcp-host pods in sandbox-recipes.
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: sandbox-recipes
-      podSelector:
-        matchLabels:
-          clerum.io/component: workflow-mcp-host
-    # Shared mcp-host pods provisioned by HCC.
-    # Required complement to the egress rule in
-    # deploy/base/mcp-host/networkpolicies.yaml; without this ingress the
-    # /workflow-approvals/request, /:id/status, /:id/cancel, /workflow-auth/refresh,
-    # /workflow-auth/reissue runtime calls would be blocked when NP enforcement
-    # is enabled.
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: mcp-host
-      podSelector:
-        matchLabels:
-          clerum.io/managed-by: host-context-controller
-    ports:
-    - port: 8092
-      protocol: TCP
+    - from:
+        # Recipe-hosted mcp-host pods in sandbox-recipes.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandbox-recipes
+          podSelector:
+            matchLabels:
+              clerum.io/component: workflow-mcp-host
+        # Shared mcp-host pods provisioned by HCC.
+        # Required complement to the egress rule in
+        # deploy/base/mcp-host/networkpolicies.yaml; without this ingress the
+        # /workflow-approvals/request, /:id/status, /:id/cancel, /workflow-auth/refresh,
+        # /workflow-auth/reissue runtime calls would be blocked when NP enforcement
+        # is enabled.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-host
+          podSelector:
+            matchLabels:
+              clerum.io/managed-by: host-context-controller
+      ports:
+        - port: 8092
+          protocol: TCP
   egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: control-plane
-      podSelector:
-        matchLabels:
-          app: control-api
-    ports:
-    - port: 8090
-      protocol: TCP
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
-    ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - port: 8090
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -525,18 +534,18 @@ spec:
     matchLabels:
       app: host-context-controller
   policyTypes:
-  - Ingress
+    - Ingress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: control-plane
-      podSelector:
-        matchLabels:
-          app: host-context-controller-api-gateway
-    ports:
-    - port: 8081
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: host-context-controller-api-gateway
+      ports:
+        - port: 8081
+          protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -548,54 +557,54 @@ spec:
     matchLabels:
       app: host-context-controller-api-gateway
   policyTypes:
-  - Ingress
-  - Egress
+    - Ingress
+    - Egress
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: mcp-host
-      podSelector:
-        matchLabels:
-          clerum.io/managed-by: host-context-controller
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: mcp-server
-      podSelector:
-        matchLabels:
-          app: mcp-proxy
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: rpc-proxy
-      podSelector:
-        matchLabels:
-          app: rpc-proxy
-    ports:
-    - port: 8081
-      protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-host
+          podSelector:
+            matchLabels:
+              clerum.io/managed-by: host-context-controller
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-server
+          podSelector:
+            matchLabels:
+              app: mcp-proxy
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: rpc-proxy
+          podSelector:
+            matchLabels:
+              app: rpc-proxy
+      ports:
+        - port: 8081
+          protocol: TCP
   egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: control-plane
-      podSelector:
-        matchLabels:
-          app: host-context-controller
-    ports:
-    - port: 8081
-      protocol: TCP
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
-    ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: host-context-controller
+      ports:
+        - port: 8081
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
 ---
 # Allow control-api to reach WRC for artifact download proxy and recipe
 # operations. Both services are in control-plane but deny-all blocks

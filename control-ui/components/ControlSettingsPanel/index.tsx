@@ -8,13 +8,12 @@ import {
 } from '@components/AdminBridgeAlerts'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
-import { IconSettings, IconThemeMoon, IconThemeSun } from '@components/Sidebar/icons'
-import { TablePanelHeader } from '@components/TablePanelHeader'
+import { useSettingsData } from '@components/SettingsDataContext'
+import { IconThemeMoon, IconThemeSun } from '@components/Sidebar/icons'
 import { useTheme } from '@components/ThemeContext'
 import { useToast } from '@components/Toast'
 import { Button, Field, TextInput } from '@components/ui'
 import {
-  getControlUISettingsMe,
   requestControlUISettingsEmailChange,
   updateControlUISettingsPassword,
   updateControlUISettingsUsername,
@@ -25,18 +24,27 @@ type EditingField = 'email' | 'username' | null
 
 interface ControlSettingsPanelProps {
   emailConfirmationStatus?: string | null
+  section: 'account' | 'ui'
 }
 
-export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSettingsPanelProps) {
+export function ControlSettingsPanel({
+  emailConfirmationStatus,
+  section,
+}: ControlSettingsPanelProps) {
   const { checkAuth, logout } = useAuth()
+  const {
+    accountError: error,
+    accountLoading: loading,
+    profile,
+    updatePendingEmailChange,
+    updateProfile,
+  } = useSettingsData()
   const { setThemeMode, themeMode } = useTheme()
   const searchParams = useSearchParams()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
-  const [loading, setLoading] = useState(true)
   const [savingProfile, setSavingProfile] = useState(false)
   const [savingPassword, setSavingPassword] = useState(false)
-  const [error, setError] = useState('')
   const [profileError, setProfileError] = useState('')
   const [passwordError, setPasswordError] = useState('')
   const [email, setEmail] = useState('')
@@ -56,43 +64,24 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
   const [confirmPassword, setConfirmPassword] = useState('')
 
   useEffect(() => {
-    let cancelled = false
-    async function load() {
-      setLoading(true)
-      setError('')
-      try {
-        const settingsResponse = await getControlUISettingsMe()
-        if (!cancelled) {
-          const loadedEmail = settingsResponse.me.email || ''
-          const loadedUsername = settingsResponse.me.username || ''
-          setEmail(loadedEmail)
-          setUsername(loadedUsername)
-          setPendingEmailChange(settingsResponse.me.pendingEmailChange || null)
-          setDraftEmail(loadedEmail)
-          setDraftUsername(loadedUsername)
-        }
-      } catch (loadError) {
-        if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : 'Failed to load settings')
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    if (section !== 'account' || !profile) return
+    const loadedEmail = profile.email || ''
+    const loadedUsername = profile.username || ''
+    setEmail(loadedEmail)
+    setUsername(loadedUsername)
+    setPendingEmailChange(profile.pendingEmailChange || null)
+    setDraftEmail(loadedEmail)
+    setDraftUsername(loadedUsername)
+  }, [profile, section])
 
   useEffect(() => {
-    if (loading || searchParams.get('focus') !== 'email') return
+    if (section !== 'account' || loading || searchParams.get('focus') !== 'email') return
     beginEditing('email')
     window.setTimeout(() => {
       const emailInput = document.querySelector<HTMLInputElement>('input[aria-label="Email"]')
       emailInput?.focus()
     }, 0)
-  }, [loading, searchParams])
+  }, [loading, searchParams, section])
 
   useEffect(() => {
     function updateResettableAlerts() {
@@ -154,9 +143,11 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     setProfileError('')
     try {
       const response = await updateControlUISettingsUsername(nextUsername)
+      const nextPendingEmailChange = response.me.pendingEmailChange || pendingEmailChange
+      updateProfile({ ...response.me, pendingEmailChange: nextPendingEmailChange })
       setEmail(response.me.email || '')
       setUsername(response.me.username || '')
-      setPendingEmailChange(response.me.pendingEmailChange || pendingEmailChange)
+      setPendingEmailChange(nextPendingEmailChange)
       setDraftEmail(response.me.email || '')
       setDraftUsername(response.me.username || '')
       setEditingField(null)
@@ -175,6 +166,11 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     try {
       const response = await requestControlUISettingsEmailChange(nextEmail)
       setPendingEmailChange({
+        email: response.confirmation.email,
+        expiresAt: response.confirmation.expiresAt,
+        createdAt: response.confirmation.createdAt,
+      })
+      updatePendingEmailChange({
         email: response.confirmation.email,
         expiresAt: response.confirmation.expiresAt,
         createdAt: response.confirmation.createdAt,
@@ -241,18 +237,77 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     }
   }
 
+  if (section === 'ui') {
+    return (
+      <>
+        <div className="cu-settings-version" aria-label="Control UI version">
+          <span className="cu-settings-row__label">Control UI version</span>
+          <span className="cu-settings-version__value">{packageJson.version}</span>
+        </div>
+        <section className="cu-settings-section">
+          <div className="cu-settings-section__header">
+            <span className="cu-settings-section__title">Appearance</span>
+          </div>
+          <div className="cu-settings-theme-options" role="radiogroup" aria-label="Theme">
+            <label
+              className={`cu-settings-theme-option${
+                themeMode === 'dark' ? ' cu-settings-theme-option--selected' : ''
+              }`}
+              htmlFor="settings-theme-dark"
+              title="Use the darker interface across Control UI."
+            >
+              <input
+                id="settings-theme-dark"
+                type="radio"
+                name="settings-theme"
+                value="dark"
+                checked={themeMode === 'dark'}
+                onChange={() => setThemeMode('dark')}
+              />
+              <span className="cu-settings-theme-option__icon" aria-hidden="true">
+                <IconThemeMoon />
+              </span>
+              <span className="cu-settings-theme-option__copy">
+                <span className="cu-settings-theme-option__title">Dark</span>
+                <span className="cu-settings-theme-option__description">
+                  Use the darker interface across Control UI.
+                </span>
+              </span>
+            </label>
+            <label
+              className={`cu-settings-theme-option${
+                themeMode === 'light' ? ' cu-settings-theme-option--selected' : ''
+              }`}
+              htmlFor="settings-theme-light"
+              title="Use the lighter interface across Control UI."
+            >
+              <input
+                id="settings-theme-light"
+                type="radio"
+                name="settings-theme"
+                value="light"
+                checked={themeMode === 'light'}
+                onChange={() => setThemeMode('light')}
+              />
+              <span className="cu-settings-theme-option__icon" aria-hidden="true">
+                <IconThemeSun />
+              </span>
+              <span className="cu-settings-theme-option__copy">
+                <span className="cu-settings-theme-option__title">Light</span>
+                <span className="cu-settings-theme-option__description">
+                  Use the lighter interface across Control UI.
+                </span>
+              </span>
+            </label>
+          </div>
+        </section>
+      </>
+    )
+  }
+
   return (
-    <div className="cu-card cu-card--viewport-fill cu-settings-card">
-      <TablePanelHeader
-        title={
-          <>
-            <IconSettings />
-            Settings
-          </>
-        }
-        subtitle="Manage your Control UI admin account and theme."
-      />
-      <div className="cu-card__body">
+    <div className="cu-settings-tab-content">
+      <div className="cu-settings-tab-content__body">
         {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
         <div className="cu-settings-sections">
           <section className="cu-settings-section">
@@ -400,67 +455,15 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
             {profileError ? <div className="cu-banner cu-banner--error">{profileError}</div> : null}
           </section>
 
-          <section className="cu-settings-section">
-            <div className="cu-settings-section__header">
-              <span className="cu-settings-section__title">Appearance</span>
-            </div>
-            <div className="cu-settings-theme-options" role="radiogroup" aria-label="Theme">
-              <label
-                className={`cu-settings-theme-option${
-                  themeMode === 'dark' ? ' cu-settings-theme-option--selected' : ''
-                }`}
-                htmlFor="settings-theme-dark"
-                title="Use the darker interface across Control UI."
-              >
-                <input
-                  id="settings-theme-dark"
-                  type="radio"
-                  name="settings-theme"
-                  value="dark"
-                  checked={themeMode === 'dark'}
-                  onChange={() => setThemeMode('dark')}
-                />
-                <span className="cu-settings-theme-option__icon" aria-hidden="true">
-                  <IconThemeMoon />
-                </span>
-                <span className="cu-settings-theme-option__copy">
-                  <span className="cu-settings-theme-option__title">Dark</span>
-                  <span className="cu-settings-theme-option__description">
-                    Use the darker interface across Control UI.
-                  </span>
-                </span>
-              </label>
-              <label
-                className={`cu-settings-theme-option${
-                  themeMode === 'light' ? ' cu-settings-theme-option--selected' : ''
-                }`}
-                htmlFor="settings-theme-light"
-                title="Use the lighter interface across Control UI."
-              >
-                <input
-                  id="settings-theme-light"
-                  type="radio"
-                  name="settings-theme"
-                  value="light"
-                  checked={themeMode === 'light'}
-                  onChange={() => setThemeMode('light')}
-                />
-                <span className="cu-settings-theme-option__icon" aria-hidden="true">
-                  <IconThemeSun />
-                </span>
-                <span className="cu-settings-theme-option__copy">
-                  <span className="cu-settings-theme-option__title">Light</span>
-                  <span className="cu-settings-theme-option__description">
-                    Use the lighter interface across Control UI.
-                  </span>
-                </span>
-              </label>
-            </div>
-            <div className="cu-settings-list">
-              {hasResettableAlerts ? (
+          {hasResettableAlerts ? (
+            <section className="cu-settings-section">
+              <div className="cu-settings-section__header">
+                <span className="cu-settings-section__title">Alerts</span>
+              </div>
+              <div className="cu-settings-list">
                 <div className="cu-settings-row">
                   <div className="cu-settings-row__main">
-                    <span className="cu-settings-row__label">Reset Alerts</span>
+                    <span className="cu-settings-row__label">Reset alerts</span>
                     <span className="cu-settings-row__value">
                       Show dismissed account and access alerts again in this browser.
                     </span>
@@ -476,13 +479,9 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
                     </Button>
                   </div>
                 </div>
-              ) : null}
-            </div>
-          </section>
-        </div>
-        <div className="cu-settings-version" aria-label="Control UI version">
-          <span className="cu-settings-row__label">Control UI version</span>
-          <span className="cu-settings-version__value">{packageJson.version}</span>
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
 

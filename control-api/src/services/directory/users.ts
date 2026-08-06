@@ -117,7 +117,12 @@ export async function listUsers(searchQuery = '') {
 
 export async function getAdminUserContext(userId: string) {
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, u.picture, p.display_name, p.channels
+    `SELECT u.id, u.email, u.name, u.picture, p.display_name, p.channels,
+            EXISTS (
+              SELECT 1
+                FROM identity_provider_identities identity
+               WHERE identity.user_id = u.id
+            ) AS email_managed_by_identity_provider
        FROM users u
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE u.id = $1
@@ -133,6 +138,7 @@ export async function getAdminUserContext(userId: string) {
         picture: string | null
         display_name: string | null
         channels: unknown
+        email_managed_by_identity_provider: boolean
       }
     | undefined
 
@@ -144,6 +150,7 @@ export async function getAdminUserContext(userId: string) {
     picture: row.picture,
     displayName: row.display_name || null,
     channels: normalizeChannels(row.channels),
+    emailManagedByIdentityProvider: Boolean(row.email_managed_by_identity_provider),
   }
 }
 
@@ -163,6 +170,27 @@ export async function updateAdminUserContext(
   const nextName = hasName ? normalizedName || null : null
 
   return withTransaction(async db => {
+    const current = await db.query(
+      `SELECT u.email,
+              EXISTS (
+                SELECT 1 FROM identity_provider_identities identity WHERE identity.user_id = u.id
+              ) AS email_managed_by_identity_provider
+         FROM users u
+        WHERE u.id = $1
+        LIMIT 1`,
+      [userId]
+    )
+    const currentRow = current.rows[0] as
+      | { email: string; email_managed_by_identity_provider: boolean }
+      | undefined
+    if (
+      currentRow?.email_managed_by_identity_provider &&
+      currentRow.email.trim().toLowerCase() !== normalizedEmail
+    ) {
+      throw Object.assign(new Error('Microsoft-managed member email cannot be changed'), {
+        code: 'identity_provider_email_locked',
+      })
+    }
     const userResult = await db.query(
       `UPDATE users
           SET email = $2,

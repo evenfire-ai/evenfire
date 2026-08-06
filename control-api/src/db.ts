@@ -5144,6 +5144,182 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',
     apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess,
   },
+  {
+    version: '0090_identity_provider_connections',
+    apply: async db => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS identity_provider_connections (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          directory_tenant_id TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          oauth_callback_url TEXT NOT NULL,
+          client_secret_encrypted TEXT NOT NULL,
+          refresh_token_encrypted TEXT,
+          granted_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+          allow_member_login BOOLEAN NOT NULL DEFAULT TRUE,
+          allowed_email_domains TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+          client_secret_expires_at TIMESTAMPTZ,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'connected', 'disconnected', 'error')),
+          connected_by_admin_id UUID REFERENCES control_admin_users(id) ON DELETE SET NULL,
+          connected_external_subject TEXT,
+          connected_external_email TEXT,
+          connected_at TIMESTAMPTZ,
+          disconnected_at TIMESTAMPTZ,
+          last_error TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (provider, directory_tenant_id, client_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_connections_active
+          ON identity_provider_connections(provider, status, display_name);
+
+        CREATE TABLE IF NOT EXISTS identity_provider_oauth_states (
+          state_hash TEXT PRIMARY KEY,
+          connection_id UUID NOT NULL
+            REFERENCES identity_provider_connections(id) ON DELETE CASCADE,
+          flow TEXT NOT NULL
+            CHECK (flow IN ('admin_connect', 'profile_login', 'desktop_login', 'invitation_link')),
+          invitation_id UUID REFERENCES invitations(id) ON DELETE CASCADE,
+          return_url TEXT NOT NULL,
+          code_verifier_encrypted TEXT NOT NULL,
+          flow_binding_hash TEXT,
+          expires_at TIMESTAMPTZ NOT NULL,
+          consumed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_oauth_states_expiry
+          ON identity_provider_oauth_states(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_oauth_states_consumed
+          ON identity_provider_oauth_states(consumed_at)
+          WHERE consumed_at IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS identity_provider_identities (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider TEXT NOT NULL,
+          connection_id UUID NOT NULL
+            REFERENCES identity_provider_connections(id) ON DELETE CASCADE,
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          external_subject TEXT NOT NULL,
+          email TEXT,
+          user_principal_name TEXT,
+          display_name TEXT,
+          linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_login_at TIMESTAMPTZ,
+          UNIQUE (connection_id, external_subject),
+          UNIQUE (connection_id, user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_identities_user
+          ON identity_provider_identities(user_id, provider);
+
+        CREATE TABLE IF NOT EXISTS identity_provider_login_codes (
+          code_hash TEXT PRIMARY KEY,
+          session_token_encrypted TEXT NOT NULL,
+          flow_binding_hash TEXT,
+          expires_at TIMESTAMPTZ NOT NULL,
+          consumed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_login_codes_expiry
+          ON identity_provider_login_codes(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_login_codes_consumed
+          ON identity_provider_login_codes(consumed_at)
+          WHERE consumed_at IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS identity_provider_team_mappings (
+          connection_id UUID NOT NULL
+            REFERENCES identity_provider_connections(id) ON DELETE CASCADE,
+          external_team_id TEXT NOT NULL,
+          team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+          external_display_name TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (connection_id, external_team_id)
+        );
+
+        ALTER TABLE invitations
+          ADD COLUMN IF NOT EXISTS identity_provider TEXT;
+        ALTER TABLE invitations
+          ADD COLUMN IF NOT EXISTS identity_provider_connection_id UUID
+            REFERENCES identity_provider_connections(id) ON DELETE SET NULL;
+        ALTER TABLE invitations
+          ADD COLUMN IF NOT EXISTS identity_provider_subject TEXT;
+        ALTER TABLE invitations
+          ADD COLUMN IF NOT EXISTS identity_provider_upn TEXT;
+        ALTER TABLE invitations
+          ADD COLUMN IF NOT EXISTS identity_provider_linked_at TIMESTAMPTZ;
+
+        CREATE INDEX IF NOT EXISTS idx_invitations_identity_provider_subject
+          ON invitations(identity_provider_connection_id, identity_provider_subject)
+          WHERE identity_provider_connection_id IS NOT NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_invitations_identity_provider_subject_active
+          ON invitations(identity_provider_connection_id, identity_provider_subject)
+          WHERE identity_provider_connection_id IS NOT NULL
+            AND identity_provider_subject IS NOT NULL
+            AND status IN ('draft', 'pending');
+
+        CREATE TABLE IF NOT EXISTS invitation_agents (
+          invitation_id UUID NOT NULL REFERENCES invitations(id) ON DELETE CASCADE,
+          agent_name TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (invitation_id, agent_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS identity_provider_setup_sessions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft'
+            CHECK (status IN ('draft', 'authorizing', 'configuring', 'importing', 'completed', 'cancelled')),
+          current_step INTEGER NOT NULL DEFAULT 1 CHECK (current_step BETWEEN 1 AND 9),
+          draft JSONB NOT NULL DEFAULT '{}'::jsonb,
+          client_secret_encrypted TEXT,
+          connection_id UUID
+            REFERENCES identity_provider_connections(id) ON DELETE SET NULL,
+          execution JSONB NOT NULL DEFAULT '{}'::jsonb,
+          import_lock_token TEXT,
+          import_lock_expires_at TIMESTAMPTZ,
+          created_by_admin_id UUID REFERENCES control_admin_users(id) ON DELETE SET NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_provider_setup_sessions_active
+          ON identity_provider_setup_sessions(provider)
+          WHERE status IN ('draft', 'authorizing', 'configuring', 'importing');
+
+        CREATE INDEX IF NOT EXISTS idx_identity_provider_setup_sessions_connection
+          ON identity_provider_setup_sessions(connection_id)
+          WHERE connection_id IS NOT NULL;
+
+        REVOKE ALL ON TABLE
+          identity_provider_connections,
+          identity_provider_identities,
+          identity_provider_login_codes,
+          identity_provider_oauth_states,
+          identity_provider_setup_sessions,
+          identity_provider_team_mappings,
+          invitation_agents
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+          identity_provider_connections,
+          identity_provider_identities,
+          identity_provider_login_codes,
+          identity_provider_oauth_states,
+          identity_provider_setup_sessions,
+          identity_provider_team_mappings,
+          invitation_agents
+          TO control_api_runtime;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

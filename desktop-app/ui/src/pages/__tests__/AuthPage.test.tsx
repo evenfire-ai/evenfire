@@ -20,6 +20,8 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   me: null,
   email: '',
   password: '',
+  identityProviders: [],
+  identityProvidersLoading: false,
   desktopSetupAuthorizationToken: '',
   desktopSetupStarted: false,
   desktopEnvironmentSetupComplete: false,
@@ -54,6 +56,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   setStatus: vi.fn(),
   loadSession: vi.fn(),
   handlePasswordLogin: vi.fn(),
+  handleMicrosoftIdentityProviderLogin: vi.fn(),
   handleStartDesktopSetup: vi.fn(),
   handleCompleteDesktopSetup: vi.fn(),
   handleSaveRuntimeConfig: vi.fn(),
@@ -156,5 +159,45 @@ describe('AuthPage', () => {
     await user.click(screen.getByRole('button', { name: 'Localhost' }))
 
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
+  })
+
+  it('defaults to Microsoft login and keeps password login as a secondary action', async () => {
+    const user = userEvent.setup()
+    const handleMicrosoftIdentityProviderLogin = vi.fn()
+
+    renderAuthPage({
+      identityProviders: [
+        {
+          id: 'microsoft-connection-1',
+          provider: 'microsoft',
+          displayName: 'Example organization',
+        },
+      ],
+      handleMicrosoftIdentityProviderLogin,
+    })
+
+    expect(screen.getByRole('button', { name: 'Connect with Microsoft' })).toBeTruthy()
+    expect(screen.queryByLabelText('Email')).toBeNull()
+    expect(screen.queryByLabelText('Password')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Connect with Microsoft' }))
+
+    expect(handleMicrosoftIdentityProviderLogin).toHaveBeenCalledWith('microsoft-connection-1')
+
+    await user.click(screen.getByRole('button', { name: 'Use password instead' }))
+
+    expect(screen.getByLabelText('Email')).toBeTruthy()
+    expect(screen.getByLabelText('Password')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Use Microsoft instead' })).toBeTruthy()
+  })
+
+  it('shows only the login spinner while sign-in options load', () => {
+    renderAuthPage({ identityProvidersLoading: true })
+
+    expect(screen.getByRole('status', { name: 'Loading sign-in options' })).toBeTruthy()
+    expect(screen.getByTitle(/Evenfire Desktop/)).toBeTruthy()
+    expect(screen.queryByText('Checking Microsoft sign-in...')).toBeNull()
+    expect(screen.queryByLabelText('Email')).toBeNull()
+    expect(screen.queryByLabelText('Password')).toBeNull()
   })
 })

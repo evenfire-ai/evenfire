@@ -6,6 +6,7 @@ import type {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  IdentityProviderConnection,
   SessionMe,
 } from '../../../../src/types'
 import type { Tone } from '../../uiTypes'
@@ -60,6 +61,8 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     null
   )
   const [desktopEnvironmentSetupComplete, setDesktopEnvironmentSetupComplete] = useState(false)
+  const [identityProviders, setIdentityProviders] = useState<IdentityProviderConnection[]>([])
+  const [identityProvidersLoading, setIdentityProvidersLoading] = useState(false)
   const [pendingDesktopEnvironmentSetup, setPendingDesktopEnvironmentSetup] =
     useState<DesktopRuntimeConfig | null>(null)
 
@@ -79,6 +82,20 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     const state = await window.clerum.auth.getRuntimeConfigState()
     setRuntimeConfigState(state)
     return state
+  }, [])
+
+  const refreshIdentityProviders = useCallback(async () => {
+    setIdentityProvidersLoading(true)
+    try {
+      const response = await window.clerum.auth.getIdentityProviders()
+      setIdentityProviders(response.items || [])
+      return response.items || []
+    } catch {
+      setIdentityProviders([])
+      return []
+    } finally {
+      setIdentityProvidersLoading(false)
+    }
   }, [])
 
   const completeDesktopSetupWith = useCallback(
@@ -111,6 +128,46 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
       setBooting(false)
     })
   }, [refreshRuntimeConfigState])
+
+  useEffect(() => {
+    if (!runtimeConfigState?.configured) {
+      setIdentityProviders([])
+      setIdentityProvidersLoading(false)
+      return
+    }
+    void refreshIdentityProviders()
+  }, [refreshIdentityProviders, runtimeConfigState?.activeOptionId, runtimeConfigState?.configured])
+
+  const completePendingIdentityProviderLogin = useCallback(async () => {
+    const code = await window.clerum.auth.consumeIdentityProviderLoginCode()
+    if (!code) return
+    try {
+      setBusy(true)
+      setAuthTransitioning(true)
+      if (code.startsWith('error:')) {
+        throw new Error(code.slice('error:'.length) || 'Microsoft sign-in could not be completed.')
+      }
+      await window.clerum.auth.completeIdentityProviderLogin(code)
+      setStatus('Signed in with Microsoft.', 'success')
+      await onSessionNeedsLoad({ preserveNav: true })
+    } catch (error) {
+      setStatus(
+        `Microsoft login failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    } finally {
+      setAuthTransitioning(false)
+      setBusy(false)
+    }
+  }, [onSessionNeedsLoad, setStatus])
+
+  useEffect(() => {
+    const unsubscribe = window.clerum.auth.onIdentityProviderLoginCode(() => {
+      void completePendingIdentityProviderLogin()
+    })
+    void completePendingIdentityProviderLogin()
+    return unsubscribe
+  }, [completePendingIdentityProviderLogin])
 
   // onDesktopSetupToken IPC listener effect
   useEffect(() => {
@@ -187,6 +244,23 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         'error',
         undefined,
         unauthorized ? { toastDurationMs: DEFAULT_TOAST_DURATION_MS } : undefined
+      )
+    } finally {
+      setAuthTransitioning(false)
+      setBusy(false)
+    }
+  }
+
+  const handleMicrosoftIdentityProviderLogin = async (connectionId: string) => {
+    try {
+      setBusy(true)
+      setAuthTransitioning(true)
+      await window.clerum.auth.startMicrosoftIdentityProviderLogin(connectionId)
+      setStatus('Complete Microsoft sign-in in your browser.', 'info')
+    } catch (error) {
+      setStatus(
+        `Microsoft login could not start: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
       )
     } finally {
       setAuthTransitioning(false)
@@ -405,6 +479,8 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     dependencyHealth,
     desktopReleaseStatus,
     desktopEnvironmentSetupComplete,
+    identityProviders,
+    identityProvidersLoading,
     pendingDesktopEnvironmentSetup,
     runtimeConfigMissing,
     showRuntimeConfigSelector,
@@ -427,7 +503,9 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setDesktopEnvironmentSetupComplete,
     setPendingDesktopEnvironmentSetup,
     refreshRuntimeConfigState,
+    refreshIdentityProviders,
     handlePasswordLogin,
+    handleMicrosoftIdentityProviderLogin,
     handleStartDesktopSetup,
     handleCompleteDesktopSetup,
     handleSaveRuntimeConfig,

@@ -1,7 +1,7 @@
 import type { FormEvent } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button, Field, IconButton, MenuItem, TextInput } from '@components/Common'
+import { Button, Field, IconButton, MenuItem, SelectInput, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
@@ -20,6 +20,8 @@ export function AuthPage() {
     runtimeConfigSetupExternalRestApiBaseUrl,
     authTransitioning,
     runtimeConfigState,
+    identityProviders = [],
+    identityProvidersLoading,
     runtimeConfigMissing,
     setEmail,
     setPassword,
@@ -27,6 +29,7 @@ export function AuthPage() {
     setRuntimeConfigSetupExternalRestApiBaseUrl,
     setStatus,
     handlePasswordLogin,
+    handleMicrosoftIdentityProviderLogin,
     handleStartDesktopSetup,
     handleSaveRuntimeConfig,
     handleDeleteRuntimeConfig,
@@ -46,6 +49,8 @@ export function AuthPage() {
     Boolean(runtimeConfigSetupExternalRestApiBaseUrl.trim())
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false)
   const [forgotPasswordBusy, setForgotPasswordBusy] = useState(false)
+  const [selectedIdentityProviderId, setSelectedIdentityProviderId] = useState('')
+  const [usePasswordLogin, setUsePasswordLogin] = useState(false)
   const [pendingDeleteOption, setPendingDeleteOption] = useState<DesktopRuntimeConfigOption | null>(
     null
   )
@@ -146,6 +151,11 @@ export function AuthPage() {
     }
   }, [runtimeMenuOpen])
 
+  useEffect(() => {
+    setSelectedIdentityProviderId(identityProviders[0]?.id || '')
+    setUsePasswordLogin(identityProviders.length === 0)
+  }, [identityProviders])
+
   return (
     <main className="auth-page">
       <section className="auth-card glass-card">
@@ -201,7 +211,67 @@ export function AuthPage() {
           </form>
         ) : null}
 
-        {!runtimeConfigMissing && !runtimeSetupVisible ? (
+        {!runtimeConfigMissing && !runtimeSetupVisible && identityProvidersLoading ? (
+          <div
+            className="auth-login-loading"
+            role="status"
+            aria-label="Loading sign-in options"
+            aria-live="polite"
+          >
+            <span className="auth-login-spinner" aria-hidden="true" />
+            <span className="visually-hidden">Loading sign-in options</span>
+          </div>
+        ) : null}
+
+        {!runtimeConfigMissing &&
+        !runtimeSetupVisible &&
+        !identityProvidersLoading &&
+        identityProviders.length > 0 &&
+        !usePasswordLogin ? (
+          <div className="auth-form-stack auth-provider-login">
+            {identityProviders.length > 1 ? (
+              <Field
+                label="Organization"
+                htmlFor="identity-provider-input"
+                wrapperClassName="auth-form-row"
+              >
+                <SelectInput
+                  id="identity-provider-input"
+                  value={selectedIdentityProviderId}
+                  onChange={event => setSelectedIdentityProviderId(event.target.value)}
+                  disabled={busy}
+                >
+                  {identityProviders.map(provider => (
+                    <option value={provider.id} key={provider.id}>
+                      {provider.displayName}
+                    </option>
+                  ))}
+                </SelectInput>
+              </Field>
+            ) : null}
+            <Button
+              block
+              disabled={!selectedIdentityProviderId || busy}
+              onClick={() => void handleMicrosoftIdentityProviderLogin(selectedIdentityProviderId)}
+            >
+              <img src="./microsoft.svg" alt="" width="21" height="21" aria-hidden="true" />
+              {authTransitioning ? 'Opening Microsoft...' : 'Connect with Microsoft'}
+            </Button>
+            <button
+              type="button"
+              className="auth-inline-link"
+              onClick={() => setUsePasswordLogin(true)}
+              disabled={busy}
+            >
+              Use password instead
+            </button>
+          </div>
+        ) : null}
+
+        {!runtimeConfigMissing &&
+        !runtimeSetupVisible &&
+        !identityProvidersLoading &&
+        (identityProviders.length === 0 || usePasswordLogin) ? (
           <form className="auth-form-stack" onSubmit={handlePasswordSubmit}>
             <Field label="Email" htmlFor="email-input" wrapperClassName="auth-form-row">
               <TextInput
@@ -239,6 +309,16 @@ export function AuthPage() {
             >
               Forgot password
             </button>
+            {identityProviders.length > 0 ? (
+              <button
+                type="button"
+                className="auth-inline-link"
+                onClick={() => setUsePasswordLogin(false)}
+                disabled={busy}
+              >
+                Use Microsoft instead
+              </button>
+            ) : null}
           </form>
         ) : null}
 

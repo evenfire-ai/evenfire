@@ -25,3 +25,10 @@ export type SelectionDropdownProps = {
   invalid?: boolean
   showSelectedChips?: boolean
 }
+
+export type SelectionDropdownMenuPosition = {
+  top?: number
+  bottom?: number
+  left: number
+  width: number
+}

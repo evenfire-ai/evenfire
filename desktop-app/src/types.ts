@@ -43,6 +43,12 @@ export type LoginResult = {
   me: SessionMe
 }
 
+export type IdentityProviderConnection = {
+  id: string
+  provider: 'microsoft'
+  displayName: string
+}
+
 export type InvitationFlowProfileLookup = {
   valid: true
   email: string

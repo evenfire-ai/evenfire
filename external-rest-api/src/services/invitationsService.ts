@@ -19,6 +19,9 @@ export type InvitationPreview = {
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  identityProvider: 'microsoft' | null
+  identityProviderConnectionId: string | null
+  identityProviderLinked: boolean
 }
 
 export async function listPendingInvitations(email: string, sessionToken: string) {
@@ -47,6 +50,9 @@ export async function acceptInvitation(
     email: string
     userId: string
     token: string
+    identityProvider: 'microsoft' | null
+    identityProviderConnectionId: string | null
+    identityProviderLinked: boolean
   }
 }> {
   try {
@@ -59,6 +65,9 @@ export async function acceptInvitation(
       email: string
       userId: string
       token: string
+      identityProvider: 'microsoft' | null
+      identityProviderConnectionId: string | null
+      identityProviderLinked: boolean
     }>('POST', '/external/invitations/accept', {
       body: {
         email,

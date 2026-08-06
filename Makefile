@@ -29,6 +29,7 @@ SHELL := /bin/bash
 
 # ── Service directories ──────────────────────────────────────────────
 SERVICES := \
+	auth-proxy \
 	channel-reader \
 	workflow-approval-request-reader \
 	mcp-host \
@@ -51,6 +52,7 @@ SERVICES := \
 
 # Services that have unit tests
 TEST_SERVICES := \
+	auth-proxy \
 	workflow-approval-request-reader \
 	mcp-host \
 	host-context-controller \
@@ -355,6 +357,10 @@ minikube-pf-control-api: ## Port-forward Control API → localhost:8090
 minikube-pf-external-api: ## Port-forward External REST API → localhost:8091
 	scripts/dev/resilient-kubectl-port-forward.sh "$(MINIKUBE_PROFILE)" profiles external-rest-api 8091 8091
 
+.PHONY: minikube-pf-auth-proxy
+minikube-pf-auth-proxy: ## Port-forward Auth Proxy → localhost:8096
+	scripts/dev/resilient-kubectl-port-forward.sh "$(MINIKUBE_PROFILE)" auth-ingress auth-proxy 8096 8096
+
 .PHONY: minikube-pf-rpc-proxy
 minikube-pf-rpc-proxy: ## Port-forward RPC Proxy → localhost:8094
 	scripts/dev/resilient-kubectl-port-forward.sh "$(MINIKUBE_PROFILE)" rpc-proxy rpc-proxy 8094 8094
@@ -368,8 +374,9 @@ minikube-pf-desktop: ## Port-forward all services needed by Desktop App (backgro
 	@echo "Starting port-forwards for Desktop App..."
 	@$(KC) port-forward svc/control-api -n control-plane 8090:8090 &
 	@$(KC) port-forward svc/external-rest-api -n profiles 8091:8091 &
+	@$(KC) port-forward svc/auth-proxy -n auth-ingress 8096:8096 &
 	@$(KC) port-forward svc/rpc-proxy -n rpc-proxy 8094:8094 &
-	@echo "Desktop App ready: control-api=:8090  external-rest-api=:8091  rpc-proxy=:8094"
+	@echo "Desktop App ready: control-api=:8090  external-rest-api=:8091  auth-proxy=:8096  rpc-proxy=:8094"
 	@echo "  Recipe Manager needs CONTROL_API_ADMIN_USERNAME + CONTROL_API_ADMIN_PASSWORD"
 	@echo "Press Ctrl+C to stop all port-forwards"
 	@wait

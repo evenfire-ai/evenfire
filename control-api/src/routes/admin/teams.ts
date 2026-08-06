@@ -3,6 +3,12 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import {
+  filterAccessValues,
+  mergeActiveUpdateWithDeletedHistory,
+  partitionAccessValues,
+} from '../../services/directory/accessReconciliation.js'
+import {
+  TeamNameConflictError,
   addMemberToTeam,
   adminDeleteTeam,
   createTeam,
@@ -132,6 +138,10 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
       }
       res.status(200).json(await createTeam(name))
     } catch (error) {
+      if (error instanceof TeamNameConflictError) {
+        res.status(409).json({ error: 'team_name_exists', message: error.message })
+        return
+      }
       next(error)
     }
   })
@@ -190,6 +200,10 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
       }
       res.status(200).json(updated)
     } catch (error) {
+      if (error instanceof TeamNameConflictError) {
+        res.status(409).json({ error: 'team_name_exists', message: error.message })
+        return
+      }
       next(error)
     }
   })

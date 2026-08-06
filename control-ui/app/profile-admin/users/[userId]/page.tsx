@@ -102,6 +102,7 @@ export default function UserDetailsPage() {
 
   const [userName, setUserName] = useState('')
   const [emailDraft, setEmailDraft] = useState('')
+  const [emailManagedByIdentityProvider, setEmailManagedByIdentityProvider] = useState(false)
   const [contactEmailsDraft, setContactEmailsDraft] = useState<string[]>([])
   const [slackHandlesDraft, setSlackHandlesDraft] = useState<string[]>([])
   const [telegramIdsDraft, setTelegramIdsDraft] = useState<string[]>([])
@@ -244,6 +245,7 @@ export default function UserDetailsPage() {
       ])
 
       setEmailDraft(context.email || '')
+      setEmailManagedByIdentityProvider(context.emailManagedByIdentityProvider === true)
       setUserName(context.name || context.displayName || context.email || '')
       setContactEmailsDraft(uniqueTrimmed(context.channels.emails || [], true))
       setSlackHandlesDraft(uniqueTrimmed(context.channels.slackUserNames || []))
@@ -614,11 +616,16 @@ export default function UserDetailsPage() {
                   value={emailDraft}
                   onChange={e => setEmailDraft(e.target.value)}
                   placeholder="user@example.com"
-                  disabled={busy}
+                  disabled={busy || emailManagedByIdentityProvider}
                 />
               ) : (
                 <div className="cu-field__readonly">{emailDraft || '-'}</div>
               )}
+              {emailManagedByIdentityProvider ? (
+                <span className="cu-field__hint">
+                  This email is managed by the member's Microsoft identity.
+                </span>
+              ) : null}
             </div>
 
             <div className="cu-field">

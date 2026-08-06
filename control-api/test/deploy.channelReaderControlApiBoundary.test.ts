@@ -143,5 +143,6 @@ describe('channel-reader -> control-api boundary manifests', () => {
     // Opción B-completa: the reader IS in the map (consulta endpoint, spec step 6).
     expect(defaultMap).toContain('workflow-approval-reader=')
     expect(defaultMap).toContain('webhook-proxy=')
+    expect(defaultMap).toContain('auth-proxy=')
   })
 })
