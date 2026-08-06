@@ -146,9 +146,14 @@ sync_gfs() {
     # verify-gfs. A genuinely stuck gfsc now fails here, named, instead of masked.
     # Iterate the list captured above (single query — no re-query between guard
     # and loop that could skip verification if the API blipped in that window).
+    # 240s per deployment matches verify-gfs.sh's VERIFY_ROLLOUT_TIMEOUT and
+    # deploy/scripts/provision-gfs-runtime.sh: a freshly-restarted gfsc-reader on
+    # a cold cluster needs ~145s to reach Ready, so a tighter budget here (this
+    # runs in the dev/prod deploy path too, via provision-gfs-runtime.sh) would
+    # abort a legitimately-slow rollout that those 240s gates would have absorbed.
     local d
     for d in ${gfs_deploys}; do
-      "${KCTL[@]}" rollout status "${d}" -n "${GFS_NAMESPACE}" --timeout=180s
+      "${KCTL[@]}" rollout status "${d}" -n "${GFS_NAMESPACE}" --timeout=240s
     done
   else
     log "No gfsc deployments exist yet; auth key is synced for future pods"
