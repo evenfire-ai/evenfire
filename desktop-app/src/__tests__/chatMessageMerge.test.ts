@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { mergeAuthoritativeServerMessages } from '../chatMessageMerge.js'
-import { turnsToChatMessages } from '../serverTurnAdapter.js'
+import fc from 'fast-check'
+import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from '../chatMessageMerge.js'
+import { type ServerTurn, turnsToChatMessages } from '../serverTurnAdapter.js'
 import type { ChatMessage } from '../types.js'
 
 describe('mergeAuthoritativeServerMessages', () => {
@@ -29,7 +30,10 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(merged.map(message => message.id)).toEqual(['turn-3-user', 'pending'])
   })
 
-  it('keeps an active optimistic message until the server identifies its task', () => {
+  it('keeps an active optimistic message without dropping the unscoped server turn (D-3)', () => {
+    // The server has not scoped its history row to the optimistic's task, so the
+    // row must survive (invariant §3) while the live optimistic stays as a
+    // transient duplicate that a later reconciliation collapses (§6).
     const serverMessages = turnsToChatMessages([
       {
         number: 2,
@@ -58,14 +62,14 @@ describe('mergeAuthoritativeServerMessages', () => {
       { activeTaskIds: new Set(['task-2']) }
     )
 
-    expect(merged).toEqual([
-      expect.objectContaining({ id: 'turn-1-user' }),
-      expect.objectContaining({
-        id: 'optimistic-task-2',
-        content: 'second',
-        task_id: 'task-2',
-      }),
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'optimistic-task-2',
+      'turn-2-user',
     ])
+    expect(merged.find(message => message.id === 'optimistic-task-2')).toEqual(
+      expect.objectContaining({ content: 'second', task_id: 'task-2' })
+    )
   })
 
   it('replaces an active optimistic message when the server identifies the same task', () => {
@@ -753,7 +757,11 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(persisted.map(message => message.id)).toContain('turn-6-assistant')
   })
 
-  it('preserves a completed local echo when a live task suppresses its server slot', () => {
+  it('collapses a completed local echo into its server slot without dropping the slot', () => {
+    // echo-answer-A is the idle echo of turn-2-assistant; the live task-B bubble
+    // must not cause the completed server row turn-2-assistant to be suppressed
+    // (invariant §3). The idle local echo collapses into its server row (§6.1),
+    // and every numbered server row survives.
     const serverMessages = turnsToChatMessages([
       {
         number: 2,
@@ -793,10 +801,15 @@ describe('mergeAuthoritativeServerMessages', () => {
 
     expect(merged.map(message => message.id)).toEqual([
       'turn-2-user',
-      'echo-answer-A',
+      'turn-2-assistant',
       'optimistic-user-B',
       'optimistic-assistant-B',
     ])
+    // Both numbered server rows survive; the live task-B bubbles remain as
+    // transient duplicates.
+    expect(merged.map(message => message.id)).toEqual(
+      expect.arrayContaining(['turn-2-user', 'turn-2-assistant'])
+    )
   })
 
   it('reinjects turnless incoming messages that are present only in the replacement window', () => {
@@ -1007,5 +1020,238 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(numberedTurns).toEqual([...numberedTurns].sort((left, right) => left - right))
     expect(second).toEqual(first)
     expect(ids).toEqual(expect.arrayContaining(durableLocalIds))
+  })
+})
+
+const roleRank = (role: ChatMessage['role']): number =>
+  role === 'user' ? 0 : role === 'assistant' ? 1 : 2
+
+// Server-turn windows are derived from the real producer (T1). turnsToChatMessages
+// never scopes task_id, so any generator here yields the dominant D-3 shape: every
+// live optimistic sees only unscoped server rows and none is ever suppressed.
+const serverTurnsArb: fc.Arbitrary<ServerTurn[]> = fc
+  .uniqueArray(fc.integer({ min: 1, max: 8 }), { minLength: 1, maxLength: 5 })
+  .map(numbers => [...numbers].sort((left, right) => left - right))
+  .chain(numbers =>
+    fc
+      .array(fc.boolean(), { minLength: numbers.length, maxLength: numbers.length })
+      .map(hasResponse =>
+        numbers.map((number, index) => ({
+          number,
+          user_input: `server q${number}`,
+          ...(hasResponse[index] ? { response: `server a${number}` } : {}),
+          started_at: new Date(number).toISOString(),
+        }))
+      )
+  )
+
+type TurnlessSpec =
+  | { kind: 'durable'; variant: 'system' | 'error' | 'preserve' }
+  | { kind: 'live'; role: 'user' | 'assistant'; task: 'live-a' | 'live-b' }
+  | { kind: 'idle'; role: 'user' | 'assistant'; task?: 'idle-a' | 'idle-b' }
+
+const turnlessSpecArb: fc.Arbitrary<TurnlessSpec> = fc.oneof(
+  fc.record({
+    kind: fc.constant('durable' as const),
+    variant: fc.constantFrom('system' as const, 'error' as const, 'preserve' as const),
+  }),
+  fc.record({
+    kind: fc.constant('live' as const),
+    role: fc.constantFrom('user' as const, 'assistant' as const),
+    task: fc.constantFrom('live-a' as const, 'live-b' as const),
+  }),
+  fc.record({
+    kind: fc.constant('idle' as const),
+    role: fc.constantFrom('user' as const, 'assistant' as const),
+    task: fc.option(fc.constantFrom('idle-a' as const, 'idle-b' as const), { nil: undefined }),
+  })
+)
+
+interface MergeScenario {
+  existing: ChatMessage[]
+  incoming: ChatMessage[]
+  activeTaskIds: ReadonlySet<string>
+}
+
+// A disk state is a previously-sorted transcript: numbered rows stay ascending,
+// turnless durable/optimistic messages are spliced between them. The active set is
+// fixed to the live-* pool so every 'live' spec is a genuine optimistic-live bubble
+// — including the R1-B1 shape (no numbered rows + live optimistics + a completed
+// incoming window).
+const mergeScenarioArb: fc.Arbitrary<MergeScenario> = fc
+  .record({
+    serverTurns: serverTurnsArb,
+    numberedNumbers: fc
+      .uniqueArray(fc.integer({ min: 1, max: 8 }), { maxLength: 5 })
+      .map(numbers => [...numbers].sort((left, right) => left - right)),
+    numberedAssistant: fc.array(fc.boolean(), { maxLength: 8 }),
+    turnless: fc.array(turnlessSpecArb, { maxLength: 6 }),
+    inserts: fc.array(fc.nat(), { maxLength: 12 }),
+  })
+  .map(({ serverTurns, numberedNumbers, numberedAssistant, turnless, inserts }) => {
+    const incoming = turnsToChatMessages(serverTurns)
+    let uid = 0
+    const numbered: ChatMessage[] = []
+    numberedNumbers.forEach((number, index) => {
+      numbered.push({
+        id: `disk-turn-${number}-user-${uid++}`,
+        role: 'user',
+        content: `local q${number}`,
+        timestamp: number * 10,
+        serverTurnNumber: number,
+      })
+      if (numberedAssistant[index]) {
+        numbered.push({
+          id: `disk-turn-${number}-assistant-${uid++}`,
+          role: 'assistant',
+          content: `local a${number}`,
+          timestamp: number * 10 + 1,
+          serverTurnNumber: number,
+        })
+      }
+    })
+    const turnlessRows: ChatMessage[] = turnless.map((spec, index) => {
+      const id = `tl-${index}-${uid++}`
+      const timestamp = 1000 + index
+      if (spec.kind === 'durable') {
+        if (spec.variant === 'system')
+          return { id, role: 'system', content: 'diagnostic', timestamp }
+        if (spec.variant === 'error')
+          return { id, role: 'assistant', content: 'error', timestamp, isError: true }
+        return { id, role: 'user', content: 'retry me', timestamp, preserveLocal: true }
+      }
+      return { id, role: spec.role, content: `optimistic ${index}`, timestamp, task_id: spec.task }
+    })
+    const existing = [...numbered]
+    turnlessRows.forEach((row, index) => {
+      const position =
+        existing.length === 0 ? 0 : (inserts[index] ?? existing.length) % (existing.length + 1)
+      existing.splice(position, 0, row)
+    })
+    return { existing, incoming, activeTaskIds: new Set(['live-a', 'live-b']) }
+  })
+
+describe('mergeAuthoritativeServerMessages property invariants (R1-B1)', () => {
+  it('holds all six merge properties under fuzzing including the active-task path', () => {
+    const durableIds = (messages: ChatMessage[]) =>
+      messages.filter(m => m.role === 'system' || m.isError || m.preserveLocal).map(m => m.id)
+    const numberedIds = (messages: ChatMessage[]) =>
+      messages.filter(m => messageServerTurnNumber(m) !== undefined).map(m => m.id)
+
+    fc.assert(
+      fc.property(mergeScenarioArb, ({ existing, incoming, activeTaskIds }) => {
+        const merged = mergeAuthoritativeServerMessages(existing, incoming, { activeTaskIds })
+        const mergedIds = merged.map(m => m.id)
+
+        // Property 3: no duplicate ids.
+        expect(new Set(mergedIds).size).toBe(mergedIds.length)
+
+        // Property 1: every incoming server row with a turn number survives by id
+        // (this is the one that catches R1-B1 — no server row is ever suppressed).
+        for (const server of incoming) {
+          if (messageServerTurnNumber(server) !== undefined) {
+            expect(mergedIds).toContain(server.id)
+          }
+        }
+
+        // Property 2: numbered output is ordered by (turn, roleRank).
+        const orderKeys = merged
+          .filter(m => messageServerTurnNumber(m) !== undefined)
+          .map(m => [messageServerTurnNumber(m)!, roleRank(m.role)] as const)
+        for (let index = 1; index < orderKeys.length; index += 1) {
+          const [previousTurn, previousRank] = orderKeys[index - 1]!
+          const [turn, rank] = orderKeys[index]!
+          expect(previousTurn < turn || (previousTurn === turn && previousRank <= rank)).toBe(true)
+        }
+
+        // Property 4: durable locals (system/error/preserveLocal) are never lost.
+        for (const id of durableIds(existing)) {
+          expect(mergedIds).toContain(id)
+        }
+
+        // Property 5: idempotence, including the active-task path.
+        const remerged = mergeAuthoritativeServerMessages(merged, incoming, { activeTaskIds })
+        expect(remerged).toEqual(merged)
+
+        // Property 6: composability at the renderer/main seam — reapplying the same
+        // authoritative window preserves the numbered subsequence exactly.
+        expect(numberedIds(remerged)).toEqual(numberedIds(merged))
+      }),
+      { numRuns: 40000 }
+    )
+  }, 120000)
+})
+
+describe('mergeAuthoritativeServerMessages invariant §3 (R1-B1)', () => {
+  it('never drops a completed server turn because a live turnless optimistic is present', () => {
+    // Exact reproduction of mini-spec §2: disk holds only two live optimistic
+    // bubbles for task-1, the server replaces with a completed turn-1, task-1 is
+    // still active. The completed server turn must not disappear.
+    const incoming = turnsToChatMessages([
+      {
+        number: 1,
+        user_input: 'live question',
+        response: 'live answer',
+        started_at: new Date(1).toISOString(),
+      },
+    ])
+    const existing: ChatMessage[] = [
+      { id: 'opt-user', role: 'user', content: 'live question', timestamp: 10, task_id: 'task-1' },
+      {
+        id: 'opt-assistant',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 11,
+        task_id: 'task-1',
+      },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(['task-1']),
+    })
+
+    const ids = merged.map(message => message.id)
+    expect(ids).toContain('turn-1-user')
+    expect(ids).toContain('turn-1-assistant')
+  })
+})
+
+describe('mergeAuthoritativeServerMessages unique claim (D-1 ↔ D-2)', () => {
+  // The server does not scope task_id on history rows today (mini-spec §6), so a
+  // task-scoped server row cannot come from turnsToChatMessages. We derive the base
+  // row from the real producer and add the scope by hand to exercise D-1/D-2 — the
+  // one place the code must stay correct for if the server ever gains the field.
+  const scopedServerUserRow = (task: string): ChatMessage => {
+    const [base] = turnsToChatMessages([
+      { number: 1, user_input: 'q1', started_at: new Date(1).toISOString() },
+    ])
+    return { ...base!, task_id: task }
+  }
+
+  it('D-1: a single live optimistic is consumed by its exact-task server row', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [{ id: 'opt-1', role: 'user', content: 'q1', timestamp: 5, task_id: 'task-x' }],
+      [scopedServerUserRow('task-x')],
+      { activeTaskIds: new Set(['task-x']) }
+    )
+
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user'])
+  })
+
+  it('D-2: two live optimistics of the same role/task neither double-claim the row nor lose a local', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        { id: 'opt-1', role: 'user', content: 'q1', timestamp: 5, task_id: 'task-x' },
+        { id: 'opt-2', role: 'user', content: 'q1b', timestamp: 6, task_id: 'task-x' },
+      ],
+      [scopedServerUserRow('task-x')],
+      { activeTaskIds: new Set(['task-x']) }
+    )
+
+    const ids = merged.map(message => message.id)
+    // The single server row is claimed by neither local; both locals survive and
+    // the server row is preserved (Property 1).
+    expect(ids).toEqual(expect.arrayContaining(['opt-1', 'opt-2', 'turn-1-user']))
+    expect(ids).toHaveLength(3)
   })
 })

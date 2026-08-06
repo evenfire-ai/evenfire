@@ -930,9 +930,13 @@ describe('messages', () => {
       { activeTaskIds: ['task-2'] }
     )
 
+    // The server has not scoped turn-2 to task-2, so the authoritative row must be
+    // persisted (invariant §3) while the live optimistic stays as a transient
+    // duplicate that a later reconciliation collapses (mini-spec §6). Suppressing
+    // the server row here was R1-B1.
     expect(
       (await store.loadMessages('agent-1', 'active-window')).map(message => message.id)
-    ).toEqual(['turn-1-user', 'optimistic-user'])
+    ).toEqual(['turn-1-user', 'optimistic-user', 'turn-2-user'])
   })
 
   it('replaces a settled legacy turnless cache without persisting duplicate history', async () => {

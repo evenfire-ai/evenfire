@@ -136,7 +136,6 @@ export function mergeAuthoritativeServerMessages(
   const removedIndexByMessage = new Map<ChatMessage, number>()
   const localByServerMessage = new Map<ChatMessage, ChatMessage>()
   const consumedLocalMessages = new Set<ChatMessage>()
-  const suppressedServerMessages = new Set<ChatMessage>()
 
   const markLocalReplacement = (serverMessage: ChatMessage, localMessage: ChatMessage) => {
     const index = existing.indexOf(localMessage)
@@ -183,6 +182,15 @@ export function mergeAuthoritativeServerMessages(
     return lowerBoundAllows && upperBoundAllows
   }
 
+  // A live optimistic bubble is the echo of a server row only when the server
+  // scopes exactly one eligible row to the same task and that row is claimed by a
+  // single live local — a strict bijection (decision D-1). The only thing dropped
+  // is then the local echo, never the server row. Any ambiguity (D-2: two matching
+  // rows, or one row contended by two locals) or missing task scope (D-3: history
+  // rows arrive unscoped today) preserves every server row; the live local survives
+  // as a transient duplicate that a later reconciliation collapses. No server row
+  // with a turn number is ever suppressed (invariant §3 / property #1).
+  const liveLocalExactMatches = new Map<ChatMessage, ChatMessage[]>()
   for (const [index, message] of existing.entries()) {
     if (
       messageServerTurnNumber(message) !== undefined ||
@@ -193,32 +201,28 @@ export function mergeAuthoritativeServerMessages(
     }
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (message.isError || message.preserveLocal || consumedLocalMessages.has(message)) continue
-    const eligibleServerMessages = authoritative.filter(
+    const exactTaskMatches = authoritative.filter(
       serverMessage =>
         !localByServerMessage.has(serverMessage) &&
-        !suppressedServerMessages.has(serverMessage) &&
         serverMessage.role === message.role &&
+        serverMessage.task_id === message.task_id &&
         serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )
-    // A live local bubble remains authoritative for the UI until the server can
-    // identify the same task. Current server history rows are usually unscoped,
-    // so suppress one only when its role and position identify a single slot.
-    const exactTaskMatches = eligibleServerMessages.filter(
-      serverMessage => serverMessage.task_id === message.task_id
-    )
-    if (exactTaskMatches.length === 1) {
-      markLocalReplacement(exactTaskMatches[0]!, message)
-      continue
-    }
+    liveLocalExactMatches.set(message, exactTaskMatches)
+  }
 
-    const unscopedCandidates = eligibleServerMessages.filter(
-      serverMessage => serverMessage.task_id === undefined
-    )
-    const candidateTurns = new Set(
-      unscopedCandidates.map(serverMessage => messageServerTurnNumber(serverMessage)!)
-    )
-    if (candidateTurns.size === 1 && unscopedCandidates.length === 1) {
-      suppressedServerMessages.add(unscopedCandidates[0]!)
+  // Count claimants per server row across every live local so a row contended by
+  // two locals (containment) degrades to D-2 and is claimed by neither.
+  const exactMatchClaimants = new Map<ChatMessage, number>()
+  for (const matches of liveLocalExactMatches.values()) {
+    for (const serverMessage of matches) {
+      exactMatchClaimants.set(serverMessage, (exactMatchClaimants.get(serverMessage) ?? 0) + 1)
+    }
+  }
+
+  for (const [message, matches] of liveLocalExactMatches) {
+    if (matches.length === 1 && exactMatchClaimants.get(matches[0]!) === 1) {
+      markLocalReplacement(matches[0]!, message)
     }
   }
 
@@ -230,7 +234,6 @@ export function mergeAuthoritativeServerMessages(
 
     const authoritativeCandidates = authoritative.filter(
       serverMessage =>
-        !suppressedServerMessages.has(serverMessage) &&
         serverMessage.role === message.role &&
         serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )
@@ -249,15 +252,13 @@ export function mergeAuthoritativeServerMessages(
     markLocalReplacement(candidates[0]!, message)
   }
 
-  const hydratedReplacements = authoritative
-    .filter(message => !suppressedServerMessages.has(message))
-    .map(message => {
-      const local = localByServerMessage.get(message)
-      return {
-        message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
-        localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
-      }
-    })
+  const hydratedReplacements = authoritative.map(message => {
+    const local = localByServerMessage.get(message)
+    return {
+      message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
+      localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
+    }
+  })
 
   const replacementAnchorByTurn = new Map<number, number>()
   for (const replacement of hydratedReplacements) {
