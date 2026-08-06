@@ -125,6 +125,7 @@ function parseSessionsListResult(value: unknown): SessionsListResult {
   const record = wireObject(value, 'sessions response')
   if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
   let firstItemError: unknown
+  let droppedItemCount = 0
   const items = record.items.flatMap((item, index): SessionsListResult['items'] => {
     try {
       const entry = wireObject(item, `sessions response.items[${index}]`)
@@ -175,12 +176,24 @@ function parseSessionsListResult(value: unknown): SessionsListResult {
       ]
     } catch (error) {
       firstItemError ??= error
+      droppedItemCount += 1
+      // R1-H1: a tolerant partial parse must not lose a session silently. A single
+      // corrupt entry should not blank the whole sidebar (we still return the valid
+      // items), but the drop has to leave a trace — otherwise a user's chat vanishes
+      // from "Latest sessions" with no signal. Log the index + item error so the loss
+      // is traceable in main-process logs, and count it into `droppedItemCount` below
+      // so the renderer can observe that `items` is shorter than the server sent.
+      console.warn(
+        `[RpcProxyClient] Dropped malformed session catalog item at index ${index}:`,
+        error
+      )
       return []
     }
   })
   if (record.items.length > 0 && items.length === 0 && firstItemError) throw firstItemError
   return {
     items,
+    ...(droppedItemCount > 0 ? { droppedItemCount } : {}),
     ...(record.nextCursor != null
       ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
       : {}),

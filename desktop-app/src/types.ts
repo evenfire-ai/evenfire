@@ -898,6 +898,14 @@ export interface SessionsListResult {
     tokens?: SessionTokensLite
   }>
   nextCursor?: string
+  /**
+   * Number of wire items the parser dropped as malformed (R1-H1). Present only
+   * when > 0. A session catalog is parsed tolerantly — one corrupt entry must not
+   * blank the whole sidebar — but the drop must stay observable: this count lets a
+   * consumer see that the returned `items` is shorter than what the server sent,
+   * instead of a chat vanishing with no trace.
+   */
+  droppedItemCount?: number
 }
 
 // F5 compile-time guard: `SessionMessagesResult` MUST keep carrying the recovery

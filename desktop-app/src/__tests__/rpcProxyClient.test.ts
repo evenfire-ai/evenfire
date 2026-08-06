@@ -139,7 +139,56 @@ describe('RpcProxyClient.listSessions', () => {
           lastActivityAt: '2026-01-02T00:00:00Z',
         },
       ],
+      droppedItemCount: 1,
     })
+  })
+
+  it('surfaces a dropped malformed session instead of losing it silently (R1-H1)', async () => {
+    // Wire response the server (mcp-host) would send: 3 sessions, the 2nd corrupt
+    // (turnCount is a non-integer, which the parser rejects). A silent partial parse
+    // would return only the 2 valid ones with no trace — a user's chat vanishing from
+    // "Latest sessions" with no way for the renderer to know. The parser must instead
+    // keep the valid items AND make the loss observable (warn with the index + a
+    // droppedItemCount on the result).
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              agent: 'agent-a',
+              chatId: 'chat-corrupt',
+              turnCount: 1.5,
+              lastActivityAt: '2026-01-02T00:00:00.000Z',
+            },
+            {
+              agent: 'agent-a',
+              chatId: 'chat-b',
+              turnCount: 2,
+              lastActivityAt: '2026-01-03T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    const result = await client.listSessions('token', 'host')
+
+    // Observable result (T4): the two valid chats are returned...
+    expect(result.items.map(item => item.chatId)).toEqual(['chat-a', 'chat-b'])
+    // ...and the loss is observable — a count on the result the renderer can read...
+    expect(result.droppedItemCount).toBe(1)
+    // ...and a warn carrying the index of the dropped item in main-process logs.
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('index 1'), expect.anything())
   })
 
   it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
