@@ -129,6 +129,25 @@ class HostMutationDependencyChangedError extends Error {
 }
 
 /**
+ * The four benign mid-pass supersession signals. revalidateHostMutationBoundary()
+ * throws these when the watch observes a newer spec/uid/authority-generation while
+ * a reconcile is in flight; a fresh reconcile runs afterwards, so the retired pass
+ * is a WITHDRAWAL, not a hard failure. Matched by `error.name` (string), NOT
+ * `instanceof`: the classes are unexported and statelessLifecycleExecutor.ts
+ * synthesizes name-equivalent plain Errors for the same races.
+ */
+const BENIGN_SUPERSESSION_ERROR_NAMES: ReadonlySet<string> = new Set([
+  'HostInventoryAuthorityUnavailableError',
+  'HostMutationIdentityChangedError',
+  'HostMutationSpecRevisionChangedError',
+  'HostMutationDependencyChangedError',
+])
+
+function isBenignSupersessionError(error: unknown): boolean {
+  return error instanceof Error && BENIGN_SUPERSESSION_ERROR_NAMES.has(error.name)
+}
+
+/**
  * The exact §13.2 destructive-cleanup predicate. Deletion of an orphan Host's
  * owned bundle is permitted ONLY when watch authority is known, the watch
  * generation captured at pass start still matches the current generation, the
@@ -3777,6 +3796,16 @@ export class HostReconciler {
         this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
+        if (isBenignSupersessionError(error)) {
+          // A newer spec/uid/authority-generation superseded this pass mid-flight;
+          // a fresh reconcile runs after. Model it as a withdrawal (superseded),
+          // NOT a hard failure — do NOT emit controller_error/reconcile_exception
+          // or an administrative 'failed' outcome. Callers already treat the
+          // rethrow as a retire (reconcileDelete → 'superseded', watch callers
+          // only console.error), so the rethrow is preserved.
+          this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
+          throw error
+        }
         this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
         this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
@@ -3789,7 +3818,7 @@ export class HostReconciler {
 
   private observeReconcileLatency(
     source: HostReconcileSource,
-    outcome: 'success' | 'error',
+    outcome: 'success' | 'error' | 'superseded',
     dispatchedAt: number,
     admittedAt: number
   ): void {

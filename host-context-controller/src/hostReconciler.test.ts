@@ -1176,6 +1176,15 @@ describe('HostReconciler Host inventory mutation authority', () => {
       .spyOn(reconciler as any, 'ensureHostServiceAccount')
       .mockResolvedValue(undefined)
 
+    // R1-M2: a benign mid-pass supersession must NOT be reported as a hard
+    // reconcile failure. The single reconcile() catch used to fire
+    // enqueueControllerError('reconcile_exception') → controller_error telemetry
+    // (status:'failed') AND an administrative 'failed' outcome to control-api for
+    // these retirements. Spy (observe-only) to prove the benign branch emits
+    // neither, while still re-throwing so callers treat it as a retire.
+    const enqueueControllerError = vi.spyOn(reconciler as any, 'enqueueControllerError')
+    const enqueueAdministrativeOutcome = vi.spyOn(reconciler as any, 'enqueueAdministrativeOutcome')
+
     const pending = reconciler.reconcile(host)
     await secretReadStarted.promise
     selectedContext = contextV2
@@ -1183,6 +1192,12 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
     await expect(pending).rejects.toThrow(/Host mutation dependency changed/)
     expect(ensureServiceAccount).not.toHaveBeenCalled()
+    expect(enqueueControllerError).not.toHaveBeenCalled()
+    expect(enqueueAdministrativeOutcome).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'failed',
+      expect.anything()
+    )
   })
 
   it('keeps a Host reconcile admitted when a watch replaces dependencies with deep-equal values', async () => {
