@@ -155,6 +155,66 @@ describe('appendControlApiPermissionEventsInTransaction', () => {
     )
   })
 
+  it('records WRC as a technical principal without coercing its subject into a user UUID', async () => {
+    const internalPrincipal = {
+      kind: 'wrc_internal_control',
+      sourceService: 'workflow-recipes',
+      serviceSub: 'wrc-provisioner',
+      credentialId: 'wrc-jti-1',
+      allowedKinds: ['linked_outcome', 'service_action'],
+    } as const
+
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: 'wrc-provisioner',
+      internalPrincipal,
+      changes: [
+        {
+          action: 'revoke',
+          resourceClass: 'plugin_workload_sdk_access',
+          resourceRef: 'plugin_workload_sdk:sandbox-recipes/example:promptBridge',
+          subject: { kind: 'service', id: 'promptBridge' },
+          namespace: 'sandbox-recipes',
+        },
+      ],
+    })
+
+    const [, principal, entries] = eventAppender.appendMany.mock.calls[0]!
+    expect(principal).toBe(internalPrincipal)
+    expect(entries[0].binding).toEqual(
+      expect.objectContaining({
+        operatorSub: 'wrc-provisioner',
+        operatorUserId: null,
+        identityIssuer: 'wrc',
+        resourceAud: 'control-api',
+        decisionActorSub: 'wrc-provisioner',
+      })
+    )
+  })
+
+  it('fails closed when an internal principal does not match operatorSub', async () => {
+    await expect(
+      appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: 'different-service',
+        internalPrincipal: {
+          kind: 'wrc_internal_control',
+          sourceService: 'workflow-recipes',
+          serviceSub: 'wrc-provisioner',
+          credentialId: 'wrc-jti-1',
+          allowedKinds: ['linked_outcome', 'service_action'],
+        },
+        changes: [
+          {
+            action: 'revoke',
+            resourceClass: 'plugin_workload_sdk_access',
+            resourceRef: 'plugin_workload_sdk:sandbox-recipes/example:promptBridge',
+            subject: { kind: 'service', id: 'promptBridge' },
+          },
+        ],
+      })
+    ).rejects.toThrow(/principal does not match operatorSub/)
+    expect(eventAppender.appendMany).not.toHaveBeenCalled()
+  })
+
   it('does not append a synthetic event when the mutation produced no diff', async () => {
     await expect(
       appendControlApiPermissionEventsInTransaction(db, {

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ingestUsageEvents, validateUsageEvent } from '../src/services/usageEvents.js'
+import {
+  ingestUsageEvents,
+  ingestUsageEventsInTransaction,
+  validateUsageEvent,
+} from '../src/services/usageEvents.js'
 
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
@@ -30,6 +34,27 @@ const VALID_EVENT = {
   output_tokens: 80,
   cache_read_tokens: 40,
   cache_write_tokens: 10,
+  prompt_bridge_metadata: null,
+}
+
+const SDK_EVENT = {
+  ...VALID_EVENT,
+  host_ref: 'sandbox-recipes/sdk-recipe',
+  source_kind: 'plugin_workload_sdk',
+  channel_type: 'plugin_workload_sdk',
+  recipe_name: 'sdk-recipe',
+  llm_secret_name: 'zai-secret',
+  task_id: null,
+  prompt_bridge_metadata: {
+    invocation_id: '33333333-3333-4333-8333-333333333333',
+    target_ref: 'zai-primary',
+    credential_slot: 'zai-api-key',
+    fallback_used: false,
+    attempt_count: 1,
+    attempt_generation: 1,
+    provider_attempt_id: '44444444-4444-4444-8444-444444444444',
+    provider_attempt_index: 1,
+  },
 }
 
 describe('validateUsageEvent', () => {
@@ -151,6 +176,52 @@ describe('validateUsageEvent', () => {
     expect(validateUsageEvent({ ...VALID_EVENT, cache_read_tokens: 1.5 })).toBeNull()
     expect(validateUsageEvent({ ...VALID_EVENT, cache_write_tokens: 1.5 })).toBeNull()
   })
+
+  it('accepts bounded promptBridge target attribution and rejects malformed metadata', () => {
+    const ev = validateUsageEvent({
+      ...VALID_EVENT,
+      prompt_bridge_metadata: {
+        target_ref: 'zai-primary',
+        credential_slot: 'zai-api-key',
+        fallback_used: true,
+        attempt_count: 2,
+      },
+    })
+    expect(ev?.prompt_bridge_metadata).toEqual({
+      target_ref: 'zai-primary',
+      credential_slot: 'zai-api-key',
+      fallback_used: true,
+      attempt_count: 2,
+    })
+    expect(
+      validateUsageEvent({
+        ...VALID_EVENT,
+        prompt_bridge_metadata: { target_ref: 'zai-primary', fallback_used: true },
+      })
+    ).toBeNull()
+  })
+
+  it('accepts workflow promptBridge usage with the SDK channel marker', () => {
+    const workflowEvent = {
+      ...VALID_EVENT,
+      source_kind: 'workflow',
+      channel_type: 'plugin_workload_sdk',
+      run_id: '00000000-0000-4000-8000-000000000001',
+      host_ref: 'sandbox-recipes/e2e-recipe',
+      context_ref: null,
+      recipe_name: 'e2e-recipe',
+      task_id: '00000000-0000-4000-8000-000000000001:e2e-recipe:2026-05-09T00:00:00.000Z',
+      llm_secret_name: 'openai-key',
+      prompt_bridge_metadata: {
+        invocation_id: '00000000-0000-4000-8000-000000000099',
+        target_ref: 'openai-primary',
+        credential_slot: 'openai-api-key',
+        fallback_used: false,
+        attempt_count: 1,
+      },
+    }
+    expect(validateUsageEvent(workflowEvent)).not.toBeNull()
+  })
 })
 
 describe('ingestUsageEvents', () => {
@@ -207,9 +278,10 @@ describe('ingestUsageEvents', () => {
     expect(params).toContain(VALID_EVENT.input_tokens)
     expect(params).toContain(VALID_EVENT.cache_read_tokens)
     expect(params).toContain(VALID_EVENT.cache_write_tokens)
-    expect(params.at(-1)).toBe(true)
-    // 22 columns per event (single event => 22 bound params).
-    expect(params).toHaveLength(22)
+    expect(params.at(-2)).toBe(true)
+    expect(params.at(-1)).toBeNull()
+    // 23 columns per event (single event => 23 bound params).
+    expect(params).toHaveLength(23)
   })
 
   it('mixes valid + invalid + duplicate accounting in a single call', async () => {
@@ -221,5 +293,21 @@ describe('ingestUsageEvents', () => {
       'not-an-object',
     ])
     expect(result).toEqual({ accepted: 1, duplicates: 1, rejected: 2 })
+  })
+
+  it('fails closed when SDK usage has no persisted authoritative receipt', async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const db = { query: mockPoolQuery } as never
+    const result = await ingestUsageEventsInTransaction([SDK_EVENT], db, {
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'sdk-recipe',
+    })
+
+    expect(result.bindingViolation).toEqual({
+      index: 0,
+      reason: 'recipe_token_invalid_sdk_usage_binding',
+    })
+    expect(result.result.accepted).toBe(0)
+    expect(mockPoolQuery).toHaveBeenCalledTimes(2)
   })
 })

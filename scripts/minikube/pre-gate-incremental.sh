@@ -28,6 +28,7 @@ incremental_is_nonruntime_path() {
   case "$1" in
     AGENTS.md|README.md|CONTRIBUTING.md|SECURITY.md|LICENSE|docs/*|*.md|.github/*) return 0 ;;
     desktop-app/*|scripts/e2e/*|scripts/tests/*) return 0 ;;
+    tests/e2e/fixtures/workflow-plugin-sdk-e2e/*) return 1 ;;
     */test/*|*/__tests__/*|*.test.*|*.spec.*|tests/*) return 0 ;;
     *) return 1 ;;
   esac
@@ -55,6 +56,9 @@ incremental_classify_path() {
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
+    tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)
+      incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e
+      ;;
     deploy/*)
       INCREMENTAL_FULL_DEPLOYMENT=true
       ;;

@@ -264,6 +264,40 @@ describe('shouldPatchRecipeStatus', () => {
     ).toBe(false)
   })
 
+  it('patches a contradictory persisted SDK capability message', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'promptBridge bootstrap policy proof is not ready',
+            },
+            conditions: [
+              {
+                type: 'PluginWorkloadSdkCapability',
+                status: 'True',
+                reason: 'Validated',
+                message: 'Capability validated (promptBridge)',
+                lastTransitionTime: 'now',
+              },
+            ],
+          },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+        }
+      )
+    ).toBe(true)
+  })
+
   it('patches when only the persisted workload status projection changes', () => {
     expect(
       shouldPatchRecipeStatus(
@@ -483,6 +517,40 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
+  it('forces timer-driven infrastructure retries past the status-only generation guard', async () => {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    const sdkOnly = makeWorkflowRecipe({
+      metadata: { name: 'sdk-only', namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+        pluginWorkloadSdk: { promptBridge: {} },
+      },
+      status: { phase: 'active' },
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      eventQueue: { enqueue: typeof enqueue }
+      handleRecipeEvent: typeof handleRecipeEvent
+      refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void>
+      stopped: boolean
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[sdkOnly.metadata.name, sdkOnly]])
+    internal.eventQueue = { enqueue }
+    internal.handleRecipeEvent = handleRecipeEvent
+    internal.stopped = false
+
+    await internal.refreshRuntimeCredentialsForInProgressRecipes()
+
+    expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
+      forceReconcile: true,
+    })
+  })
+
   it('keeps reconciling a promptBridge SDK recipe with no run so the eager mcp-host stays configured', () => {
     // phase=active, workflowExecution cleared (eager SDK path) — must still requeue.
     expect(
@@ -509,6 +577,21 @@ describe('runtime credential refresh loop helpers', () => {
           spec: {
             steps: [{ id: 's1', instruction: 'ack' }],
             pluginWorkloadSdk: { clientNotifications: { allowedEventTypes: ['e2e.test'] } },
+          },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('keeps reconciling a stepless SDK-only recipe through the full capability lane', () => {
+    expect(
+      workflowNeedsInfrastructureReconcile(
+        makeWorkflowRecipe({
+          spec: {
+            steps: [],
+            workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+            pluginWorkloadSdk: { promptBridge: {} },
           },
           status: { phase: 'active' },
         })
@@ -594,7 +677,9 @@ describe('runtime credential refresh loop helpers', () => {
 
     expect(refreshInProgressWorkflowRuntimeCredentials).toHaveBeenCalledWith(initializing)
     expect(enqueue).toHaveBeenCalledWith(initializing.metadata.name, expect.any(Function))
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing)
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing, {
+      forceReconcile: true,
+    })
   })
 })
 
@@ -624,6 +709,17 @@ describe('workload status refresh loop helpers', () => {
       workflowNeedsWorkloadStatusRefresh(
         makeWorkloadRecipe({
           metadata: { name: 'deleting', namespace: 'sandbox-recipes', deletionTimestamp: 'now' },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(false)
+    expect(
+      workflowNeedsWorkloadStatusRefresh(
+        makeWorkloadRecipe({
+          spec: {
+            steps: [],
+            pluginWorkloadSdk: { promptBridge: {} },
+          },
           status: { phase: 'active' },
         })
       )

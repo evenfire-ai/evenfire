@@ -378,6 +378,15 @@ jobs:
       - name: Validate service version bumps
         run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
 
+      - name: Test the image manifest
+        run: bash scripts/tests/test-images-manifest.sh
+
+      - name: Test release image resolution
+        run: bash scripts/tests/test-resolve-release-images.sh
+
+      - name: Test release image promotion
+        run: bash scripts/tests/test-promote-release-images.sh
+
   # ─── Platform NGINX image guard (CVE baseline) ────────────────────────────
   nginx-image-guard:
     name: Validate platform NGINX images

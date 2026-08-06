@@ -1,6 +1,6 @@
 {
   "name": "clerum-mcp-host",
-  "version": "0.1.220",
+  "version": "0.1.231",
   "description": "MCP Host - reads Host CRD and provides LLM access via OpenAI/Claude",
   "main": "dist/main.js",
   "engines": {
@@ -41,6 +41,7 @@
     "docx": "^9.6.1",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.1",
     "jose": "^6.2.1",
     "jsonwebtoken": "^9.0.2",
     "openai": "^4.70.0",

@@ -20,7 +20,11 @@ import {
   pluginWorkloadSdkTokenSecretKey,
   resolvePluginWorkloadSdkAllowedCallers,
 } from './pluginWorkloadSdkTokens'
-import { buildMcpHostPod } from './podFactory'
+import {
+  buildMcpHostPod,
+  declaredPluginWorkloadSdkCapabilities,
+  pluginWorkloadSdkRuntimeContractHash,
+} from './podFactory'
 import {
   PLUGIN_WORKLOAD_SDK_LEGACY_TOKEN_DATA_KEY,
   buildMcpHostUrl,
@@ -30,10 +34,37 @@ import type { WorkflowRuntimePlan } from './runtimePlan'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
 
-export type EagerSdkMcpHostStatus = 'ready' | 'deploying' | 'failed' | 'provider_unavailable'
+export type EagerSdkMcpHostStatus =
+  | 'ready'
+  | 'awaiting_policy'
+  | 'deploying'
+  | 'failed'
+  | 'provider_unavailable'
+
+export interface EagerSdkBootstrapProof {
+  ready: true
+  contractVersion: 2
+  podUid: string
+  provider?: string
+  model?: string
+  policyReady?: boolean
+  policyState?: string
+  policyReason?: string
+  /** Optional snapshot when a grant already exists; request authorization
+   * always re-reads and validates the current policy. */
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
+  verifiedAt: string
+}
 
 /**
- * Consecutive eager `/configure` failures tolerated before the provider is
+ * Consecutive eager SDK bootstrap failures tolerated before the provider is
  * surfaced as unavailable instead of an indefinite `deploying`. Mirrors the
  * crash-recovery MAX_ATTEMPTS bound so a permanently-failing provider broker
  * (e.g. a bad secretRef) is not indistinguishable from "still booting".
@@ -76,25 +107,18 @@ export type PluginWorkloadSdkProvisionerDeps = {
  * keep the reconciler file bounded while preserving the existing behavior.
  */
 export class PluginWorkloadSdkProvisioner {
-  /**
-   * In-memory record of the last successful eager-SDK provider configure, keyed
-   * by recipe name. The value is `<podUid>:<provider>:<model>` — when it matches
-   * the current mcp-host pod and agent, the (idempotent) /configure is skipped to
-   * avoid a ConfigMap read + Secret read + RS256 sign + HTTP POST on every
-   * level-triggered reconcile. Lost on WRC restart, which just re-configures
-   * once (still idempotent); a pod restart changes the UID and forces a refresh.
-   */
-  private readonly eagerSdkConfiguredByRecipe = new Map<string, string>()
+  /** Last fresh Control API proof, tied to the current pod UID. */
+  private readonly eagerSdkBootstrapProofByRecipe = new Map<string, EagerSdkBootstrapProof>()
 
   /**
-   * Consecutive eager `/configure` failures per recipe and stable configure
+   * Consecutive eager SDK bootstrap failures per recipe and stable bootstrap
    * identity. The budget counts only repeated failures for the same
    * `<podUid>:<provider>:<model>`; a pod replacement or agent model/provider
    * change starts from one without needing WRC to observe the roll directly.
-   * Reset on a successful configure (and on recipe cleanup). Once the matching
+   * Reset on a successful bootstrap (and on recipe cleanup). Once the matching
    * key reaches MAX_EAGER_CONFIGURE_ATTEMPTS the provisioner projects
    * `provider_unavailable` instead of an indefinite `deploying`. Lost on WRC
-   * restart, which just re-attempts from zero (configure is idempotent).
+   * restart, which just re-attempts from zero (bootstrap is idempotent).
    */
   private readonly eagerSdkConfigureFailuresByRecipe = new Map<
     string,
@@ -104,13 +128,17 @@ export class PluginWorkloadSdkProvisioner {
   constructor(private readonly deps: PluginWorkloadSdkProvisionerDeps) {}
 
   clearRecipeState(recipeName: string): void {
-    this.eagerSdkConfiguredByRecipe.delete(recipeName)
+    this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
     this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
+  }
+
+  getBootstrapProof(recipeName: string): EagerSdkBootstrapProof | undefined {
+    return this.eagerSdkBootstrapProofByRecipe.get(recipeName)
   }
 
   /**
    * Deletes the eager mcp-host pod (wedge recovery or image-drift roll) and
-   * clears the per-recipe `/configure` failure budget. The failure map is also
+   * clears the per-recipe bootstrap failure budget. The failure map is also
    * identity-keyed, but explicit WRC rolls are a clear boundary where the prior
    * pod's broker state is no longer relevant.
    */
@@ -120,6 +148,7 @@ export class PluginWorkloadSdkProvisioner {
       `${recipeName}-mcp-host`,
       this.deps.config.sandboxNamespace
     )
+    this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
     this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
   }
 
@@ -128,13 +157,13 @@ export class PluginWorkloadSdkProvisioner {
    *
    * Creates the recipe mcp-host before any run is triggered so the always-on
    * SDK server (:8099) is reachable, then — only when the recipe declares the
-   * promptBridge family — brokers the provider API key into it via POST
-   * /configure. clientNotifications-only recipes need no provider, so the
-   * configure step is skipped for them.
+   * promptBridge family — publishes the public provider/model bootstrap binding
+   * via a credential-free endpoint. Credentials stay behind the per-attempt
+   * WRC broker; clientNotifications-only recipes need no provider bootstrap.
    *
-   * Idempotent: safe to call on every reconcile. The mcp-host /configure is a
-   * hot-swap, so re-delivering the same provider/model after a pod restart
-   * simply re-arms the SDK LLM binding.
+   * Idempotent: safe to call on every reconcile. The mcp-host bootstrap is an
+   * identity-only handshake, so re-delivering the same provider/model after a
+   * pod restart simply re-arms the SDK LLM binding.
    */
   async ensureEagerSdkMcpHost(
     recipeName: string,
@@ -148,15 +177,15 @@ export class PluginWorkloadSdkProvisioner {
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
+    const capabilities = declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
+    const requiresPromptBridge = capabilities.includes('promptBridge')
     const mcpHostAgent = resolveEagerSdkMcpHostAgent(spec)
 
-    if (!mcpHostAgent) {
-      if (spec.pluginWorkloadSdk?.promptBridge) {
-        log.warn(
-          'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
-            'add spec.agent or a step agent with provider+model to recover the eager mcp-host'
-        )
-      }
+    if (!mcpHostAgent && requiresPromptBridge) {
+      log.warn(
+        'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
+          'declare spec.agent with provider+model to bind the eager mcp-host'
+      )
       return 'failed'
     }
 
@@ -172,6 +201,26 @@ export class PluginWorkloadSdkProvisioner {
     )
 
     await this.deps.ensureMcpHostHeadlessService(recipeName)
+
+    // Build the desired Pod once per reconcile so drift checks compare the
+    // complete immutable runtime contract, not only the image string. This
+    // catches same-image upgrades of the sdk-only env/dispatch contract.
+    const desiredMcpHostPod = buildMcpHostPod(
+      recipeName,
+      mcpHostAgent,
+      this.deps.config,
+      runtimeScopeRecipeName,
+      namespace,
+      undefined,
+      undefined,
+      effectiveWorkflowContextRefForSpec(recipeName, spec),
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: capabilities,
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      }
+    )
+    const desiredRuntimeContractHash = pluginWorkloadSdkRuntimeContractHash(desiredMcpHostPod)
 
     let mcpHostPhase = opts.mcpHostPhase
     if (mcpHostPhase === 'Running' || mcpHostPhase === 'Pending') {
@@ -209,102 +258,125 @@ export class PluginWorkloadSdkProvisioner {
       if (runningPod?.deleting) {
         return 'deploying'
       }
-      if (runningPod?.image && runningPod.image !== this.deps.config.mcpHostImage) {
-        log.info('Plugin Workload SDK eager mcp-host image drift; rolling to platform image', {
+      const imageDrift = runningPod?.image !== this.deps.config.mcpHostImage
+      const runtimeContractDrift = runningPod?.runtimeContractHash !== desiredRuntimeContractHash
+      if (runningPod && (imageDrift || runtimeContractDrift)) {
+        log.info('Plugin Workload SDK eager mcp-host runtime contract drift; rolling Pod', {
           runningImage: runningPod.image,
           desiredImage: this.deps.config.mcpHostImage,
+          observedRuntimeContractHash: runningPod.runtimeContractHash,
+          desiredRuntimeContractHash,
         })
         await this.rollEagerSdkMcpHostPod(recipeName)
         // Requeue: the pod is recreated from the platform image on a later
         // reconcile once the prior pod has terminated. Returning here avoids
         // racing createIfNotExists against the still-terminating pod and
-        // avoids brokering /configure into a pod that is about to be replaced.
+        // avoids bootstrapping a pod that is about to be replaced.
         return 'deploying'
       }
     }
 
     if (!mcpHostPhase || mcpHostPhase === 'Failed' || mcpHostPhase === 'Unknown') {
-      const mcpHostPod = buildMcpHostPod(
-        recipeName,
-        mcpHostAgent,
-        this.deps.config,
-        runtimeScopeRecipeName,
-        namespace,
-        undefined,
-        undefined,
-        effectiveWorkflowContextRefForSpec(recipeName, spec),
-        {
-          mountWorkflowOutput: false,
-          pluginWorkloadSdkEnabled: true,
-        }
-      )
       await this.deps.createIfNotExists(
         () =>
           this.deps.coreApi.createNamespacedPod({
             namespace: this.deps.config.sandboxNamespace,
-            body: mcpHostPod,
+            body: desiredMcpHostPod,
           }),
         `Pod "${recipeName}-mcp-host"`
       )
     }
 
     const readiness = await this.readinessForEagerSdkMcpHost(recipeName)
-    if (!spec.pluginWorkloadSdk?.promptBridge) {
+    const promptBridge = capabilities.includes('promptBridge')
+    const clientNotifications = capabilities.includes('clientNotifications')
+    if (!promptBridge && !clientNotifications) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
-    if (!this.deps.modelConfigHandler) {
+    const modelConfigHandler = this.deps.modelConfigHandler
+    if (requiresPromptBridge && !modelConfigHandler) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+      return 'provider_unavailable'
+    }
+    if (readiness.status !== 'ready') {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return readiness.status
     }
-    if (readiness.status !== 'ready') return readiness.status
+
+    // A provider-free notification host can expose its route once the
+    // namespace-bound runtime is Ready; there is no LLM identity to broker.
+    // Production normally supplies the modelConfigHandler for a policy proof,
+    // but absence must not turn a valid notification-only recipe into a fake
+    // provider failure.
+    if (!requiresPromptBridge && !modelConfigHandler) {
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+      return readiness.status
+    }
+    if (!modelConfigHandler) return 'provider_unavailable'
 
     if (!readiness.uid) {
       log.warn(
-        'Plugin Workload SDK eager mcp-host reported Ready without a pod UID; waiting for stable configure identity'
+        'Plugin Workload SDK eager mcp-host reported Ready without a pod UID; waiting for stable bootstrap identity'
       )
       return 'deploying'
     }
 
-    const configureKey = `${readiness.uid}:${mcpHostAgent.provider}:${mcpHostAgent.model}`
-    if (this.eagerSdkConfiguredByRecipe.get(recipeName) === configureKey) {
-      this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
-      return 'ready'
-    }
-
+    if (promptBridge && !mcpHostAgent) return 'failed'
+    const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
         namespace
       )
       const mcpHostEndpoint = buildMcpHostUrl(recipeName, this.deps.config.sandboxNamespace)
-      const result = await this.deps.modelConfigHandler.handle(
-        {
-          stepId: 'plugin-workload-sdk-bootstrap',
-          provider: mcpHostAgent.provider,
-          model: mcpHostAgent.model,
-        },
-        mcpHostEndpoint,
-        wrcConfigureToken
-      )
+      const result =
+        capabilityFamily === 'promptBridge'
+          ? await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+              mcpHostAgent!.provider,
+              mcpHostAgent!.model,
+              mcpHostEndpoint,
+              wrcConfigureToken
+            )
+          : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
+              undefined,
+              undefined,
+              mcpHostEndpoint,
+              wrcConfigureToken,
+              'clientNotifications'
+            )
       if (result.status >= 400) {
-        this.eagerSdkConfiguredByRecipe.delete(recipeName)
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
-          reason: 'Plugin Workload SDK eager mcp-host configure returned an error',
+          reason: 'Plugin Workload SDK eager mcp-host bootstrap returned an error',
           detail: { status: result.status },
         })
       }
-      this.eagerSdkConfiguredByRecipe.set(recipeName, configureKey)
+      const proof = parseEagerSdkBootstrapProof(result.body, readiness.uid)
+      if (!proof) {
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+        return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
+          reason: 'Plugin Workload SDK bootstrap response omitted identity proof',
+          detail: { status: result.status },
+        })
+      }
+      this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
+      if (promptBridge && proof.policyReady === false) {
+        return 'awaiting_policy'
+      }
+      if (clientNotifications && proof.clientNotificationsPolicyReady === false) {
+        return 'awaiting_policy'
+      }
     } catch (err) {
-      this.eagerSdkConfiguredByRecipe.delete(recipeName)
+      this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
       return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
-        reason: 'Plugin Workload SDK eager mcp-host configure failed',
+        reason: 'Plugin Workload SDK eager mcp-host bootstrap failed',
         detail: { error: err instanceof Error ? err.message : String(err) },
       })
     }
-    // Reuse the readiness captured above: configure does not recreate the pod,
-    // and we already gated on readiness.status === 'ready', so a second K8s
-    // readiness GET would return the same status. Avoid the extra round-trip.
-    return readiness.status
+    return 'ready'
   }
 
   async readinessForEagerSdkMcpHost(
@@ -330,7 +402,7 @@ export class PluginWorkloadSdkProvisioner {
   }
 
   /**
-   * Records a consecutive eager `/configure` failure and decides the projected
+   * Records a consecutive eager SDK bootstrap failure and decides the projected
    * status. Below MAX_EAGER_CONFIGURE_ATTEMPTS the recipe stays `deploying` so
    * the level-triggered reconcile keeps retrying (a transient mcp-host blip or
    * slow boot recovers on its own). Once the bound is reached, the failure is a
@@ -366,7 +438,7 @@ export class PluginWorkloadSdkProvisioner {
       maxAttempts: MAX_EAGER_CONFIGURE_ATTEMPTS,
     })
     // Not ready until the provider is brokered; stay pending so the
-    // level-triggered reconcile retries the configure.
+    // level-triggered reconcile retries the bootstrap.
     return 'deploying'
   }
 
@@ -453,5 +525,85 @@ export class PluginWorkloadSdkProvisioner {
         namespace: this.deps.config.sandboxNamespace,
       })
     )
+  }
+}
+
+function parseEagerSdkBootstrapProof(
+  body: Record<string, unknown>,
+  podUid: string
+): EagerSdkBootstrapProof | null {
+  if (body.capabilityFamily === 'clientNotifications') {
+    if (
+      body.configured !== true ||
+      body.ready !== true ||
+      body.contractVersion !== 2 ||
+      body.capabilityFamily !== 'clientNotifications' ||
+      typeof body.policyReady !== 'boolean' ||
+      typeof body.policyState !== 'string'
+    ) {
+      return null
+    }
+    return {
+      ready: true,
+      contractVersion: 2,
+      podUid,
+      clientNotificationsPolicyReady: body.policyReady,
+      clientNotificationsPolicyState: body.policyState,
+      ...(typeof body.policyReason === 'string'
+        ? { clientNotificationsPolicyReason: body.policyReason }
+        : {}),
+      verifiedAt: new Date().toISOString(),
+    }
+  }
+  if (
+    body.configured !== true ||
+    body.ready !== true ||
+    body.contractVersion !== 2 ||
+    typeof body.provider !== 'string' ||
+    typeof body.model !== 'string' ||
+    body.provider.length === 0 ||
+    body.model.length === 0
+  ) {
+    return null
+  }
+  const hasPolicyProof =
+    Number.isSafeInteger(body.policyRevision) &&
+    Number(body.policyRevision) >= 1 &&
+    typeof body.policyHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(body.policyHash) &&
+    typeof body.defaultTargetRef === 'string' &&
+    body.defaultTargetRef.length > 0 &&
+    typeof body.defaultProvider === 'string' &&
+    body.defaultProvider === body.provider &&
+    typeof body.defaultModel === 'string' &&
+    body.defaultModel === body.model
+  return {
+    ready: true,
+    contractVersion: 2,
+    podUid,
+    provider: body.provider,
+    model: body.model,
+    policyReady: body.policyReady !== false && hasPolicyProof,
+    policyState: typeof body.policyState === 'string' ? body.policyState : 'unknown',
+    ...(typeof body.policyReason === 'string' ? { policyReason: body.policyReason } : {}),
+    verifiedAt: new Date().toISOString(),
+    ...(hasPolicyProof
+      ? {
+          policyRevision: Number(body.policyRevision),
+          policyHash: body.policyHash as string,
+          defaultTargetRef: body.defaultTargetRef as string,
+          defaultProvider: body.defaultProvider as string,
+          defaultModel: body.defaultModel as string,
+        }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyReady === 'boolean'
+      ? { clientNotificationsPolicyReady: body.clientNotificationsPolicyReady }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyState === 'string'
+      ? { clientNotificationsPolicyState: body.clientNotificationsPolicyState }
+      : {}),
+    ...(typeof body.clientNotificationsPolicyReason === 'string'
+      ? { clientNotificationsPolicyReason: body.clientNotificationsPolicyReason }
+      : {}),
   }
 }

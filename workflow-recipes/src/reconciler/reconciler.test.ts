@@ -10,6 +10,7 @@ import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFa
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { isRetryableInfraError } from './k8sErrors'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
+import { PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE } from './pluginWorkloadSdkValidator'
 import {
   resolveResourceName,
   resolveScopedStatefulSetResourceName,
@@ -253,6 +254,240 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('active')
     expect(result.workloadStatuses).toHaveLength(1)
     expect(result.workloadStatuses[0].ready).toBe(true)
+  })
+
+  it('uses the SDK-only runtime adapter without invoking workflow reconciliation', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Plugin Workload SDK mcp-host registered',
+      pluginWorkloadSdkBootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'sdk-pod-uid',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyReady: true,
+        verifiedAt: '2026-08-04T00:00:00.000Z',
+      },
+    })
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, reconcilePluginWorkloadSdkOnly }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.phase).toBe('active')
+    expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalledWith(
+      'test-recipe',
+      'uid-123',
+      'sandbox-recipes',
+      recipe.spec
+    )
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('never settles promptBridge active when the SDK adapter omits bootstrap proof', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Plugin Workload SDK mcp-host registered',
+    })
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+      })
+    )
+
+    expect(result).toMatchObject({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK bootstrap identity proof pending',
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      requeueFixedInterval: true,
+    })
+  })
+
+  it('keeps an SDK-only recipe deploying and requeues while the eager host boots', async () => {
+    const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK mcp-host starting',
+    })
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = true
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+      })
+    )
+
+    expect(result).toMatchObject({
+      phase: 'deploying',
+      message: 'Plugin Workload SDK mcp-host starting',
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      requeueFixedInterval: true,
+    })
+  })
+
+  it('cleans SDK-only runtime resources after the capability is removed without invoking workflow reconciliation', async () => {
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdk }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        },
+      })
+    )
+
+    expect(result.phase).toBe('active')
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+      preserveWorkflowRuntime: false,
+    })
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it.each(['failed', 'deprecated', 'rollback-failed'] as const)(
+    'cleans a removed SDK capability even when the recipe is already %s',
+    async phase => {
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler = { cleanupPluginWorkloadSdk }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          status: {
+            phase,
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+            },
+          },
+        })
+      )
+
+      expect(result.phase).toBe(phase)
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
+    }
+  )
+
+  it('tears down an existing SDK-only host when the global feature flag is disabled', async () => {
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+        }
+      }
+    ).config.pluginWorkloadSdkEnabled = false
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, cleanupPluginWorkloadSdk }
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        },
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+      })
+    )
+
+    expect(result).toMatchObject({
+      phase: 'active',
+      pluginWorkloadSdkTeardownConfirmed: true,
+      message: 'Plugin Workload SDK disabled after confirmed teardown',
+    })
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+      preserveWorkflowRuntime: false,
+    })
+    expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
   it('degrades an active recipe when observed child Deployment readiness drifts', async () => {
@@ -1172,6 +1407,18 @@ describe('WorkflowRecipeReconciler', () => {
       expect(deploymentRule?.verbs).not.toContain('patch')
     })
 
+    it('allows only read access to Service endpoints for SDK teardown absence checks', () => {
+      const role = workflowRecipesRole(
+        'deploy/base/sandbox-recipes/rbac.yaml',
+        'sandbox-recipes',
+        'workflow-recipes-sandbox'
+      )
+      const endpointsRule = role.rules?.find(
+        rule => rule.apiGroups?.includes('') && rule.resources?.includes('endpoints')
+      )
+      expect(endpointsRule?.verbs).toEqual(['get'])
+    })
+
     it('grants patch only on apps/statefulsets in mcp-server', () => {
       const role = workflowRecipesRole('deploy/base/mcp-server/rbac.yaml', 'mcp-server')
       const statefulSetRule = role.rules?.find(
@@ -1273,6 +1520,86 @@ describe('WorkflowRecipeReconciler', () => {
         lastTransitionTime: 'now',
       },
     ])
+  })
+
+  it('replaces and clears the SDK provider-unavailable condition on recovery', async () => {
+    ;(
+      reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+    ).config.pluginWorkloadSdkEnabled = true
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+      status: {
+        phase: 'degraded',
+        conditions: [
+          {
+            type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+            status: 'True',
+            reason: 'ProviderUnavailable',
+            lastTransitionTime: 'old',
+          },
+        ],
+      },
+    })
+
+    await reconciler.patchStatus(recipe, {
+      phase: 'degraded',
+      message: 'configured provider unavailable',
+      workloadStatuses: [],
+      pluginWorkloadSdkProviderUnavailable: true,
+    })
+    const degradedPatch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+    expect(
+      degradedPatch.status.conditions.filter(
+        (condition: { type: string }) =>
+          condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE
+      )
+    ).toHaveLength(1)
+
+    mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+    const recoveredRecipe: WorkflowRecipeCRD = {
+      ...recipe,
+      status: { phase: 'degraded', conditions: degradedPatch.status.conditions },
+    }
+    await reconciler.patchStatus(recoveredRecipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProviderUnavailable: false,
+      pluginWorkloadSdkBootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'mcp-host-pod-uid',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyRevision: 3,
+        policyHash: 'sha256:policy',
+        defaultTargetRef: 'zai/glm-4.7',
+        defaultProvider: 'zai',
+        defaultModel: 'glm-4.7',
+        verifiedAt: new Date().toISOString(),
+      },
+    })
+    const recoveredPatch =
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+    expect(
+      recoveredPatch.status.conditions.some(
+        (condition: { type: string }) =>
+          condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE
+      )
+    ).toBe(false)
+    expect(recoveredPatch.status.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'PluginWorkloadSdkCapability',
+          status: 'True',
+          reason: 'Validated',
+        }),
+      ])
+    )
   })
 
   it('prunes only selected stale internal-dependency policies when none are desired', async () => {
@@ -3760,6 +4087,40 @@ describe('WorkflowRecipeReconciler', () => {
       name: 'test-recipe-web-search-12345678',
       namespace: 'mcp-server',
     })
+  })
+
+  it('fences SDK authority before deleting a hybrid workflow recipe', async () => {
+    const order: string[] = []
+    const cleanupPluginWorkloadSdk = vi.fn(async () => {
+      order.push('sdk-revoke-and-cleanup')
+    })
+    const workflowInfraCleanup = vi.fn(async () => {
+      order.push('workflow-cleanup')
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+          reconcileDelete: typeof workflowInfraCleanup
+        }
+      }
+    ).workflowReconciler = { cleanupPluginWorkloadSdk, reconcileDelete: workflowInfraCleanup }
+
+    const recipe = makeRecipe({
+      spec: {
+        steps: [{ id: 'research', instruction: 'run' }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['api'] },
+      },
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+      },
+    })
+
+    await reconciler.reconcileDelete(recipe)
+
+    expect(order).toEqual(['sdk-revoke-and-cleanup', 'workflow-cleanup'])
+    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
   })
 
   it('forwards custom coordinator workflow fields to the workflow reconciler', async () => {

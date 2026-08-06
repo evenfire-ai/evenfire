@@ -226,4 +226,19 @@ describe('param audit — OpenAI-compatible driver sends a portable param set', 
     expect(callArgs.temperature).toBe(1.7)
     expect(callArgs.tool_choice).toBe('required')
   })
+
+  it('keeps max_tokens for OpenAI-compatible GPT-5 model names', async () => {
+    const provider = new OpenAICompatibleProvider(
+      { id: 'openrouter', baseURL: 'https://openrouter.ai/api/v1', defaultModel: 'gpt-5.4-mini' },
+      'fake-key'
+    )
+    const mockClient = createMockOpenAIClient()
+    ;(provider as unknown as { client: unknown }).client = mockClient
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }], { max_tokens: 8 })
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    expect(callArgs.max_tokens).toBe(8)
+    expect(callArgs).not.toHaveProperty('max_completion_tokens')
+  })
 })
