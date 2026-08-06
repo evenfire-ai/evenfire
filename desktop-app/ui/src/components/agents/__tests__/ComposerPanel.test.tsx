@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
 import { ComposerPanel } from '../ComposerPanel'
+
+const composerStyles = readFileSync('ui/src/styles.css', 'utf8')
 
 const composerState = {
   composerImageAttachments: [],
@@ -37,7 +40,7 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
 }))
 
 vi.mock('@contexts/NavigationContext', () => ({
-  useNavigationContext: () => ({ selectedAgent: null }),
+  useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -56,7 +59,22 @@ vi.mock('@hooks/useComposerDraft', () => ({
   useComposerDraft: () => [draftState.value, draftState.set],
 }))
 
-vi.mock('../ModelSelector', () => ({ ModelSelector: () => null }))
+vi.mock('@hooks/useHostModels', () => ({
+  useHostModels: () => ({
+    data: {
+      provider: 'claude',
+      hostDefault: 'claude-haiku-4-5',
+      sessionModel: null,
+      degraded: false,
+      models: [{ name: 'claude-haiku-4-5', displayName: 'Haiku 4.5' }],
+    },
+    loading: false,
+    saving: false,
+    error: null,
+    selectModel: vi.fn(async () => true),
+    clearError: vi.fn(),
+  }),
+}))
 vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => null }))
 vi.mock('../ComposerGlobalFilesModal', () => ({ ComposerGlobalFilesModal: () => null }))
 vi.mock('../AnnotationCanvas', () => ({ AnnotationCanvas: () => null }))
@@ -65,11 +83,24 @@ function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
   Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value })
 }
 
+beforeEach(() => {
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: { workflows: { list: vi.fn(async () => ({ items: [] })) } },
+  })
+})
+
 afterEach(() => {
   cleanup()
   draftState.value = ''
   draftState.set.mockReset()
+  delete (window as Partial<typeof window>).clerum
 })
+
+function cssRule(selector: string) {
+  const match = composerStyles.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))
+  return match?.[1] ?? ''
+}
 
 describe.each([
   ['inline new-chat', true],
@@ -106,5 +137,31 @@ describe.each([
     rerender(<ComposerPanel inline={inline} />)
     expect(textarea.style.height).toBe(inline ? '48px' : '56px')
     expect(textarea.style.overflowY).toBe('hidden')
+  })
+
+  it('keeps context and model popovers outside the clipped text viewport', () => {
+    const { container } = render(<ComposerPanel inline={inline} />)
+    const shell = container.querySelector('.composer-input-shell')
+    const viewport = container.querySelector('.composer-textarea-viewport')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Model — Haiku 4.5/ }))
+
+    const contextMenu = container.querySelector('.composer-reference-menu-panel')
+    const submenu = container.querySelector('.composer-reference-submenu')
+    const modelMenu = container.querySelector('.model-selector-popover')
+
+    expect(contextMenu).toBeTruthy()
+    expect(submenu).toBeTruthy()
+    expect(modelMenu).toBeTruthy()
+    expect(viewport?.contains(contextMenu)).toBe(false)
+    expect(viewport?.contains(submenu)).toBe(false)
+    expect(viewport?.contains(modelMenu)).toBe(false)
+    expect(shell?.contains(contextMenu)).toBe(true)
+    expect(shell?.contains(submenu)).toBe(true)
+    expect(shell?.contains(modelMenu)).toBe(true)
+    expect(cssRule('\\.composer-input-shell')).not.toMatch(/overflow\s*:/)
+    expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
   })
 })

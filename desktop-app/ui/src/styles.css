@@ -6796,10 +6796,14 @@ h3 {
   position: relative;
   display: grid;
   gap: var(--space-1-5);
-  overflow: hidden;
   border: 1px solid rgba(var(--edge-rgb), 0.22);
   border-radius: var(--radius-md);
   background: var(--surface-soft);
+}
+
+.composer-textarea-viewport {
+  overflow: hidden;
+  border-radius: calc(var(--radius-md) - 1px);
 }
 
 .composer-input-shell:focus-within {
