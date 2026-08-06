@@ -95,9 +95,18 @@ function manifestField(root, field) {
 // are written by update-desktop-release-manifest.mjs, which prepare-release
 // delegates to rather than duplicating its renderer, so those rows declare
 // `writtenBy` instead. The writer skips any row without a `write`.
+//
+// Every `write` row also carries `path`: the repo-relative file that write
+// touches. `name` cannot serve -- the ghcr row is named for the FIELD it pins
+// ('deploy/components/ghcr-images newTag'), not for a file. prepare-release.mjs
+// derives its half-cut recovery instruction from these paths, so a new writing
+// coordinate cannot be added without the recovery text learning about it. See
+// writtenCoordinatePaths() below, which fails loudly on a `write` row that
+// forgets its `path` rather than printing a short list that silently omits it.
 export const COORDINATES = [
   {
     name: 'desktop-app/package.json',
+    path: 'desktop-app/package.json',
     assert: 'equals',
     read: root => readJson(root, 'desktop-app/package.json').version,
     write: (root, version) => {
@@ -108,6 +117,7 @@ export const COORDINATES = [
   },
   {
     name: 'desktop-app/package-lock.json',
+    path: 'desktop-app/package-lock.json',
     assert: 'equals',
     read: root => {
       const j = readJson(root, 'desktop-app/package-lock.json')
@@ -157,6 +167,7 @@ export const COORDINATES = [
   },
   {
     name: 'deploy/components/ghcr-images newTag',
+    path: GHCR_COMPONENT,
     assert: 'pointer',
     // Reads EVERY newTag, not just the first: a half-applied rewrite leaves
     // mixed tags, and the puller would then fetch two different releases into
@@ -194,4 +205,27 @@ export const COORDINATES = [
 
 export function readCounterPackage(root, rel) {
   return readJson(root, rel).version
+}
+
+// Every repo-relative file the coordinate loop in prepare-release.mjs writes.
+//
+// Derived, never listed by hand: the recovery instruction printed after a
+// half-cut release used a hardcoded `desktop-app/package.json
+// desktop-app/package-lock.json`, and when the ghcr pin became the eighth
+// coordinate the instruction kept naming two files out of three. Following it
+// verbatim reverted the version and left the pin bumped -- a tree that is still
+// half-cut, produced by the very command offered to un-cut it.
+//
+// A `write` row with no `path` throws instead of being skipped: a quietly
+// short list is exactly the failure this function exists to end.
+export function writtenCoordinatePaths() {
+  return COORDINATES.filter(c => c.write).map(c => {
+    if (!c.path) {
+      throw new Error(
+        `release-coordinates: coordinate '${c.name}' owns a write but declares no path, ` +
+          `so the half-cut recovery instruction would silently omit the file it wrote`
+      )
+    }
+    return c.path
+  })
 }

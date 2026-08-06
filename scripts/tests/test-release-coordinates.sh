@@ -838,6 +838,101 @@ assert_a_half_cut_release_can_be_completed_by_rerunning() {
   rm -rf "$d"
 }
 
+# ---------------------------------------------------------------------------
+# The half-cut recovery instruction
+# ---------------------------------------------------------------------------
+#
+# The message printed when the manifest update fails told the operator to
+# `git checkout -- desktop-app/package.json desktop-app/package-lock.json`.
+# The ghcr pin became the eighth coordinate and the writer started touching it,
+# but the instruction kept naming two files out of three: following it verbatim
+# reverted the version and left the pin bumped -- a tree still half-cut,
+# produced by the command offered to un-cut it.
+
+# Mutation coverage: hardcode the old two-file list back (the ghcr path
+# disappears from both the prose and the checkout command), or invert the
+# filter to `c => !c.write` (the checkout command names releaseManifest fields
+# that are not files at all). Both are caught -- the assertion pins the EXACT
+# path set the writer touches, in the checkout command specifically, not merely
+# "the string appears somewhere".
+assert_a_half_cut_release_names_every_file_the_writer_touched() {
+  local d out checkout_cmd problems=""
+  d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # Force the manifest write to fail AFTER the coordinate loop has written
+  # package.json, the lockfile and the ghcr component.
+  chmod -w "$d/external-rest-api/src/releaseManifest.ts"
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t 2>&1 )"
+  chmod +w "$d/external-rest-api/src/releaseManifest.ts"
+
+  # The tree really is half-cut, or this case proves nothing about recovery.
+  local pin; pin="$(component_tags "$d")"
+  [ "$pin" = "v0.6.0 " ] || problems+="the ghcr pin was not written before the failure (tags: '${pin}'); "
+
+  checkout_cmd="$(grep -o 'git checkout -- [^`]*' <<< "$out")"
+  [ -n "$checkout_cmd" ] || problems+="no 'git checkout --' recovery command in the output; "
+  for f in desktop-app/package.json desktop-app/package-lock.json \
+           deploy/components/ghcr-images/kustomization.yaml; do
+    grep -q -- "$f" <<< "$checkout_cmd" || problems+="the discard command omits ${f}; "
+  done
+  # Every path it names must be a file the writer actually touched: a list that
+  # names releaseManifest fields would "contain" nothing useful to checkout.
+  for named in $checkout_cmd; do
+    case "$named" in
+      git | checkout | --) continue ;;
+    esac
+    [ -f "$d/$named" ] || problems+="the discard command names '${named}', which is not a file in the tree; "
+  done
+
+  if [ -z "$problems" ]; then
+    pass "a half-cut release's discard command names every file the writer touched, including the ghcr pin"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# The list is derived from the coordinate table, so a future coordinate that
+# owns a write but forgets to declare its path must fail the cut LOUDLY rather
+# than reintroduce a silently short recovery list.
+#
+# Mutation coverage: turn the throw in writtenCoordinatePaths() into a
+# `return ''`/skip and this case sees a successful cut instead of a refusal;
+# move the resolution after the coordinate loop and the tree is half-written
+# when it dies, which the package.json assertion below catches.
+assert_a_write_coordinate_without_a_path_stops_the_cut_before_any_write() {
+  local d out rc pkg problems=""
+  d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # A ninth coordinate that writes a file and never says which one.
+  cat >> "$d/scripts/release/release-coordinates.mjs" <<'EOF'
+
+COORDINATES.push({
+  name: 'test-only/undeclared-path',
+  assert: 'equals',
+  read: () => '',
+  write: () => {},
+})
+EOF
+
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t 2>&1 )"; rc=$?
+  pkg="$(node -e 'console.log(require(process.argv[1]).version)' "$d/desktop-app/package.json")"
+  [ "$rc" -ne 0 ] || problems+="the cut succeeded despite a write coordinate with no path; "
+  grep -q 'test-only/undeclared-path' <<< "$out" || problems+="the refusal does not name the offending coordinate: ${out}; "
+  [ "$pkg" = "0.5.0" ] || problems+="desktop-app/package.json was written to ${pkg} before the refusal; "
+
+  if [ -z "$problems" ]; then
+    pass "a write coordinate with no declared path stops the cut, by name, before anything is written"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
 assert_floor_is_not_dragged_by_a_desktop_bump
 assert_floor_above_desktop_is_rejected
 assert_explicit_minimum_flag_is_honoured
@@ -868,6 +963,8 @@ assert_the_pointer_check_does_not_require_the_artifact_to_exist
 assert_a_mixed_tag_component_is_rejected
 assert_prepare_release_fails_loudly_when_no_row_can_be_written
 assert_a_component_with_no_rows_is_rejected
+assert_a_half_cut_release_names_every_file_the_writer_touched
+assert_a_write_coordinate_without_a_path_stops_the_cut_before_any_write
 assert_every_coordinate_has_a_case
 assert_every_defined_case_is_invoked
 
