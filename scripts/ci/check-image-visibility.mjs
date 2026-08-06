@@ -21,6 +21,13 @@ const ACCEPT = [
 // to explain why.
 const FETCH_TIMEOUT_MS = 15_000
 
+// images-manifest.mjs already rejects a malformed name when it loads the file,
+// but that guard lives a module away from the URLs it protects. Re-deriving the
+// name from a strict charset match here keeps the check adjacent to its sink,
+// and the value interpolated below is the match result rather than the string
+// read off disk.
+const IMAGE_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/
+
 async function token(image) {
   const url = `https://ghcr.io/token?scope=repository:${NAMESPACE}/${image}:pull&service=ghcr.io`
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
@@ -31,7 +38,12 @@ async function token(image) {
 const failures = []
 
 for (const image of publishedImages()) {
-  const t = await token(image.name)
+  const [safeName] = image.name.match(IMAGE_NAME_RE) ?? []
+  if (!safeName) {
+    failures.push(`${image.name}: not a valid image name`)
+    continue
+  }
+  const t = await token(safeName)
   if (!t) {
     // A 403/DENIED response with no token is returned both for a private
     // package and for one that never existed under this namespace at all --
@@ -42,7 +54,7 @@ for (const image of publishedImages()) {
     )
     continue
   }
-  const res = await fetch(`https://ghcr.io/v2/${NAMESPACE}/${image.name}/manifests/latest`, {
+  const res = await fetch(`https://ghcr.io/v2/${NAMESPACE}/${safeName}/manifests/latest`, {
     headers: { Authorization: `Bearer ${t}`, Accept: ACCEPT },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   })
