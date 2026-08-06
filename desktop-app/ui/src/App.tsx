@@ -13,6 +13,8 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { PluginConsentModal } from '@components/PluginConsentModal'
+import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
@@ -211,6 +213,34 @@ export function App() {
   ])
   activeConversationOriginRef.current = activeConversationOrigin
 
+  /**
+   * Plugin permission prompts (spec §9). Main hides the plugin's
+   * `WebContentsView` before pushing the request and restores it once the user
+   * answers, so this modal is the only thing on screen while it is up.
+   */
+  const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
+    null
+  )
+
+  React.useEffect(() => {
+    const offRequested = window.clerum.pluginSdk?.onConsentRequested?.(request => {
+      setPluginConsentPrompt(request)
+    })
+    const offCancelled = window.clerum.pluginSdk?.onConsentCancelled?.(({ promptId }) => {
+      // Main withdrew the prompt (timeout, or the plugin was closed under it).
+      setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    })
+    return () => {
+      offRequested?.()
+      offCancelled?.()
+    }
+  }, [])
+
+  const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
+    setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    void window.clerum.pluginSdk?.resolveConsent?.(promptId, allowed)?.catch?.(() => undefined)
+  }, [])
+
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
     try {
@@ -218,6 +248,11 @@ export function App() {
     } catch {
       // Ignore storage failures in restricted environments.
     }
+    // Mirror into the main process so `theme.read` and the `theme.changed`
+    // event can answer for plugin embeds, which have no access to this
+    // renderer's localStorage. The renderer stays the writer; main only keeps
+    // the last value it was told.
+    void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
   React.useEffect(() => {
@@ -1242,6 +1277,12 @@ export function App() {
                         {environmentSetupConfirmationDialog}
                         {environmentSetupSuccessDialog}
                         {sandboxUiDeepLinkDialog}
+                        {pluginConsentPrompt ? (
+                          <PluginConsentModal
+                            request={pluginConsentPrompt}
+                            onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
                       </DesktopStateProvider>
                     </McpRuntimeProvider>
                   </AgentChatProviders>

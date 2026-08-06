@@ -1,3 +1,8 @@
+import type {
+  PluginAuditEntryView,
+  PluginConsentRequest,
+  PluginGrantView,
+} from './pluginSdkProtocol.js'
 import {
   AccessCatalog,
   AgentWithMcpServers,
@@ -567,6 +572,19 @@ declare global {
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+      }
+      pluginSdk: {
+        onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
+        onConsentCancelled: (callback: (args: { promptId: string }) => void) => () => void
+        onNotificationClicked: (
+          callback: (args: { pluginId: string; ref: string | null }) => void
+        ) => () => void
+        resolveConsent: (promptId: string, allowed: string[]) => Promise<boolean>
+        listGrants: () => Promise<PluginGrantView[]>
+        revoke: (pluginId: string, capability?: string) => Promise<void>
+        activity: (limit?: number, includeAmbient?: boolean) => Promise<PluginAuditEntryView[]>
+        clearActivity: () => Promise<void>
+        setTheme: (theme: string) => Promise<void>
       }
     }
   }

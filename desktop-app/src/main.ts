@@ -5,6 +5,7 @@ import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
+import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -426,6 +427,10 @@ if (gotSingleInstanceLock) {
     .whenReady()
     .then(async () => {
       wireAdaptiveSystemIcon()
+      // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
+      // runtime eagerly on first call, and a plugin can be mounted the moment
+      // the window paints.
+      initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
       registerIpcHandlers(appService)
       mainWindowLifecycleReady = true
       wirePowerMonitor()

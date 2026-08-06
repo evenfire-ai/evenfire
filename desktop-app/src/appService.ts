@@ -17,6 +17,7 @@ import { type DelegationAffordances, delegationAffordances } from './gfs/delegat
 import { GfsClient, parseSubjectKey } from './gfs/uriHandler.js'
 import { ApiError, requestJson } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
+import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
 import {
@@ -517,6 +518,13 @@ export class AppService {
     return matchingEntry?.team.id ?? this.accessCatalog?.teamId ?? null
   }
 
+  /**
+   * Monotonic per sandbox-ui mount. Carried into the SDK surface pin so a
+   * request from a superseded embed can be told apart from the live one
+   * (spec §8.1), mirroring the driver's own `mountGeneration` guard.
+   */
+  private sandboxUiGeneration = 0
+
   private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.sandboxUiLifecycleQueue.then(operation)
     this.sandboxUiLifecycleQueue = result.then(
@@ -881,6 +889,9 @@ export class AppService {
     this.rpcTokenManager.clear()
     await this.tokenStore.clearSessionToken(getActiveEnvKey())
     unbindChatStore()
+    // Grants survive logout (they are keyed by userId), but every cached SDK
+    // result must not: the next user of this machine gets nothing of this one's.
+    tryGetPluginSdkRuntime()?.notifySessionChanged(false)
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -1025,6 +1036,17 @@ export class AppService {
   async getSessionState(): Promise<SessionState> {
     if (!this.sessionToken || !this.me) return { authenticated: false, me: null }
     return { authenticated: true, me: this.me }
+  }
+
+  /**
+   * Synchronous read of the cached session user id. The plugin SDK broker needs
+   * the current user to key grants and audit lines on every request, and it
+   * cannot await mid-decision without opening a window where a logout races the
+   * consent check. Returns null whenever there is no live session.
+   */
+  getCachedUserId(): string | null {
+    if (!this.sessionToken || !this.me) return null
+    return this.me.id
   }
 
   async listTeams(): Promise<{ currentTeamId: string; items: TeamSummary[] }> {
@@ -1454,6 +1476,10 @@ export class AppService {
     await this.switchSessionToTeam(targetTeamId)
     if (!this.me) throw new Error('Team switch ended without an authenticated session')
     this.stopAllStreams()
+    // Grants are keyed by userId, not by team, so they carry over — but every
+    // cached org/agents/contexts answer is now about the wrong team. Drop the
+    // cache and tell mounted plugins to refetch (spec §6.2).
+    tryGetPluginSdkRuntime()?.notifySessionChanged(true)
     return { authenticated: true, me: this.me }
   }
 
@@ -2910,6 +2936,7 @@ export class AppService {
   openSandboxUi(args: {
     recipeNs: string
     recipeName: string
+    title?: string
     defaultPath?: string
     routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
@@ -2924,6 +2951,7 @@ export class AppService {
   private async openSandboxUiNow(args: {
     recipeNs: string
     recipeName: string
+    title?: string
     defaultPath?: string
     routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
@@ -2935,6 +2963,7 @@ export class AppService {
     const recipeNs = String(args.recipeNs || '').trim()
     const recipeName = String(args.recipeName || '').trim()
     if (!recipeNs || !recipeName) throw new Error('recipeNs and recipeName are required')
+    this.sandboxUiGeneration += 1
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
@@ -2951,6 +2980,10 @@ export class AppService {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
         refreshModule.cancelSandboxUiRefresh()
+        // Unpin before anything else can observe a dead surface as pinned:
+        // per-mount SDK state (session denials, prompt budget, rate budget)
+        // dies with the mount.
+        tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
         args.onClosed?.()
       },
       onOauthAuthorize: (oauthClientId, background) => {
@@ -2973,6 +3006,14 @@ export class AppService {
       // to whichever recipe is active now.
       return
     }
+    // Pin the surface so the SDK broker can derive this plugin's identity from
+    // `webContents.id` — the plugin never asserts who it is (spec §8.1).
+    tryGetPluginSdkRuntime()?.pinSandboxUiSurface({
+      pluginId: activeView.appRef,
+      pluginTitle: String(args.title || '').trim() || recipeName,
+      webContentsId: activeView.webContentsId,
+      generation: this.sandboxUiGeneration,
+    })
     refreshModule.startSandboxUiRefresh({
       recipeNs,
       recipeName,
@@ -2991,6 +3032,7 @@ export class AppService {
       const driver = await import('./sandboxUiDriver.js')
       const refreshModule = await import('./sandboxUiSessionRefresh.js')
       refreshModule.cancelSandboxUiRefresh()
+      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
       await driver.unmountSandboxUiView()
     })
   }

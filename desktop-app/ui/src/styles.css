@@ -14613,3 +14613,56 @@ pre {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ── Plugin consent prompt (spec §9.4) ─────────────────────────────────
+   Reuses the confirm-dialog shell; only the permission rows are new. Wider
+   than a confirm dialog because each row carries a full scope sentence, and
+   a batched prompt can list up to eight of them. */
+.da-plugin-consent {
+  width: min(480px, 100%);
+}
+
+.da-plugin-consent__count {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.da-plugin-consent__rows {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.da-plugin-consent__row {
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+
+.da-plugin-consent__label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  cursor: pointer;
+}
+
+.da-plugin-consent__row-title {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-plugin-consent__row-detail {
+  display: block;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-plugin-consent__footer {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+}
