@@ -150,19 +150,39 @@ minikube-start: ## Start minikube cluster (starts Docker Desktop if needed)
 minikube-stop: ## Stop minikube cluster
 	minikube stop -p $(MINIKUBE_PROFILE)
 
+# Images come from ghcr by default: `make minikube-setup` on a clean clone
+# pulls ~25 published images instead of building 28 from source. Build
+# everything locally with `make minikube-setup-local` (or IMAGE_SOURCE=local).
+IMAGE_SOURCE ?= ghcr
+
 .PHONY: minikube-setup
-minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
+minikube-setup: ## Clean install from scratch, PULLING published images (IMAGE_SOURCE=local or `make minikube-setup-local` builds instead). Rebuilds the DB; REUSE_DB=true keeps it. SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
 	@if [ "$(SKIP_PREREQS)" != "true" ]; then $(MAKE) --no-print-directory prereqs; fi
 	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
+		IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
 		scripts/minikube/full-setup.sh $(ARGS)
 
+.PHONY: minikube-setup-local
+minikube-setup-local: ## Clean install building every image from source (the pre-2026-08 behaviour; ~20 min on a clean clone). Use when you are changing service code, or when no published image exists for your platform.
+	@$(MAKE) --no-print-directory minikube-setup IMAGE_SOURCE=local
+
 .PHONY: minikube-setup-e2e
-minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers).
+minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers). Pulls published images, then builds the two unpublished E2E coordinator fixtures.
 	@$(MAKE) --no-print-directory minikube-setup SEED_PROFILE=e2e
+	@if [ "$(IMAGE_SOURCE)" = "ghcr" ]; then \
+		echo "Building the two unpublished E2E coordinator fixtures..."; \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e; \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-plugin-sdk-e2e; \
+	fi
 
 .PHONY: minikube-teardown
 minikube-teardown: ## Remove deployments (keep namespaces/CRDs)
 	@scripts/minikube/teardown.sh
+
+.PHONY: minikube-pull-images
+minikube-pull-images: ## Pull ALL published images into minikube at the pinned release tag (MINIKUBE_IMAGE_TAG=<tag> overrides the pin for this run only)
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		scripts/minikube/pull-images.sh
 
 .PHONY: minikube-build-images
 minikube-build-images: ## Build and load ALL Docker images into minikube (with SHA verification)
@@ -173,8 +193,9 @@ minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator 
 	@scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 
 .PHONY: minikube-verify-images
-minikube-verify-images: ## Verify all image SHAs match between local Docker and minikube
-	@scripts/minikube/build-images.sh --verify-only
+minikube-verify-images: ## Verify every image the cluster runs is present (checks ghcr refs in ghcr mode, clerum/* in local mode)
+	@IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		scripts/minikube/build-images.sh --verify-only
 
 .PHONY: minikube-verify
 minikube-verify: ## Verify all McpServers have resolved envSecrets (standalone smoke check)
