@@ -347,15 +347,27 @@ export function mergeAuthoritativeServerMessages(
   const hydratedReplacements = authoritative.map(message => {
     const local = localByServerMessage.get(message)
     let hydrated = preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) })
-    // Merge the side metadata of a collapsed idle echo onto its authoritative slot
-    // row (§6.2, R2-M1). Chained after the positional local so the positional local
-    // keeps precedence for any field it supplies; the collapsed echo fills the rest
-    // (e.g. toolSteps/attachments the reconciled server row lacks). Content is never
-    // rewritten — preferredServerMessage only touches side fields. This does NOT
-    // affect localAnchorIndex: the collapse has no positional anchor of its own.
+    // Merge the DURABLE side metadata of a collapsed idle echo onto its
+    // authoritative slot row (§6.2, R2-M1). Bounded to attachments/toolSteps only,
+    // gap-filling and non-destructive: whatever `hydrated` already supplies wins, so
+    // the row only gains fields the reconciled server turn lacked. It deliberately
+    // does NOT use preferredServerMessage/copyLocalMetadata here: that path also
+    // copies `task_id` (echo identity), which is correct for D-1 replacement (the
+    // server IS the live task's echo) but WRONG for an idle collapse — the task is
+    // done and the collapse is by content coincidence, not identity. Tagging a
+    // historical server row with a done task's id leaks identity and would break the
+    // task_id-based dedupe consumers rely on (the exact class the ':602' stale-
+    // metadata guard forbids). `content` is never touched either (loss-safety, §6.1).
+    // This does NOT affect localAnchorIndex: the collapse has no positional anchor.
     const collapsedEcho = collapsedEchoMetadataByServerMessage.get(message)
     if (collapsedEcho) {
-      hydrated = preferredServerMessage(hydrated, collapsedEcho, { copyLocalMetadata: true })
+      hydrated = {
+        ...hydrated,
+        attachments: hydrated.attachments?.length
+          ? hydrated.attachments
+          : collapsedEcho.attachments,
+        toolSteps: hydrated.toolSteps?.length ? hydrated.toolSteps : collapsedEcho.toolSteps,
+      }
     }
     return {
       message: hydrated,

@@ -1490,6 +1490,10 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
             expect(authRow?.toolSteps).toEqual(bubbleToolSteps)
             expect(authRow?.attachments).toEqual(bubbleAttachments)
           }
+          // The done task's identity never leaks onto a numbered server row (§6.2).
+          for (const server of incoming) {
+            expect(merged.find(m => m.id === server.id)?.task_id).toBeUndefined()
+          }
         } else {
           expect(ids).toContain('sandwiched-bubble')
           // The surviving bubble keeps its original text in the output.
@@ -1587,12 +1591,72 @@ describe('mergeAuthoritativeServerMessages — R2-M1 idle echo metadata preceden
     expect(outputTurn2Assistant?.attachments).toEqual(optimisticEcho.attachments)
     // content is NOT rewritten (loss-safety of text, §6.2).
     expect(outputTurn2Assistant?.content).toBe('a2')
+    // The done task's identity is NOT leaked onto the historical server row (§6.2).
+    expect(outputTurn2Assistant?.task_id).toBeUndefined()
     // Non-reintroduction of R1-B1: every numbered server row survives.
     for (const server of incoming) {
       if (messageServerTurnNumber(server) !== undefined) {
         expect(merged.map(m => m.id)).toContain(server.id)
       }
     }
+  })
+
+  it('R2-M1: collapse does not leak the idle echo task_id onto the historical server row', () => {
+    // Extends the ':602' stale-metadata guard to the COLLAPSE path (F1 regression of
+    // d8f45d34): the chained copy used preferredServerMessage, which propagates
+    // task_id (local.task_id ?? server.task_id), tagging the historical numbered row
+    // with the done task's id. That id leak would break task_id-based dedupe in
+    // useAgentChatController (noop) and useChatNotifications (toast dedupe). The
+    // collapse must copy attachments/toolSteps ONLY, never task_id. Server rows are
+    // derived from the real producer (T1).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'q1', response: 'a1', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'q2', response: 'a2', started_at: new Date(2).toISOString() },
+    ])
+    const idleEcho: ChatMessage = {
+      id: 'idle-echo-assistant',
+      role: 'assistant',
+      content: 'a2', // mirrors turn-2-assistant → collapses once idle (I-1)
+      timestamp: 999,
+      task_id: 'done-task',
+      toolSteps: [{ toolName: 'search', displayName: 'Search', state: 'completed' }],
+    }
+    const existing: ChatMessage[] = [
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'a1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      idleEcho,
+      {
+        id: 'turn-2-assistant',
+        role: 'assistant',
+        content: 'a2',
+        timestamp: 3,
+        serverTurnNumber: 2,
+      },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+
+    // The echo collapsed; the authoritative row survives.
+    expect(merged.map(m => m.id)).not.toContain('idle-echo-assistant')
+    const outputTurn2Assistant = merged.find(m => m.id === 'turn-2-assistant')
+    expect(outputTurn2Assistant).toBeDefined()
+    // task_id identity is NOT leaked onto the historical server row.
+    expect(outputTurn2Assistant?.task_id).toBeUndefined()
+    // No OTHER authoritative row picks up the done task_id either.
+    for (const server of incoming) {
+      if (messageServerTurnNumber(server) !== undefined) {
+        expect(merged.find(m => m.id === server.id)?.task_id).toBeUndefined()
+      }
+    }
+    // The durable side metadata still survives (the R2-M1 preservation is intact).
+    expect(outputTurn2Assistant?.toolSteps).toEqual(idleEcho.toolSteps)
   })
 
   it('R2-M1: does not collapse a text-less idle bubble on empty-content coincidence', () => {
