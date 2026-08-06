@@ -135,6 +135,13 @@ export function mergeAuthoritativeServerMessages(
   const removedIndexes = new Set<number>()
   const removedIndexByMessage = new Map<ChatMessage, number>()
   const localByServerMessage = new Map<ChatMessage, ChatMessage>()
+  // Side metadata (toolSteps/attachments/tokens via copyLocalMetadata) of a
+  // collapsed idle echo, keyed by the authoritative row it merges onto. Kept
+  // SEPARATE from localByServerMessage: the collapse is not a positional 1↔1
+  // replacement, so it must not drive the local anchor index nor the single-claim
+  // filter — it only contributes metadata to a server row that always survives
+  // (§6.2, R2-M1).
+  const collapsedEchoMetadataByServerMessage = new Map<ChatMessage, ChatMessage>()
   const consumedLocalMessages = new Set<ChatMessage>()
 
   const markLocalReplacement = (serverMessage: ChatMessage, localMessage: ChatMessage) => {
@@ -147,16 +154,25 @@ export function mergeAuthoritativeServerMessages(
     localByServerMessage.set(serverMessage, localMessage)
   }
 
-  // Drop-only sibling of markLocalReplacement: evicts a turnless idle echo from
-  // the output WITHOUT associating it to any server row (no localByServerMessage
-  // write). No server row changes content or presence, so this can never
-  // reintroduce R1-B1 — property #1 still guards every numbered server row (§6.1).
-  const dropLocalEcho = (localMessage: ChatMessage) => {
+  // Collapse sibling of markLocalReplacement: evicts a turnless idle echo from the
+  // output WITHOUT registering localByServerMessage (no positional 1↔1 anchoring),
+  // but DOES merge its side metadata (toolSteps/attachments/tokens via
+  // copyLocalMetadata) onto the authoritative row of its slot — the same echoRow
+  // its content matched. The server row never changes content or presence, so this
+  // can never reintroduce R1-B1 (property #1 still guards every numbered server
+  // row, §6.1) and never rewrites content (loss-safety of text, §6.2). It is no
+  // longer pure drop-only: it is drop of the local ∩ merge of its metadata into the
+  // surviving authoritative row, so toolSteps/attachments the optimistic bubble
+  // accumulated are not lost when the reconciled server row lacks them (R2-M1).
+  const dropLocalEcho = (localMessage: ChatMessage, echoRow: ChatMessage) => {
     const index = existing.indexOf(localMessage)
     if (index < 0 || consumedLocalMessages.has(localMessage)) return
     consumedLocalMessages.add(localMessage)
     removed.push(localMessage)
     removedIndexes.add(index)
+    if (!collapsedEchoMetadataByServerMessage.has(echoRow)) {
+      collapsedEchoMetadataByServerMessage.set(echoRow, localMessage)
+    }
   }
 
   for (const serverMessage of authoritative) {
@@ -301,13 +317,19 @@ export function mergeAuthoritativeServerMessages(
         }
         const nextAuthoritative = authoritativeSlotRow(nextNumbered)
         const previousAuthoritative = authoritativeSlotRow(previousNumbered)
-        const echoRow =
-          nextAuthoritative?.content === message.content
-            ? nextAuthoritative
-            : previousAuthoritative?.content === message.content
-              ? previousAuthoritative
-              : undefined
-        if (echoRow) dropLocalEcho(message)
+        // Non-empty content gate (§6.2, R2-M1): strict equality would fire the
+        // collapse on '' === '' / undefined === undefined, treating a text-less
+        // bubble (e.g. attachment-only) as an echo. A collapse requires truthy
+        // content on BOTH the local and the authoritative row — an empty bubble is
+        // not a "text echo" and must survive.
+        const matchesAuthoritative = (row: ChatMessage | undefined): boolean =>
+          Boolean(message.content) && row?.content === message.content
+        const echoRow = matchesAuthoritative(nextAuthoritative)
+          ? nextAuthoritative
+          : matchesAuthoritative(previousAuthoritative)
+            ? previousAuthoritative
+            : undefined
+        if (echoRow) dropLocalEcho(message, echoRow)
       }
       continue
     }
@@ -324,8 +346,19 @@ export function mergeAuthoritativeServerMessages(
 
   const hydratedReplacements = authoritative.map(message => {
     const local = localByServerMessage.get(message)
+    let hydrated = preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) })
+    // Merge the side metadata of a collapsed idle echo onto its authoritative slot
+    // row (§6.2, R2-M1). Chained after the positional local so the positional local
+    // keeps precedence for any field it supplies; the collapsed echo fills the rest
+    // (e.g. toolSteps/attachments the reconciled server row lacks). Content is never
+    // rewritten — preferredServerMessage only touches side fields. This does NOT
+    // affect localAnchorIndex: the collapse has no positional anchor of its own.
+    const collapsedEcho = collapsedEchoMetadataByServerMessage.get(message)
+    if (collapsedEcho) {
+      hydrated = preferredServerMessage(hydrated, collapsedEcho, { copyLocalMetadata: true })
+    }
     return {
-      message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
+      message: hydrated,
       localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
     }
   })

@@ -1417,10 +1417,14 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
       ),
       // If active, the bubble is optimistic-live and must never collapse (I-5).
       active: fc.boolean(),
+      // R2-M1: whether the optimistic bubble carries side metadata
+      // (toolSteps/attachments) that the reconciled server row does NOT have. When
+      // an idle echo collapses, that metadata must survive on the authoritative row.
+      withMeta: fc.boolean(),
     })
 
     fc.assert(
-      fc.property(scenarioArb, ({ start, role, bubbleMode, active }) => {
+      fc.property(scenarioArb, ({ start, role, bubbleMode, active, withMeta }) => {
         const turns = [
           { number: start, user_input: `q${start}`, started_at: new Date(start).toISOString() },
           {
@@ -1451,12 +1455,21 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
             : bubbleMode === 'stale-echo'
               ? staleContent
               : `orphan-${start}`
+        // R2-M1: side metadata the reconciled server rows never carry. When the
+        // idle echo collapses it must be merged onto the authoritative row.
+        const bubbleToolSteps = [
+          { toolName: 'search', displayName: 'Search', state: 'completed' as const },
+        ]
+        const bubbleAttachments = [
+          { id: 'echo-file', type: 'response_file' as const, label: 'result.txt' },
+        ]
         const bubble: ChatMessage = {
           id: 'sandwiched-bubble',
           role,
           content: bubbleContent,
           timestamp: 999,
           task_id: 'the-task',
+          ...(withMeta ? { toolSteps: bubbleToolSteps, attachments: bubbleAttachments } : {}),
         }
         const existing: ChatMessage[] = [low!, bubble, diskHigh]
 
@@ -1470,10 +1483,24 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
         // gate (b) plus the authoritative-comparison fix: no local text is lost.
         if (bubbleMode === 'fresh-echo' && !active) {
           expect(ids).not.toContain('sandwiched-bubble')
+          // R2-M1: the collapsed echo's side metadata survives on the surviving
+          // authoritative row (never dropped with the local, never rewriting content).
+          if (withMeta) {
+            const authRow = merged.find(m => m.serverTurnNumber === start + 1 && m.role === role)
+            expect(authRow?.toolSteps).toEqual(bubbleToolSteps)
+            expect(authRow?.attachments).toEqual(bubbleAttachments)
+          }
         } else {
           expect(ids).toContain('sandwiched-bubble')
           // The surviving bubble keeps its original text in the output.
           expect(merged.find(m => m.id === 'sandwiched-bubble')?.content).toBe(bubbleContent)
+          // R2-M1: an un-collapsed bubble keeps its own metadata and never leaks it
+          // onto the authoritative row (no false merge).
+          if (withMeta) {
+            expect(merged.find(m => m.id === 'sandwiched-bubble')?.toolSteps).toEqual(
+              bubbleToolSteps
+            )
+          }
         }
         // The authoritative higher turn always lands with its FRESH content.
         expect(merged.find(m => m.serverTurnNumber === start + 1 && m.role === role)?.content).toBe(
@@ -1507,4 +1534,101 @@ describe('mergeAuthoritativeServerMessages — R2-H1 idle echo liveness (§6.1, 
       { numRuns: 20000 }
     )
   }, 120000)
+})
+
+describe('mergeAuthoritativeServerMessages — R2-M1 idle echo metadata precedence (§6.2)', () => {
+  it('R2-M1: preserves a collapsed idle echo side metadata (toolSteps/attachments) on the authoritative row', () => {
+    // Regression for R2-M1 (regression of 40cc7afe): a drop-only collapse discarded
+    // the optimistic bubble's toolSteps/attachments that the reconciled server row
+    // does not carry. Server rows are derived from the real producer (T1) and carry
+    // NO tool_steps here, so the metadata lives only on the local bubble. After the
+    // idle collapse the metadata must land on the surviving authoritative row (T4).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'q1', response: 'a1', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'q2', response: 'a2', started_at: new Date(2).toISOString() },
+    ])
+    const optimisticEcho: ChatMessage = {
+      id: 'optimistic-assistant',
+      role: 'assistant',
+      content: 'a2', // mirrors turn-2-assistant → collapses once idle (I-1)
+      timestamp: 999,
+      task_id: 'done-task',
+      toolSteps: [{ toolName: 'search', displayName: 'Search', state: 'completed' }],
+      attachments: [{ id: 'echo-file', type: 'response_file', label: 'result.txt' }],
+    }
+    const existing: ChatMessage[] = [
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'a1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      optimisticEcho,
+      {
+        id: 'turn-2-assistant',
+        role: 'assistant',
+        content: 'a2',
+        timestamp: 3,
+        serverTurnNumber: 2,
+      },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+
+    // The echo collapsed (drop of the local), the authoritative row survives.
+    expect(merged.map(m => m.id)).not.toContain('optimistic-assistant')
+    const outputTurn2Assistant = merged.find(m => m.id === 'turn-2-assistant')
+    expect(outputTurn2Assistant).toBeDefined()
+    // The side metadata the bubble accumulated survives on the authoritative row.
+    expect(outputTurn2Assistant?.toolSteps).toEqual(optimisticEcho.toolSteps)
+    expect(outputTurn2Assistant?.attachments).toEqual(optimisticEcho.attachments)
+    // content is NOT rewritten (loss-safety of text, §6.2).
+    expect(outputTurn2Assistant?.content).toBe('a2')
+    // Non-reintroduction of R1-B1: every numbered server row survives.
+    for (const server of incoming) {
+      if (messageServerTurnNumber(server) !== undefined) {
+        expect(merged.map(m => m.id)).toContain(server.id)
+      }
+    }
+  })
+
+  it('R2-M1: does not collapse a text-less idle bubble on empty-content coincidence', () => {
+    // The collapse gate used strict equality, so '' === '' fired on an
+    // attachment-only bubble sandwiched between two empty-content numbered turns.
+    // §6.2 requires truthy content on both sides: a text-less bubble is not a text
+    // echo and must survive with its attachment. Server rows come from the real
+    // producer (T1).
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: '', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: '', started_at: new Date(2).toISOString() },
+    ])
+    const attachmentOnly: ChatMessage = {
+      id: 'attachment-only',
+      role: 'user',
+      content: '',
+      timestamp: 999,
+      task_id: 'done-task',
+      attachments: [{ id: 'file-9', type: 'uploaded_file', label: 'photo.png' }],
+    }
+    const existing: ChatMessage[] = [
+      { id: 'turn-1-user', role: 'user', content: '', timestamp: 1, serverTurnNumber: 1 },
+      attachmentOnly,
+      { id: 'turn-2-user', role: 'user', content: '', timestamp: 3, serverTurnNumber: 2 },
+    ]
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+
+    // The empty bubble is not a text echo: it survives with its attachment.
+    expect(merged.map(m => m.id)).toContain('attachment-only')
+    expect(merged.find(m => m.id === 'attachment-only')?.attachments).toEqual(
+      attachmentOnly.attachments
+    )
+    // Non-reintroduction of R1-B1: both numbered server rows survive.
+    expect(merged.map(m => m.id)).toEqual(expect.arrayContaining(['turn-1-user', 'turn-2-user']))
+  })
 })
