@@ -11,7 +11,10 @@ import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
-import { resolveCredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import {
+  isRecipeOwned,
+  resolveCredentialSurface,
+} from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServer, updateMcpServer } from '@lib/api'
 import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
@@ -195,6 +198,11 @@ export default function EditMcpServerPage() {
                   server.status?.conditions,
                   server.spec as { managed?: boolean } | undefined
                 )}
+                // Ownership, passed separately from `surface` on purpose:
+                // `surface` is derived from an observed condition and reads
+                // 'rotate' whenever status is absent, Unknown or stale, so it
+                // cannot gate the create path. This is the spec fact.
+                recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
               />
             </div>
           ) : null}

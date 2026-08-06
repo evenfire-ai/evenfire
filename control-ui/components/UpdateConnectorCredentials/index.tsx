@@ -83,6 +83,7 @@ export function UpdateConnectorCredentials({
   serverName,
   envSecret,
   surface = 'rotate',
+  recipeOwned = false,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -246,16 +247,25 @@ export function UpdateConnectorCredentials({
     }
   }, [phase, rotationCutoff, serverName])
 
-  // `secretCreated` gates BOTH set-mode sources, not just the `surface` prop.
-  // It latches the moment a create succeeds, and the Secret it created exists
-  // from then on — whether the form got here from a stale `surface` prop or
-  // from a rotate PUT that 404'd (`recreateRequired`). Leaving `recreateRequired`
-  // outside the guard made it a one-way latch: nothing resets it (resetToIdle
-  // does not), so after a successful recreate the form kept "set" copy, forced
-  // every key, and offered a confirm dialog promising to create a Secret that
-  // now exists.
-  const mode: 'set' | 'rotate' =
-    !secretCreated && (recreateRequired || surface === 'set') ? 'set' : 'rotate'
+  // "The Secret is missing and this screen would have to create it." Two
+  // sources feed it, and `secretCreated` gates BOTH — not just the `surface`
+  // prop. That latch flips the moment a create succeeds, and the Secret it
+  // created exists from then on, whether the form got here from a stale
+  // `surface` prop or from a rotate PUT that 404'd (`recreateRequired`).
+  // Leaving `recreateRequired` outside the guard made it a one-way latch:
+  // nothing resets it (resetToIdle does not), so after a successful recreate
+  // the form kept "set" copy, forced every key, and offered a confirm dialog
+  // promising to create a Secret that now exists.
+  const secretMissing = !secretCreated && (recreateRequired || surface === 'set')
+  // Ownership is the can-create invariant, and it is NOT derived from the
+  // observed condition — see the `recipeOwned` prop doc. A recipe-owned
+  // connector reaches `secretMissing` only through the late PUT 404 (or a
+  // caller handing it surface='set'), and neither may open the create form:
+  // the Secret name belongs to the recipe, the POST route does not guard
+  // ownership the way the PUT does, and HCC never rolls out a managed:false
+  // connector, so the create would cross an ownership boundary AND never
+  // converge. `mode` can therefore never be 'set' while `recipeOwned` is true.
+  const mode: 'set' | 'rotate' = secretMissing && !recipeOwned ? 'set' : 'rotate'
 
   if (!envSecret) {
     return (
@@ -272,7 +282,14 @@ export function UpdateConnectorCredentials({
   // belongs to the recipe (the PUT route guards recipe-owned Secrets, the POST
   // route does not), and HCC never creates a Deployment for managed:false, so a
   // create here would both cross an ownership boundary and never converge.
-  if (surface === 'recipe-owned') {
+  //
+  // Two ways in, and both must land here rather than on the create form:
+  //  - `surface === 'recipe-owned'`, resolved up front from an observed
+  //    SecretResolved=False/SecretNotFound condition; and
+  //  - `recipeOwned && secretMissing`, the LATE discovery — status was absent,
+  //    Unknown or stale, so the surface resolved to 'rotate' and only the
+  //    rotation PUT's 404 revealed the Secret is gone.
+  if (surface === 'recipe-owned' || (recipeOwned && secretMissing)) {
     return (
       <FormSection title="Update credentials">
         <p className="cu-muted">

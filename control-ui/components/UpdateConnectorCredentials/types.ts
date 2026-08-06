@@ -19,8 +19,25 @@ export type UpdateConnectorCredentialsProps = {
    * Which credential surface to render, derived by resolveCredentialSurface()
    * from the McpServer's SecretResolved condition and spec.managed. Optional
    * and defaulting to 'rotate' so existing call sites keep today's behavior.
+   *
+   * OBSERVED state, not ownership: absent, Unknown or stale status yields
+   * 'rotate' for recipe-owned connectors too. Never gate the create path on
+   * this — use `recipeOwned`.
    */
   surface?: CredentialSurface
+  /**
+   * Whether the connector is WorkflowRecipe-owned (`spec.managed === false`),
+   * threaded from the page via isRecipeOwned().
+   *
+   * This is the can-create invariant, and it is deliberately independent of
+   * `surface`. A recipe-owned connector with no status yet resolves to
+   * 'rotate', and the rotation PUT's own 404 is the first evidence its Secret
+   * is missing — the exact moment the create form must NOT appear. When this is
+   * true, `mode` can never become 'set' by any path, and every "the Secret is
+   * missing" transition lands on the explanation that points at the recipe's
+   * secrets instead.
+   */
+  recipeOwned?: boolean
 }
 
 /**

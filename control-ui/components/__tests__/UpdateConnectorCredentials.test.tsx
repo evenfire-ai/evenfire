@@ -81,7 +81,8 @@ async function flush(ticks = 4) {
 // always pass explicitly.
 async function renderPanel(
   envSecret: EnvSecret | undefined,
-  surface: CredentialSurface = 'rotate'
+  surface: CredentialSurface = 'rotate',
+  recipeOwned = false
 ) {
   const utils = render(
     <ToastProvider>
@@ -89,6 +90,7 @@ async function renderPanel(
         serverName={SERVER_NAME}
         envSecret={envSecret}
         surface={surface}
+        recipeOwned={recipeOwned}
       />
     </ToastProvider>
   )
@@ -772,6 +774,70 @@ describe('UpdateConnectorCredentials — recipe-owned', () => {
     expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  })
+})
+
+// ─── R1-H1: ownership must not depend on the observed condition ────────────
+//
+// `surface` is derived from status. A managed:false connector whose status is
+// absent, Unknown, or stale carries NO SecretNotFound condition, so it resolves
+// to `rotate` — and the PUT's own 404 is then the FIRST evidence the Secret is
+// missing. If that 404 were allowed to open the create form, the ownership
+// guard would be defeated exactly when it matters: the operator would POST an
+// unlabeled Secret outside the WorkflowRecipe flow, collide with the recipe's
+// later provisioning, and then wait forever for an HCC rollout that
+// managed:false connectors never receive.
+//
+// `recipeOwned` is therefore threaded from the page as an ownership FACT
+// (spec.managed === false), independent of any condition.
+describe('UpdateConnectorCredentials — recipe-owned, late 404', () => {
+  it('lands on explanation-only when a rotate PUT 404s on a recipe-owned connector', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    // Status has not been written yet, so the resolver can only say 'rotate'.
+    await renderPanel(ENV_SECRET, 'rotate', true)
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+
+    await submitRotation({ 'api-key': 'only-one' })
+
+    // The 404 must point at the recipe, not at a create form.
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Enter every key to recreate it/)).not.toBeInTheDocument()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  // Defense in depth: even if a caller (or a future resolver change) handed
+  // this component `surface: 'set'` for a recipe-owned connector, POST must
+  // stay unreachable. `mode` may never resolve to 'set' by ANY path.
+  it('never renders the create form for a recipe-owned connector handed surface="set"', async () => {
+    await renderPanel(ENV_SECRET, 'set', true)
+
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/needs credentials before it can start/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+  })
+
+  // The managed:TRUE control for the same journey — the recovery this screen
+  // exists to provide must keep working, so the guard above cannot be a blanket
+  // "never recover from a 404".
+  it('still opens the create form on a late 404 for a managed connector', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate', false)
+    await submitRotation({ 'api-key': 'only-one' })
+
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+    expect(screen.queryByText(/managed by its WorkflowRecipe/i)).not.toBeInTheDocument()
   })
 })
 
