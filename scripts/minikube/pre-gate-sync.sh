@@ -47,6 +47,37 @@ log() {
   printf '[pre-gate-sync] %s\n' "$*"
 }
 
+# ---- Which images this cluster runs ---------------------------------------
+# THIS HAS TO COME FROM THE CLUSTER, NOT FROM THIS SHELL. A cluster set up with
+# ghcr release images and pre-gated with IMAGE_SOURCE=local (or the reverse)
+# would otherwise look in sync while every running pod referenced images this
+# sync never touched, and the gate would pass against code that is not
+# deployed. scripts/minikube/image-mode.sh is the one resolver; it reads the
+# mode whichever writer last acquired images recorded, and falls back to the
+# environment only for a cluster nothing has built or pulled into yet.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+
+if ! IMAGE_SOURCE="$(image_mode_source "${PROJECT_DIR}")"; then
+  exit 1
+fi
+if ! IMAGE_TAG="$(image_mode_tag "${PROJECT_DIR}")"; then
+  exit 1
+fi
+if ! PRE_GATE_RENDER_DIR="$(image_mode_render_dir "${PROJECT_DIR}")"; then
+  exit 1
+fi
+if ! IMAGES_GENERATED_AT="$(image_mode_images_generated_at "${PROJECT_DIR}")"; then
+  exit 1
+fi
+export IMAGE_SOURCE
+if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
+  # Every `make` sub-invocation below (pull-images, verify-images, deploy-all)
+  # must resolve the SAME coordinate this run resolved, including an override
+  # the committed pin does not carry.
+  export MINIKUBE_IMAGE_TAG="${IMAGE_TAG}"
+fi
+
 # shellcheck source=scripts/minikube/pre-gate-runtime.sh
 source "${SCRIPT_DIR}/pre-gate-runtime.sh"
 # shellcheck source=scripts/minikube/pre-gate-incremental.sh
@@ -184,31 +215,53 @@ cluster_marker_matches() {
   local expected_cluster_fingerprint="$1"
   local expected_worktree_id="$2"
   local expected_git_head actual_cluster_fingerprint actual_worktree_id actual_git_head
+  local actual_image_source actual_image_tag actual_images_generated_at
 
   expected_git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
 
   actual_cluster_fingerprint="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.clusterFingerprint}' 2>/dev/null || true)"
   actual_worktree_id="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
   actual_git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
+  # The image coordinate is part of "in sync". gitHead cannot tell a ghcr
+  # cluster from a local one, nor v0.6.0 from latest, and the acquisition stamp
+  # is what catches a `make minikube-setup` between two pre-gates: that re-pulls
+  # every release image and discards any shadow build while leaving this marker
+  # untouched, so without it no sync would run and the gate would silently test
+  # release code.
+  actual_image_source="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageSource}' 2>/dev/null || true)"
+  actual_image_tag="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageTag}' 2>/dev/null || true)"
+  actual_images_generated_at="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
 
   [[ "${actual_cluster_fingerprint}" == "${expected_cluster_fingerprint}" ]] &&
     [[ "${actual_worktree_id}" == "${expected_worktree_id}" ]] &&
-    [[ -n "${expected_git_head}" && "${actual_git_head}" == "${expected_git_head}" ]]
+    [[ -n "${expected_git_head}" && "${actual_git_head}" == "${expected_git_head}" ]] &&
+    [[ "${actual_image_source}" == "${IMAGE_SOURCE}" ]] &&
+    [[ "${actual_image_tag}" == "${IMAGE_TAG}" ]] &&
+    [[ "${actual_images_generated_at}" == "${IMAGES_GENERATED_AT}" ]]
 }
 
 persist_cluster_marker() {
   local cluster_fingerprint="$1"
   local infra_fingerprint="$2"
-  local git_head updated_at
+  local git_head updated_at images_generated_at
 
   git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || printf 'unknown')"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Re-read rather than reusing the value from startup: this run may have
+  # re-pulled or rebuilt images, which rewrites the manifest.
+  if ! images_generated_at="$(image_mode_images_generated_at "${PROJECT_DIR}")"; then
+    log "ERROR: cannot read the image manifest to stamp the cluster sync marker"
+    return 1
+  fi
 
   ${KC} create configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
     --from-literal=clusterFingerprint="${cluster_fingerprint}" \
     --from-literal=infraFingerprint="${infra_fingerprint}" \
     --from-literal=worktreeId="${WORKTREE_ID}" \
     --from-literal=gitHead="${git_head}" \
+    --from-literal=imageSource="${IMAGE_SOURCE}" \
+    --from-literal=imageTag="${IMAGE_TAG}" \
+    --from-literal=imagesGeneratedAt="${images_generated_at}" \
     --from-literal=gate="${GATE_NAME}" \
     --from-literal=updatedAt="${updated_at}" \
     --dry-run=client \
@@ -315,7 +368,23 @@ assert_no_legacy_prompt_bridge_grants() {
   log "Legacy promptBridge grant inventory is empty"
 }
 
+# Test seam: everything above resolves configuration and defines functions
+# only, with no cluster or network call. `PRE_GATE_SYNC_CONFIG_ONLY=true` stops
+# here so scripts/tests/test-minikube-pre-gate-shadow.sh can read the resolved
+# image coordinate, and (when it sources this file) exercise the marker
+# functions, without a cluster. It must stay immediately before the first
+# cluster call.
+if [[ "${PRE_GATE_SYNC_CONFIG_ONLY:-false}" == "true" ]]; then
+  printf 'imageSource=%s\n' "${IMAGE_SOURCE}"
+  printf 'imageTag=%s\n' "${IMAGE_TAG}"
+  printf 'renderDir=%s\n' "${PRE_GATE_RENDER_DIR}"
+  printf 'imagesGeneratedAt=%s\n' "${IMAGES_GENERATED_AT}"
+  # `return` when sourced, `exit` when executed.
+  return 0 2>/dev/null || exit 0
+fi
+
 log "Evaluating sync requirements for ${GATE_NAME}"
+log "Cluster images: ${IMAGE_SOURCE}${IMAGE_TAG:+ (${IMAGE_TAG})}; overlay $(basename "${PRE_GATE_RENDER_DIR}")"
 preflight_host_lifecycle_probe
 
 cluster_fingerprint="$(
@@ -406,9 +475,16 @@ if [[ "${cluster_changed}" == "true" ]]; then
 
   if incremental_requires_database_reconcile; then
     rollout_if_present control-plane control-postgres
+    # The migration script EXTRACTS THE CONTROL-API IMAGE from the overlay it
+    # renders. Hardcoding the local overlay here yielded clerum/control-api:test
+    # on a ghcr cluster -- an image that does not exist there, so the migration
+    # Job ImagePullBackOffs; and rendering the pinned ghcr overlay on a cluster
+    # running an overridden tag would run a release nobody pulled. Follow the
+    # coordinate the cluster actually runs, which is also the ref the shadow
+    # build above just retagged.
     CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-      --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
+      --overlay "${PRE_GATE_RENDER_DIR}"
     CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
     # The GFS DSN authentication probe deliberately runs inside control-api so

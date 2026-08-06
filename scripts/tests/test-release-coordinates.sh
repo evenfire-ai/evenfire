@@ -15,6 +15,40 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+# Write the ghcr pointer component the eighth coordinate reads.
+# Usage: make_ghcr_component <dir> <tag> [secondRowTag]
+# Two rows, because the component in the real tree has one per published image
+# and the coordinate must handle ALL of them. The optional second tag builds a
+# deliberately half-rewritten component; it defaults to the first, which is the
+# only coherent state.
+make_ghcr_component() {
+  local d=$1 tag=$2 tag2=${3:-$2}
+  mkdir -p "$d/deploy/components/ghcr-images"
+  cat > "$d/deploy/components/ghcr-images/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+configurations:
+  - imagetags.yaml
+
+images:
+  - name: clerum/control-api
+    newName: ghcr.io/evenfire-ai/control-api
+    newTag: $tag
+  - name: clerum/control-ui
+    newName: ghcr.io/evenfire-ai/control-ui
+    newTag: $tag2
+EOF
+}
+
+# The DISTINCT set of newTag values in the component, space separated. A
+# coherent component collapses to one value; a half-applied rewrite shows both,
+# which is the state that must never read as "the first one wins".
+component_tags() {
+  sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' \
+    "$1/deploy/components/ghcr-images/kustomization.yaml" | sort -u | tr '\n' ' '
+}
+
 # Build a scratch repo with the given desktop/ers/rpc versions and manifest.
 # Usage: make_fixture <dir> <desktopVersion> <ersVersion> <rpcVersion> \
 #                     <manifestDesktop> <manifestMinimum> <manifestErs> <manifestRpc>
@@ -42,6 +76,12 @@ export const releaseManifest: ReleaseManifest = {
   minimumDesktopVersion: '$mmin',
 }
 EOF
+  # The ghcr pin is a coordinate like any other, so every fixture carries one.
+  # Without it the checker's read would blow up on a missing file and every
+  # negative case below would "pass" on the crash instead of on the thing it
+  # claims to test. Pinned to v<desktopVersion> so a fixture that is coherent
+  # for the desktop coordinates is coherent for this one too.
+  make_ghcr_component "$d" "v$dv"
   ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
 }
 
@@ -382,6 +422,8 @@ export const releaseManifestRENAMED: ReleaseManifest = {
   minimumDesktopVersion: '0.1.252',
 }
 EOF
+  # Coherent ghcr pin: the ONLY disagreement in this tree must be the manifest.
+  make_ghcr_component "$d" v0.6.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
@@ -429,6 +471,8 @@ export const releaseManifest: ReleaseManifest = {
   minimumDesktopVersion: '9.9.9',
 }
 EOF
+  # Coherent ghcr pin: the ONLY disagreement in this tree must be the manifest.
+  make_ghcr_component "$d" v0.6.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
@@ -521,12 +565,17 @@ assert_unhandled_assert_kind_fails_closed() {
   make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
-  # Append an 8th coordinate whose assert kind ('pointer') the checker does
-  # not implement, carrying a deliberately garbage value that would never
-  # agree with anything. If an unrecognized assert kind falls through every
-  # branch instead of failing closed, this coordinate is never actually
-  # checked and the tree still reports success -- the exact bug this case
-  # guards against.
+  # Append an extra coordinate whose assert kind the checker does not
+  # implement, carrying a deliberately garbage value that would never agree
+  # with anything. If an unrecognized assert kind falls through every branch
+  # instead of failing closed, this coordinate is never actually checked and
+  # the tree still reports success -- the exact bug this case guards against.
+  #
+  # The injected kind must be one the checker genuinely has no case for. This
+  # used to inject 'pointer', which worked only while 'pointer' was unimplemented;
+  # once the ghcr pin landed as a real pointer coordinate, that injection was
+  # caught by the pointer case (garbage != v0.6.0) and this case would have kept
+  # passing with the `default:` branch deleted.
   node -e '
     const fs = require("fs")
     const p = process.argv[1]
@@ -536,8 +585,8 @@ assert_unhandled_assert_kind_fails_closed() {
     s = s.replace(
       marker,
       "COORDINATES.push({\n" +
-        "  name: \"test-only-pointer-coordinate\",\n" +
-        "  assert: \"pointer\",\n" +
+        "  name: \"test-only-unimplemented-kind-coordinate\",\n" +
+        "  assert: \"no-such-assert-kind\",\n" +
         "  read: () => \"garbage-value-that-is-never-checked\",\n" +
         "})\n\n" +
         marker
@@ -546,9 +595,164 @@ assert_unhandled_assert_kind_fails_closed() {
   ' "$d/scripts/release/release-coordinates.mjs"
 
   if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
-    fail "validate-release-tag passed with an unhandled assert kind ('pointer') on a coordinate"
+    fail "validate-release-tag passed with an unhandled assert kind ('no-such-assert-kind') on a coordinate"
   else
     pass "validate-release-tag fails closed on an unhandled assert kind instead of skipping it silently"
+  fi
+  rm -rf "$d"
+}
+
+# The pin must be a full coordinate, not a hand-bumped file. A release cut that
+# moves the desktop version and leaves the pin behind ships a v0.6.0 whose
+# desktop app reports 0.6.0 while minikube-setup pulls v0.5.0 images -- the
+# exact skew the one-writer rule exists to prevent.
+assert_prepare_release_writes_the_ghcr_pin() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_ghcr_component "$d" v0.5.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t 2>&1 )"; rc=$?
+  local got; got="$(component_tags "$d")"
+  if [ "$rc" -eq 0 ] && [ "$got" = "v0.6.0 " ]; then
+    pass "prepare-release.mjs writes the ghcr component pin"
+  else
+    fail "component tags after the cut were '${got}', expected 'v0.6.0 ' (rc=$rc out='$out')"
+  fi
+  rm -rf "$d"
+}
+
+# The pin is v-prefixed; the release version is not. Writing 0.6.0 into the
+# component would produce a tag that never exists.
+assert_the_pin_is_written_v_prefixed() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_ghcr_component "$d" v0.5.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  ( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t >/dev/null 2>&1 )
+  local component="$d/deploy/components/ghcr-images/kustomization.yaml"
+  if grep -q 'newTag: v0.6.0' "$component" && ! grep -qE 'newTag: 0\.6\.0' "$component"; then
+    pass "the pin is written as v0.6.0, not 0.6.0"
+  else
+    fail "the written pin is not v-prefixed: $(component_tags "$d")"
+  fi
+  rm -rf "$d"
+}
+
+# EVERY row, not just the first. A rewrite that missed rows would produce a
+# component with mixed tags, and the puller would fetch two different releases.
+assert_every_component_row_is_rewritten() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_ghcr_component "$d" v0.5.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  ( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t >/dev/null 2>&1 )
+  local count
+  count="$(grep -c 'newTag: v0.6.0' "$d/deploy/components/ghcr-images/kustomization.yaml")"
+  if [ "$count" = "2" ]; then
+    pass "every component row was rewritten, not just the first"
+  else
+    fail "only $count of 2 rows carry the new pin"
+  fi
+  rm -rf "$d"
+}
+
+assert_validate_release_tag_catches_a_stale_pin() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_ghcr_component "$d" v0.5.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "ghcr" <<< "$out" && grep -q "v0.5.0" <<< "$out"; then
+    pass "the checker catches a stale ghcr pin, naming it"
+  else
+    fail "expected a failure naming the ghcr pin and v0.5.0; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+# The checker must NOT reach the registry. The v<version> images are created by
+# release-images.yml ON THE TAG, so they cannot exist when the release-prep PR
+# is checked. Asserting existence here would make every release-prep PR red.
+assert_the_pointer_check_does_not_require_the_artifact_to_exist() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_ghcr_component "$d" v0.6.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  # No network, no registry, no tag: a pure tree read must still pass.
+  out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    pass "the pointer check is a pure tree read; artifact existence is release-images.yml's half"
+  else
+    fail "the checker rejected an agreeing tree (rc=$rc): $out"
+  fi
+  rm -rf "$d"
+}
+
+# A component with mixed newTag values is not "the first one wins" -- it is a
+# half-applied write, and reading only the first would hide it.
+assert_a_mixed_tag_component_is_rejected() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  # First row already bumped, second row left behind: the first-row read that
+  # this case exists to forbid would see v0.6.0 and pass.
+  make_ghcr_component "$d" v0.6.0 v0.5.0
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "MIXED" <<< "$out"; then
+    pass "a component with mixed newTag values is rejected"
+  else
+    fail "a half-rewritten component passed the checker (rc=$rc): $out"
+  fi
+  rm -rf "$d"
+}
+
+# Gut the component's images list: a file that still parses as a Component but
+# carries no pin at all.
+gut_ghcr_component() {
+  cat > "$1/deploy/components/ghcr-images/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+configurations:
+  - imagetags.yaml
+
+images: []
+EOF
+}
+
+# A writer that wrote nothing is a failed cut, not a no-op. Silently rewriting
+# zero rows would hand the operator a "prepared release 0.6.0" over a tree with
+# no pin in it at all.
+assert_prepare_release_fails_loudly_when_no_row_can_be_written() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  gut_ghcr_component "$d"
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t 2>&1 )"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "ghcr-images/kustomization.yaml" <<< "$out"; then
+    pass "prepare-release fails loudly, naming the file, when no pin row can be written"
+  else
+    fail "a cut over a component with no pin rows reported rc=$rc: $out"
+  fi
+  rm -rf "$d"
+}
+
+# A guard that scanned zero rows is a broken guard, not a passing one. A
+# component whose images list was gutted must fail, not read as agreement.
+assert_a_component_with_no_rows_is_rejected() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  gut_ghcr_component "$d"
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "empty" <<< "$out"; then
+    pass "a component carrying no newTag rows is rejected, not read as agreement"
+  else
+    fail "a component with zero newTag rows was accepted (rc=$rc): $out"
   fi
   rm -rf "$d"
 }
@@ -634,6 +838,101 @@ assert_a_half_cut_release_can_be_completed_by_rerunning() {
   rm -rf "$d"
 }
 
+# ---------------------------------------------------------------------------
+# The half-cut recovery instruction
+# ---------------------------------------------------------------------------
+#
+# The message printed when the manifest update fails told the operator to
+# `git checkout -- desktop-app/package.json desktop-app/package-lock.json`.
+# The ghcr pin became the eighth coordinate and the writer started touching it,
+# but the instruction kept naming two files out of three: following it verbatim
+# reverted the version and left the pin bumped -- a tree still half-cut,
+# produced by the command offered to un-cut it.
+
+# Mutation coverage: hardcode the old two-file list back (the ghcr path
+# disappears from both the prose and the checkout command), or invert the
+# filter to `c => !c.write` (the checkout command names releaseManifest fields
+# that are not files at all). Both are caught -- the assertion pins the EXACT
+# path set the writer touches, in the checkout command specifically, not merely
+# "the string appears somewhere".
+assert_a_half_cut_release_names_every_file_the_writer_touched() {
+  local d out checkout_cmd problems=""
+  d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # Force the manifest write to fail AFTER the coordinate loop has written
+  # package.json, the lockfile and the ghcr component.
+  chmod -w "$d/external-rest-api/src/releaseManifest.ts"
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t 2>&1 )"
+  chmod +w "$d/external-rest-api/src/releaseManifest.ts"
+
+  # The tree really is half-cut, or this case proves nothing about recovery.
+  local pin; pin="$(component_tags "$d")"
+  [ "$pin" = "v0.6.0 " ] || problems+="the ghcr pin was not written before the failure (tags: '${pin}'); "
+
+  checkout_cmd="$(grep -o 'git checkout -- [^`]*' <<< "$out")"
+  [ -n "$checkout_cmd" ] || problems+="no 'git checkout --' recovery command in the output; "
+  for f in desktop-app/package.json desktop-app/package-lock.json \
+           deploy/components/ghcr-images/kustomization.yaml; do
+    grep -q -- "$f" <<< "$checkout_cmd" || problems+="the discard command omits ${f}; "
+  done
+  # Every path it names must be a file the writer actually touched: a list that
+  # names releaseManifest fields would "contain" nothing useful to checkout.
+  for named in $checkout_cmd; do
+    case "$named" in
+      git | checkout | --) continue ;;
+    esac
+    [ -f "$d/$named" ] || problems+="the discard command names '${named}', which is not a file in the tree; "
+  done
+
+  if [ -z "$problems" ]; then
+    pass "a half-cut release's discard command names every file the writer touched, including the ghcr pin"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# The list is derived from the coordinate table, so a future coordinate that
+# owns a write but forgets to declare its path must fail the cut LOUDLY rather
+# than reintroduce a silently short recovery list.
+#
+# Mutation coverage: turn the throw in writtenCoordinatePaths() into a
+# `return ''`/skip and this case sees a successful cut instead of a refusal;
+# move the resolution after the coordinate loop and the tree is half-written
+# when it dies, which the package.json assertion below catches.
+assert_a_write_coordinate_without_a_path_stops_the_cut_before_any_write() {
+  local d out rc pkg problems=""
+  d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  # A ninth coordinate that writes a file and never says which one.
+  cat >> "$d/scripts/release/release-coordinates.mjs" <<'EOF'
+
+COORDINATES.push({
+  name: 'test-only/undeclared-path',
+  assert: 'equals',
+  read: () => '',
+  write: () => {},
+})
+EOF
+
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t 2>&1 )"; rc=$?
+  pkg="$(node -e 'console.log(require(process.argv[1]).version)' "$d/desktop-app/package.json")"
+  [ "$rc" -ne 0 ] || problems+="the cut succeeded despite a write coordinate with no path; "
+  grep -q 'test-only/undeclared-path' <<< "$out" || problems+="the refusal does not name the offending coordinate: ${out}; "
+  [ "$pkg" = "0.5.0" ] || problems+="desktop-app/package.json was written to ${pkg} before the refusal; "
+
+  if [ -z "$problems" ]; then
+    pass "a write coordinate with no declared path stops the cut, by name, before anything is written"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
 assert_floor_is_not_dragged_by_a_desktop_bump
 assert_floor_above_desktop_is_rejected
 assert_explicit_minimum_flag_is_honoured
@@ -656,6 +955,16 @@ assert_counter_mismatch_is_rejected_by_the_checker
 assert_unhandled_assert_kind_fails_closed
 assert_floor_above_version_is_rejected_before_any_write
 assert_a_half_cut_release_can_be_completed_by_rerunning
+assert_prepare_release_writes_the_ghcr_pin
+assert_the_pin_is_written_v_prefixed
+assert_every_component_row_is_rewritten
+assert_validate_release_tag_catches_a_stale_pin
+assert_the_pointer_check_does_not_require_the_artifact_to_exist
+assert_a_mixed_tag_component_is_rejected
+assert_prepare_release_fails_loudly_when_no_row_can_be_written
+assert_a_component_with_no_rows_is_rejected
+assert_a_half_cut_release_names_every_file_the_writer_touched
+assert_a_write_coordinate_without_a_path_stops_the_cut_before_any_write
 assert_every_coordinate_has_a_case
 assert_every_defined_case_is_invoked
 
