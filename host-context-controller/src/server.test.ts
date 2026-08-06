@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { McpServerProvider } from './k8sClient'
+import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer } from './server'
 
 class FakeProvider implements McpServerProvider {
@@ -263,6 +264,30 @@ describe('ContextMapperServer desktop status authority', () => {
       error: 'Service Unavailable',
       message: 'Host inventory is not authoritative',
     })
+  })
+
+  it('serves desktop status 200 in the dev wiring (no watcher), never 503 (R2-M1)', async () => {
+    // Wiring regression for R2-M1: main.ts resolves both authority gates from the
+    // same watcher. In dev (DevMcpServerProvider, watcher=null) the OLD wiring left
+    // the Host gate undefined, so the server's fail-closed default pinned every
+    // /api/v1/desktop/* at 503 after setReady(true) — where the base answered 200
+    // {status:'inactive'}. Exercise the REAL resolvers with a null watcher, exactly
+    // as main.ts does, so a revert to the undefined wiring turns this 200 into 503.
+    const providerAuthoritativeFn = resolveProviderAuthoritativeFn(null)
+    const hostAuthoritativeFn = resolveHostAuthoritativeFn(null)
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      runningReconciler,
+      hasDesktopFn,
+      providerAuthoritativeFn,
+      hostAuthoritativeFn
+    )
+    server.setReady(true)
+
+    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    expect(desktop.statusCode).toBe(200)
+    expect(JSON.parse(desktop.body)).toEqual({ status: 'running', hostRef: 'host-a' })
   })
 
   it('fails desktop closed when no Host-authority gate is wired (default)', async () => {
