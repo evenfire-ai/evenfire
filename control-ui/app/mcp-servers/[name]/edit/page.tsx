@@ -11,6 +11,7 @@ import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
+import { resolveCredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServer, updateMcpServer } from '@lib/api'
 import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
@@ -190,6 +191,10 @@ export default function EditMcpServerPage() {
               <UpdateConnectorCredentials
                 serverName={name}
                 envSecret={resolveEnvSecret(server.spec as Record<string, unknown> | undefined)}
+                surface={resolveCredentialSurface(
+                  server.status?.conditions,
+                  server.spec as { managed?: boolean } | undefined
+                )}
               />
             </div>
           ) : null}
