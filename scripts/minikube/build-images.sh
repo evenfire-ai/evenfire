@@ -85,6 +85,34 @@ case "${SKIP_UIS}" in
   *) SKIP_UIS=false ;;
 esac
 
+# Which refs --verify-only checks. The BUILD path is unaffected: this script
+# always builds clerum/* locally when asked to build. In ghcr mode the cluster
+# runs ghcr.io/evenfire-ai/* refs (deploy/components/ghcr-images), so verifying
+# clerum/* would report "all images present" against images no pod references.
+IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
+case "$IMAGE_SOURCE" in
+  ghcr|local) ;;
+  *) echo "Unknown IMAGE_SOURCE: '${IMAGE_SOURCE}' (expected: ghcr | local)" >&2; exit 1 ;;
+esac
+GHCR_NAMESPACE="ghcr.io/evenfire-ai"
+GHCR_COMPONENT="${PROJECT_DIR}/deploy/components/ghcr-images/kustomization.yaml"
+
+# The effective ghcr tag: MINIKUBE_IMAGE_TAG if set (a render-time operator
+# lever), otherwise the committed pin, which is the single source of truth.
+resolve_ghcr_tag() {
+  if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
+    printf '%s' "$MINIKUBE_IMAGE_TAG"
+    return 0
+  fi
+  [ -f "$GHCR_COMPONENT" ] || { echo "ghcr component not found at ${GHCR_COMPONENT}" >&2; exit 1; }
+  local tags
+  tags="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$GHCR_COMPONENT" | sort -u)"
+  [ -n "$tags" ] || { echo "no newTag: line in ${GHCR_COMPONENT}" >&2; exit 1; }
+  [ "$(printf '%s\n' "$tags" | wc -l | tr -d ' ')" = "1" ] \
+    || { echo "mixed newTag values in ${GHCR_COMPONENT}: $(printf '%s ' $tags)" >&2; exit 1; }
+  printf '%s' "$tags"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --skip-public) SKIP_PUBLIC=true ;;
@@ -306,10 +334,62 @@ if [ "$SKIP_UIS" = true ]; then
 fi
 
 # ---- Verify-only mode ----
+# The verify set is NOT ALL_IMAGES. ALL_IMAGES is the BUILD list (its ordering
+# and Dockerfile arguments are hand-written per call). What must be verified is
+# the ref each pod will actually pull, which splits on `published`, not on the
+# mode: a published+deployed image runs from ghcr in ghcr mode, and every
+# unpublished one (doc-generator-mcp, workflow-custom-sdk-e2e,
+# workflow-plugin-sdk-e2e) is built and verified locally in BOTH modes.
 if [ "$VERIFY_ONLY" = true ]; then
-  echo -e "\n${BOLD}=== Verifying Images in Minikube ===${NC}"
+  echo -e "\n${BOLD}=== Verifying Images in Minikube (IMAGE_SOURCE=${IMAGE_SOURCE}) ===${NC}"
+
+  GHCR_TAG=""
+  if [ "$IMAGE_SOURCE" = ghcr ]; then
+    GHCR_TAG="$(resolve_ghcr_tag)"
+  fi
+
+  VERIFY_IMAGES=()
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    VERIFY_IMAGES+=("$ref")
+  done < <(node -e '
+    import("'"$PROJECT_DIR"'/scripts/release/images-manifest.mjs").then(m => {
+      const mode = process.argv[1]
+      const tag = process.argv[2]
+      const ghcr = new Set(m.pullInGhcrMode().map(i => i.name))
+      for (const image of m.IMAGES) {
+        if (!image.deployed_to_minikube) continue
+        if (mode === "ghcr" && ghcr.has(image.name)) {
+          process.stdout.write(`ghcr.io/evenfire-ai/${image.name}:${tag}\n`)
+        } else {
+          process.stdout.write(`${m.localRef(image)}\n`)
+        }
+      }
+    }).catch(err => {
+      process.stderr.write(`images-manifest read failed: ${err.message}\n`)
+      process.exit(1)
+    })' "$IMAGE_SOURCE" "$GHCR_TAG")
+
+  # An empty verify set means the manifest read failed or the mode is wrong.
+  # "0 of 0 images missing" is not a pass.
+  if [ "${#VERIFY_IMAGES[@]}" -eq 0 ]; then
+    err "the manifest produced zero images to verify; refusing to report success on an empty set"
+    exit 1
+  fi
+
+  if [ "$SKIP_UIS" = true ]; then
+    FILTERED_VERIFY=()
+    for image in "${VERIFY_IMAGES[@]}"; do
+      case "$image" in
+        */control-ui:*|*/profile-ui:*) continue ;;
+        *) FILTERED_VERIFY+=("$image") ;;
+      esac
+    done
+    VERIFY_IMAGES=("${FILTERED_VERIFY[@]}")
+  fi
+
   fail_count=0
-  for img in "${ALL_IMAGES[@]}"; do
+  for img in "${VERIFY_IMAGES[@]}"; do
     sha=$(minikube_image_id "$img")
     if [ "$sha" = "NOT_FOUND" ]; then
       err "MISSING: ${img}"
@@ -320,10 +400,14 @@ if [ "$VERIFY_ONLY" = true ]; then
   done
   echo ""
   if [ "$fail_count" -eq 0 ]; then
-    echo -e "${GREEN}${BOLD}All ${#ALL_IMAGES[@]} images present in minikube.${NC}"
+    echo -e "${GREEN}${BOLD}All ${#VERIFY_IMAGES[@]} images present in minikube.${NC}"
   else
-    echo -e "${RED}${BOLD}${fail_count} of ${#ALL_IMAGES[@]} images missing!${NC}"
-    echo -e "${RED}Run: make minikube-build-images${NC}"
+    echo -e "${RED}${BOLD}${fail_count} of ${#VERIFY_IMAGES[@]} images missing!${NC}"
+    if [ "$IMAGE_SOURCE" = ghcr ]; then
+      echo -e "${RED}Run: make minikube-pull-images${NC}"
+    else
+      echo -e "${RED}Run: make minikube-build-images${NC}"
+    fi
     exit 1
   fi
   exit 0

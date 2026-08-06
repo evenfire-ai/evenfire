@@ -536,6 +536,54 @@ assert_all_three_image_lists_agree() {
 # fed `while read` nothing, `missing` stayed empty, and this case could never
 # fail -- verified by commenting out an invocation and seeing it still print
 # PASS while under-reporting its own invoked count.
+# build-images.sh --verify-only must check the ref the CLUSTER will run, which
+# depends on IMAGE_SOURCE. Checking clerum/* in ghcr mode reports "all images
+# present" against images no pod references, which is worse than no check.
+assert_verify_only_resolves_the_ref_per_mode() {
+  local sh out
+  sh="$REPO_ROOT/scripts/minikube/build-images.sh"
+  out=""
+  grep -q 'IMAGE_SOURCE' "$sh" || out+="build-images.sh does not read IMAGE_SOURCE; "
+  grep -q 'pullInGhcrMode' "$sh" || out+="build-images.sh does not derive its verify set from pullInGhcrMode(); "
+  grep -q 'VERIFY_IMAGES' "$sh" || out+="build-images.sh has no separate VERIFY_IMAGES set; "
+  if [ -z "$out" ]; then
+    pass "build-images.sh derives a mode-aware verify set from the manifest"
+  else
+    fail "$out"
+  fi
+}
+
+# The rule has to hold in BOTH modes, not just ghcr: doc-generator-mcp,
+# workflow-custom-sdk-e2e and workflow-plugin-sdk-e2e are published:false, so
+# they are locally built and locally verified even when IMAGE_SOURCE=ghcr.
+assert_the_verify_set_splits_on_published_not_on_mode() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const ghcrNames = new Set(m.pullInGhcrMode().map(i => i.name))
+      const bad = []
+      for (const i of m.IMAGES) {
+        if (!i.deployed_to_minikube) continue
+        const inGhcrSet = ghcrNames.has(i.name)
+        if (i.published !== inGhcrSet) {
+          bad.push(`${i.name}: published=${i.published} but pull_in_ghcr_mode=${inGhcrSet}`)
+        }
+      }
+      console.log(bad.join(","))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "for every minikube-deployed image, ghcr-vs-local verification splits on published"
+  else
+    fail "$output"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-images-manifest.sh"
@@ -560,6 +608,8 @@ assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_all_three_image_lists_agree
+assert_verify_only_resolves_the_ref_per_mode
+assert_the_verify_set_splits_on_published_not_on_mode
 assert_every_defined_case_is_invoked
 
 exit $FAIL
