@@ -7,18 +7,20 @@ import {
   UpdateConnectorCredentials,
 } from '@components/UpdateConnectorCredentials'
 import type { CredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
-import { getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import { createMcpSecret, getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
   updateMcpSecret: vi.fn(),
+  createMcpSecret: vi.fn(),
 }))
 
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
+const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
 const SERVER_NAME = 'my-connector'
 // secretKey and envVar are deliberately different strings so table/label
@@ -108,6 +110,28 @@ async function submitRotation(keys: Record<string, string>) {
   const dialog = screen.getByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
   await flush()
+}
+
+/** Fills `keys` (secretKey -> value), submits, and confirms the set-mode
+ *  dialog — draining the microtask chain in between so callers land on a
+ *  settled `phase`. */
+async function submitSet(keys: Record<string, string>) {
+  for (const [secretKey, value] of Object.entries(keys)) {
+    fireEvent.change(screen.getByLabelText(secretKey), { target: { value } })
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+  const dialog = screen.getByRole('alertdialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Set & start' }))
+  await flush()
+}
+
+const ALL_KEYS = { 'api-key': 'a-value', 'workspace-id': 'w-value' }
+
+/** The shape control-api actually returns for a duplicate create: a bare 500,
+ *  NOT a 409 (see spec Non-goals). Mocking 409 here would be a test that can
+ *  never fail against the real server. */
+function serverError() {
+  return Object.assign(new Error('500 Internal Server Error'), { status: 500 })
 }
 
 beforeEach(() => {
@@ -630,5 +654,82 @@ describe('UpdateConnectorCredentials — set mode', () => {
     ).toBeInTheDocument()
     // No confirm dialog, so nothing was sent.
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})
+
+describe('UpdateConnectorCredentials — set mode submit', () => {
+  it('calls createMcpSecret and not updateMcpSecret', async () => {
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, {
+      'api-key': 'a-value',
+      'workspace-id': 'w-value',
+    })
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  // The AlreadyExists race. control-api collapses it to 500, so the retry must
+  // NOT be gated on a status code.
+  it('falls back to updateMcpSecret when the create fails, and reports success', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    expect(screen.queryByText(/Rotation failed/i)).not.toBeInTheDocument()
+  })
+
+  it('reports the original create error when the retry also fails', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('data["api-key"] must be a string'), { status: 400 })
+    )
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret not found'), { status: 404 })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/data\["api-key"\] must be a string/)).toBeInTheDocument()
+    expect(screen.queryByText(/404 - Secret not found/)).not.toBeInTheDocument()
+  })
+
+  it('reaches the success banner once DeploymentReady turns True', async () => {
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`${SERVER_NAME} started`))).toBeInTheDocument()
+  })
+
+  it('shows a set-mode failure banner, not "Rotation failed", when both the create and the retry fail', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(serverError())
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/Could not set credentials:/)).toBeInTheDocument()
+    expect(screen.queryByText(/Rotation failed/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
   })
 })

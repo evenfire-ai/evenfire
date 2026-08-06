@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
-import { getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import { createMcpSecret, getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
 import type { McpServerCondition } from '@lib/api'
 import type { RotationPhase, UpdateConnectorCredentialsProps } from './types'
 
@@ -302,12 +302,20 @@ export function UpdateConnectorCredentials({
     }
     setValidationError('')
 
-    const confirmed = await confirm({
-      title: 'Rotate credentials',
-      message: buildConfirmMessage(envSecret!.name, previewAffected),
-      confirmLabel: 'Rotate & restart',
-      tone: 'danger',
-    })
+    const confirmed = await confirm(
+      mode === 'set'
+        ? {
+            title: 'Set credentials',
+            message: `This creates Secret "${envSecret!.name}" and starts ${serverName}.`,
+            confirmLabel: 'Set & start',
+          }
+        : {
+            title: 'Rotate credentials',
+            message: buildConfirmMessage(envSecret!.name, previewAffected),
+            confirmLabel: 'Rotate & restart',
+            tone: 'danger',
+          }
+    )
     if (!confirmed) return
 
     // Captured BEFORE the PUT fires — the correlation anchor the poll below
@@ -324,16 +332,40 @@ export function UpdateConnectorCredentials({
     const cutoff = new Date(Date.now() - CLOCK_SKEW_TOLERANCE_MS).toISOString()
     setPhase('saving')
     setPhaseMessage('')
+    // Capture what this submit IS, before any state flips underneath it.
+    setSubmittedMode(mode)
     try {
-      const result = await updateMcpSecret(envSecret!.name, data)
+      if (mode === 'set') {
+        try {
+          await createMcpSecret(envSecret!.name, data)
+        } catch (postError) {
+          // The Secret may have appeared between page load and submit. Retry as
+          // a merge-patch WITHOUT inspecting the status: control-api answers a
+          // bare 500 for AlreadyExists, never 409 (spec Non-goals), so a
+          // status-gated branch here would be permanently dead code.
+          try {
+            await updateMcpSecret(envSecret!.name, data)
+          } catch {
+            // Surface the ORIGINAL create error: it describes what the operator
+            // actually attempted. A 404 from the follow-up PUT is noise.
+            throw postError
+          }
+        }
+        setSecretCreated(true)
+        // POST returns no affectedConnectors, so fall back to the best-effort
+        // preview for the "who else restarts" note.
+        setRotationAffected(previewAffected ?? [])
+      } else {
+        const result = await updateMcpSecret(envSecret!.name, data)
+        setRotationAffected(result.affectedConnectors)
+      }
       setDraft({})
-      setRotationAffected(result.affectedConnectors)
       setRotationCutoff(cutoff)
       setPhase('rotating')
     } catch (e) {
       setPhase('failed')
-      setPhaseMessage(e instanceof Error ? e.message : 'Failed to rotate credentials')
-      showToast('Failed to rotate credentials.', { tone: 'error' })
+      setPhaseMessage(e instanceof Error ? e.message : 'Failed to save credentials')
+      showToast('Failed to save credentials.', { tone: 'error' })
     }
   }
 
@@ -426,21 +458,27 @@ export function UpdateConnectorCredentials({
 
         {phase === 'rotating' ? (
           <div className="cu-banner cu-banner--info" role="status">
-            Rotating credentials — waiting for {serverName} to restart with the new value.
+            {submittedMode === 'set'
+              ? `Setting credentials — waiting for ${serverName} to start.`
+              : `Rotating credentials — waiting for ${serverName} to restart with the new value.`}
             {phaseMessage ? ` ${phaseMessage}` : ''}
           </div>
         ) : null}
 
         {phase === 'success' ? (
           <div className="cu-banner cu-banner--ok" role="status">
-            Credentials rotated. {serverName} restarted and is serving the new credential.
+            {submittedMode === 'set'
+              ? `Credentials set. ${serverName} started and is serving the new credential.`
+              : `Credentials rotated. ${serverName} restarted and is serving the new credential.`}
             {otherAffectedNote}
           </div>
         ) : null}
 
         {phase === 'failed' ? (
           <div className="cu-banner cu-banner--error" role="alert">
-            Rotation failed: {phaseMessage}
+            {submittedMode === 'set'
+              ? `Could not set credentials: ${phaseMessage}`
+              : `Rotation failed: ${phaseMessage}`}
           </div>
         ) : null}
 
@@ -453,7 +491,11 @@ export function UpdateConnectorCredentials({
         <div className="cu-create-actions">
           {phase === 'success' || phase === 'failed' || phase === 'timeout' ? (
             <Button type="button" onClick={resetToIdle}>
-              {phase === 'success' ? 'Done' : 'Rotate again'}
+              {phase === 'success'
+                ? 'Done'
+                : submittedMode === 'set'
+                  ? 'Try again'
+                  : 'Rotate again'}
             </Button>
           ) : (
             <Button type="submit" variant="primary" disabled={busy}>
