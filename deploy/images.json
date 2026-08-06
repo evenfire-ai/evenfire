@@ -269,13 +269,6 @@
       "published": false,
       "deployed_to_minikube": true,
       "e2e_only": true
-    },
-    {
-      "name": "doc-generator-mcp",
-      "path": "mcp-servers/doc-generator",
-      "local_tag": "v1",
-      "published": false,
-      "deployed_to_minikube": false
     }
   ]
 }

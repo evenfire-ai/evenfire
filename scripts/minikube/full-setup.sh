@@ -769,11 +769,9 @@ elif [ "$IMAGE_SOURCE" = ghcr ]; then
   ok "Public base images loaded"
 
   # No local build runs on this path any more. The published:false images
-  # (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e, doc-generator-mcp) have
-  # no ghcr counterpart, and all three are now built only by the path that
-  # actually needs them: the two fixtures by `make minikube-setup-e2e`, and
-  # doc-generator-mcp by nothing at all -- the registry distributes it and
-  # installs it on demand, so no cluster manifest names its local ref.
+  # (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) have no ghcr
+  # counterpart, and both are now built only by the path that actually needs
+  # them: `make minikube-setup-e2e`.
 
   log "Pulling published images (${EFFECTIVE_IMAGE_TAG}) into minikube..."
   # `${MINIKUBE_MULTI_NODE:-false}`, not `$MINIKUBE_MULTI_NODE`: this script

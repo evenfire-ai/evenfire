@@ -304,10 +304,9 @@ incremental_shadow_selector() {
   while IFS="$(printf '\t')" read -r name local_ref shadow_ref; do
     [[ -n "${name}" ]] || continue
     if [[ "${shadow_ref}" == "-" ]]; then
-      # published:false images (the two E2E fixtures; doc-generator-mcp, which
-      # nothing acquires any more) run under their clerum/* ref in BOTH modes,
-      # so the local build is already the running image and there is nothing to
-      # shadow.
+      # published:false images (the two E2E fixtures) run under their clerum/*
+      # ref in BOTH modes, so the local build is already the running image and
+      # there is nothing to shadow.
       log "  ${local_ref} has no published counterpart; the local build is what runs"
       continue
     fi

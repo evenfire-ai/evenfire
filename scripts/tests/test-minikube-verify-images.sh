@@ -346,7 +346,7 @@ assert_an_only_build_carries_the_recorded_mode_forward() {
 #
 # The daemon fixture is now `all_ghcr_refs` alone. It used to carry
 # clerum/doc-generator-mcp:v1 as well, because full-setup.sh built that one
-# unpublished image before the pull; nothing builds it on this path any more.
+# unpublished image before the pull; that image has no manifest row any more.
 assert_the_default_ghcr_verify_passes_without_the_e2e_fixtures() {
   local d out rc present
   d="$(mktemp -d)"
@@ -366,9 +366,14 @@ assert_the_default_ghcr_verify_passes_without_the_e2e_fixtures() {
 
 # The end-to-end half of the manifest guard, through the REAL script: a cluster
 # that correctly never acquired the registry-distributed MCP servers must
-# verify CLEAN. If any of the three were still demanded, the daemon fixture
-# above (which does not contain them) would make this rc!=0 -- so the run has to
-# be green AND silent about all three, in every mode the verifier supports.
+# verify CLEAN. If any of them were still demanded, the daemon fixture above
+# (which does not contain them) would make this rc!=0 -- so the run has to be
+# green AND silent about every one, in every mode the verifier supports.
+#
+# doc-generator-mcp was the third name here. It has no manifest row at all now,
+# so there is nothing for this script to derive a ref from; its absence from
+# every verify mode is asserted directly in test-images-manifest.sh
+# (assert_doc_generator_mcp_has_been_removed_from_the_image_system).
 #
 # rc is checked before the greps: "no mention of airtable" is also true of a
 # crashed run that printed nothing.
@@ -394,7 +399,7 @@ assert_the_verify_set_never_demands_a_registry_distributed_mcp_server() {
         out="$(run_verify "$d" "$present")"; rc=$?
         ;;
     esac
-    named="$(grep -E 'airtable-mcp-server|web-search-mcp|doc-generator-mcp' <<< "$out" || true)"
+    named="$(grep -E 'airtable-mcp-server|web-search-mcp' <<< "$out" || true)"
     if [ "$rc" -eq 0 ] && [ -z "$named" ]; then
       pass "the ${mode} verify set demands no registry-distributed MCP server"
     else

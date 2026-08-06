@@ -120,14 +120,14 @@ assert_it_pulls_every_pull_in_ghcr_mode_image() {
   rm -rf "$d"
 }
 
-# The derivation guard at the consumer end. The three published:false images
+# The derivation guard at the consumer end. The two published:false images
 # have no ghcr counterpart at all; pulling one fails with MANIFEST_UNKNOWN and
 # takes the whole default setup down with it.
 assert_it_never_pulls_an_unpublished_image() {
   local d out bad
   d="$(mktemp -d)"
   out="$(run_puller "$d")"
-  bad="$(grep -E '^pull ghcr\.io/evenfire-ai/(workflow-custom-sdk-e2e|workflow-plugin-sdk-e2e|doc-generator-mcp):' "$d/ops.log" || true)"
+  bad="$(grep -E '^pull ghcr\.io/evenfire-ai/(workflow-custom-sdk-e2e|workflow-plugin-sdk-e2e):' "$d/ops.log" || true)"
   if [ -z "$bad" ]; then
     pass "no unpublished image was pulled"
   else
@@ -238,11 +238,11 @@ assert_it_never_pulls_a_registry_distributed_mcp_server() {
   local d out bad aliased
   d="$(mktemp -d)"
   out="$(run_puller "$d")"
-  bad="$(grep -E '^pull ghcr\.io/evenfire-ai/(airtable-mcp-server|web-search-mcp|doc-generator-mcp):' "$d/ops.log" || true)"
+  bad="$(grep -E '^pull ghcr\.io/evenfire-ai/(airtable-mcp-server|web-search-mcp):' "$d/ops.log" || true)"
   # The alias is the other half: a `docker tag` onto clerum/airtable-mcp-server
   # would put the image in the daemon under the exact name the old McpServer
   # instance expects, hiding the removal from every consumer.
-  aliased="$(grep -E '^tag [^ ]+ clerum/(airtable-mcp-server|web-search-mcp|doc-generator-mcp):' "$d/ops.log" || true)"
+  aliased="$(grep -E '^tag [^ ]+ clerum/(airtable-mcp-server|web-search-mcp):' "$d/ops.log" || true)"
   if [ -z "$bad" ] && [ -z "$aliased" ]; then
     pass "no registry-distributed MCP server was pulled or aliased"
   else

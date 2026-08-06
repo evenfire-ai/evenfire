@@ -424,8 +424,8 @@ fi
 # MINIKUBE_SEED_PROFILE=e2e, and in local mode, where a full build builds every
 # fixture.
 #
-# The registry-distributed MCP servers (airtable-mcp-server, web-search-mcp,
-# doc-generator-mcp) are absent from this set entirely, because they are
+# The registry-distributed MCP servers (airtable-mcp-server, web-search-mcp)
+# are absent from this set entirely, because they are
 # deployed_to_minikube:false -- minikube setup neither builds nor pulls them,
 # so demanding them would fail every cluster. airtable-mcp-server is an opt-in
 # local build (MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE) for the SEED_PROFILE=e2e demo

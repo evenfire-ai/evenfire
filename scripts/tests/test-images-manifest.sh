@@ -202,17 +202,19 @@ JSON
   rm -rf "$d"
 }
 
-assert_unpublished_images_are_exactly_the_known_three() {
+assert_unpublished_images_are_exactly_the_known_two() {
   local got
   got="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m =>
       console.log(m.IMAGES.filter(i=>!i.published).map(i=>i.name).sort().join(",")))' 2>/dev/null)"
-  # Verified by anonymous ghcr probe: these three return `denied`. playwright-server
+  # Verified by anonymous ghcr probe: these two return `denied`. playwright-server
   # IS published (an earlier draft wrongly listed it as a gap; the probe that said
-  # otherwise was missing its Accept header).
-  local want="doc-generator-mcp,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
+  # otherwise was missing its Accept header). doc-generator-mcp used to be the
+  # third; it has no manifest row at all now (see
+  # assert_doc_generator_mcp_has_been_removed_from_the_image_system).
+  local want="workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
   if [ "$got" = "$want" ]; then
-    pass "the unpublished set is exactly the known three"
+    pass "the unpublished set is exactly the known two"
   else
     fail "unpublished set is '$got', expected '$want'"
   fi
@@ -586,9 +588,8 @@ assert_the_verify_set_splits_on_published_not_on_mode() {
 # default path fails a healthy cluster with a remedy that can never work.
 #
 # doc-generator-mcp used to be the one exception -- unpublished but built on
-# both paths. It is deployed_to_minikube:false now (the registry distributes it
-# and installs it on demand), so it is not in the verify set at all rather than
-# being in it under a local ref.
+# both paths. It has no manifest row at all now (never published, so no cluster
+# could ever acquire it), so it is not in the verify set in any mode.
 #
 # The expected refs are spelled out rather than re-derived from the manifest:
 # a test that recomputes minikubeVerifyRefs()'s own rule proves nothing.
@@ -642,7 +643,7 @@ assert_registry_distributed_mcp_servers_are_out_of_the_minikube_set() {
   local output rc
   output="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
-      const registryServed = ["airtable-mcp-server", "web-search-mcp", "doc-generator-mcp"]
+      const registryServed = ["airtable-mcp-server", "web-search-mcp"]
       const problems = []
       const byName = new Map(m.IMAGES.map(i => [i.name, i]))
       const ghcrNames = new Set(m.pullInGhcrMode().map(i => i.name))
@@ -680,13 +681,15 @@ assert_registry_distributed_mcp_servers_are_out_of_the_minikube_set() {
 }
 
 # The other half of the pair above, and the reason it cannot simply assert
-# "these three are absent from deploy/images.json". Dropping the rows would stop
+# "these two are absent from deploy/images.json". Dropping the rows would stop
 # publishing them, and the registry serves these images from ghcr -- so the rows
 # must stay, with published untouched.
 #
-# doc-generator-mcp is published:false today. That is a known, separate gap
-# (the registry cannot serve an image that is never pushed) and is pinned here
-# as the current state rather than silently fixed by this case.
+# doc-generator-mcp was the third name here, pinned as published:false. That
+# combination was unserveable -- the registry cannot install an image no one
+# pushes -- so the image was removed from the system outright instead of being
+# published; assert_doc_generator_mcp_has_been_removed_from_the_image_system
+# holds that.
 assert_registry_distributed_mcp_servers_keep_their_published_flag() {
   local output rc
   output="$(node -e '
@@ -694,7 +697,6 @@ assert_registry_distributed_mcp_servers_keep_their_published_flag() {
       const expected = new Map([
         ["airtable-mcp-server", true],
         ["web-search-mcp", true],
-        ["doc-generator-mcp", false],
       ])
       const problems = []
       const byName = new Map(m.IMAGES.map(i => [i.name, i]))
@@ -721,9 +723,79 @@ assert_registry_distributed_mcp_servers_keep_their_published_flag() {
   if [ "$rc" -ne 0 ]; then
     fail "published-flag derivation failed: $output"
   elif [ -z "$output" ]; then
-    pass "the registry-distributed MCP servers keep publishing (doc-generator-mcp still the known false)"
+    pass "the registry-distributed MCP servers keep publishing"
   else
     fail "$output"
+  fi
+}
+
+# THE REGRESSION GUARD for the removal. doc-generator-mcp was published:false
+# AND deployed_to_minikube:false: nothing built it, nothing pulled it, and
+# ghcr.io/evenfire-ai/doc-generator-mcp answers 403 because it was never
+# pushed. An image obtainable nowhere is not a gap to publish, it is a row to
+# delete -- so the row is gone, and every set derived from it must stay empty
+# of the name.
+#
+# Asserted against the derived sets by NAME rather than by re-deriving the
+# absence rule, and across every consumer at once: the missing row fans out to
+# the build matrix, the puller, the ghcr overlay component, and all three
+# verify modes, and a check on IMAGES alone would not notice a name
+# reintroduced further down the chain.
+#
+# The source directory mcp-servers/doc-generator deliberately survives: it is
+# an npm workspace package (@clerum/doc-generator-mcp) that scripts/build-
+# preflight.sh type-checks and scripts/prettier/paths.mjs formats. This case is
+# about the IMAGE, so it must not grow an assertion about the tree.
+assert_doc_generator_mcp_has_been_removed_from_the_image_system() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const gone = "doc-generator-mcp"
+      const problems = []
+      if (m.IMAGES.some(i => i.name === gone)) problems.push("still has a row in deploy/images.json")
+      if (m.publishedImages().some(i => i.name === gone)) problems.push("still in publishedImages()")
+      if (m.pullInGhcrMode().some(i => i.name === gone)) problems.push("still in pullInGhcrMode()")
+      const modes = [
+        ["ghcr", m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST" })],
+        ["local", m.minikubeVerifyRefs({ mode: "local" })],
+        ["ghcr+e2e", m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST", includeE2eFixtures: true })],
+      ]
+      for (const [label, refs] of modes) {
+        if (refs.some(r => r.includes(gone))) problems.push(`still verified in ${label} mode`)
+      }
+      // The two hand-written lists the manifest does not generate. Read rather
+      // than derived, because a stale entry in either is exactly what a
+      // manifest-only check cannot see.
+      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
+      if (wf.includes(gone)) problems.push("still named in the build-publish.yml matrix")
+      const sh = fs.readFileSync("'"$REPO_ROOT"'/scripts/minikube/build-images.sh", "utf8")
+      const block = sh.match(/ALL_IMAGES=\(([\s\S]*?)\n\)/)
+      if (!block) {
+        console.log("PARSE_ERROR: could not find the ALL_IMAGES=(...) array in build-images.sh")
+        process.exit(1)
+      }
+      const refs = [
+        ...[...block[1].matchAll(/"([^"]+)"/g)].map(x => x[1]),
+        ...[...sh.matchAll(/ALL_IMAGES\+=\("([^"]+)"\)/g)].map(x => x[1]),
+      ]
+      if (refs.some(r => r.includes(gone))) problems.push("still built by build-images.sh")
+      const overlay = fs.readFileSync("'"$REPO_ROOT"'/deploy/overlays/minikube/kustomization.yaml", "utf8")
+      if (overlay.includes(gone)) problems.push("still named in the minikube overlay")
+      const component = fs.readFileSync("'"$REPO_ROOT"'/deploy/components/ghcr-images/kustomization.yaml", "utf8")
+      if (component.includes(gone)) problems.push("still named in the ghcr-images component")
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "doc-generator-mcp removal check failed: $output"
+  elif [ -z "$output" ]; then
+    pass "doc-generator-mcp is gone from the manifest and every derived set"
+  else
+    fail "doc-generator-mcp: $output"
   fi
 }
 
@@ -848,7 +920,7 @@ assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_a_published_image_with_no_source_paths_is_rejected
 assert_an_invalid_image_name_is_rejected
-assert_unpublished_images_are_exactly_the_known_three
+assert_unpublished_images_are_exactly_the_known_two
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
@@ -857,6 +929,7 @@ assert_the_verify_set_splits_on_published_not_on_mode
 assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures
 assert_registry_distributed_mcp_servers_are_out_of_the_minikube_set
 assert_registry_distributed_mcp_servers_keep_their_published_flag
+assert_doc_generator_mcp_has_been_removed_from_the_image_system
 assert_the_e2e_opt_in_and_local_mode_both_keep_the_fixtures
 assert_verify_refs_refuses_a_mode_or_tag_it_cannot_serve
 assert_e2e_only_images_are_unpublished_minikube_fixtures
