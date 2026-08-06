@@ -133,7 +133,9 @@ sync_gfs() {
   fi
   # gfsc reads the key at boot; restart the writer+reader so the new key takes
   # effect (label-based — the reconciler owns the deployment names).
-  if "${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null | grep -q .; then
+  local gfs_deploys
+  gfs_deploys="$("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null || true)"
+  if [[ -n "${gfs_deploys}" ]]; then
     log "Restarting gfsc (${GFS_DEPLOY_SELECTOR}) after auth key drift"
     "${KCTL[@]}" rollout restart deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" >/dev/null
     # Wait per-deployment (writer AND reader) with an independent budget each, and
@@ -142,8 +144,10 @@ sync_gfs() {
     # writer's init-container chown starved the reader, and `|| true` hid that the
     # reader never became Ready, so the failure resurfaced 60-150s later in
     # verify-gfs. A genuinely stuck gfsc now fails here, named, instead of masked.
+    # Iterate the list captured above (single query — no re-query between guard
+    # and loop that could skip verification if the API blipped in that window).
     local d
-    for d in $("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name); do
+    for d in ${gfs_deploys}; do
       "${KCTL[@]}" rollout status "${d}" -n "${GFS_NAMESPACE}" --timeout=180s
     done
   else

@@ -1132,7 +1132,6 @@ fi
 SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-SEED_USER_OK=true
 if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    SEED_PROFILE="${SEED_PROFILE}" \
    ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
@@ -1141,7 +1140,6 @@ if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
   ok "Test user seeded"
 else
-  SEED_USER_OK=false
   if [ "$SEED_PROFILE" = "minimal" ]; then
     # This step is the only place that both creates the owner user AND
     # rotates the bootstrap admin credential (POST /admin/auth/setup, called
@@ -1239,37 +1237,16 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-# Step 10 (Seed Test User) is what actually rotates the bootstrap admin
-# credential and creates the seed user. If it failed, SEED_USER_OK=false and
-# these lines must say so instead of printing a false ✓ (a failed Step 10
-# under minimal already aborts before reaching here — see Step 10 above —
-# so this else branch is reachable only via the e2e soft-fail path).
+# Step 10 (Seed Test User) rotates the bootstrap admin credential and creates
+# the seed user. A failed Step 10 aborts setup under either profile (minimal and
+# e2e both `err` + `exit 1` — see Step 10 above), so reaching this summary means
+# the seed succeeded; always report ✓.
+echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
 if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
-  fi
-else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
-  fi
-fi
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-  else
-    echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
+  echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
   echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
 else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-  else
-    echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
+  echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
 fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
 echo ""
