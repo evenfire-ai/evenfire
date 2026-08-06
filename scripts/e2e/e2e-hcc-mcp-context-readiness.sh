@@ -5,12 +5,14 @@
 # The gate runs only on an exact-HEAD, branch-owned Minikube profile. It routes
 # HCC DNS through an isolated in-cluster proxy that forwards every query except
 # one fixture hostname. The gate first lets HCC create a real external-egress
-# policy. A same-intent restart then proves the safety pass revokes that
-# DNS-derived allow without attempting DNS and certifies global readiness while
-# the affected runtime stays blocked. DNS release lets the additive lane create
-# the current TCP policy and runtime. A second phase changes that binding's
-# protocol while HCC is stopped and proves the same contract for TCP-to-UDP
-# replacement. A real Context watch update still converges its three
+# policy. A same-intent restart then proves the safety pass RETAINS that
+# identity-stable DNS-derived allow without attempting DNS and certifies global
+# readiness with the allow still present — no deny window — while the affected
+# runtime stays blocked. DNS release lets the additive lane refresh the current
+# TCP policy and runtime. A second phase changes that binding's protocol while
+# HCC is stopped and proves the divergent contract: an identity-changing
+# TCP-to-UDP replacement IS revoked before readiness. A real Context watch update
+# still converges its three
 # NetworkPolicies. The fleet is wider than the bounded worker width, covering
 # the original large-fleet symptom.
 set -euo pipefail
@@ -102,6 +104,7 @@ HCC_GATE_LOCK_UID=""
 HCC_GATE_FINALIZATION_FAILURE=""
 HCC_READY_PROBE_DIAGNOSTIC=""
 BASELINE_POLICY_SNAPSHOT=""
+SAME_INTENT_EGRESS_SNAPSHOT=""
 
 # Clean-window negative markers. Consumed ONLY while the DNS fault injection is
 # NOT applied (pre-injection pre-checks, post-restore cleanup): under the
@@ -889,6 +892,75 @@ hcc_ready_after_stale_policy_revoked() {
   return 2
 }
 
+# Canonical, order-stable projection of the single external-egress policy for the
+# fixture server: name, ownership labels, and full spec. Used to prove a
+# same-intent restart RETAINS the identity-stable DNS allow byte-for-byte (B3
+# retain-identity-stable contract), the inverse of the divergent revoke path.
+external_egress_policy_snapshot() {
+  kctl get networkpolicy -n "$MCP_NS" \
+    -l "${MCP_SERVER_LABEL}=${MCP_NAME},${POLICY_TYPE_LABEL}=external-egress" \
+    -o json 2>/dev/null |
+    jq -ceS \
+      --arg managedByLabel "$MANAGED_BY_LABEL" \
+      --arg managedByValue "$MANAGED_BY_VALUE" \
+      --arg policyTypeLabel "$POLICY_TYPE_LABEL" \
+      --arg serverLabel "$MCP_SERVER_LABEL" \
+      --arg server "$MCP_NAME" '
+      [.items[] | {
+        name: .metadata.name,
+        managedBy: .metadata.labels[$managedByLabel],
+        policyType: .metadata.labels[$policyTypeLabel],
+        serverLabel: .metadata.labels[$serverLabel],
+        spec
+      }]
+      | select(length == 1)
+      | .[0]
+      | select(.managedBy == $managedByValue
+          and .policyType == "external-egress"
+          and .serverLabel == $server)
+    '
+}
+
+# True when the external-egress policy is present and identical (spec +
+# ownership) to the snapshot captured before the same-intent restart. An API
+# error or a missing/renamed policy fails closed.
+identity_stable_policy_retained() {
+  local current
+  [ -n "$SAME_INTENT_EGRESS_SNAPSHOT" ] || return 1
+  current="$(external_egress_policy_snapshot)" || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$SAME_INTENT_EGRESS_SNAPSHOT" ]
+}
+
+hcc_ready_with_identity_stable_policy_retained() {
+  # INVERSE of the pre-B3 revoke-before-ready contract. B3 retains an
+  # identity-stable DNS allow across a same-intent restart with NO deny window and
+  # certifies /ready=200 WHILE that allow is still present and unchanged. A single
+  # poll that reaches /ready=200 with the identity-stable allow ABSENT from the
+  # start is the retain regression (a deny window) and must be FATAL, never
+  # retried: retrying would let a later poll — after the held-refresh timeout
+  # legitimately fail-closed deletes the allow — mask the regression as a PASS.
+  # rc=2 signals that fatal violation to wait_until_fast; rc=1 is a benign
+  # "not ready yet, keep polling".
+  local retained_before=0
+  identity_stable_policy_retained && retained_before=1
+  probe_new_hcc_ready_endpoint || return 1
+  if identity_stable_policy_retained; then
+    [ "$retained_before" -eq 1 ] && return 0
+    # The allow reappeared within this poll: adjudicate cleanly on the next poll.
+    return 1
+  fi
+  if [ "$retained_before" -eq 1 ]; then
+    # The allow was present immediately before this probe and is gone now: a
+    # legitimate fail-closed refresh timeout can race the probe inside one poll.
+    # Retry to adjudicate — a real retain regression never presents the allow at
+    # readiness, so a later poll still returns rc=2.
+    return 1
+  fi
+  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=identity-stable-policy-revoked"
+  return 2
+}
+
 hcc_restore_is_verified() {
   local deployment
   deployment="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json)" || return 1
@@ -1507,9 +1579,12 @@ BASELINE_POLICY_SNAPSHOT="$(baseline_policy_snapshot)" ||
   die "could not capture canonical baseline NetworkPolicy ownership and specs"
 
 # Same-intent safety phase: restart with the exact same desired binding. The
-# safety pass must revoke the DNS-derived policy without resolving DNS, certify
-# global readiness, and leave the affected runtime blocked for the additive
-# lane.
+# safety pass must RETAIN the identity-stable DNS-derived policy without resolving
+# DNS (B3 retain-identity-stable contract), certify global readiness with that
+# allow still present — no deny window — and leave the affected runtime blocked
+# for the additive lane. Retention-at-readiness is adjudicated promptly: a
+# held-refresh timeout later fail-closed deletes the retained allow, so the proof
+# must land before any refresh timeout.
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
 wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
   die "existing HCC pod did not stop"
@@ -1517,6 +1592,10 @@ delete_fixture_runtime_leaving_dns_policy_for_safety ||
   die "could not remove the initial MCP runtime while retaining its external-egress policy"
 external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
   die "the initial TCP policy disappeared before the same-intent safety pass"
+SAME_INTENT_EGRESS_SNAPSHOT="$(external_egress_policy_snapshot)" ||
+  die "could not capture the identity-stable external-egress policy snapshot"
+[ -n "$SAME_INTENT_EGRESS_SNAPSHOT" ] ||
+  die "the identity-stable external-egress policy snapshot was empty before the same-intent restart"
 create_peer_fleet || die "could not create the gate-owned MCP/Context peer fleet"
 ok "created ${#MCP_FLEET_NAMES[@]} gate-owned MCP/Context fixtures before fleet bootstrap"
 
@@ -1531,34 +1610,34 @@ identity="$(kctl get pod "$NEW_HCC_POD" -n "$HCC_NS" \
 read -r HCC_UID HCC_RESTARTS <<<"$identity"
 [ -n "$HCC_UID" ] && [ -n "$HCC_RESTARTS" ] ||
   die "could not capture same-intent HCC pod identity"
-wait_until 120 "same-intent external-egress refresh to reach the DNS hold" \
-  dns_hold_observed_since_arm ||
-  die "same-intent external-egress refresh never reached the DNS hold"
-wait_until_fast 60 "HCC readiness after revoking the same-intent DNS policy" \
-  hcc_ready_after_stale_policy_revoked ||
-  die "HCC did not revoke the same-intent DNS policy before global readiness (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+# Adjudicate retention-at-readiness FIRST — at the earliest possible moment —
+# because the certifying safety pass retains WITHOUT resolving DNS, so /ready=200
+# and the retained allow flip together. The separate additive refresh reaches the
+# DNS hold and, on its timeout, fail-closed deletes the retained allow; latching
+# the retained+Ready observation here beats that timeout.
+wait_until_fast 60 "HCC readiness while the same-intent identity-stable DNS policy is retained" \
+  hcc_ready_with_identity_stable_policy_retained ||
+  die "HCC did not certify readiness with the same-intent identity-stable DNS policy retained (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+# Retention-at-readiness is latched. Corroborate promptly — present, unchanged,
+# under a still-held DNS, with no restart and the baseline intact — before any
+# held-refresh timeout can fail-closed delete the retained allow.
+dns_has_not_released_since_hold ||
+  die "the DNS blocker released before the same-intent retention assertion"
+identity_stable_policy_retained ||
+  die "the same-intent identity-stable DNS policy was revoked at readiness (retain regression / deny window)"
 fixture_runtime_and_ready_absent ||
   die "the affected runtime or Ready status escaped the held same-intent DNS boundary"
+hcc_identity_is_stable ||
+  die "HCC restarted while the same-intent identity-stable DNS policy was retained"
+baseline_policies_unchanged ||
+  die "baseline safety NetworkPolicy ownership or specs changed during same-intent retention"
 wait_until 30 "Kubernetes to corroborate same-intent HCC readiness" \
   hcc_kubernetes_readiness_is_exact ||
   die "Kubernetes did not corroborate same-intent HCC readiness"
-external_egress_policy_absent ||
-  die "the same-intent DNS policy reappeared before additive retry"
-wait_until 120 "a real same-intent external-egress retry to be scheduled" \
-  external_egress_retry_progress_is_observed ||
-  die "the held same-intent refresh did not schedule a real retry"
-DNS_HOLD_COUNT_AT_RETRY_SCHEDULE="$(dns_hold_count)" ||
-  die "could not snapshot DNS hold evidence after the same-intent retry was scheduled"
-wait_until 180 "the scheduled same-intent external-egress retry to execute" \
-  dns_retry_query_observed_since_schedule ||
-  die "the scheduled same-intent external-egress retry did not execute"
-probe_new_hcc_ready_endpoint ||
-  die "HCC lost readiness after a same-intent DNS retry (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
-external_egress_policy_absent ||
-  die "a held same-intent retry recreated the DNS policy without current resolution"
-dns_has_not_released_since_hold ||
-  die "the DNS blocker released before the retry revocation assertion"
-ok "same-intent safety revoked the DNS policy while HCC stayed Ready and runtime stayed blocked"
+wait_until 120 "the same-intent external-egress refresh to reach the DNS hold" \
+  dns_hold_observed_since_arm ||
+  die "the same-intent external-egress refresh never reached the DNS hold"
+ok "same-intent safety retained the identity-stable DNS policy while HCC stayed Ready and runtime stayed blocked"
 
 release_dns_blocker || die "could not release the same-intent DNS query"
 wait_until 30 "DNS blocker to answer the same-intent query" \
