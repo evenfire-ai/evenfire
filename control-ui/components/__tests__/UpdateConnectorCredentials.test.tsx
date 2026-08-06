@@ -254,6 +254,26 @@ describe('UpdateConnectorCredentials — PUT rejection', () => {
   })
 })
 
+describe('UpdateConnectorCredentials — rotate mode against a vanished Secret', () => {
+  it('switches to set mode instead of creating a partial Secret', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    // Only ONE key filled — valid for a rotation, fatal for a create.
+    await submitRotation({ 'api-key': 'only-one' })
+
+    expect(screen.getByText(/This Secret no longer exists\./)).toBeInTheDocument()
+    // The partial data must NOT have been posted.
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+    // The form is now in set mode, demanding every key.
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+  })
+})
+
 // ─── Polling / DeploymentReady correlation — the CRD contract (Fase 3 §6) ───
 describe('UpdateConnectorCredentials — rollout polling', () => {
   it('reports success once a FRESH DeploymentReady=True is observed after the PUT', async () => {

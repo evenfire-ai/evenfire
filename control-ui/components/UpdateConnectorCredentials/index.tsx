@@ -356,8 +356,22 @@ export function UpdateConnectorCredentials({
         // preview for the "who else restarts" note.
         setRotationAffected(previewAffected ?? [])
       } else {
-        const result = await updateMcpSecret(envSecret!.name, data)
-        setRotationAffected(result.affectedConnectors)
+        try {
+          const result = await updateMcpSecret(envSecret!.name, data)
+          setRotationAffected(result.affectedConnectors)
+        } catch (putError) {
+          // The Secret is gone (or the condition was stale). Do NOT silently
+          // POST: rotate mode may hold only one of several declared keys, and a
+          // partial create is exactly the failure this screen exists to remove
+          // (HCC would answer SecretMissingKey). Demand every key instead.
+          if ((putError as { status?: number })?.status === 404) {
+            setRecreateRequired(true)
+            setPhase('idle')
+            setValidationError('This Secret no longer exists. Enter every key to recreate it.')
+            return
+          }
+          throw putError
+        }
       }
       setDraft({})
       setRotationCutoff(cutoff)
