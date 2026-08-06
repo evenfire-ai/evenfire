@@ -357,6 +357,9 @@ jobs:
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
 
+      - name: Test the ghcr-images kustomize component
+        run: bash scripts/tests/test-ghcr-component.sh
+
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh
 
