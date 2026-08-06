@@ -82,6 +82,7 @@ function findFreshDeploymentReady(
 export function UpdateConnectorCredentials({
   serverName,
   envSecret,
+  surface = 'rotate',
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -233,6 +234,21 @@ export function UpdateConnectorCredentials({
         <p className="cu-muted">
           This connector has no Kubernetes Secret configured for credentials — there is nothing to
           rotate here.
+        </p>
+      </FormSection>
+    )
+  }
+
+  // A WorkflowRecipe-owned connector whose Secret is missing: the Secret name
+  // belongs to the recipe (the PUT route guards recipe-owned Secrets, the POST
+  // route does not), and HCC never creates a Deployment for managed:false, so a
+  // create here would both cross an ownership boundary and never converge.
+  if (surface === 'recipe-owned') {
+    return (
+      <FormSection title="Update credentials">
+        <p className="cu-muted">
+          This connector&apos;s credentials are managed by its WorkflowRecipe. Add the Secret
+          through the recipe&apos;s secrets, not here.
         </p>
       </FormSection>
     )

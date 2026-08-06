@@ -1,4 +1,5 @@
 import type { EnvSecret } from '../../lib/api'
+import type { CredentialSurface } from './resolveCredentialSurface'
 
 export type UpdateConnectorCredentialsProps = {
   /**
@@ -14,6 +15,12 @@ export type UpdateConnectorCredentialsProps = {
    * instead of a form when this is unset.
    */
   envSecret: EnvSecret | undefined
+  /**
+   * Which credential surface to render, derived by resolveCredentialSurface()
+   * from the McpServer's SecretResolved condition and spec.managed. Optional
+   * and defaulting to 'rotate' so existing call sites keep today's behavior.
+   */
+  surface?: CredentialSurface
 }
 
 /**

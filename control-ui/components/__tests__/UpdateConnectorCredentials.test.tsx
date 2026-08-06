@@ -6,6 +6,7 @@ import {
   POLL_TIMEOUT_MS,
   UpdateConnectorCredentials,
 } from '@components/UpdateConnectorCredentials'
+import type { CredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import { getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
 
@@ -76,10 +77,17 @@ async function flush(ticks = 4) {
 // no-envSecret state, but a JS default parameter substitutes ENV_SECRET for
 // an explicit `undefined` argument, silently defeating that test. Callers
 // always pass explicitly.
-async function renderPanel(envSecret: EnvSecret | undefined) {
+async function renderPanel(
+  envSecret: EnvSecret | undefined,
+  surface: CredentialSurface = 'rotate'
+) {
   const utils = render(
     <ToastProvider>
-      <UpdateConnectorCredentials serverName={SERVER_NAME} envSecret={envSecret} />
+      <UpdateConnectorCredentials
+        serverName={SERVER_NAME}
+        envSecret={envSecret}
+        surface={surface}
+      />
     </ToastProvider>
   )
   // Flush the best-effort "who else uses this Secret" preview fetch
@@ -585,5 +593,17 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // Regression guard for the overclaim: the unobserved connector must never be
     // asserted as already serving the new credential.
     expect(banner.textContent).not.toMatch(new RegExp(`${OTHER}[^.]*restarted and is serving`))
+  })
+})
+
+describe('UpdateConnectorCredentials — recipe-owned', () => {
+  it('renders an explanation and no form when the Secret belongs to a WorkflowRecipe', async () => {
+    await renderPanel(ENV_SECRET, 'recipe-owned')
+
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    // No form at all: neither the inputs nor either submit button.
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 })
