@@ -4,7 +4,7 @@ import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
-import { K8sConflictError } from '../src/services/resourceService.js'
+import { K8sConflictError, ResourceService } from '../src/services/resourceService.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -1323,6 +1323,64 @@ describe('routes/resources — display & identifier spec validation (F0.3 / UT-6
       .expect(201)
   })
 
+  // L1 (security, visual spoofing): bidi override / isolate / line-separator
+  // characters must be rejected in display free-text — an admin could otherwise
+  // craft a spec.host / spec.displayName that visually impersonates another
+  // resource in the UI/desktop. These are NOT in the C0/DEL range, so they must
+  // be rejected explicitly.
+  it.each([
+    ['RLO (U+202E)', '‮'],
+    ['LRE (U+202A)', '‪'],
+    ['FSI (U+2068)', '⁨'],
+    ['PDI (U+2069)', '⁩'],
+    ['LRI (U+2066)', '⁦'],
+    ['line separator (U+2028)', ' '],
+    ['paragraph separator (U+2029)', ' '],
+  ])(
+    'rejects a spec.host with a bidi/override char %s on host create (422)',
+    async (_label, ch) => {
+      const gateway = new MockGateway('mcp-host')
+      const res = await request(makeApp(gateway))
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'product-agent' },
+          spec: { host: `pay${ch}pal`, contextRef: 'c1' },
+        })
+        .expect(422)
+      expect(res.body.errors[0].field).toBe('spec.host')
+    }
+  )
+
+  it.each([
+    ['RLO (U+202E)', '‮'],
+    ['bidi isolate (U+2066)', '⁦'],
+    ['line separator (U+2028)', ' '],
+  ])(
+    'rejects a spec.displayName with a bidi/override char %s on context create (422)',
+    async (_label, ch) => {
+      const gateway = new MockGateway('mcp-server')
+      const res = await request(makeApp(gateway))
+        .post('/admin/contexts')
+        .send({
+          metadata: { name: 'my-context' },
+          spec: { contextId: 'my-context', mcpServers: [], displayName: `bad${ch}name` },
+        })
+        .expect(422)
+      expect(res.body.errors[0].field).toBe('spec.displayName')
+    }
+  )
+
+  it('accepts a display field with accents, ampersand and spaces (no false positive) (201)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'product-agent' },
+        spec: { host: 'Résumé & Café Agents', contextRef: 'c1' },
+      })
+      .expect(201)
+  })
+
   it('rejects a non-RFC1123 spec.contextId on context create (422)', async () => {
     const gateway = new MockGateway('mcp-server')
     const res = await request(makeApp(gateway))
@@ -1401,5 +1459,86 @@ describe('routes/resources — display & identifier spec validation (F0.3 / UT-6
       .send({ spec: { contextId: 'New Bad Id', mcpServers: [] } })
       .expect(422)
     expect(res.body.errors[0].field).toBe('spec.contextId')
+  })
+})
+
+// N1: the admin PUT for hosts/contexts must read the CR from the apiserver
+// EXACTLY ONCE. Before the fix the router read `current` for the ratchet AND
+// updateResource read it again internally — two GETs per PUT.
+//
+// This spies the read at the apiserver boundary (customApi.getNamespacedCustomObject)
+// through the REAL ResourceService, because MockGateway.updateResource does a
+// direct store lookup (it does NOT model the service's internal read), so a spy
+// on MockGateway.getResource would show only 1 read at HEAD and could not go RED.
+describe('routes/resources — N1 single CR read per hosts/contexts PUT', () => {
+  function realServiceGateway() {
+    const ns = config.contextsNamespace
+    let rv = 0
+    const store = new Map<string, Record<string, unknown>>()
+    const getNamespacedCustomObject = vi.fn(async ({ name }: { name: string }) => {
+      const obj = store.get(name)
+      if (!obj) {
+        const err = new Error(`contexts/${name} not found`) as Error & { code: number }
+        err.code = 404
+        throw err
+      }
+      return obj
+    })
+    const replaceNamespacedCustomObject = vi.fn(
+      async ({ name, body }: { name: string; body: Record<string, unknown> }) => {
+        const stored = {
+          ...body,
+          metadata: {
+            ...(body.metadata as Record<string, unknown>),
+            resourceVersion: String(++rv),
+          },
+        }
+        store.set(name, stored)
+        return stored
+      }
+    )
+    const createNamespacedCustomObject = vi.fn(
+      async ({ body }: { body: { metadata: { name: string } } }) => {
+        const stored = {
+          ...(body as Record<string, unknown>),
+          metadata: { ...body.metadata, resourceVersion: String(++rv) },
+        }
+        store.set(body.metadata.name, stored)
+        return stored
+      }
+    )
+    const customApi = {
+      getNamespacedCustomObject,
+      replaceNamespacedCustomObject,
+      createNamespacedCustomObject,
+    } as unknown as ConstructorParameters<typeof ResourceService>[0]
+    const svc = new ResourceService(customApi, ns, { contexts: ns })
+    const gateway = {
+      getResource: svc.getResource.bind(svc),
+      updateResource: svc.updateResource.bind(svc),
+      createResource: svc.createResource.bind(svc),
+    }
+    return { gateway, getNamespacedCustomObject }
+  }
+
+  it('reads the CR exactly once per context PUT (N1)', async () => {
+    const { gateway, getNamespacedCustomObject } = realServiceGateway()
+    await gateway.createResource(
+      'contexts',
+      { metadata: { name: 'ctx-n1' }, spec: { contextId: 'ctx-n1', mcpServers: [] } },
+      config.contextsNamespace
+    )
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+
+    getNamespacedCustomObject.mockClear()
+    await request(app)
+      .put('/admin/contexts/ctx-n1')
+      .send({ spec: { contextId: 'ctx-n1', mcpServers: ['a'] } })
+      .expect(200)
+
+    // RED at parent sha: HEAD reads twice (ratchet read + updateResource's own read).
+    expect(getNamespacedCustomObject).toHaveBeenCalledTimes(1)
   })
 })
