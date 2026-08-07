@@ -343,6 +343,43 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(funnelConf).toContain('client_max_body_size 25165824;')
   })
 
+  it('keeps the whole GFS upload cap chain homologous (client × 4/3 ≤ gfsc write cap)', () => {
+    // The 16 MB upload feature rests on an invariant spread across 5 files and 2
+    // repos, but only the funnel literal was machine-checked. This asserts the rest
+    // of the chain so deleting the HCC env or drifting a client cap fails loud in CI
+    // instead of silently 413-ing a 16 MB file the client said would fit.
+    const GFSC_WRITE_CAP = 25165824 // 24 MiB — the funnel + gfsc authoritative cap
+
+    // 1. gfsc's write cap is actually plumbed to the pod. Without this env gfsc
+    //    falls back to its 16 MiB in-code default and a 16 MB file (22.4 MB body)
+    //    hard-413s while the client-side cap says it should have worked.
+    const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
+    const gfscCapMatch = hccDeployment.match(
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+    )
+    expect(
+      gfscCapMatch,
+      'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
+    ).not.toBeNull()
+    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+
+    // 2. Both client caps are equal (web and desktop advertise the same limit).
+    const parseClientCap = (relPath: string): number => {
+      const src = read(relPath)
+      const m = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
+      expect(m, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
+      // Only digits/`*`/spaces are matched, so evaluating the arithmetic is safe.
+      return Number(m![1].split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
+    }
+    const webCap = parseClientCap('../../control-ui/app/constants/gfsFileUpload.ts')
+    const desktopCap = parseClientCap('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
+    expect(webCap).toBe(desktopCap)
+
+    // 3. The base64-inflated client cap (× 4/3) fits under the gfsc write cap, with
+    //    headroom for the JSON envelope.
+    expect(Math.ceil((webCap * 4) / 3)).toBeLessThan(GFSC_WRITE_CAP)
+  })
+
   it('keeps the Minikube control-api Marketplace on the shared registry', () => {
     const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
 
