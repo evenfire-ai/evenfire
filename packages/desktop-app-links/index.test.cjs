@@ -84,6 +84,35 @@ test('route normalization canonicalizes safe percent-encoded paths once', () => 
   assert.equal(links.sandboxUiDeepLinkTargetsEqual(unicode, decoded), true)
 })
 
+test('route normalization rejects unstable segment-edge whitespace', () => {
+  for (const input of ['/report ', '/report%20', '/%20report', '/.%20']) {
+    assert.equal(links.normalizeSandboxUiRoute(input), null)
+  }
+
+  const canonical = links.normalizeSandboxUiRoute('/report summary')
+  assert.equal(canonical, '/report summary')
+  assert.equal(links.normalizeSandboxUiRoute(canonical), canonical)
+
+  const parsed = links.parseSandboxUiDeepLink(
+    links.buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'reporting',
+      path: canonical,
+    })
+  )
+  assert.deepEqual(parsed, {
+    appRef: 'sandbox-recipes/reporting',
+    path: canonical,
+  })
+  assert.equal(
+    links.sandboxUiDeepLinkTargetsEqual(
+      { appRef: 'sandbox-recipes/reporting', path: canonical },
+      parsed
+    ),
+    true
+  )
+})
+
 test('shared app links carry only client-side pathnames', () => {
   for (const pathValue of [
     '/tasks?authorization=secret',

@@ -147,7 +147,9 @@ describe('sandbox UI route normalization', () => {
     expect(resolveSandboxUiDefaultPath('/safe/%252e%252e/admin')).toBe('/')
     expect(resolveSandboxUiDefaultPath('/safe/%252Fadmin')).toBe('/')
     expect(resolveSandboxUiDefaultPath('/tasks\u2028admin')).toBe('/')
-    expect(warn).toHaveBeenCalledTimes(3)
+    expect(resolveSandboxUiDefaultPath('/report ')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/report%20')).toBe('/')
+    expect(warn).toHaveBeenCalledTimes(5)
 
     warn.mockRestore()
   })

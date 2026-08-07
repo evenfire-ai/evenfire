@@ -31,7 +31,7 @@ function normalizeTeamId(rawTeamId) {
 function isUnsafeRouteSegment(rawSegment) {
   let segment = rawSegment
   for (let depth = 0; depth <= MAX_ROUTE_SEGMENT_DECODE_DEPTH; depth += 1) {
-    if (segment === '.' || segment === '..') return true
+    if (segment === '.' || segment === '..' || segment.trim() !== segment) return true
     if (
       segment.includes('/') ||
       segment.includes('\\') ||
@@ -72,7 +72,7 @@ function canonicalizeRouteSegment(rawSegment) {
 }
 
 function normalizeSandboxUiRoute(rawPath) {
-  const routePath = String(rawPath || '').trim()
+  const routePath = String(rawPath || '')
   if (!routePath) return undefined
   if (
     routePath.length > MAX_APP_ROUTE_LENGTH ||

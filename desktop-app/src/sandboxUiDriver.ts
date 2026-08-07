@@ -530,8 +530,8 @@ export async function applySandboxUiClientRoute(
 }
 
 export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
-  const rawDefaultPath = String(defaultPath || '').trim()
-  if (!rawDefaultPath) return '/'
+  const rawDefaultPath = String(defaultPath || '')
+  if (!rawDefaultPath.trim()) return '/'
   const normalized = normalizeSandboxUiDefaultPath(rawDefaultPath)
   if (normalized) return normalized
   console.warn('[SandboxUI] Invalid recipe defaultPath; falling back to "/":', rawDefaultPath)
@@ -597,8 +597,8 @@ function encodeSandboxUiDefaultPath(defaultPath: string): string {
 }
 
 function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
-  const routePath = String(rawPath || '').trim()
-  if (!routePath) return '/'
+  const routePath = String(rawPath || '')
+  if (!routePath.trim()) return '/'
   if (
     routePath.length > 4096 ||
     routePath.includes('\\') ||
