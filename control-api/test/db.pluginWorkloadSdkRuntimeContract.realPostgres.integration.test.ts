@@ -136,18 +136,80 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
   }
 
   async function restoreHistoricalRuntimeState(): Promise<void> {
+    // The validator body below is the VERBATIM
+    // governed_trace_safe_agent_run_metadata definition shipped by migration
+    // 0065_governed_session_replay_and_prompt_history (control-api/src/db.ts).
+    // It is intentionally permissive where 0090 hardens: prompt_bridge is
+    // allowed, invocation_id/provider_attempt_id only need to match the lax
+    // '^[0-9a-f-]{36}$' shape, provider_attempt_index/attempt_count are
+    // uncapped, target_ref has no length cap, and there is no allowlist for
+    // nested prompt_bridge keys. Installing the real historical validator (not
+    // a strawman) lets the test seed rows 0065 accepted and 0090 must reject.
     await dbPool.query(`
       CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
       RETURNS BOOLEAN
       LANGUAGE sql
       IMMUTABLE
       AS $$
-        SELECT event_kind <> 'token_usage'
-          OR (
-            jsonb_typeof(value) = 'object'
-            AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
-            AND NOT (value ? 'prompt_bridge')
-          );
+        SELECT CASE
+          WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+          ELSE jsonb_typeof(value) = 'object'
+           AND octet_length(value::text) <= 16384
+           AND value ?& ARRAY[
+             'request_ref', 'provider', 'model', 'source_kind',
+             'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+             'cache_tokens_reported'
+           ]
+           AND NOT EXISTS (
+             SELECT 1
+               FROM jsonb_object_keys(value) AS key_name
+              WHERE key_name NOT IN (
+                'request_ref', 'provider', 'model', 'source_kind',
+                'input_tokens', 'output_tokens', 'cache_read_tokens',
+                'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
+              )
+           )
+           AND jsonb_typeof(value->'request_ref') = 'string'
+           AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+           AND jsonb_typeof(value->'provider') = 'string'
+           AND jsonb_typeof(value->'model') = 'string'
+           AND jsonb_typeof(value->'source_kind') = 'string'
+           AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
+           AND jsonb_typeof(value->'input_tokens') = 'number'
+           AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+           AND jsonb_typeof(value->'output_tokens') = 'number'
+           AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+           AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+           AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+           AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+           AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+           AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+           AND (
+             NOT (value ? 'iteration')
+             OR (
+               jsonb_typeof(value->'iteration') = 'number'
+               AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+             )
+           )
+           AND (
+             NOT (value ? 'prompt_bridge')
+             OR (
+               jsonb_typeof(value->'prompt_bridge') = 'object'
+               AND value->'prompt_bridge' ?& ARRAY[
+                 'invocation_id', 'attempt_generation', 'target_ref',
+                 'fallback_used', 'attempt_count', 'provider_attempt_id',
+                 'provider_attempt_index'
+               ]
+               AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+               AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+               AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+               AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+               AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+               AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+               AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
+             )
+           )
+        END;
       $$;
       ALTER FUNCTION governed_trace_safe_metadata(JSONB) RESET search_path;
       ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB) RESET search_path;
@@ -281,57 +343,116 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       workflow_metadata: true,
     })
 
-    const historicalInvalidEventId = await seedTraceEvent(
-      {
-        source_kind: 'unknown',
-        input_tokens: 1,
-        output_tokens: 1,
-      },
-      'historical'
+    // Fidelity proof that the installed fixture is the REAL (permissive) 0065
+    // validator and not a strawman: 0065 accepts the modern prompt_bridge
+    // payload, so finalization succeeds under the historical contract too.
+    const historicalAccepts = await dbPool.query<{ accepted: boolean }>(
+      `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
+      [JSON.stringify(validPayload())]
     )
+    expect(historicalAccepts.rows[0]?.accepted).toBe(true)
 
     const historicalClient = await dbPool.connect()
-    let redInput: PromptBridgeFinalizationInput
     try {
       await begin(historicalClient)
-      redInput = await seedAttempt(historicalClient, { contractVersion: 2, lease: true })
-      await expect(finalizePromptBridgeInTransaction(redInput, historicalClient)).rejects.toThrow(
-        /agent_run_events_check/
+      const historicalInput = await seedAttempt(historicalClient, {
+        contractVersion: 2,
+        lease: true,
+      })
+      const historicalResult = await finalizePromptBridgeInTransaction(
+        historicalInput,
+        historicalClient
       )
+      expect(historicalResult).toMatchObject({ status: 'complete', usageAccepted: true })
       await historicalClient.query('ROLLBACK')
     } finally {
       historicalClient.release()
     }
 
-    const rejected = await dbPool.query<{ accepted: boolean }>(
-      `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
-      [JSON.stringify(validPayload(redInput!.invocationId, redInput!.providerAttemptId))]
-    )
-    expect(rejected.rows[0]?.accepted).toBe(false)
+    // One seed per rule that 0090 hardens over 0065. Every payload MUST be
+    // insertable under the historical CHECK (proving 0065 accepted it) and MUST
+    // make the 0090 reconciliation abort fail-closed, leaving schema_migrations
+    // without 0090 and the row intact.
+    const hardenedRuleSeeds: Array<{ label: string; payload: Record<string, unknown> }> = [
+      {
+        // Passes the lax '^[0-9a-f-]{36}$' shape, fails the canonical
+        // 8-4-4-4-12 UUID regex enforced by 0090.
+        label: 'non-canonical 36-char invocation_id',
+        payload: {
+          ...validPayload(),
+          prompt_bridge: {
+            ...validPayload().prompt_bridge,
+            invocation_id: 'abcdefabcdefabcdefabcdefabcdefabcdef',
+          },
+        },
+      },
+      {
+        // 0065 allowed any positive integer; 0090 caps the index at 4.
+        label: 'provider_attempt_index above the 1-4 cap',
+        payload: {
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, provider_attempt_index: 5 },
+        },
+      },
+      {
+        // 0065 only required a string; 0090 caps target_ref at 256 chars.
+        label: 'target_ref longer than 256 chars',
+        payload: {
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, target_ref: 'x'.repeat(257) },
+        },
+      },
+      {
+        // 0065 had no nested-key allowlist; 0090 rejects unknown keys.
+        label: 'unexpected nested prompt_bridge key',
+        payload: {
+          ...validPayload(),
+          prompt_bridge: { ...validPayload().prompt_bridge, unexpected_key: true },
+        },
+      },
+    ]
 
-    await expect(initDb({ connect: () => dbPool.connect() })).rejects.toThrow(
-      /cannot reconcile .* historical agent_run_events rows with invalid payload metadata/
-    )
-    const failedMigrationState = await dbPool.query<{ migration_count: string; row_count: string }>(
-      `SELECT
-          (SELECT COUNT(*)::text FROM schema_migrations
-            WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation') AS migration_count,
-          (SELECT COUNT(*)::text FROM agent_run_events WHERE event_id = $1) AS row_count`,
-      [historicalInvalidEventId]
-    )
-    expect(failedMigrationState.rows[0]).toEqual({ migration_count: '0', row_count: '1' })
-    const historicalCleanupClient = await dbPool.connect()
-    try {
-      await begin(historicalCleanupClient)
-      await historicalCleanupClient.query('DELETE FROM agent_run_events WHERE event_id = $1', [
-        historicalInvalidEventId,
-      ])
-      await historicalCleanupClient.query('DELETE FROM governed_event_stream WHERE event_id = $1', [
-        historicalInvalidEventId,
-      ])
-      await commit(historicalCleanupClient)
-    } finally {
-      historicalCleanupClient.release()
+    for (const seed of hardenedRuleSeeds) {
+      // Throws (failing the test loudly) if the historical 0065 CHECK rejects
+      // the payload -- i.e. if the fixture ever regresses into a strawman.
+      const seededEventId = await seedTraceEvent(seed.payload, 'historical')
+
+      await expect(
+        initDb({ connect: () => dbPool.connect() }),
+        `0090 must abort on historical row: ${seed.label}`
+      ).rejects.toThrow(
+        /cannot reconcile .* historical agent_run_events rows with invalid payload metadata/
+      )
+
+      const failedMigrationState = await dbPool.query<{
+        migration_count: string
+        row_count: string
+      }>(
+        `SELECT
+            (SELECT COUNT(*)::text FROM schema_migrations
+              WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation') AS migration_count,
+            (SELECT COUNT(*)::text FROM agent_run_events WHERE event_id = $1) AS row_count`,
+        [seededEventId]
+      )
+      expect(failedMigrationState.rows[0], seed.label).toEqual({
+        migration_count: '0',
+        row_count: '1',
+      })
+
+      const historicalCleanupClient = await dbPool.connect()
+      try {
+        await begin(historicalCleanupClient)
+        await historicalCleanupClient.query('DELETE FROM agent_run_events WHERE event_id = $1', [
+          seededEventId,
+        ])
+        await historicalCleanupClient.query(
+          'DELETE FROM governed_event_stream WHERE event_id = $1',
+          [seededEventId]
+        )
+        await commit(historicalCleanupClient)
+      } finally {
+        historicalCleanupClient.release()
+      }
     }
 
     const skippedAttempt = {

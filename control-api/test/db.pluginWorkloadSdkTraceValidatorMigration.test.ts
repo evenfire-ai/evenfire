@@ -57,6 +57,14 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     expect(migrationSql).toContain("'skipped'")
     expect(migrationSql).toContain('cannot reconcile % v2 invocations without leases')
     expect(migrationSql).toContain('LOCK TABLE')
+    // Deploy-critical lock knobs: EXCLUSIVE (not SHARE ROW EXCLUSIVE / ACCESS
+    // EXCLUSIVE) keeps plain readers alive during the scan, and the 60s
+    // lock_timeout bounds the wait below the deploy's kubectl budget. A silent
+    // regression of either knob turns the migration into a deploy outage.
+    expect(migrationSql).toContain('IN EXCLUSIVE MODE')
+    expect(migrationSql).toContain("SET LOCAL lock_timeout = '60s'")
+    // The hardened cap on prompt_bridge provider_attempt_index / attempt_count.
+    expect(migrationSql).toContain("~ '^[1-4]$'")
     expect(migrationSql).toContain('agent_run_events_check')
     expect(migrationSql).toContain('IS DISTINCT FROM TRUE')
     expect(migrationSql).toContain('IS TRUE)')

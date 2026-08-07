@@ -2295,11 +2295,17 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
  */
 async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
   await db.query(`
-    -- Bound the wait for the table locks so a long-running reader can never turn
-    -- this migration into an indefinite lock queue (a queued ACCESS EXCLUSIVE
-    -- request blocks every new reader behind it). Fail loud and let the migration
-    -- Job be retried instead of silently stalling the deploy.
-    SET LOCAL lock_timeout = '5s';
+    -- Bound the wait for the table locks so a stuck concurrent writer cannot make
+    -- this migration hang indefinitely. EXCLUSIVE conflicts with the ROW EXCLUSIVE
+    -- that ordinary INSERT/UPDATE/DELETE take (e.g. the trace-retention prune's
+    -- DELETE FROM agent_run_events), so if such a writer holds its lock past this
+    -- timeout the LOCK/DDL below fails loudly (exit 1) rather than stalling. 60s
+    -- sits well above the bounded prune wake-transaction and well below the deploy's
+    -- 300s kubectl-wait budget, so a transient writer is tolerated but a genuinely
+    -- stuck one surfaces fast. NOTE: the migration Job runs with backoffLimit 0, so a
+    -- timeout aborts the deploy and the deploy must be re-run; raising the Job's
+    -- backoffLimit (deploy script, out of this PR's scope) would let it self-retry.
+    SET LOCAL lock_timeout = '60s';
 
     -- Runtime writers do not take the initDb advisory lock. Hold the table locks
     -- in the same logical order as finalization (invocation -> receipt ->
@@ -2450,20 +2456,21 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
     END
     $$;
 
-    -- History is clean: reinstall the named constraint. ADD ... NOT VALID is a
-    -- metadata-only change (brief ACCESS EXCLUSIVE, no scan); VALIDATE re-checks
-    -- the rows under SHARE UPDATE EXCLUSIVE. Both are cheap now that the scan
-    -- above already proved every row passes.
+    -- History is clean: the fail-closed scan above ran under the EXCLUSIVE table
+    -- lock (plain readers proceed) and already proved every row passes, emitting a
+    -- triage sample on failure. Reinstall the named constraint with a single
+    -- validating ADD CONSTRAINT: it takes ACCESS EXCLUSIVE and scans once. A
+    -- NOT VALID + separate VALIDATE would buy nothing here -- applyPendingMigrations
+    -- holds this transaction open until COMMIT, so the ADD's ACCESS EXCLUSIVE (and
+    -- the reader blocking it implies) is held through any later VALIDATE anyway; the
+    -- split would just scan the table a second time under the same lock profile.
     ALTER TABLE agent_run_events
       DROP CONSTRAINT IF EXISTS agent_run_events_check;
     ALTER TABLE agent_run_events
       DROP CONSTRAINT IF EXISTS agent_run_events_payload_metadata_check;
     ALTER TABLE agent_run_events
       ADD CONSTRAINT agent_run_events_check
-      CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE)
-      NOT VALID;
-    ALTER TABLE agent_run_events
-      VALIDATE CONSTRAINT agent_run_events_check;
+      CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE);
 
     ALTER TABLE plugin_workload_sdk_invocations
       ALTER COLUMN contract_version SET DEFAULT 1;
@@ -2538,9 +2545,14 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
          );
 
       GET DIAGNOSTICS fenced_count = ROW_COUNT;
+      -- Belt-and-braces: under the EXCLUSIVE lock held above nothing can change the
+      -- captured set between the snapshot and this UPDATE, and the ambiguity check
+      -- already aborted on any physical attempt, so fenced_count always equals
+      -- expected_count. This guard is defence-in-depth and is not expected to fire.
       IF fenced_count <> expected_count THEN
         RAISE EXCEPTION
-          'plugin workload SDK invocation state changed during reconciliation; retry safely';
+          'plugin workload SDK invocation state changed during reconciliation (fenced % of % captured); aborting the migration',
+          fenced_count, expected_count;
       END IF;
     END
     $$;
@@ -2578,6 +2590,13 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
     ALTER TABLE plugin_workload_sdk_provider_attempts
       ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
       CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped'));
+
+    -- Reset the statement-scoped lock timeout set at the top of this migration.
+    -- applyPendingMigrations runs every pending migration in one transaction, so
+    -- without this a later 0091+ applied in the same batch would silently inherit
+    -- the 60s timeout. 0090 is currently last (so this is latent today), but keep
+    -- the transaction state hygienic for whatever ships next.
+    SET LOCAL lock_timeout = '0';
   `)
 }
 
