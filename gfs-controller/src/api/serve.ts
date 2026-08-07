@@ -27,14 +27,19 @@ import { planWrite, WriteError } from "./write";
 /**
  * Strip control characters (CR/LF/tab, C0 controls, DEL) and bound the length of
  * a user-controlled value before it is interpolated into a log line. Prevents
- * log injection / log forging (CWE-117) when request fields (method, target)
- * reach a log sink. Internal values (status, error code, stack) are NOT passed
- * through this — the stack is intentionally multi-line and is not user-tainted.
+ * log injection / log forging (CWE-117) when values that may carry user input
+ * (request method/target, or an error message/stack that echoes a decoded path)
+ * reach a log sink. CR/LF are removed; other control chars become '?'.
  */
 export function sanitizeForLog(value: string): string {
-  // Replace CR/LF, other C0 controls, and DEL with '?' (CodeQL-recognized
-  // log-injection barrier), then bound length to guard against log flooding.
-  return value.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 512);
+  // Remove CR/LF first (the log-forging vector; empty-string replace that
+  // enumerates \n is the barrier CodeQL's js/log-injection recognizes), then
+  // scrub any remaining C0 controls and DEL to '?', and bound the length to
+  // guard against log flooding.
+  return value
+    .replace(/[\n\r]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "?")
+    .slice(0, 512);
 }
 
 /**
@@ -267,10 +272,13 @@ export class GfsServingHandler {
         // A 5xx must never be invisible: an unknown throw (e.g. the base64
         // RangeError that produced a bogus `internal` 500) previously left no
         // trace anywhere in the system. Log code + stack (never the body/content).
+        // The stack/message is sanitized too: an underlying error (e.g. a driver
+        // error echoing a decoded path) can carry user input with real newlines,
+        // so it is a log-injection source just like method/url.
         console.error(
-          `[gfsc] ${sanitizeForLog(method)} ${sanitizeForLog(req.url ?? "?")} -> ${status} ${body.error.code}: ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`
+          `[gfsc] ${sanitizeForLog(method)} ${sanitizeForLog(req.url ?? "?")} -> ${status} ${body.error.code}: ${sanitizeForLog(
+            err instanceof Error ? (err.stack ?? err.message ?? "") : String(err)
+          )}`
         );
       }
       if (!res.headersSent) sendJson(res, status, body, abortConnectionHeader(req));
