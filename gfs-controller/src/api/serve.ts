@@ -25,6 +25,22 @@ import { normalizeResourceName, ResourceNameError } from "./resourceName";
 import { planWrite, WriteError } from "./write";
 
 /**
+ * Strip control characters (CR/LF/tab, C0 controls, DEL) and bound the length of
+ * a user-controlled value before it is interpolated into a log line. Prevents
+ * log injection / log forging (CWE-117) when request fields (method, target)
+ * reach a log sink. Internal values (status, error code, stack) are NOT passed
+ * through this — the stack is intentionally multi-line and is not user-tainted.
+ */
+export function sanitizeForLog(value: string): string {
+  let out = "";
+  for (const ch of value.slice(0, 512)) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? "?" : ch;
+  }
+  return out;
+}
+
+/**
  * gfsc read serving handler (spec community.md §Operator surfaces / §Auth,
  * plan P1-S07/S08 composed). This is the broker's READ data plane — the single
  * place where a request is turned into a served byte or a denial.
@@ -255,7 +271,7 @@ export class GfsServingHandler {
         // RangeError that produced a bogus `internal` 500) previously left no
         // trace anywhere in the system. Log code + stack (never the body/content).
         console.error(
-          `[gfsc] ${method} ${req.url ?? "?"} -> ${status} ${body.error.code}: ${
+          `[gfsc] ${sanitizeForLog(method)} ${sanitizeForLog(req.url ?? "?")} -> ${status} ${body.error.code}: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`
         );
