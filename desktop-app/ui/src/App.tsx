@@ -33,6 +33,7 @@ import {
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
+  findPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   removePendingSandboxUiDeepLink,
@@ -840,19 +841,20 @@ export function App() {
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }`
 
-  const pendingSandboxUiConfirmation = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item =>
-        isPendingSandboxUiDeepLinkAwaitingConfirmation(item, vm.authenticatedPrincipalIdentity)
-      )
-    : null
+  const pendingSandboxUiConfirmation =
+    findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinks,
+      vm.authenticatedPrincipalIdentity
+    ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
     : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!identity || !pending) return
     const next = confirmPendingSandboxUiDeepLink(
@@ -865,8 +867,9 @@ export function App() {
 
   const handleDismissSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!pending) return
     void acknowledgeSandboxUiDeepLink(pending.link.id)

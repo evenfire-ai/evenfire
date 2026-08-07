@@ -7,6 +7,7 @@ import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 
 const confirmDialogHarness = vi.hoisted(() => ({
+  rendered: vi.fn(),
   props: null as null | {
     title: string
     onCancel: () => void
@@ -44,6 +45,7 @@ vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
+    confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
     return null
   },
@@ -351,13 +353,15 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
   })
 
-  it('purges user A links synchronously before user B can process them', async () => {
+  it('never presents a user A link after user B becomes authenticated', async () => {
     const { rerender } = render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
-      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-a' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/user-a-app', teamId: 'team-a' })
     })
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    confirmDialogHarness.rendered.mockClear()
 
     currentController = makeController({
       initialExperienceLoading: false,
@@ -375,8 +379,17 @@ describe('App deep-link orchestration', () => {
     })
     rerender(<App />)
 
+    expect(confirmDialogHarness.rendered).not.toHaveBeenCalled()
     await waitFor(() => expect(clearPendingDeepLinks).toHaveBeenCalledOnce())
     expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    act(() => {
+      emitDeepLink?.({ id: 2, appRef: 'ns/user-b-app', teamId: 'team-b' })
+    })
+    await waitFor(() => expect(confirmDialogHarness.rendered).toHaveBeenCalledOnce())
+    expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 

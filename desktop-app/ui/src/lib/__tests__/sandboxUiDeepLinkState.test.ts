@@ -10,6 +10,7 @@ import {
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
+  findPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   nextSandboxUiDeepLinkRetryDelayMs,
@@ -236,6 +237,26 @@ describe('pending sandbox UI deep-link state', () => {
 
     expect(isPendingSandboxUiDeepLinkStale(pending[0]!, 'user-a')).toBe(false)
     expect(isPendingSandboxUiDeepLinkStale(pending[0]!, 'user-b')).toBe(true)
+  })
+
+  it('selects confirmation links only for the current authenticated identity', () => {
+    const userALink = enqueuePendingSandboxUiDeepLink(
+      [],
+      { id: 1, appRef: 'ns/user-a-app' },
+      null,
+      'user-a'
+    )
+    const withUserBLink = enqueuePendingSandboxUiDeepLink(
+      userALink,
+      { id: 2, appRef: 'ns/user-b-app' },
+      null,
+      'user-b'
+    )
+
+    expect(findPendingSandboxUiDeepLinkAwaitingConfirmation(userALink, 'user-b')).toBeUndefined()
+    expect(
+      findPendingSandboxUiDeepLinkAwaitingConfirmation(withUserBLink, 'user-b')?.link.appRef
+    ).toBe('ns/user-b-app')
   })
 
   it('tracks bounded retry delays and explicit failed state', () => {

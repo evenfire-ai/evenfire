@@ -55,6 +55,18 @@ export function isPendingSandboxUiDeepLinkStale(
   return Boolean(pending.confirmedIdentity && pending.confirmedIdentity !== currentIdentity)
 }
 
+export function findPendingSandboxUiDeepLinkAwaitingConfirmation(
+  current: PendingSandboxUiDeepLink[],
+  currentIdentity: string | null
+): PendingSandboxUiDeepLink | undefined {
+  if (!currentIdentity) return undefined
+  return current.find(
+    item =>
+      !isPendingSandboxUiDeepLinkStale(item, currentIdentity) &&
+      isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)
+  )
+}
+
 export function confirmPendingSandboxUiDeepLink(
   current: PendingSandboxUiDeepLink[],
   linkId: number,
