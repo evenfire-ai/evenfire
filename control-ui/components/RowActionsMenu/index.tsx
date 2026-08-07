@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconDotsVertical } from '@components/icons'
+import { IconDotsVertical, IconMoreHorizontal } from '@components/icons'
 
 export type RowAction = {
   key: string
@@ -15,9 +15,11 @@ export type RowAction = {
 export function RowActionsMenu({
   ariaLabel,
   actions,
+  horizontalTrigger = false,
 }: {
   ariaLabel: string
   actions: RowAction[]
+  horizontalTrigger?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -94,7 +96,11 @@ export function RowActionsMenu({
           setOpen(value => !value)
         }}
       >
-        <IconDotsVertical width={16} height={16} />
+        {horizontalTrigger ? (
+          <IconMoreHorizontal width={16} height={16} />
+        ) : (
+          <IconDotsVertical width={16} height={16} />
+        )}
       </button>
       {open
         ? createPortal(

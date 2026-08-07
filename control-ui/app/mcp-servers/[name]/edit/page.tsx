@@ -4,9 +4,12 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
-import { DetailPageShell } from '@components/DetailPageShell'
+import { CreateFlowPanel } from '@components/CreateFlowPanel'
+import { CreatePageHeader } from '@components/CreatePageHeader'
+import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
+import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
@@ -16,7 +19,8 @@ import {
   type ConnectorEditTab,
 } from '@constants/connectorEdit'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getMcpServer, updateMcpServer } from '@lib/api'
+import { getAgentDisplayName } from '@lib/agentName'
+import { getContextTeams, getContextUsers, getHosts, getMcpServer, updateMcpServer } from '@lib/api'
 import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
 import type { EgressEditorStatus } from '@lib/egressModel'
 
@@ -47,6 +51,32 @@ function parseConnectorEditTab(value: string | string[] | undefined): ConnectorE
   return CONNECTOR_EDIT_TABS.find(tab => tab === candidate) ?? CONNECTOR_EDIT_DEFAULT_TAB
 }
 
+type ContextAccess = {
+  agents: Array<{ id: string; label: string }>
+  teams: Array<{ id: string; label: string }>
+  users: Array<{ id: string; label: string }>
+}
+
+function resolveRegistryCredentialSource(
+  metadata: McpServerResource['metadata'] | undefined
+): { name: string; version: string } | undefined {
+  const labels = (metadata?.labels ?? {}) as Record<string, unknown>
+  const annotations = (metadata?.annotations ?? {}) as Record<string, unknown>
+  const name = String(annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? '').trim()
+  const version = String(
+    annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version'] ?? ''
+  ).trim()
+  return name && version ? { name, version } : undefined
+}
+
+const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
+
+const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
+  { key: 'users', title: 'Users' },
+  { key: 'teams', title: 'Teams' },
+  { key: 'agents', title: 'Agents' },
+]
+
 export default function EditMcpServerPage() {
   const router = useRouter()
   const params = useParams<{ name: string; tab?: string | string[] }>()
@@ -62,6 +92,9 @@ export default function EditMcpServerPage() {
   const [saveError, setSaveError] = useState('')
   const [egressBindings, setEgressBindings] = useState<EgressBinding[] | undefined>(undefined)
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
+  const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
+  const [contextAccessError, setContextAccessError] = useState('')
+  const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
   function backToList() {
     router.push(CONTROL_ROUTES.connectors.root)
@@ -107,6 +140,66 @@ export default function EditMcpServerPage() {
     }
   }, [name])
 
+  const contextRef =
+    typeof server?.spec?.contextRef === 'string' ? server.spec.contextRef.trim() : ''
+
+  useEffect(() => {
+    if (!contextRef) {
+      setContextAccess(EMPTY_CONTEXT_ACCESS)
+      setContextAccessError('')
+      setLoadingContextAccess(false)
+      return
+    }
+
+    let cancelled = false
+    setLoadingContextAccess(true)
+    setContextAccessError('')
+
+    void (async () => {
+      const [usersResult, teamsResult, hostsResult] = await Promise.allSettled([
+        getContextUsers(contextRef),
+        getContextTeams(contextRef),
+        getHosts(),
+      ])
+      if (cancelled) return
+
+      const failed =
+        usersResult.status === 'rejected' ||
+        teamsResult.status === 'rejected' ||
+        hostsResult.status === 'rejected'
+      setContextAccess({
+        users:
+          usersResult.status === 'fulfilled'
+            ? (usersResult.value.items ?? []).map(user => ({
+                id: user.id,
+                label: user.displayName || user.name || user.email || user.id,
+              }))
+            : [],
+        teams:
+          teamsResult.status === 'fulfilled'
+            ? (teamsResult.value.items ?? []).map(team => ({ id: team.id, label: team.name }))
+            : [],
+        agents:
+          hostsResult.status === 'fulfilled'
+            ? (hostsResult.value.items ?? [])
+                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextRef)
+                .map(host => {
+                  const agentName = host.metadata?.name || 'unknown'
+                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
+                })
+            : [],
+      })
+      setContextAccessError(
+        failed ? 'Some access information could not be loaded. The lists below may be incomplete.' : ''
+      )
+      setLoadingContextAccess(false)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [contextRef])
+
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!server?.spec || saving || egressStatus?.errors.length) return
@@ -132,103 +225,188 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
+  const registryCredentialSource = resolveRegistryCredentialSource(server?.metadata)
 
   return (
     <AuthGate>
-      <DetailPageShell<ConnectorEditTab>
-        activeTab={activeTab}
-        backLabel="Back to connectors"
-        icon={<IconCable />}
-        onBack={backToList}
-        onTabChange={selectTab}
-        subtitle="Update external egress and rotate credentials for this connector."
-        tabAriaLabel="Connector edit sections"
-        tabClassName="cu-tabs--compact"
-        tabs={CONNECTOR_EDIT_TABS.map(tab => ({
-          value: tab,
-          label: CONNECTOR_EDIT_TAB_LABELS[tab],
-          href:
-            tab === CONNECTOR_EDIT_DEFAULT_TAB
-              ? CONTROL_ROUTES.connectors.edit(name)
-              : CONTROL_ROUTES.connectors.editTab(name, tab),
-        }))}
-        title={`Edit Connector: ${name}`}
-        error={loadError || undefined}
-      >
-        {loading ? (
-          activeTab === 'credentials' ? (
-            <div
-              role="status"
-              aria-busy="true"
-              aria-label="Loading connector credentials"
-              className="cu-body-loading-skeleton"
-            >
-              <section className="cu-body-loading-skeleton__section">
-                <span className="cu-skeleton cu-body-loading-skeleton__heading" />
-                <span className="cu-skeleton cu-body-loading-skeleton__line" />
-                <div className="cu-body-loading-skeleton__fields">
-                  <span className="cu-skeleton cu-body-loading-skeleton__field" />
-                  <span className="cu-skeleton cu-body-loading-skeleton__field" />
-                </div>
-              </section>
-            </div>
-          ) : (
-            <FormSectionsSkeleton label="Connector" primaryActionLabel="Save egress" sections={2} />
-          )
-        ) : server ? (
-          activeTab === 'credentials' ? (
-            <UpdateConnectorCredentials serverName={name} envSecret={envSecret} />
-          ) : (
-            <form className="cu-connector-edit-content" onSubmit={handleSave}>
-              <div className="cu-connector-edit-meta">
-                <div>
-                  <strong>Image:</strong>{' '}
-                  <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
-                </div>
-                <div>
-                  <strong>Context:</strong>{' '}
-                  <code>
-                    {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
-                  </code>
-                </div>
+      <DashboardLayout isDetailPage>
+        <CreateFlowPanel
+          header={
+            <CreatePageHeader
+              icon={<IconCable />}
+              title={`Edit Connector: ${name}`}
+              subtitle="Review context access, rotate credentials, and update external egress for this connector."
+              backLabel="Back to connectors"
+              onBack={backToList}
+            />
+          }
+        >
+          <TabBar<ConnectorEditTab>
+            ariaLabel="Connector edit sections"
+            activeValue={activeTab}
+            className="cu-tabs--compact cu-connector-edit-tabs"
+            onChange={selectTab}
+            options={CONNECTOR_EDIT_TABS.map(tab => ({
+              value: tab,
+              label: CONNECTOR_EDIT_TAB_LABELS[tab],
+              href:
+                tab === CONNECTOR_EDIT_DEFAULT_TAB
+                  ? CONTROL_ROUTES.connectors.edit(name)
+                  : CONTROL_ROUTES.connectors.editTab(name, tab),
+            }))}
+          />
+
+          {loadError ? <div className="cu-banner cu-banner--error">{loadError}</div> : null}
+
+          {loading ? (
+            activeTab === 'credentials' ? (
+              <div
+                role="status"
+                aria-busy="true"
+                aria-label="Loading connector credentials"
+                className="cu-connector-edit-form cu-body-loading-skeleton"
+              >
+                <section className="cu-body-loading-skeleton__section">
+                  <span className="cu-skeleton cu-body-loading-skeleton__heading" />
+                  <span className="cu-skeleton cu-body-loading-skeleton__line" />
+                  <div className="cu-body-loading-skeleton__fields">
+                    <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                    <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                  </div>
+                </section>
               </div>
-
-              <EgressEditor
-                allowCidr
-                key={`${name}-${JSON.stringify(server.spec?.egressBindings ?? [])}`}
-                initialBindings={server.spec?.egressBindings as EgressBinding[] | undefined}
-                onChange={handleEgressChange}
-                title="External Egress"
-                description="Adjust only the external egress contract. Other connector settings are preserved."
-              />
-
-              {saveError ? (
-                <div className="cu-banner cu-banner--error" role="alert">
-                  {saveError}
-                </div>
-              ) : null}
-
-              <div className="cu-create-actions">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost"
-                  disabled={saving}
-                  onClick={backToList}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="cu-btn cu-btn--primary"
-                  disabled={saving || Boolean(egressStatus?.errors.length)}
-                >
-                  {saving ? 'Saving...' : 'Save egress'}
-                </button>
+            ) : (
+              <div className="cu-connector-edit-form">
+                <FormSectionsSkeleton
+                  label="Connector"
+                  primaryActionLabel="Save egress"
+                  sections={2}
+                />
               </div>
-            </form>
-          )
-        ) : null}
-      </DetailPageShell>
+            )
+          ) : server ? (
+            activeTab === 'credentials' ? (
+              <div className="cu-connector-edit-form">
+                <UpdateConnectorCredentials
+                  serverName={name}
+                  envSecret={envSecret}
+                  registryCredentialSource={registryCredentialSource}
+                />
+              </div>
+            ) : activeTab === 'context' ? (
+              <div className="cu-connector-edit-form cu-connector-edit-content">
+                <section className="cu-form-section" aria-labelledby="connector-context-title">
+                  <div className="cu-form-section__header">
+                    <h2 id="connector-context-title" className="cu-form-section__title">
+                      Context access
+                    </h2>
+                    <p className="cu-form-section__description">
+                      This connector is available in the context shown below. Context assignments
+                      cannot be changed here yet.
+                    </p>
+                  </div>
+
+                  <p className="cu-connector-edit-context-name" aria-label="Connector context">
+                    Context: <strong>{contextRef || 'No context assigned'}</strong>
+                  </p>
+
+                  {contextRef ? (
+                    loadingContextAccess ? (
+                      <p className="cu-muted">Loading context access…</p>
+                    ) : (
+                      <>
+                        {contextAccessError ? (
+                          <p className="cu-banner cu-banner--warn" role="status">
+                            {contextAccessError}
+                          </p>
+                        ) : null}
+                        <section className="cu-registry-context-access" aria-label="Context access">
+                          {CONTEXT_ACCESS_GROUPS.map(group => (
+                            <section
+                              className="cu-registry-context-access__group"
+                              data-kind={group.key}
+                              key={group.key}
+                            >
+                              <div className="cu-registry-context-access__heading">
+                                <h4>{group.title}</h4>
+                                <span>{contextAccess[group.key].length}</span>
+                              </div>
+                              {contextAccess[group.key].length > 0 ? (
+                                <ul className="cu-registry-context-access__list">
+                                  {contextAccess[group.key].map(principal => (
+                                    <li key={principal.id}>
+                                      <span>{principal.label}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p className="cu-muted">
+                                  No {group.title.toLowerCase()} have access.
+                                </p>
+                              )}
+                            </section>
+                          ))}
+                        </section>
+                      </>
+                    )
+                  ) : null}
+                </section>
+              </div>
+            ) : (
+              <form
+                className="cu-connector-edit-form cu-connector-edit-content"
+                onSubmit={handleSave}
+              >
+                <div className="cu-connector-edit-meta">
+                  <div>
+                    <strong>Image:</strong>{' '}
+                    <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
+                  </div>
+                  <div>
+                    <strong>Context:</strong>{' '}
+                    <code>
+                      {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
+                    </code>
+                  </div>
+                </div>
+
+                <EgressEditor
+                  allowCidr
+                  key={`${name}-${JSON.stringify(server.spec?.egressBindings ?? [])}`}
+                  initialBindings={server.spec?.egressBindings as EgressBinding[] | undefined}
+                  onChange={handleEgressChange}
+                  title="External Egress"
+                  description="Adjust only the external egress contract. Other connector settings are preserved."
+                />
+
+                {saveError ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    {saveError}
+                  </div>
+                ) : null}
+
+                <div className="cu-create-actions">
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost"
+                    disabled={saving}
+                    onClick={backToList}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="cu-btn cu-btn--primary"
+                    disabled={saving || Boolean(egressStatus?.errors.length)}
+                  >
+                    {saving ? 'Saving...' : 'Save egress'}
+                  </button>
+                </div>
+              </form>
+            )
+          ) : null}
+        </CreateFlowPanel>
+      </DashboardLayout>
     </AuthGate>
   )
 }

@@ -13,8 +13,7 @@ import { IconPencil, IconRefresh, IconX } from './icons'
 type ContextRef = { name: string }
 
 const CONTEXT_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Context Name', minWidth: '7rem' },
-  { key: 'description', label: 'Description' },
+  { key: 'name', label: 'Context Name' },
   { key: 'servers', label: 'Connectors', width: '7rem' },
   { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
 ]
@@ -122,7 +121,7 @@ export function ContextTable({
               <TableHeaderRow columns={CONTEXT_COLUMNS} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={4} rows={4} />
+              <SkeletonTableRows columns={CONTEXT_COLUMNS.length} rows={4} />
             </tbody>
           </table>
         </div>
@@ -147,22 +146,10 @@ export function ContextTable({
                   aria-label={`Open context ${name}`}
                 >
                   <td>
-                    <button
-                      type="button"
-                      className="cu-link"
-                      onClick={event => {
-                        event.stopPropagation()
-                        openContext(name)
-                      }}
-                      onKeyDown={event => event.stopPropagation()}
-                    >
-                      {name}
-                    </button>
-                  </td>
-                  <td style={{ color: 'var(--cu-text-soft)', maxWidth: '28rem' }}>
-                    <span style={{ display: 'inline-block', verticalAlign: 'top' }}>
+                    <span className="cu-expandable-row__name">{name}</span>
+                    <div className="cu-registry-description" title={item.spec?.description || '—'}>
                       {item.spec?.description || '—'}
-                    </span>
+                    </div>
                   </td>
                   <td style={{ color: 'var(--cu-text-muted)', fontVariantNumeric: 'tabular-nums' }}>
                     {mcpServers.length}

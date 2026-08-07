@@ -265,6 +265,11 @@ body.cu-body {
   max-width: min(28rem, 100%);
 }
 
+.cu-connector-credentials-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .cu-form-grid {
   display: grid;
   gap: var(--cu-space-3);
@@ -2500,6 +2505,246 @@ textarea.cu-input {
   display: grid;
   gap: var(--cu-space-2);
   padding: var(--cu-space-3) var(--cu-space-4);
+}
+
+.cu-registry-install-flow .cu-agent-form-stack--wide {
+  max-width: 100%;
+}
+
+.cu-registry-context-access {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: rgba(var(--cu-panel-rgb), 0.35);
+}
+
+.cu-registry-context-access__intro {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: var(--cu-space-1);
+}
+
+.cu-registry-context-access__intro > span {
+  color: var(--cu-text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cu-registry-context-access__intro > p {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.cu-registry-context-access__group {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  min-height: 7.75rem;
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background:
+    linear-gradient(145deg, rgba(var(--cu-accent-rgb), 0.09), transparent 52%),
+    var(--cu-surface);
+  overflow: hidden;
+}
+
+.cu-registry-context-access__group::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: var(--cu-accent);
+  content: '';
+}
+
+.cu-registry-context-access__group[data-kind='teams'] {
+  background:
+    linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%),
+    var(--cu-surface);
+}
+
+.cu-registry-context-access__group[data-kind='teams']::before {
+  background: var(--cu-success);
+}
+
+.cu-registry-context-access__group[data-kind='agents'] {
+  background:
+    linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%),
+    var(--cu-surface);
+}
+
+.cu-registry-context-access__group[data-kind='agents']::before {
+  background: var(--cu-warning);
+}
+
+.cu-registry-context-access__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+}
+
+.cu-registry-context-access__heading h4 {
+  margin: 0;
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cu-registry-context-access__heading span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__heading span {
+  border-color: rgba(var(--cu-success-rgb), 0.35);
+  background: rgba(var(--cu-success-rgb), 0.12);
+}
+
+.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__heading span {
+  border-color: rgba(var(--cu-warning-rgb), 0.35);
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-registry-context-access__list {
+  display: grid;
+  gap: var(--cu-space-1);
+  max-height: 10rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  list-style: none;
+}
+
+.cu-registry-context-access__list li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.cu-registry-context-access__list li::before {
+  width: 0.35rem;
+  height: 0.35rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.75);
+  content: '';
+}
+
+.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__list li::before {
+  background: rgba(var(--cu-success-rgb), 0.8);
+}
+
+.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__list li::before {
+  background: rgba(var(--cu-warning-rgb), 0.8);
+}
+
+.cu-registry-context-access__list li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-registry-context-access__group .cu-muted {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.cu-registry-install-access-summary {
+  display: grid;
+}
+
+.cu-registry-install-access-summary__row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 10rem) minmax(0, 1fr);
+  gap: var(--cu-space-3);
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--cu-border-subtle);
+  color: var(--cu-text-soft);
+  font-size: 0.875rem;
+}
+
+.cu-registry-install-access-summary__row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.cu-registry-install-access-summary__row:last-child {
+  padding-bottom: 0;
+}
+
+.cu-registry-install-access-summary__row strong {
+  color: var(--cu-text);
+  overflow-wrap: anywhere;
+}
+
+.cu-modal-panel--install-success {
+  width: min(27rem, calc(100vw - (var(--cu-space-4) * 2)));
+  justify-items: center;
+  padding: 1.6rem;
+  text-align: center;
+}
+
+.cu-registry-install-success__icon {
+  display: grid;
+  place-items: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  border: 1px solid rgba(var(--cu-success-rgb), 0.48);
+  border-radius: 999px;
+  background: rgba(var(--cu-success-rgb), 0.14);
+  color: var(--cu-success);
+}
+
+.cu-registry-install-success__content {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-registry-install-success__eyebrow {
+  margin: 0;
+  color: var(--cu-success);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cu-modal-panel--install-success .cu-modal-copy {
+  max-width: 23rem;
+}
+
+.cu-modal-panel__foot.cu-registry-install-success__actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  border-top: 0;
+  padding-top: 0;
 }
 
 .cu-registry-trust-chip {
@@ -5052,6 +5297,19 @@ textarea.cu-input {
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: var(--cu-bg-elevated);
+}
+
+.cu-connector-edit-tabs {
+  margin-inline: var(--cu-space-3);
+}
+
+.cu-connector-edit-context-name {
+  margin: 0 0 var(--cu-space-3);
+  color: var(--cu-text-muted);
+}
+
+.cu-connector-edit-context-name strong {
+  color: var(--cu-text);
 }
 
 .cu-connector-edit-form {

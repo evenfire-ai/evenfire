@@ -12,25 +12,34 @@ import {
   createMcpServer,
   deleteMcpSecret,
   getContext,
+  getContextTeams,
+  getContextUsers,
   getContexts,
+  getHosts,
   listOrgImages,
   updateContext,
 } from '@/lib/api'
 import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
 import type { EgressEditorStatus } from '@/lib/egressModel'
+import { getAgentDisplayName } from '@/lib/agentName'
 import { EgressEditor } from '../EgressEditor'
 import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
-const STEPS = ['Connector', 'Secrets'] as const
+const STEPS = ['Connector', 'Context', 'Secrets'] as const
 
 const STEP_DETAILS = [
   {
-    description: 'Name, image, and context',
+    description: 'Name, image, and runtime',
     title: 'Connector identity',
-    subtitle: 'Register the connector name, image, and Context allowlist target.',
+    subtitle: 'Register the connector name, image, and runtime configuration.',
+  },
+  {
+    description: 'Choose connector access',
+    title: 'Context',
+    subtitle: 'Choose where this connector will be available and review who can use it.',
   },
   {
     description: 'Environment and credentials',
@@ -38,6 +47,20 @@ const STEP_DETAILS = [
     subtitle: 'Add environment variables and optional Secret-backed credentials.',
   },
 ] as const
+
+type ContextAccess = {
+  agents: Array<{ id: string; label: string }>
+  teams: Array<{ id: string; label: string }>
+  users: Array<{ id: string; label: string }>
+}
+
+const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
+
+const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
+  { key: 'users', title: 'Users' },
+  { key: 'teams', title: 'Teams' },
+  { key: 'agents', title: 'Agents' },
+]
 
 type OrgImageOption = {
   value: string
@@ -177,6 +200,9 @@ export function CreateMcpServerForm({
   const [contexts, setContexts] = useState<Array<{ name: string }>>([])
   const [contextsLoading, setContextsLoading] = useState(true)
   const [contextsError, setContextsError] = useState('')
+  const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
+  const [contextAccessError, setContextAccessError] = useState('')
+  const [loadingContextAccess, setLoadingContextAccess] = useState(false)
   const [orgImages, setOrgImages] = useState<OrgImage[]>([])
   const [orgImageScope, setOrgImageScope] = useState('')
   const [managed, setManaged] = useState(true)
@@ -214,8 +240,10 @@ export function CreateMcpServerForm({
     egressValid &&
     credentialsConfigured &&
     !submitting
+  const connectorComplete = Boolean(name && image && nameValid) && egressValid
+  const contextComplete = Boolean(contextRef)
   const canContinue =
-    step === 0 ? Boolean(name && image && contextRef && nameValid) && egressValid : egressValid
+    step === 0 ? connectorComplete : step === 1 ? contextComplete : egressValid
   const contextOptions = useMemo(
     () => contexts.map(context => ({ value: context.name, label: context.name })),
     [contexts]
@@ -272,6 +300,64 @@ export function CreateMcpServerForm({
   }, [])
 
   useEffect(() => {
+    const selectedContext = contextRef.trim()
+    if (!selectedContext) {
+      setContextAccess(EMPTY_CONTEXT_ACCESS)
+      setContextAccessError('')
+      setLoadingContextAccess(false)
+      return
+    }
+
+    let cancelled = false
+    setLoadingContextAccess(true)
+    setContextAccessError('')
+
+    void (async () => {
+      const [usersResult, teamsResult, hostsResult] = await Promise.allSettled([
+        getContextUsers(selectedContext),
+        getContextTeams(selectedContext),
+        getHosts(),
+      ])
+      if (cancelled) return
+
+      const failed =
+        usersResult.status === 'rejected' ||
+        teamsResult.status === 'rejected' ||
+        hostsResult.status === 'rejected'
+      setContextAccess({
+        users:
+          usersResult.status === 'fulfilled'
+            ? (usersResult.value.items ?? []).map(user => ({
+                id: user.id,
+                label: user.displayName || user.name || user.email || user.id,
+              }))
+            : [],
+        teams:
+          teamsResult.status === 'fulfilled'
+            ? (teamsResult.value.items ?? []).map(team => ({ id: team.id, label: team.name }))
+            : [],
+        agents:
+          hostsResult.status === 'fulfilled'
+            ? (hostsResult.value.items ?? [])
+                .filter(host => String(host.spec?.contextRef ?? '').trim() === selectedContext)
+                .map(host => {
+                  const agentName = host.metadata?.name || 'unknown'
+                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
+                })
+            : [],
+      })
+      setContextAccessError(
+        failed ? 'Some access information could not be loaded. The lists below may be incomplete.' : ''
+      )
+      setLoadingContextAccess(false)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [contextRef])
+
+  useEffect(() => {
     let cancelled = false
 
     listOrgImages()
@@ -296,7 +382,8 @@ export function CreateMcpServerForm({
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    return Boolean(name && image && contextRef && nameValid && egressValid)
+    if (targetStep === 1) return connectorComplete
+    return connectorComplete && contextComplete
   }
 
   const handleEgressChange = useCallback(
@@ -525,7 +612,7 @@ export function CreateMcpServerForm({
       <form onSubmit={handleSubmit}>
         <CreateStepFlow
           ariaLabel="Create connector steps"
-          className="cu-create-step-flow--2"
+          className="cu-create-step-flow--3"
           currentStep={step}
           onStepChange={setStep}
           canSelectStep={canSelectStep}
@@ -558,6 +645,15 @@ export function CreateMcpServerForm({
                 />
               </Field>
 
+              <Field label="Description">
+                <TextInput
+                  onChange={event => setDescription(event.target.value)}
+                  placeholder="Optional description of this connector"
+                  disabled={submitting}
+                  value={description}
+                />
+              </Field>
+
               <Field
                 description="Choose one of your organization’s images or enter another container image URL."
                 label="Image"
@@ -568,40 +664,6 @@ export function CreateMcpServerForm({
                   onChange={setImage}
                   options={orgImageOptions}
                   value={image}
-                />
-              </Field>
-
-              <Field
-                description={
-                  contextsLoading
-                    ? 'Loading available contexts...'
-                    : contexts.length > 0
-                      ? "The server will be added to this context's allowlist."
-                      : 'Create a context before creating a connector.'
-                }
-                error={contextsError || undefined}
-                label="Context"
-                required
-              >
-                <SelectionDropdown
-                  multiple={false}
-                  onChange={next => setContextRef(next[0] ?? '')}
-                  disabled={submitting || contextsLoading || contexts.length === 0}
-                  value={contextRef ? [contextRef] : []}
-                  options={contextOptions}
-                  placeholder={contextsLoading ? 'Loading contexts...' : 'Select a context...'}
-                  searchPlaceholder="Search contexts..."
-                  emptyLabel="No contexts available."
-                  selectionLabel="Context"
-                />
-              </Field>
-
-              <Field label="Description">
-                <TextInput
-                  onChange={event => setDescription(event.target.value)}
-                  placeholder="Optional description of this connector"
-                  disabled={submitting}
-                  value={description}
                 />
               </Field>
 
@@ -705,6 +767,89 @@ export function CreateMcpServerForm({
           ) : null}
 
           {step === 1 ? (
+            <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
+              <section className="cu-form-section">
+                <div className="cu-form-section__header">
+                  <h3 className="cu-form-section__title">Context access</h3>
+                  <p className="cu-form-section__description">
+                    Choose the context where this connector will be available. The access lists
+                    update for the selected context.
+                  </p>
+                </div>
+                <Field
+                  description={
+                    contextsLoading
+                      ? 'Loading available contexts...'
+                      : contexts.length > 0
+                        ? "The connector will be added to this context's allowlist."
+                        : 'Create a context before creating a connector.'
+                  }
+                  error={contextsError || undefined}
+                  label="Context"
+                  required
+                >
+                  <SelectionDropdown
+                    id="create-connector-context"
+                    multiple={false}
+                    onChange={next => setContextRef(next[0] ?? '')}
+                    disabled={submitting || contextsLoading || contexts.length === 0}
+                    value={contextRef ? [contextRef] : []}
+                    options={contextOptions}
+                    placeholder={contextsLoading ? 'Loading contexts...' : 'Select a context...'}
+                    searchPlaceholder="Search contexts..."
+                    emptyLabel="No contexts available."
+                    selectionLabel="Context"
+                    showSelectedChips={false}
+                  />
+                </Field>
+
+                {loadingContextAccess ? (
+                  <p className="cu-muted">Loading context access…</p>
+                ) : contextRef ? (
+                  <>
+                    {contextAccessError ? (
+                      <p className="cu-banner cu-banner--warn" role="status">
+                        {contextAccessError}
+                      </p>
+                    ) : null}
+                    <div className="cu-registry-context-access__intro">
+                      <span>Access preview</span>
+                      <p>These people and agents can use this connector in {contextRef}.</p>
+                    </div>
+                    <section className="cu-registry-context-access" aria-label="Context access">
+                      {CONTEXT_ACCESS_GROUPS.map(group => (
+                        <section
+                          className="cu-registry-context-access__group"
+                          data-kind={group.key}
+                          key={group.key}
+                        >
+                          <div className="cu-registry-context-access__heading">
+                            <h4>{group.title}</h4>
+                            <span>{contextAccess[group.key].length}</span>
+                          </div>
+                          {contextAccess[group.key].length > 0 ? (
+                            <ul className="cu-registry-context-access__list">
+                              {contextAccess[group.key].map(principal => (
+                                <li key={principal.id}>
+                                  <span>{principal.label}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="cu-muted">
+                              No {group.title.toLowerCase()} have access.
+                            </p>
+                          )}
+                        </section>
+                      ))}
+                    </section>
+                  </>
+                ) : null}
+              </section>
+            </div>
+          ) : null}
+
+          {step === 2 ? (
             <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
               <FormSection
                 description="Additional environment variables injected into the container."

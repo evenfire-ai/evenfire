@@ -85,14 +85,6 @@ function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
-function isDroppedPreviewFile(file: File): boolean {
-  return (
-    file.type.toLowerCase().startsWith('image/') ||
-    gfsImagePreviewMimeType(file.name) !== null ||
-    isGfsMarkdownPreviewFile(file.name)
-  )
-}
-
 function isGfsPreviewFile(fileName: string): boolean {
   return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
 }
@@ -316,23 +308,15 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     const droppedFiles = Array.from(event.dataTransfer.files || [])
-    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
-    if (!previewFiles.length) {
-      showToast('Only image and Markdown files can be dropped here.', { tone: 'error' })
+    if (!droppedFiles.length) {
+      showToast('No files were dropped.', { tone: 'error' })
       return
     }
 
-    setDroppedUploadCount(previewFiles.length)
+    setDroppedUploadCount(droppedFiles.length)
     try {
-      for (const file of previewFiles) {
+      for (const file of droppedFiles) {
         await uploadFile(file)
-      }
-      const skippedCount = droppedFiles.length - previewFiles.length
-      if (skippedCount > 0) {
-        showToast(
-          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
-          { tone: 'error' }
-        )
       }
     } finally {
       setDroppedUploadCount(0)
@@ -474,7 +458,7 @@ export function GfsBrowser(): React.JSX.Element {
             {droppedUploadCount > 0
               ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
               : current?.id
-                ? `Drop images or Markdown files to upload to ${currentLabel}`
+                ? `Drop files to upload to ${currentLabel}`
                 : 'Files cannot be uploaded until a destination folder is available.'}
           </div>
         ) : null}

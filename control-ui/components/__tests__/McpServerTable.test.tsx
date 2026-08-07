@@ -19,6 +19,7 @@ function makeItem(overrides: {
   namespace?: string
   image?: string
   contextRef?: string
+  description?: string
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
   enabled?: boolean
   conditions?: McpServerCondition[] | undefined
@@ -29,6 +30,7 @@ function makeItem(overrides: {
     spec: {
       image: string
       contextRef: string
+      description?: string
       enabled?: boolean
       transport: { type: 'sse' | 'streamableHttp' | 'stdio'; url: string }
     }
@@ -41,6 +43,7 @@ function makeItem(overrides: {
     spec: {
       image: overrides.image ?? 'ghcr.io/example/mcp:1.0',
       contextRef: overrides.contextRef ?? 'context1',
+      description: overrides.description,
       enabled: overrides.enabled,
       transport: {
         type: overrides.transportType ?? 'streamableHttp',
@@ -191,6 +194,24 @@ describe('McpServerTable — column sorting', () => {
       'zebra-server',
       'alpha-server',
     ])
+  })
+})
+
+describe('McpServerTable — marketplace-aligned rows', () => {
+  it('renders a connector description below its name in the list row', () => {
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'brave-search', description: 'Search the public web.' })]}
+      />
+    )
+
+    const row = screen.getByText('brave-search').closest('tr')
+    expect(row).not.toBeNull()
+    expect(row).toHaveTextContent('Search the public web.')
+    expect(row?.querySelector('.cu-registry-description')).toHaveAttribute(
+      'title',
+      'Search the public web.'
+    )
   })
 })
 

@@ -280,7 +280,7 @@ describe('GfsBrowser', () => {
     )
   })
 
-  it('uploads dropped images and Markdown files into the current folder', async () => {
+  it('uploads dropped files into the current folder', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
     mockApiGet.mockResolvedValue({
@@ -295,11 +295,12 @@ describe('GfsBrowser', () => {
     const browser = screen.getByRole('region', { name: 'Global File System browser' })
     const image = new File(['operator image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Operator notes'], 'notes.md', { type: 'text/markdown' })
-    const dataTransfer = { dropEffect: 'none', files: [image, markdown], types: ['Files'] }
+    const pdf = new File(['%PDF operator report'], 'report.pdf', { type: 'application/pdf' })
+    const dataTransfer = { dropEffect: 'none', files: [image, markdown, pdf], types: ['Files'] }
 
     fireEvent.dragEnter(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
     const dropStatus = screen.getByRole('status')
-    expect(dropStatus).toHaveTextContent('Drop images or Markdown files to upload to main')
+    expect(dropStatus).toHaveTextContent('Drop files to upload to main')
     expect(dropStatus).toHaveClass('cu-gfs-drop-overlay')
 
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
@@ -315,15 +316,26 @@ describe('GfsBrowser', () => {
         }
       )
     )
-    expect(mockApiSend).toHaveBeenCalledWith(
-      'POST',
-      `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
-      {
-        name: 'notes.md',
-        kind: 'file',
-        contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
-      }
-    )
+    await waitFor(() => {
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+        {
+          name: 'notes.md',
+          kind: 'file',
+          contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
+        }
+      )
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+        {
+          name: 'report.pdf',
+          kind: 'file',
+          contentBase64: 'JVBERiBvcGVyYXRvciByZXBvcnQ=',
+        }
+      )
+    })
   })
 
   it('rejects oversized dropped files before reading or uploading them', async () => {

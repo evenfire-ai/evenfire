@@ -128,6 +128,20 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
+      // Context is a read-only final tab. It mirrors the selected context's
+      // Users, Teams, and Agents access preview without offering a mutation.
+      await page.getByRole('tab', { name: 'Context', exact: true }).click()
+      await expect(page).toHaveURL(
+        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/context$`)
+      )
+      await expect(page.getByRole('heading', { name: 'Context access', exact: true })).toBeVisible({
+        timeout: 20_000,
+      })
+      await expect(page.getByLabel('Connector context').getByText(contextName)).toBeVisible()
+      await expect(page.getByLabel('Context access')).toBeVisible()
+
+      await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
+
       // Image and Context are rendered as static read-only text (not editable inputs).
       const meta = page.locator('.cu-connector-edit-meta')
       await expect(meta).toBeVisible({ timeout: 20_000 })

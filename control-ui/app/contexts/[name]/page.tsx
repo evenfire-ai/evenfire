@@ -45,7 +45,7 @@ import {
 } from '../../../lib/api'
 
 type ContextTab = 'connectors' | 'agent-files' | 'agents' | 'teams' | 'members'
-const CONTEXT_TABS: ContextTab[] = ['connectors', 'agent-files', 'agents', 'teams', 'members']
+const CONTEXT_TABS: ContextTab[] = ['connectors', 'agents', 'teams', 'members']
 
 const TAB_LABELS: Record<ContextTab, string> = {
   connectors: 'Connectors',

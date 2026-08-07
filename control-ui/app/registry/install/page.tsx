@@ -657,7 +657,8 @@ function RegistryInstallPageContent() {
               <RegistryInstallForm
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
-                onInstalled={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => undefined}
+                onViewConnectors={() => router.push(CONTROL_ROUTES.connectors.root)}
               />
             ) : null}
           </CreateFlowPanel>

@@ -19,7 +19,10 @@ vi.mock('../../lib/api', () => ({
   getContext: vi.fn().mockResolvedValue({
     spec: { contextId: 'context1', mcpServers: [] },
   }),
+  getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
+  getContextUsers: vi.fn().mockResolvedValue({ items: [] }),
   listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
+  getHosts: vi.fn().mockResolvedValue({ items: [] }),
   updateContext: vi.fn().mockResolvedValue({}),
 }))
 
@@ -33,7 +36,7 @@ function render(children: ReactNode) {
 }
 
 async function fillIdentity(name = 'brave-search') {
-  await waitFor(() => expect(screen.getByRole('button', { name: 'context1' })).toBeInTheDocument())
+  await waitFor(() => expect(api.getContexts).toHaveBeenCalledTimes(1))
   fireEvent.change(screen.getByPlaceholderText('my-mcp-server'), {
     target: { value: name },
   })
@@ -48,6 +51,7 @@ function openAdvanced() {
 }
 
 function continueToSecrets() {
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 }
 
@@ -78,10 +82,12 @@ describe('CreateMcpServerForm — render', () => {
     expect(continueButton).not.toBeDisabled()
   })
 
-  it('loads available contexts into a selector', async () => {
+  it('loads available contexts into the dedicated Context step', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
 
-    await waitFor(() => expect(api.getContexts).toHaveBeenCalledTimes(1))
+    await fillIdentity()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Context access' })).toBeInTheDocument())
     const contextSelector = screen.getByRole('button', { name: 'context1' })
     fireEvent.click(contextSelector)
 
@@ -103,7 +109,9 @@ describe('CreateMcpServerForm — render', () => {
     })
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
 
-    const imageField = await screen.findByRole('combobox')
+    const imageField = await screen.findByPlaceholderText(
+      'us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest'
+    )
     fireEvent.focus(imageField)
     fireEvent.click(screen.getByRole('option', { name: 'todoist-mcp-server:1.0.0' }))
 
@@ -112,11 +120,31 @@ describe('CreateMcpServerForm — render', () => {
     ).toBeInTheDocument()
   })
 
-  it('uses two connector steps', () => {
+  it('uses connector, context, and secrets steps', () => {
     const { container } = render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(2)
+    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(3)
     expect(screen.queryByText('Step 1 of 3')).not.toBeInTheDocument()
     expect(screen.queryByText('Step 1 of 4')).not.toBeInTheDocument()
+  })
+
+  it('previews the selected context access before continuing to secrets', async () => {
+    vi.mocked(api.getContextUsers).mockResolvedValueOnce({
+      items: [{ id: 'user-1', displayName: 'Josue', email: 'josue@example.com', name: 'josue' }],
+    })
+    vi.mocked(api.getContextTeams).mockResolvedValueOnce({
+      items: [{ id: 'team-1', name: 'Development Team' }],
+    })
+    vi.mocked(api.getHosts).mockResolvedValueOnce({
+      items: [{ metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } }],
+    })
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+
+    await fillIdentity()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(await screen.findByText('Josue')).toBeInTheDocument()
+    expect(screen.getByText('Development Team')).toBeInTheDocument()
+    expect(screen.getByText('product')).toBeInTheDocument()
   })
 
   it('hides the advanced options by default and reveals them on toggle', async () => {
@@ -299,7 +327,7 @@ describe('CreateMcpServerForm — submit', () => {
     fireEvent.change(screen.getByPlaceholderText('443'), {
       target: { value: '443' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
 
     chooseNoCredentials()
 
@@ -324,7 +352,7 @@ describe('CreateMcpServerForm — submit', () => {
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'public-web' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
 
     chooseNoCredentials()
 
@@ -353,7 +381,7 @@ describe('CreateMcpServerForm — submit', () => {
     fireEvent.change(screen.getByPlaceholderText('443'), {
       target: { value: '443' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
 
     chooseNoCredentials()
 

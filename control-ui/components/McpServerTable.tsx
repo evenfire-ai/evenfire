@@ -274,6 +274,7 @@ export function McpServerTable({
           onCreate ? (
             <RowActionsMenu
               ariaLabel="Connector actions"
+              horizontalTrigger
               actions={[
                 {
                   key: 'create',
@@ -379,6 +380,12 @@ export function McpServerTable({
                       </td>
                       <td>
                         <span className="cu-expandable-row__name">{name}</span>
+                        <div
+                          className="cu-registry-description"
+                          title={spec.description || 'No description provided.'}
+                        >
+                          {spec.description || 'No description provided.'}
+                        </div>
                       </td>
                       <td>
                         <BoolBadge value={spec.enabled} trueLabel="Yes" falseLabel="No" />

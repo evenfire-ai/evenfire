@@ -6,17 +6,19 @@ import {
   POLL_TIMEOUT_MS,
   UpdateConnectorCredentials,
 } from '@components/UpdateConnectorCredentials'
-import { getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import { getMcpServer, getMcpServers, getRegistryCredentialSchema, updateMcpSecret } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
+  getRegistryCredentialSchema: vi.fn(),
   updateMcpSecret: vi.fn(),
 }))
 
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
+const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 
 const SERVER_NAME = 'my-connector'
@@ -130,6 +132,7 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
     await renderPanel(ENV_SECRET)
 
     expect(screen.getByText(ENV_SECRET.name)).toBeInTheDocument()
+    const rotateButton = screen.getByRole('button', { name: 'Rotate credentials' })
     const table = screen.getByRole('table')
     for (const key of ENV_SECRET.keys) {
       expect(within(table).getByText(key.secretKey)).toBeInTheDocument()
@@ -139,6 +142,38 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
       expect(input).toHaveAttribute('autocomplete', 'new-password')
       expect(input.value).toBe('')
     }
+    expect(
+      rotateButton.compareDocumentPosition(screen.getByLabelText(ENV_SECRET.keys[0].secretKey))
+    ).toBe(Node.DOCUMENT_POSITION_PRECEDING)
+  })
+
+  it('uses the Marketplace credential label when the connector retains its catalog source', async () => {
+    mockGetRegistryCredentialSchema.mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [
+        {
+          name: 'api-key',
+          label: 'Linear API key',
+          kind: 'api-key',
+        },
+      ],
+    })
+    render(
+      <ToastProvider>
+        <UpdateConnectorCredentials
+          serverName={SERVER_NAME}
+          envSecret={ENV_SECRET}
+          registryCredentialSource={{ name: '@evenfire/linear', version: '1.0.0' }}
+        />
+      </ToastProvider>
+    )
+
+    await flush(3)
+
+    expect(mockGetRegistryCredentialSchema).toHaveBeenCalledWith('@evenfire/linear', '1.0.0')
+    expect(screen.getByLabelText('Linear API key')).toBeInTheDocument()
+    expect(screen.getByLabelText('workspace-id')).toBeInTheDocument()
   })
 
   it('never renders a stored credential value — inputs stay empty through a full rotation cycle', async () => {
