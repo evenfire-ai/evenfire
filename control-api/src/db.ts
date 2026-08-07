@@ -2295,17 +2295,27 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
  */
 async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
   await db.query(`
-    -- Runtime writers do not take the initDb advisory lock. Hold the table
-    -- locks in the same logical order as finalization (invocation -> receipt
-    -- -> provider attempt) before replacing validators or fencing rows. This
-    -- closes the rolling-deploy race in which a writer could change a row
-    -- between the ambiguity check and the repair UPDATE.
+    -- Bound the wait for the table locks so a long-running reader can never turn
+    -- this migration into an indefinite lock queue (a queued ACCESS EXCLUSIVE
+    -- request blocks every new reader behind it). Fail loud and let the migration
+    -- Job be retried instead of silently stalling the deploy.
+    SET LOCAL lock_timeout = '5s';
+
+    -- Runtime writers do not take the initDb advisory lock. Hold the table locks
+    -- in the same logical order as finalization (invocation -> receipt ->
+    -- provider attempt) before replacing validators or fencing rows.
+    -- EXCLUSIVE MODE (not SHARE ROW EXCLUSIVE) conflicts with the ROW SHARE that
+    -- finalization's SELECT ... FOR UPDATE takes, so a concurrent finalization
+    -- cannot hold row locks and deadlock against the ACCESS EXCLUSIVE that the
+    -- ALTERs below acquire; plain readers (ACCESS SHARE) are still allowed. This
+    -- closes the rolling-deploy race in which a writer could change a row between
+    -- the ambiguity check and the repair UPDATE.
     LOCK TABLE
       plugin_workload_sdk_invocations,
       plugin_workload_sdk_invocation_attempts,
       plugin_workload_sdk_provider_attempts,
       agent_run_events
-      IN SHARE ROW EXCLUSIVE MODE;
+      IN EXCLUSIVE MODE;
 
     CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
     RETURNS BOOLEAN
@@ -2405,10 +2415,45 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
       TO control_api_runtime;
 
     -- Changing a function body does not recheck rows already accepted by a
-    -- CHECK that calls it. Reinstall the named constraint as NOT VALID, scan
-    -- every historical row fail-closed, and only then validate the constraint.
-    -- No row is rewritten or deleted: an invalid append-only history aborts
-    -- the whole migration and requires an explicit data-governance decision.
+    -- CHECK that calls it, so scan every historical row fail-closed. Run the scan
+    -- FIRST, while only the EXCLUSIVE table lock is held (plain readers still
+    -- allowed), before the DROP/ADD CONSTRAINT below take ACCESS EXCLUSIVE -- this
+    -- keeps the expensive full scan out of the reader-blocking window. On failure
+    -- the message carries a bounded sample of offending (id:event_type) rows so an
+    -- operator can triage from the log. No row is rewritten or deleted: an invalid
+    -- append-only history aborts the whole migration and requires an explicit
+    -- data-governance decision.
+    DO $$
+    DECLARE
+      invalid_count BIGINT := 0;
+      invalid_sample TEXT := '';
+      offending RECORD;
+    BEGIN
+      FOR offending IN
+        SELECT COUNT(*) OVER () AS total, event_id, event_type
+          FROM agent_run_events
+         WHERE governed_trace_safe_agent_run_metadata(event_type, payload_metadata)
+               IS DISTINCT FROM TRUE
+         ORDER BY occurred_at
+         LIMIT 10
+      LOOP
+        invalid_count := offending.total;
+        invalid_sample := invalid_sample
+          || CASE WHEN invalid_sample = '' THEN '' ELSE ', ' END
+          || offending.event_id::text || ':' || offending.event_type;
+      END LOOP;
+      IF invalid_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % historical agent_run_events rows with invalid payload metadata (first % shown): %',
+          invalid_count, LEAST(invalid_count, 10), invalid_sample;
+      END IF;
+    END
+    $$;
+
+    -- History is clean: reinstall the named constraint. ADD ... NOT VALID is a
+    -- metadata-only change (brief ACCESS EXCLUSIVE, no scan); VALIDATE re-checks
+    -- the rows under SHARE UPDATE EXCLUSIVE. Both are cheap now that the scan
+    -- above already proved every row passes.
     ALTER TABLE agent_run_events
       DROP CONSTRAINT IF EXISTS agent_run_events_check;
     ALTER TABLE agent_run_events
@@ -2417,23 +2462,6 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
       ADD CONSTRAINT agent_run_events_check
       CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE)
       NOT VALID;
-
-    DO $$
-    DECLARE invalid_count BIGINT;
-    BEGIN
-      SELECT COUNT(*)
-        INTO invalid_count
-        FROM agent_run_events
-       WHERE governed_trace_safe_agent_run_metadata(event_type, payload_metadata)
-             IS DISTINCT FROM TRUE;
-      IF invalid_count > 0 THEN
-        RAISE EXCEPTION
-          'cannot reconcile % historical agent_run_events rows with invalid payload metadata',
-          invalid_count;
-      END IF;
-    END
-    $$;
-
     ALTER TABLE agent_run_events
       VALIDATE CONSTRAINT agent_run_events_check;
 
