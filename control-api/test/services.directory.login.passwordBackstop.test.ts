@@ -129,6 +129,32 @@ describe('directory login without team memberships', () => {
     )
   })
 
+  it('does not select a pending invitation as the Google session team', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: 'pending-team', role: 'admin', team_name: 'Pending Team' }],
+        rowCount: 1,
+      })
+
+    const result = await googleLoginData({ email: 'a@b.com', name: 'Ada' })
+
+    expect(result).toMatchObject({
+      membership: { team_id: null, role: 'member', team_name: null },
+    })
+  })
+
   it('does NOT self-heal (no team created) when the password is wrong', async () => {
     bcryptMock.compare.mockResolvedValue(false)
     dbMocks.txQuery.mockResolvedValueOnce({
