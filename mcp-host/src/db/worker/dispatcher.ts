@@ -12,6 +12,8 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionMessagePage,
+  PersistedSessionSummary,
   ReapedSession,
   SessionRow,
   WorkerOp,
@@ -24,6 +26,27 @@ export interface DispatcherDeps {
 
 export function createDispatcher(db: Database): DispatcherDeps {
   return { db, statements: prepareStatements(db) }
+}
+
+function updateSessionSummaryAfterInsert(
+  statements: PreparedStatements,
+  message: {
+    session_id: string
+    role: string
+    tool_calls: string | null
+    timestamp: number
+    turn_number: number | null
+  }
+): void {
+  statements.updateSessionSummaryAfterInsert.run({
+    id: message.session_id,
+    timestamp: message.timestamp,
+    turn_number: message.turn_number,
+    visible_message_delta:
+      message.role === 'user' || (message.role === 'assistant' && message.tool_calls === null)
+        ? 1
+        : 0,
+  })
 }
 
 /**
@@ -91,6 +114,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             system_prompt_stable_hash: row.system_prompt_stable_hash ?? null,
             parent_session_id: row.parent_session_id ?? null,
             started_at: row.started_at,
+            last_activity_at: row.last_activity_at ?? row.started_at,
+            turn_count: row.turn_count ?? 0,
             ended_at: row.ended_at ?? null,
             end_reason: row.end_reason ?? null,
             message_count: row.message_count ?? 0,
@@ -164,7 +189,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             for (const sess of sessions) {
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
-                max_turn: number
+                max_turn: number | null
               }
               // Synthetic assistant message on the open turn. The marker lives
               // in content_parts JSON (machine-detectable) while finish_reason
@@ -193,6 +218,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 output_tokens: null,
                 cache_read_tokens: null,
                 cache_write_tokens: null,
+              })
+              updateSessionSummaryAfterInsert(s, {
+                session_id: sess.id,
+                role: 'assistant',
+                tool_calls: null,
+                timestamp: nowMs / 1000,
+                turn_number: agg.max_turn,
               })
               s.updateSessionState.run({
                 id: sess.id,
@@ -283,7 +315,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             for (const sess of sessions) {
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
-                max_turn: number
+                max_turn: number | null
               }
               s.insertMessage.run({
                 session_id: sess.id,
@@ -308,6 +340,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 output_tokens: null,
                 cache_read_tokens: null,
                 cache_write_tokens: null,
+              })
+              updateSessionSummaryAfterInsert(s, {
+                session_id: sess.id,
+                role: 'assistant',
+                tool_calls: null,
+                timestamp: nowMs / 1000,
+                turn_number: agg.max_turn,
               })
               // Resolve the (expired) approval row(s) atomically with the state
               // flip so PHASE 2's load_all_pending_approvals can't resurrect them.
@@ -411,9 +450,10 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             cache_read_tokens: op.payload.cache_read_tokens ?? null,
             cache_write_tokens: op.payload.cache_write_tokens ?? null,
           })
+          updateSessionSummaryAfterInsert(s, op.payload)
           s.updateSessionCounters.run({
             id: op.payload.session_id,
-            message_count_delta: 1,
+            message_count_delta: 0,
             tool_call_count_delta: op.payload.role === 'assistant' && op.payload.tool_calls ? 1 : 0,
             input_tokens_delta: 0,
             output_tokens_delta: 0,
@@ -453,9 +493,10 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             cache_read_tokens: op.message.cache_read_tokens ?? null,
             cache_write_tokens: op.message.cache_write_tokens ?? null,
           })
+          updateSessionSummaryAfterInsert(s, op.message)
           s.updateSessionCounters.run({
             id: op.message.session_id,
-            message_count_delta: 1,
+            message_count_delta: 0,
             tool_call_count_delta: op.message.role === 'assistant' && op.message.tool_calls ? 1 : 0,
             input_tokens_delta: 0,
             output_tokens_delta: 0,
@@ -508,6 +549,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               cache_write_tokens: m.cache_write_tokens ?? null,
             })
           }
+          s.recomputeSessionMessageSummary.run({ id: op.sessionId })
         })
         tx.immediate()
         return { ok: true, count: op.messages.length }
@@ -544,6 +586,50 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return persisted
     }
 
+    case 'load_session_message_page': {
+      const sessionRow = s.selectSessionBySessionKey.get(op.sessionKey) as SessionRow | undefined
+      if (!sessionRow) return null
+      const limit =
+        op.limit === undefined ? -1 : Number.isInteger(op.limit) && op.limit > 0 ? op.limit : 0
+      const messageRows =
+        op.afterTurn !== undefined
+          ? s.selectMessagesBySessionTurnsAfter.all({
+              session_id: sessionRow.id,
+              after_turn: op.afterTurn,
+              limit,
+            })
+          : op.beforeTurn !== undefined
+            ? s.selectMessagesBySessionTurnsBefore.all({
+                session_id: sessionRow.id,
+                before_turn: op.beforeTurn,
+                limit,
+              })
+            : s.selectMessagesBySessionNewestTurns.all({
+                session_id: sessionRow.id,
+                limit,
+              })
+      const bounds = s.selectSessionTurnBounds.get({ session_id: sessionRow.id }) as
+        | {
+            first_turn_number: number | null
+            last_turn_number: number | null
+          }
+        | undefined
+      const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
+        | PendingApprovalRow
+        | undefined
+      return {
+        session: sessionRow,
+        messages: messageRows as PersistedSessionMessagePage['messages'],
+        pending_approval: pendingRow
+          ? { request_id: pendingRow.request_id, tool_name: pendingRow.tool_name }
+          : null,
+        total_turns: sessionRow.turn_count ?? 0,
+        first_turn_number: bounds?.first_turn_number ?? null,
+        last_turn_number: bounds?.last_turn_number ?? null,
+        last_activity_at: sessionRow.last_activity_at ?? sessionRow.started_at,
+      } satisfies PersistedSessionMessagePage
+    }
+
     case 'list_sessions_by_prefix': {
       const pattern = `${op.sessionKeyPrefix}%`
       const sessionRows = s.selectSessionsByPrefix.all(pattern) as SessionRow[]
@@ -560,14 +646,85 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return result
     }
 
+    case 'list_session_summaries_by_prefix': {
+      const prefixStart = op.sessionKeyPrefix
+      const prefixCharacters = Array.from(op.sessionKeyPrefix)
+      const finalCodePoint = prefixCharacters.at(-1)?.codePointAt(0)
+      if (finalCodePoint === undefined || finalCodePoint >= 0x10ffff) {
+        throw new Error('Session key prefix must have a finite lexicographic upper bound')
+      }
+      const prefixEnd = `${prefixCharacters
+        .slice(0, -1)
+        .join('')}${String.fromCodePoint(finalCodePoint + 1)}`
+      const agentScoped = op.agentScoped === true
+      const limit =
+        op.limit === undefined ? -1 : Number.isInteger(op.limit) && op.limit > 0 ? op.limit : 0
+      const rows = s.selectSessionSummariesByPrefix.all({
+        prefix_start: prefixStart,
+        prefix_end: prefixEnd,
+        user_id: op.userId,
+        agent_scoped: agentScoped ? 1 : 0,
+        limit,
+        cursor_updated_at: op.cursorUpdatedAt ?? null,
+        cursor_key: op.cursorKey ?? null,
+      }) as Array<
+        SessionRow & {
+          summary_last_activity_at: number
+          summary_turn_count: number
+          pending_request_id: string | null
+          pending_tool_name: string | null
+        }
+      >
+      return rows.map(row => {
+        const {
+          summary_last_activity_at,
+          summary_turn_count,
+          pending_request_id,
+          pending_tool_name,
+          ...session
+        } = row
+        return {
+          session: session as SessionRow,
+          last_activity_at: summary_last_activity_at,
+          turn_count: summary_turn_count,
+          pending_approval:
+            pending_request_id && pending_tool_name
+              ? { request_id: pending_request_id, tool_name: pending_tool_name }
+              : null,
+        } satisfies PersistedSessionSummary
+      })
+    }
+
     case 'load_all_pending_approvals': {
       const rows = s.selectPendingApprovalsAll.all() as Array<
-        PendingApprovalRow & { session_key: string }
+        PendingApprovalRow & {
+          session_key: string
+          session_user_id: string | null
+          session_channel_type: string | null
+          session_channel_id: string | null
+          session_thread_id: string | null
+        }
       >
       const out: LoadAllPendingApprovalsRow[] = []
       for (const row of rows) {
-        const { session_key, ...approval } = row
-        out.push({ approval: approval as PendingApprovalRow, session_key })
+        const {
+          session_key,
+          session_user_id,
+          session_channel_type,
+          session_channel_id,
+          session_thread_id,
+          ...approval
+        } = row
+        out.push({
+          approval: approval as PendingApprovalRow,
+          session_key,
+          ownership: {
+            user_id: session_user_id,
+            channel_type: session_channel_type,
+            channel_id: session_channel_id,
+            thread_id: session_thread_id,
+          },
+        })
       }
       return out
     }

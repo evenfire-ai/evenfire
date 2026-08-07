@@ -25,6 +25,7 @@ type BindingViolation = {
     | 'recipe_token_host_ref_mismatch'
     | 'recipe_token_missing_canonical_task_id'
     | 'recipe_token_missing_llm_secret_name'
+    | 'recipe_token_invalid_sdk_usage_binding'
     | 'unrecognized_token_binding'
 }
 
@@ -125,14 +126,23 @@ function checkClaimBinding(
       if (recipeName !== claims.recipeName) {
         return { index: i, reason: 'recipe_token_recipe_name_mismatch' }
       }
-      if (sourceKind !== 'workflow') {
+      if (sourceKind === 'workflow') {
+        if (!UUID_PREFIX_REGEX.test(taskId)) {
+          return { index: i, reason: 'recipe_token_missing_canonical_task_id' }
+        }
+        if (!llmSecretName) {
+          return { index: i, reason: 'recipe_token_missing_llm_secret_name' }
+        }
+      } else if (
+        !['unknown', 'plugin_workload_sdk'].includes(String(sourceKind)) ||
+        (e as { channel_type?: unknown }).channel_type !== 'plugin_workload_sdk' ||
+        taskId ||
+        !llmSecretName ||
+        typeof (e as { prompt_bridge_metadata?: unknown }).prompt_bridge_metadata !== 'object' ||
+        (e as { prompt_bridge_metadata?: { invocation_id?: unknown } }).prompt_bridge_metadata
+          ?.invocation_id === undefined
+      ) {
         return { index: i, reason: 'recipe_token_non_workflow_source' }
-      }
-      if (!UUID_PREFIX_REGEX.test(taskId)) {
-        return { index: i, reason: 'recipe_token_missing_canonical_task_id' }
-      }
-      if (!llmSecretName) {
-        return { index: i, reason: 'recipe_token_missing_llm_secret_name' }
       }
     }
 
@@ -265,7 +275,11 @@ export function createInternalUsageEventsRouter(): Router {
         const workflowBinding = await checkWorkflowRunBinding(events, req.mcpHostJwt!, db)
         if (workflowBinding.violation) return { violation: workflowBinding.violation }
 
-        const ingest = await ingestUsageEventsInTransaction(events, db)
+        const ingest = await ingestUsageEventsInTransaction(events, db, {
+          recipeNamespace: req.mcpHostJwt!.recipeNamespace,
+          recipeName: req.mcpHostJwt!.recipeName,
+        })
+        if (ingest.bindingViolation) return { violation: ingest.bindingViolation }
         await projectAcceptedUsageEvents(db, ingest.acceptedEvents, workflowBinding.bindings, {
           recipeNamespace: req.mcpHostJwt!.recipeNamespace,
           recipeName: req.mcpHostJwt!.recipeName,

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('../src/db.js', () => ({
-  pool: {
-    query: vi.fn(),
-  },
-}))
+vi.mock('../src/db.js', () => {
+  const pool = { query: vi.fn() }
+  return {
+    pool,
+    withTransaction: vi.fn(async (fn: (db: typeof pool) => unknown) => fn(pool)),
+  }
+})
 
 const { pool } = await import('../src/db.js')
 const { acknowledgeDesktopNotificationDelivery } =
@@ -23,6 +25,8 @@ describe('notificationAckService', () => {
         rowCount: 1,
         rows: [{ invocationId: '33333333-3333-3333-3333-333333333333' }],
       } as never)
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] } as never)
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ attempt_generation: 1 }] } as never)
       .mockResolvedValueOnce({ rowCount: 1, rows: [] } as never)
 
     const result = await acknowledgeDesktopNotificationDelivery(
@@ -43,6 +47,7 @@ describe('notificationAckService', () => {
       '33333333-3333-3333-3333-333333333333',
       'delivered',
       true,
+      0,
       'accepted',
     ])
   })

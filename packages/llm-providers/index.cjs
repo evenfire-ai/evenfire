@@ -52,6 +52,15 @@ const PROVIDER_IDS = Object.freeze([
   'azure',
 ])
 
+// Model identifiers are transport selectors, not arbitrary user text. Keep
+// one executable grammar shared by authoring, WRC admission and mcp-host.
+const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH = 128
+const RUNNABLE_LLM_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
+
+function isRunnableLlmModelId(value) {
+  return typeof value === 'string' && RUNNABLE_LLM_MODEL_ID_PATTERN.test(value)
+}
+
 /** A single-API-key slot: `<provider>-api-key` → `<PROVIDER>_API_KEY`. */
 function apiKeySlot(dataKey, envName) {
   return Object.freeze([Object.freeze({ dataKey, envName, required: true })])
@@ -182,10 +191,33 @@ function isLlmProviderId(s) {
   return typeof s === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_CREDENTIAL_SLOTS, s)
 }
 
+/**
+ * Whether a policy credentialSlot is a valid operator-owned slot for a
+ * provider. Single, single-line API-key providers may use additive suffixed
+ * slots (for example `openai-api-key-fallback-a`); multi-slot providers and
+ * multiline credentials must use one of their canonical slots exactly.
+ */
+function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
+  if (!isLlmProviderId(provider) || typeof credentialSlot !== 'string') return false
+  const slots = PROVIDER_CREDENTIAL_SLOTS[provider]
+  const canonical = slots.map(slot => slot.dataKey)
+  const singleSlotProvider = slots.length === 1 && slots[0].multiline !== true
+  if (singleSlotProvider) {
+    return canonical.some(
+      dataKey => credentialSlot === dataKey || credentialSlot.startsWith(`${dataKey}-`)
+    )
+  }
+  return canonical.includes(credentialSlot)
+}
+
 module.exports = {
   PROVIDER_IDS,
+  RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
+  RUNNABLE_LLM_MODEL_ID_PATTERN,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_NON_SECRET_ENV,
+  isCredentialSlotOwnedByProvider,
   isLlmProviderId,
+  isRunnableLlmModelId,
 }

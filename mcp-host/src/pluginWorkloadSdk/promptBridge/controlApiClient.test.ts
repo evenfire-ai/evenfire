@@ -11,6 +11,30 @@ const promptBody = {
   idempotencyKey: 'k1',
   messages: [{ role: 'user', content: 'hi' }],
 }
+const target = {
+  targetRef: 'primary-zai',
+  provider: 'zai',
+  model: 'glm-5.1',
+  credentialSlot: 'zai-api-key',
+}
+
+function authorizedBody(invocationId: string) {
+  return {
+    contractVersion: 2,
+    invocationId,
+    replay: false,
+    providerCallRequired: true,
+    status: 'in_progress',
+    model: target.model,
+    modelPolicy: null,
+    selectedTarget: target,
+    authorizedTargets: [target],
+    attemptGeneration: 1,
+    policyRevision: 2,
+    policyHash: 'a'.repeat(64),
+    maxOutputTokens: null,
+  }
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -32,21 +56,12 @@ function makeClient(fetchImpl: typeof fetch, breaker?: CircuitBreaker) {
 
 describe('PluginWorkloadSdkControlApiClient', () => {
   it('posts to the gateway with the mcp-host bearer token', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(201, {
-        invocationId: 'inv-1',
-        replay: false,
-        status: 'in_progress',
-        model: null,
-        modelPolicy: null,
-        maxOutputTokens: null,
-      })
-    )
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
     const result = await client.authorizePromptBridge(promptBody)
     expect(result.invocationId).toBe('inv-1')
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge')
+    expect(url).toBe('http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2')
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer jwt-access')
   })
 
@@ -64,6 +79,206 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1) // 4xx is not retried
   })
 
+  it('accepts identity-only bootstrap before an operator grant exists', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'missing',
+        policyRevision: 0,
+        policyHash: null,
+        defaultTargetRef: null,
+        defaultProvider: null,
+        defaultModel: null,
+        v2Ready: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(client.verifyPromptBridgeBootstrapV2('openai', 'gpt-5.4-mini')).resolves.toEqual({
+      ready: true,
+      contractVersion: 2,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      policyReady: false,
+      policyState: 'missing',
+      policyReason: 'grant_missing',
+      clientNotificationsPolicyReady: false,
+      clientNotificationsPolicyState: 'missing',
+      clientNotificationsPolicyReason: 'grant_missing',
+    })
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/capabilities',
+      expect.objectContaining({ method: 'GET' })
+    )
+  })
+
+  it('keeps request-time policy readiness separate from identity bootstrap', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'missing',
+        policyRevision: 0,
+        policyHash: null,
+        defaultTargetRef: null,
+        defaultProvider: null,
+        defaultModel: null,
+        v2Ready: false,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(client.ensurePromptBridgeCapabilities()).rejects.toMatchObject({
+      code: 'provider_policy_denied',
+      retryable: false,
+    })
+  })
+
+  it('proves provider-free clientNotifications readiness from the capabilities contract', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'missing',
+        policyRevision: 0,
+        policyHash: null,
+        defaultTargetRef: null,
+        defaultProvider: null,
+        defaultModel: null,
+        v2Ready: false,
+        clientNotificationsPolicyState: 'active',
+        clientNotificationsReady: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(client.verifyClientNotificationsBootstrap()).resolves.toEqual({
+      ready: true,
+      contractVersion: 2,
+      policyReady: true,
+      policyState: 'active',
+    })
+  })
+
+  it('accepts a policy-only authorization envelope and leaves ticket issuance to the attempt path', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(client.authorizePromptBridge(promptBody)).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      authorizedTargets: [target],
+    })
+  })
+
+  it('rejects a response missing the v2 provider-call disposition', async () => {
+    const { providerCallRequired: _omitted, ...incompleteBody } =
+      authorizedBody('legacy-invocation')
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, incompleteBody))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(client.authorizePromptBridge(promptBody)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+    })
+  })
+
+  it('serializes provider and target selectors without supplying a host default', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(201, authorizedBody('inv-1')))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.authorizePromptBridge({
+      ...promptBody,
+      provider: 'zai',
+      model: 'glm-5.1',
+      targetRef: 'primary-zai',
+    })
+    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      provider: 'zai',
+      model: 'glm-5.1',
+      targetRef: 'primary-zai',
+    })
+  })
+
+  it('reissues a ticket bound to the authorized recipe, invocation, target, and policy snapshot', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        targetRef: target.targetRef,
+        credentialTicket: 'fresh-signed-ticket',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        expiresInSeconds: 60,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.reissuePromptBridgeCredentialTicket({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        target,
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+      })
+    ).resolves.toMatchObject({ credentialTicket: 'fresh-signed-ticket' })
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket'
+    )
+    expect(JSON.parse(String(init.body))).toEqual({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+      invocationId: 'inv-1',
+      targetRef: target.targetRef,
+      attemptGeneration: 1,
+    })
+  })
+
+  it('rejects a reissued ticket that does not match the original authorization snapshot', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        targetRef: 'different-target',
+        credentialTicket: 'fresh-signed-ticket',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        expiresInSeconds: 60,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(
+      client.reissuePromptBridgeCredentialTicket({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        target,
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: false })
+  })
+
   it('retries 5xx and returns provider_unavailable after exhausting retries', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(503, {}))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
@@ -78,16 +293,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     const fetchImpl = vi
       .fn()
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
-      .mockResolvedValueOnce(
-        jsonResponse(201, {
-          invocationId: 'inv-2',
-          replay: false,
-          status: 'in_progress',
-          model: null,
-          modelPolicy: null,
-          maxOutputTokens: null,
-        })
-      )
+      .mockResolvedValueOnce(jsonResponse(201, authorizedBody('inv-2')))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
     const result = await client.authorizePromptBridge(promptBody)
     expect(result.invocationId).toBe('inv-2')
@@ -117,14 +323,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
   })
 
   describe('refresh-on-401 (runtime-token durability)', () => {
-    const successBody = {
-      invocationId: 'inv-ok',
-      replay: false,
-      status: 'in_progress',
-      model: null,
-      modelPolicy: null,
-      maxOutputTokens: null,
-    }
+    const successBody = authorizedBody('inv-ok')
 
     function makeRefreshingClient(
       fetchImpl: typeof fetch,
@@ -201,12 +400,56 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     })
   })
 
-  it('reportInvocationStatus never throws (best-effort)', async () => {
+  it('reportInvocationStatus surfaces a rejected terminal acknowledgement', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(500, {}))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
     await expect(
-      client.reportInvocationStatus('inv-1', 'sandbox-recipes', 'r1', 'complete')
-    ).resolves.toBeUndefined()
+      client.reportInvocationStatus('inv-1', 'sandbox-recipes', 'r1', 'complete', 1)
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
+  })
+
+  it('finalizes one provider attempt with an idempotent exact usage receipt', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'complete',
+        outcome: 'exact',
+        idempotent: false,
+        usageAccepted: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const result = await client.finalizePromptBridge({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+      invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 1,
+      status: 'complete',
+      reason: 'provider_completed',
+      target,
+      usage: {
+        llmSecretName: 'zai-api-key',
+        callerRef: 'api',
+        fallbackUsed: false,
+        attemptCount: 1,
+        inputTokens: 3,
+        outputTokens: 4,
+      },
+    })
+    expect(result).toMatchObject({ outcome: 'exact', usageAccepted: true })
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize'
+    )
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'complete',
+      usage: { inputTokens: 3, outputTokens: 4 },
+    })
   })
 
   it('submitClientNotification maps event_type_not_allowed', async () => {

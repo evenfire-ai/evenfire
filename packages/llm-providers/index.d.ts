@@ -32,6 +32,15 @@ export declare const PROVIDER_IDS: readonly [
 /** Union of the canonical provider ids. */
 export type LlmProviderId = (typeof PROVIDER_IDS)[number]
 
+/** Maximum length accepted by all runnable provider/model selectors. */
+export declare const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH: 128
+
+/** Executable grammar for provider model identifiers. */
+export declare const RUNNABLE_LLM_MODEL_ID_PATTERN: RegExp
+
+/** Returns true when a model identifier is executable by the runtime contract. */
+export declare function isRunnableLlmModelId(value: unknown): value is string
+
 /**
  * One credential a provider loads from the K8s LLM Secret, mapped to a
  * shell-style env var name.
@@ -69,3 +78,13 @@ export declare const PROVIDER_NON_SECRET_ENV: Record<LlmProviderId, readonly Non
 
 /** Own-property (prototype-safe) guard for the canonical provider ids. */
 export declare function isLlmProviderId(s: unknown): s is LlmProviderId
+
+/**
+ * Returns whether a policy credential slot belongs to the provider. Additive
+ * suffixed slots are valid only for single, single-line API-key providers;
+ * multi-slot and multiline providers accept canonical slots only.
+ */
+export declare function isCredentialSlotOwnedByProvider(
+  provider: string,
+  credentialSlot: string,
+): boolean

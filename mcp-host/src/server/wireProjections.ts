@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Conversation, Turn } from '../core/types'
 import { getDisplayName } from '../progress/intentExtraction'
 import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from './types'
@@ -5,6 +6,119 @@ import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from '
 // Wire projections: map a Conversation / Turn to the runtime API shapes served
 // by `/v1/runtime/sessions` and `/messages` (per-session + per-turn token
 // usage, and per-turn tool steps). Pure functions, unit-tested in isolation.
+
+type SessionTokenSource = Pick<
+  Conversation,
+  | 'input_tokens'
+  | 'output_tokens'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
+  | 'cacheTokensReported'
+>
+
+export interface SessionsCursor {
+  version: 1
+  scope: string
+  updatedAt: string
+  key: string
+}
+
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
+}
+
+export function sessionsCursorScope(userSub: string, agent?: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([userSub, agent ?? null]))
+    .digest('base64url')
+    .slice(0, 24)
+}
+
+export function decodeSessionsCursor(
+  cursor: string | undefined,
+  expectedScope?: string
+): SessionsCursor | null {
+  if (!cursor) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      version?: unknown
+      scope?: unknown
+      updatedAt?: unknown
+      key?: unknown
+    }
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.scope !== 'string' ||
+      parsed.scope.length === 0 ||
+      (expectedScope !== undefined && parsed.scope !== expectedScope) ||
+      typeof parsed.updatedAt !== 'string' ||
+      typeof parsed.key !== 'string' ||
+      parsed.key.length === 0 ||
+      !isCanonicalIsoTimestamp(parsed.updatedAt)
+    ) {
+      return null
+    }
+    return {
+      version: 1,
+      scope: parsed.scope,
+      updatedAt: parsed.updatedAt,
+      key: parsed.key,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function encodeSessionsCursor(updatedAt: string, key: string, scope = 'unscoped'): string {
+  return Buffer.from(JSON.stringify({ version: 1, scope, updatedAt, key }), 'utf8').toString(
+    'base64url'
+  )
+}
+
+export function paginateSessionSummaries<T extends { key: string; lastActivityAt: Date }>(
+  entries: T[],
+  limit: number | undefined,
+  encodeKey: (key: string) => string = key => key,
+  cursorScope = 'unscoped'
+): { page: T[]; nextCursor?: string } {
+  if (limit === undefined) return { page: entries }
+  const page = entries.slice(0, limit)
+  const last = page.at(-1)
+  return {
+    page,
+    ...(entries.length > page.length && last
+      ? {
+          nextCursor: encodeSessionsCursor(
+            last.lastActivityAt.toISOString(),
+            encodeKey(last.key),
+            cursorScope
+          ),
+        }
+      : {}),
+  }
+}
+
+export function projectMessageWindowBounds(
+  turns: Array<{ number: number }>,
+  bounds: { firstTurnNumber?: number; lastTurnNumber?: number },
+  _query: { beforeTurn?: number; afterTurn?: number }
+) {
+  const oldestTurnNumber = turns[0]?.number
+  const latestTurnNumber = turns.at(-1)?.number
+  return {
+    oldestTurnNumber,
+    latestTurnNumber,
+    hasMoreBefore:
+      bounds.firstTurnNumber !== undefined &&
+      oldestTurnNumber !== undefined &&
+      oldestTurnNumber > bounds.firstTurnNumber,
+    hasMoreAfter:
+      bounds.lastTurnNumber !== undefined &&
+      latestTurnNumber !== undefined &&
+      latestTurnNumber < bounds.lastTurnNumber,
+  }
+}
 
 /**
  * Project a Conversation's lifetime token mirror into the wire shape served by
@@ -16,7 +130,9 @@ import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from '
  * cache hit" (Anthropic) from "absent because the provider doesn't report
  * cache" (OpenAI / zai / bailian).
  */
-export function projectSessionTokens(conversation: Conversation): SessionTokensWire | undefined {
+export function projectSessionTokens(
+  conversation: SessionTokenSource
+): SessionTokensWire | undefined {
   const hasTokens =
     !!conversation.input_tokens ||
     !!conversation.output_tokens ||

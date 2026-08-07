@@ -111,6 +111,31 @@ describe('WorkflowRecipe CRD snippet step schema', () => {
     expect(mcpServersSchema).toContain('maxItems: 20')
   })
 
+  it('admits the explicit stepless promptBridge binding and closes SDK-only workflow fields', () => {
+    const validations = readSchemaPath(workflowRecipeSchema, [
+      'properties',
+      'spec',
+      'x-kubernetes-validations',
+    ])
+    expect(Array.isArray(validations)).toBe(true)
+    const rules = (validations as Array<{ rule?: string; message?: string }>).map(validation =>
+      String(validation.rule ?? '')
+    )
+
+    expect(rules).toContain(
+      '!has(self.agent) || (has(self.steps) && size(self.steps) > 0) || (has(self.pluginWorkloadSdk) && has(self.pluginWorkloadSdk.promptBridge))'
+    )
+    expect(rules).toContain(
+      '!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))'
+    )
+    expect(crd).toContain(
+      'agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge'
+    )
+    expect(crd).toContain(
+      'spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
+    )
+  })
+
   it('keeps expensive step graph checks in control-api and WRC instead of CRD CEL', () => {
     expect(crd).not.toContain('s.dependsOn.all(dep, self.steps.exists(t, t.id == dep))')
     expect(crd).toContain('duplicate step IDs are not allowed')

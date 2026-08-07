@@ -40,6 +40,15 @@ type TokenUsagePayload = {
   cache_write_tokens: number
   cache_tokens_reported: boolean
   iteration?: number
+  prompt_bridge?: {
+    invocation_id: string
+    attempt_generation: number
+    target_ref: string
+    fallback_used: boolean
+    attempt_count: number
+    provider_attempt_id: string
+    provider_attempt_index: number
+  }
 }
 
 function sha256(value: string): string {
@@ -62,6 +71,22 @@ function tokenUsagePayload(usage: LlmUsageEvent): TokenUsagePayload {
     cache_write_tokens: usage.cache_write_tokens,
     cache_tokens_reported: usage.cache_tokens_reported,
     ...(usage.iteration === null ? {} : { iteration: usage.iteration }),
+    ...(usage.prompt_bridge_metadata?.invocation_id &&
+    usage.prompt_bridge_metadata.attempt_generation !== undefined &&
+    usage.prompt_bridge_metadata.provider_attempt_id &&
+    usage.prompt_bridge_metadata.provider_attempt_index !== undefined
+      ? {
+          prompt_bridge: {
+            invocation_id: usage.prompt_bridge_metadata.invocation_id,
+            attempt_generation: usage.prompt_bridge_metadata.attempt_generation,
+            target_ref: usage.prompt_bridge_metadata.target_ref,
+            fallback_used: usage.prompt_bridge_metadata.fallback_used,
+            attempt_count: usage.prompt_bridge_metadata.attempt_count,
+            provider_attempt_id: usage.prompt_bridge_metadata.provider_attempt_id!,
+            provider_attempt_index: usage.prompt_bridge_metadata.provider_attempt_index!,
+          },
+        }
+      : {}),
   }
 }
 
@@ -219,6 +244,55 @@ function pendingWorkflowUsageEvent(
       recipeName: binding.recipeName,
       teamId,
       actorHumanSub: humanActorId,
+      hostRef: context.hostRef,
+    },
+  })
+}
+
+/**
+ * SDK-only calls have no workflow run, but they still need a governed,
+ * invocation-anchored usage event. The server-issued invocation UUID is used
+ * as the run identity for this direct API lane; it is never supplied by the
+ * workload and is already bound to the recipe JWT and attempt receipt.
+ */
+function pendingSdkOnlyUsageEvent(
+  usage: LlmUsageEvent,
+  context: UsageProjectionContext,
+  now: () => Date,
+  newEventId: () => string
+): PendingGovernedEvent<'agent_run'> {
+  const metadata = usage.prompt_bridge_metadata
+  const invocationId = metadata?.invocation_id
+  if (!invocationId) {
+    throw new Error(`accepted SDK-only usage ${usage.request_id} has no invocation binding`)
+  }
+  return pendingTokenUsageEvent({
+    usage,
+    environment: context.environment ?? canonicalTracingEnvironment(),
+    now,
+    newEventId,
+    binding: {
+      runId: invocationId,
+      sessionId: null,
+      spanId: sha256(`plugin-sdk:${invocationId}:token-usage:${usage.request_id.toLowerCase()}`),
+      parentSpanId: sha256(`plugin-sdk:${invocationId}:root`),
+      origin: 'api',
+      identityIssuer: 'control-api',
+      actorHumanSub: null,
+      agentSub: `plugin-workload-sdk:${context.recipeNamespace}/${context.recipeName}`,
+      actorMedium: 'api',
+      approvalRequestId: null,
+      teamId: null,
+      userId: null,
+      recipeNamespace: context.recipeNamespace,
+      recipeName: context.recipeName,
+      hostRef: context.hostRef,
+    },
+    canonicalBinding: {
+      invocationId,
+      attemptGeneration: metadata.attempt_generation,
+      recipeNamespace: context.recipeNamespace,
+      recipeName: context.recipeName,
       hostRef: context.hostRef,
     },
   })
@@ -469,6 +543,10 @@ export async function projectAcceptedUsageEvents(
   }
 
   for (const usage of acceptedEvents) {
+    if (usage.source_kind === 'plugin_workload_sdk') {
+      pending.push(pendingSdkOnlyUsageEvent(usage, context, now, newEventId))
+      continue
+    }
     if (usage.source_kind === 'workflow') {
       const runId = usage.run_id?.toLowerCase()
       const binding = runId ? workflowBindings.get(runId) : undefined

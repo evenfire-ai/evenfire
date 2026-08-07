@@ -38,6 +38,8 @@ configurations:
 # Build local images with `eval $(minikube docker-env) && docker build -t
 # clerum/<svc>:test ./<svc>`. To roll a new local tag, change `newTag: test`
 # below in ONE place and re-render with `kubectl kustomize`.
+# Every entry below must have a matching row in deploy/images.json --
+# scripts/tests/test-images-manifest.sh enforces it.
 images:
   - name: clerum/channel-reader
     newTag: test

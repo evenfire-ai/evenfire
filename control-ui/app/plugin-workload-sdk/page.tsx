@@ -17,11 +17,14 @@ import {
   type PluginWorkloadSdkGrant,
   type PluginWorkloadSdkGrantInput,
   type PluginWorkloadSdkInvocation,
+  type PluginWorkloadSdkPromptTarget,
   type WorkflowRecipeResource,
   deletePluginWorkloadSdkGrant,
   getAdminUsers,
+  getPluginWorkloadSdkLegacyInventory,
   getRecipes,
   isSilentApiError,
+  listLlmHostSecrets,
   listPluginWorkloadSdkGrants,
   listWorkflowGrants,
   searchPluginWorkloadSdkInvocations,
@@ -31,17 +34,13 @@ import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
+  buildPromptBridgeTargetPolicy,
   getModelOptions,
+  getPromptBridgeCredentialSlotOptions,
   getProviderLabel,
-  inferProviderFromModels,
   normalizeProvider,
 } from '@lib/llm'
-import {
-  appendCustomPluginWorkloadSdkModel,
-  buildPluginWorkloadSdkModelOptions,
-  getCustomPluginWorkloadSdkModelError,
-  validateCustomPluginWorkloadSdkModel,
-} from '@lib/pluginWorkloadSdkModels'
+import { shouldApplyRecipePrefill } from '@lib/pluginWorkloadSdkPrefill'
 import { GrantsView, InvocationsView } from './Views'
 
 type SdkView = 'grants' | 'invocations'
@@ -128,6 +127,11 @@ export default function PluginWorkloadSdkPage() {
   const [grants, setGrants] = useState<PluginWorkloadSdkGrant[]>([])
   const [grantsLoading, setGrantsLoading] = useState(true)
   const [grantsError, setGrantsError] = useState('')
+  const [legacyInventory, setLegacyInventory] = useState<Awaited<
+    ReturnType<typeof getPluginWorkloadSdkLegacyInventory>
+  > | null>(null)
+  const [legacyInventoryLoading, setLegacyInventoryLoading] = useState(true)
+  const [legacyInventoryError, setLegacyInventoryError] = useState('')
   const [grantSearch, setGrantSearch] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editing, setEditing] = useState<PluginWorkloadSdkGrant | 'new' | null>(null)
@@ -180,19 +184,46 @@ export default function PluginWorkloadSdkPage() {
   const loadGrants = useCallback(async () => {
     setGrantsLoading(true)
     setGrantsError('')
+    setLegacyInventoryLoading(true)
+    setLegacyInventoryError('')
     try {
       const r = await listPluginWorkloadSdkGrants()
       const items = (r.items || []) as PluginWorkloadSdkGrant[]
       setGrants(items)
+      try {
+        const inventory = await getPluginWorkloadSdkLegacyInventory()
+        setLegacyInventory(inventory)
+      } catch (e) {
+        setLegacyInventory(null)
+        setLegacyInventoryError(
+          isSilentApiError(e)
+            ? 'SDK migration inventory could not be verified; refresh after signing in again.'
+            : e instanceof Error
+              ? e.message
+              : 'Failed to load SDK migration inventory'
+        )
+      } finally {
+        setLegacyInventoryLoading(false)
+      }
       const userRefs = items.flatMap(grant => grant.allowedUserRefs)
       void fetchUsersByRefs(userRefs)
         .then(mergeLoadedUsers)
         .catch(() => undefined)
     } catch (e) {
-      if (isSilentApiError(e)) return
-      setGrantsError(e instanceof Error ? e.message : 'Failed to load grants')
+      setGrantsError(
+        isSilentApiError(e)
+          ? 'SDK grants could not be verified; refresh after signing in again.'
+          : e instanceof Error
+            ? e.message
+            : 'Failed to load grants'
+      )
+      setLegacyInventoryLoading(false)
     } finally {
       setGrantsLoading(false)
+      // Inventory is a safety prerequisite independent of the grants request;
+      // never leave the page in an apparently loading-but-editable state when
+      // the inventory request failed or the grants request short-circuited.
+      setLegacyInventoryLoading(false)
     }
   }, [mergeLoadedUsers])
 
@@ -280,7 +311,12 @@ export default function PluginWorkloadSdkPage() {
                     onChange={setGrantSearch}
                     placeholder="Search grants"
                     ariaLabel="Search grants"
-                    disabled={grantsInitialLoad}
+                    disabled={
+                      grantsInitialLoad ||
+                      legacyInventoryLoading ||
+                      Boolean(legacyInventoryError) ||
+                      Boolean(grantsError)
+                    }
                   />
                   <Button
                     type="button"
@@ -308,7 +344,12 @@ export default function PluginWorkloadSdkPage() {
                     variant="primary"
                     size="sm"
                     onClick={() => setEditing('new')}
-                    disabled={grantsInitialLoad}
+                    disabled={
+                      grantsInitialLoad ||
+                      legacyInventoryLoading ||
+                      Boolean(legacyInventoryError) ||
+                      Boolean(grantsError)
+                    }
                   >
                     New grant
                   </Button>
@@ -339,6 +380,9 @@ export default function PluginWorkloadSdkPage() {
             error={grantsError}
             deletingId={deletingId}
             userMap={userMap}
+            legacyInventory={legacyInventory}
+            legacyInventoryLoading={legacyInventoryLoading}
+            legacyInventoryError={legacyInventoryError}
             onEdit={setEditing}
             onDelete={handleDelete}
           />
@@ -396,24 +440,20 @@ function GrantFormModal({
     grant?.capabilityFamily ?? 'promptBridge'
   )
   const { models: allowedCatalog } = useLlmAllowedModels()
-  // Prefer the grant's explicit provider (R1), then the recipe spec's provider.
-  const providerExplicit = Boolean(grant?.provider) || Boolean(initialRecipeInfo?.provider)
   const [modelProvider, setModelProvider] = useState<LlmProvider>(
     (grant?.provider ? normalizeProvider(grant.provider) : undefined) ??
       initialRecipeInfo?.provider ??
       LLM_PROVIDER_OPTIONS[0].value
   )
-  // Legacy grants have neither an explicit nor a recipe provider — infer it from
-  // the allowed models once the allowlist loads, so the picklist filters to the
-  // right provider. One-shot, and never overrides an explicit source.
-  const didInferProviderRef = useRef(false)
-  useEffect(() => {
-    if (providerExplicit || didInferProviderRef.current || allowedCatalog.length === 0) return
-    didInferProviderRef.current = true
-    setModelProvider(inferProviderFromModels(grant?.allowedModels ?? [], allowedCatalog))
-  }, [providerExplicit, allowedCatalog, grant?.allowedModels])
-  const [allowedModels, setAllowedModels] = useState<string[]>(grant?.allowedModels ?? [])
-  const [customModel, setCustomModel] = useState('')
+  // Legacy grants deliberately start empty: they must be explicitly migrated by
+  // an operator, never inferred from a flat provider/model list.
+  const [promptTargets, setPromptTargets] = useState<PluginWorkloadSdkPromptTarget[]>(
+    grant?.promptTargets ?? []
+  )
+  const [targetRef, setTargetRef] = useState('')
+  const [targetModel, setTargetModel] = useState('')
+  const [credentialSlot, setCredentialSlot] = useState('')
+  const [availableCredentialKeys, setAvailableCredentialKeys] = useState<string[]>([])
   const [allowedEventTypes, setAllowedEventTypes] = useState(
     (grant?.allowedEventTypes ?? []).join(', ')
   )
@@ -424,6 +464,11 @@ function GrantFormModal({
   const [allowedCallers, setAllowedCallers] = useState((grant?.allowedCallers ?? []).join(', '))
   const [users, setUsers] = useState<AdminUser[]>([])
   const [userSearch, setUserSearch] = useState('')
+  // Recipe prefill resolves the access grant asynchronously. Keep that
+  // response from overwriting an operator's explicit recipient choice when
+  // the request finishes after the user has opened the picker.
+  const recipePrefillRequest = useRef(0)
+  const allowedUserRefsEdited = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -450,6 +495,27 @@ function GrantFormModal({
       cancelled = true
     }
   }, [allowedUserRefs])
+  useEffect(() => {
+    let cancelled = false
+    listLlmHostSecrets()
+      .then(result => {
+        if (cancelled) return
+        setAvailableCredentialKeys(
+          Array.from(new Set((result.items ?? []).flatMap(item => item.keys ?? []))).sort((a, b) =>
+            a.localeCompare(b)
+          )
+        )
+      })
+      .catch(() => {
+        // The save endpoint remains the source of truth. Without a readable
+        // key-name catalog we fail closed in this form rather than asking an
+        // operator to type a potentially unrelated slot.
+        if (!cancelled) setAvailableCredentialKeys([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [maxRequestsPerRun, setMaxRequestsPerRun] = useState(
     grant?.quotaLimits.maxRequestsPerRun?.toString() ?? ''
   )
@@ -474,6 +540,8 @@ function GrantFormModal({
   // users from the recipe's access grant — so the operator configures access
   // once and the notify allowlist defaults to it (narrowable, security kept).
   async function applyRecipePrefill(key: string) {
+    const requestId = ++recipePrefillRequest.current
+    allowedUserRefsEdited.current = false
     setRecipeKey(key)
     const info = sdkRecipes.find(r => `${r.namespace}/${r.name}` === key)
     if (!info) return
@@ -485,21 +553,43 @@ function GrantFormModal({
     if (info.provider) {
       setModelProvider(info.provider)
     }
-    setAllowedModels(info.allowedModels)
-    setCustomModel('')
+    // Recipe metadata only pre-fills a *new* reviewed target draft. It does
+    // not turn legacy grant data into an implicit routing policy.
+    setTargetModel(info.allowedModels[0] ?? '')
+    setTargetRef('')
+    setCredentialSlot('')
     try {
       const res = await listWorkflowGrants(info.namespace, info.name)
+      // A later recipe selection invalidates this response. Once the operator
+      // edits the picker, preserve that explicit decision instead of applying
+      // a stale/default access grant over it.
+      if (
+        !shouldApplyRecipePrefill(
+          requestId,
+          recipePrefillRequest.current,
+          allowedUserRefsEdited.current
+        )
+      )
+        return
       setAllowedUserRefs((res.items ?? []).map(u => u.id))
     } catch {
       // Best-effort: leave users empty if the access grant can't be read.
     }
   }
 
-  const modelsList = allowedModels
+  function handleAllowedUserRefsChange(next: string[]) {
+    allowedUserRefsEdited.current = true
+    setAllowedUserRefs(next)
+  }
+
   const eventTypesList = parseList(allowedEventTypes)
   const callersList = parseList(allowedCallers)
   const wildcardPresent =
-    hasWildcard(modelsList) ||
+    promptTargets.some(target =>
+      [target.targetRef, target.provider, target.model, target.credentialSlot].some(value =>
+        value.includes('*')
+      )
+    ) ||
     hasWildcard(eventTypesList) ||
     hasWildcard(parseList(allowedTargetRefs)) ||
     hasWildcard(callersList)
@@ -508,20 +598,10 @@ function GrantFormModal({
     () => getModelOptions(allowedCatalog, modelProvider),
     [allowedCatalog, modelProvider]
   )
-  const modelOptions = useMemo(
-    () =>
-      buildPluginWorkloadSdkModelOptions(allowedCatalog, modelProvider, allowedModels).map(
-        model => ({
-          value: model,
-          label: model,
-          description: providerModelOptions.includes(model) ? undefined : 'Configured custom model',
-          badge: getProviderLabel(modelProvider),
-        })
-      ),
-    [allowedCatalog, allowedModels, modelProvider, providerModelOptions]
+  const credentialSlotOptions = useMemo(
+    () => getPromptBridgeCredentialSlotOptions(modelProvider, availableCredentialKeys),
+    [availableCredentialKeys, modelProvider]
   )
-  const customModelValidation = validateCustomPluginWorkloadSdkModel(customModel, allowedModels)
-  const customModelError = getCustomPluginWorkloadSdkModelError(customModel, allowedModels)
   const userOptions = useMemo(
     () =>
       users.map(user => ({
@@ -532,13 +612,13 @@ function GrantFormModal({
     [users]
   )
   const eventTypesMissing = family === 'clientNotifications' && eventTypesList.length === 0
-  const modelsMissing = family === 'promptBridge' && modelsList.length === 0
+  const targetsMissing = family === 'promptBridge' && promptTargets.length === 0
   const callersMissing = callersList.length === 0
   const canSubmit =
     Boolean(recipeNamespace.trim() && recipeName.trim()) &&
     !wildcardPresent &&
     !eventTypesMissing &&
-    !modelsMissing &&
+    !targetsMissing &&
     !callersMissing &&
     !submitting
 
@@ -565,19 +645,25 @@ function GrantFormModal({
         quotaLimits.maxOutputTokens = grant.quotaLimits.maxOutputTokens
     }
 
+    const routingPolicy =
+      family === 'promptBridge' ? buildPromptBridgeTargetPolicy(promptTargets) : undefined
     const payload: PluginWorkloadSdkGrantInput = {
       recipeNamespace: recipeNamespace.trim(),
       recipeName: recipeName.trim(),
       capabilityFamily: family,
       // R1: persist the explicit provider (control-api requires it for
       // promptBridge). Omitted for clientNotifications, which has no model.
-      provider: family === 'promptBridge' ? modelProvider : undefined,
-      allowedModels: family === 'promptBridge' ? modelsList : [],
+      provider: routingPolicy?.provider,
+      // Retained only as legacy inventory metadata; runtime selection uses the
+      // ordered targets below and never falls back to this flat list.
+      allowedModels: routingPolicy?.allowedModels ?? [],
       allowedEventTypes: family === 'clientNotifications' ? eventTypesList : [],
       allowedTargetRefs: family === 'clientNotifications' ? parseList(allowedTargetRefs) : [],
       allowedUserRefs: family === 'clientNotifications' ? allowedUserRefs : [],
       allowedCallers: callersList,
       quotaLimits,
+      promptTargets: routingPolicy?.promptTargets,
+      defaultTargetRef: routingPolicy?.defaultTargetRef,
     }
     // Edit mode: preserve modelPolicies, which the form does not expose, so the
     // full-column upsert does not wipe policies configured outside this form.
@@ -595,10 +681,40 @@ function GrantFormModal({
     }
   }
 
-  function addCustomModel() {
-    if (!customModelValidation.ok) return
-    setAllowedModels(current => appendCustomPluginWorkloadSdkModel(current, customModel))
-    setCustomModel('')
+  function addPromptTarget() {
+    const model = targetModel.trim()
+    const slot = credentialSlot.trim()
+    const ref = targetRef.trim() || `${modelProvider}-${model}-${promptTargets.length + 1}`
+    if (!model || !slot || !ref) return
+    if (
+      promptTargets.some(
+        target =>
+          target.targetRef === ref || (target.provider === modelProvider && target.model === model)
+      )
+    ) {
+      setError('Each promptBridge target must have a unique ref and provider/model pair.')
+      return
+    }
+    setPromptTargets(current => [
+      ...current,
+      { targetRef: ref, provider: modelProvider, model, credentialSlot: slot },
+    ])
+    setTargetRef('')
+    setTargetModel('')
+    setCredentialSlot('')
+    setError('')
+  }
+
+  function moveTarget(index: number, direction: -1 | 1) {
+    const nextIndex = index + direction
+    if (nextIndex < 0 || nextIndex >= promptTargets.length) return
+    setPromptTargets(current => {
+      const next = [...current]
+      const currentTarget = next[index]!
+      next[index] = next[nextIndex]!
+      next[nextIndex] = currentTarget
+      return next
+    })
   }
 
   return (
@@ -688,9 +804,9 @@ function GrantFormModal({
             {family === 'promptBridge' ? (
               <FormSection title="promptBridge policy">
                 <Field
-                  label="Provider"
+                  label="Target provider"
                   htmlFor="sdk-provider"
-                  description="Must match the provider bound to the recipe's mcp-host. promptBridge can only use models from this provider."
+                  description="Add one reviewed target at a time. The first target is the default and later targets are the only permitted fallback order."
                 >
                   <SelectInput
                     id="sdk-provider"
@@ -699,13 +815,8 @@ function GrantFormModal({
                     onChange={e => {
                       const next = normalizeProvider(e.target.value)
                       setModelProvider(next)
-                      // Unknown custom models are provider-scoped by this form:
-                      // if the provider changes, the operator must re-add the
-                      // exact configured model for the new provider.
-                      setAllowedModels(prev =>
-                        prev.filter(model => getModelOptions(allowedCatalog, next).includes(model))
-                      )
-                      setCustomModel('')
+                      setTargetModel('')
+                      setCredentialSlot('')
                     }}
                   >
                     {LLM_PROVIDER_OPTIONS.map(option => (
@@ -716,53 +827,116 @@ function GrantFormModal({
                   </SelectInput>
                 </Field>
                 <Field
-                  label="Allowed models"
-                  htmlFor="sdk-models"
+                  label="Target model"
+                  htmlFor="sdk-target-model"
                   required
-                  error={modelsMissing ? 'Select at least one model for promptBridge.' : undefined}
-                  description="Models the workload may request. Only explicitly selected models are allowed."
+                  error={
+                    targetsMissing
+                      ? 'Add at least one reviewed target for promptBridge.'
+                      : undefined
+                  }
+                  description="The model must be enabled for the selected provider."
                 >
-                  <SelectionDropdown
-                    id="sdk-models"
-                    value={allowedModels}
-                    onChange={setAllowedModels}
-                    options={modelOptions}
-                    placeholder="Select approved models"
-                    searchPlaceholder="Search models..."
-                    selectionLabel="Selected models"
-                    emptyLabel="No models for this provider."
-                  />
+                  <SelectInput
+                    id="sdk-target-model"
+                    compact
+                    value={targetModel}
+                    onChange={e => setTargetModel(e.target.value)}
+                  >
+                    <option value="">Select enabled model…</option>
+                    {providerModelOptions.map(model => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </Field>
+                <Field
+                  label="Credential slot"
+                  htmlFor="sdk-credential-slot"
+                  required
+                  description="Sanitized Secret data-key identity owned by this provider. Its value is never displayed or sent to the workload."
+                >
+                  <SelectInput
+                    id="sdk-credential-slot"
+                    compact
+                    value={credentialSlot}
+                    onChange={e => setCredentialSlot(e.target.value)}
+                  >
+                    <option value="">Select provider-owned slot…</option>
+                    {credentialSlotOptions.map(slot => (
+                      <option key={slot} value={slot}>
+                        {slot}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </Field>
+                <Field
+                  label="Target reference"
+                  htmlFor="sdk-target-ref"
+                  description="Stable caller-selectable identifier. Empty creates a deterministic local suggestion."
+                >
                   <div className="cu-sdk-custom-model-row">
                     <TextInput
-                      id="sdk-custom-model"
+                      id="sdk-target-ref"
                       compact
                       monospace
-                      value={customModel}
-                      onChange={e => setCustomModel(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          addCustomModel()
-                        }
-                      }}
-                      invalid={Boolean(customModelError)}
-                      aria-label="Configured model name"
-                      aria-invalid={Boolean(customModelError) || undefined}
-                      placeholder="configured-model-id"
+                      value={targetRef}
+                      onChange={e => setTargetRef(e.target.value)}
+                      aria-label="PromptBridge target reference"
+                      placeholder="primary-zai"
                     />
                     <Button
                       type="button"
                       size="sm"
-                      onClick={addCustomModel}
-                      disabled={!customModelValidation.ok}
+                      onClick={addPromptTarget}
+                      disabled={!targetModel.trim() || !credentialSlot.trim()}
                     >
-                      Add model
+                      Add target
                     </Button>
                   </div>
-                  {customModelError ? (
-                    <span className="cu-field__error">{customModelError}</span>
-                  ) : null}
                 </Field>
+                {promptTargets.length > 0 ? (
+                  <div className="cu-field__hint" aria-label="Ordered promptBridge targets">
+                    {promptTargets.map((target, index) => (
+                      <div key={target.targetRef} className="cu-sdk-custom-model-row">
+                        <code>
+                          {index === 0 ? 'default · ' : `fallback ${index} · `}
+                          {target.targetRef}: {getProviderLabel(target.provider as LlmProvider)} /{' '}
+                          {target.model} / {target.credentialSlot}
+                        </code>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => moveTarget(index, -1)}
+                          disabled={index === 0}
+                        >
+                          Up
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => moveTarget(index, 1)}
+                          disabled={index === promptTargets.length - 1}
+                        >
+                          Down
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setPromptTargets(current => current.filter((_, i) => i !== index))
+                          }
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </FormSection>
             ) : (
               <FormSection title="clientNotifications policy">
@@ -804,7 +978,7 @@ function GrantFormModal({
                   <SelectionDropdown
                     id="sdk-userrefs"
                     value={allowedUserRefs}
-                    onChange={setAllowedUserRefs}
+                    onChange={handleAllowedUserRefsChange}
                     onSearchQueryChange={setUserSearch}
                     options={userOptions}
                     placeholder="Select users…"

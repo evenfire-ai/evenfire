@@ -20,19 +20,32 @@
 #   clerum/workflow-plugin-sdk-e2e:test <- tests/e2e/fixtures/workflow-plugin-sdk-e2e/Dockerfile
 #
 # Usage:
-#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/build-images.sh [--skip-public] [--skip-uis] [--verify-only] [--only=<svc>]
+#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/build-images.sh [--skip-public] [--skip-uis] [--verify-only] [--public-only] [--only=<svc>]
 #
 # Options:
 #   --skip-public   Skip pulling/loading public images (postgres, redis, etc.)
 #   --skip-uis      Skip Control UI, Profile UI, and Desktop App images.
 #   --verify-only   Only verify image SHAs are present in minikube
+#   --public-only   Load only the public third-party images (postgres, redis,
+#                   nginx, ...) and build nothing. The IMAGE_SOURCE=ghcr path
+#                   needs them: no clerum build runs there to pull them in.
 #   --only=<svc>    Build only the image(s) whose tag matches the substring <svc>
 #                   (e.g. --only=control-api, --only=workflow-recipes). Skips
 #                   public-image pulls and manifest regeneration.
+#   --include-e2e-fixtures
+#                  --verify-only: also demand the two E2E-only fixtures
+#                  (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) in ghcr
+#                  mode. Only `make minikube-setup-e2e` builds them there, so
+#                  the default ghcr verify set leaves them out.
+#                  MINIKUBE_SEED_PROFILE=e2e implies this.
 #   --include-desktop-image
 #                  Include clerum/mcp-host-desktop:test in full builds.
 #   --include-playwright-mcp-image
 #                  Include the heavy playwright MCP image in full builds.
+#   --include-airtable-mcp-image
+#                  Include clerum/airtable-mcp-server:test in full builds. The
+#                  registry distributes this connector, so no default setup
+#                  needs it; the SEED_PROFILE=e2e demo McpServer instance does.
 #
 # Env:
 #   MINIKUBE_PRELOAD_BASE_IMAGES=false  Skip preloading Dockerfile base images
@@ -57,6 +70,19 @@
 #   MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE
 #                                      Published image to retag locally when
 #                                      Playwright MCP is explicitly enabled.
+#   MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true
+#                                      Include the optional local Airtable MCP
+#                                      image. MCP servers are distributed via
+#                                      the evenfire registry and installed on
+#                                      demand -- a registry install writes a
+#                                      fully-qualified imageRef the kubelet
+#                                      pulls, so nothing on the default path
+#                                      needs a locally loaded clerum/* alias.
+#                                      Only the SEED_PROFILE=e2e demo instance
+#                                      (deploy/overlays/minikube/instances-e2e/
+#                                      airtable-server.yaml) still names the
+#                                      local ref, and full-setup.sh sets this
+#                                      flag for exactly that case.
 # ======================================================================
 
 set -euo pipefail
@@ -69,6 +95,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 SKIP_PUBLIC=false
 VERIFY_ONLY=false
+PUBLIC_ONLY=false
 ONLY_SVC=""
 FAILED_IMAGES=()
 MINIKUBE_PRELOAD_BASE_IMAGES="${MINIKUBE_PRELOAD_BASE_IMAGES:-true}"
@@ -78,6 +105,7 @@ MINIKUBE_BUILD_DESKTOP_IMAGE="${MINIKUBE_BUILD_DESKTOP_IMAGE:-false}"
 MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE:-false}"
 MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE:-true}"
 MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE:-us-central1-docker.pkg.dev/your-gcp-project/clerum/playwright-server:latest}"
+MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE="${MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE:-false}"
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 
 case "${SKIP_UIS}" in
@@ -85,14 +113,85 @@ case "${SKIP_UIS}" in
   *) SKIP_UIS=false ;;
 esac
 
+# Which refs --verify-only checks. The BUILD path is unaffected: this script
+# always builds clerum/* locally when asked to build. In ghcr mode the cluster
+# runs ghcr.io/evenfire-ai/* refs (deploy/components/ghcr-images), so verifying
+# clerum/* would report "all images present" against images no pod references.
+#
+# This env var is only the FALLBACK for --verify-only. What a cluster actually
+# runs is decided by whichever writer last performed a full image acquisition,
+# and that is recorded in .image-manifest.json (see recorded_image_source
+# below). Trusting the env default here is what made `make minikube-verify-
+# images` report "25 of 28 images missing" on a healthy locally built cluster.
+IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
+case "$IMAGE_SOURCE" in
+  ghcr|local) ;;
+  *) echo "Unknown IMAGE_SOURCE: '${IMAGE_SOURCE}' (expected: ghcr | local)" >&2; exit 1 ;;
+esac
+GHCR_NAMESPACE="ghcr.io/evenfire-ai"
+# The committed pin is NOT read here. resolve_ghcr_tag below delegates to
+# image-mode.sh, which owns that read along with the recorded-tag precedence.
+
+# Written by this script's manifest writer and by pull-images.sh; read back by
+# --verify-only. Declared here, not next to the writer at the bottom, because
+# the verify path (which exits before the writer) needs it too.
+MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+
+# The mode the cluster's images were actually acquired in. Prints nothing when
+# the manifest is absent, unparseable, or records anything other than
+# ghcr|local -- callers then fall back to the IMAGE_SOURCE env var.
+#
+# ONE reader, shared with scripts/minikube/pre-gate-sync.sh through
+# scripts/minikube/image-mode.sh. A second copy here would let the verify path
+# and the pre-gate disagree about what the cluster is running, which is the
+# exact failure this key exists to prevent.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+
+recorded_image_source() {
+  image_mode_recorded_source "$PROJECT_DIR"
+}
+
+recorded_image_tag() {
+  image_mode_manifest_field "$PROJECT_DIR" 2
+}
+
+# The two E2E-only fixtures are built by `make minikube-setup-e2e` alone, which
+# sets SEED_PROFILE=e2e. Honour that as well as the explicit flag so a verify
+# run after an e2e setup checks what that setup actually built.
+INCLUDE_E2E_FIXTURES=false
+if [ "${MINIKUBE_SEED_PROFILE:-}" = "e2e" ]; then
+  INCLUDE_E2E_FIXTURES=true
+fi
+
+# The effective ghcr tag: the explicit MINIKUBE_IMAGE_TAG override, else the tag
+# the last acquisition RECORDED for this cluster, else the committed pin.
+#
+# The recorded tag is not optional here. It is the imageSource bug above with a
+# different field: `MINIKUBE_IMAGE_TAG=latest make minikube-setup` is the
+# documented bootstrap while no release tag exists on ghcr, and the NEXT shell
+# has no such variable. Resolving the committed pin there reported
+# "23 of 23 images missing!" against a cluster holding every :latest ref, and
+# told the operator to pull a tag that is not published at all.
+#
+# image_mode_tag applies exactly that precedence and is the resolver
+# pre-gate-sync.sh already uses; a second copy of the precedence in this file is
+# what let the two disagree, so this delegates instead of reimplementing it.
+resolve_ghcr_tag() {
+  image_mode_tag "$PROJECT_DIR"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --skip-public) SKIP_PUBLIC=true ;;
     --skip-uis) SKIP_UIS=true ;;
     --verify-only) VERIFY_ONLY=true ;;
+    --public-only) PUBLIC_ONLY=true ;;
     --only=*) ONLY_SVC="${arg#--only=}" ;;
+    --include-e2e-fixtures) INCLUDE_E2E_FIXTURES=true ;;
     --include-desktop-image) MINIKUBE_BUILD_DESKTOP_IMAGE=true ;;
     --include-playwright-mcp-image) MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true ;;
+    --include-airtable-mcp-image) MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true ;;
   esac
 done
 
@@ -104,6 +203,13 @@ if [ -n "$ONLY_SVC" ]; then
   fi
   if [[ "$ONLY_SVC" == *"playwright"* ]]; then
     MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true
+  fi
+  # Same self-enabling rule the two opt-in images above already use: naming an
+  # image in --only IS the opt-in. Without this, `--only=airtable-mcp-server`
+  # would print the "skipping the optional Airtable MCP image" warning and exit
+  # 0 having built nothing -- a silent no-op in the one place that asks for it.
+  if [[ "$ONLY_SVC" == *"airtable"* ]]; then
+    MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true
   fi
 fi
 
@@ -252,7 +358,9 @@ else
   log "Skipping docker-env; multi-node profiles use host builds plus 'minikube image load'"
 fi
 
-# All images built in this session
+# All images built in this session. Every entry here must have a matching
+# row in deploy/images.json (via localRef()) -- scripts/tests/test-images-
+# manifest.sh enforces it.
 ALL_IMAGES=(
   "clerum/host-context-controller:test"
   "clerum/workflow-recipes:test"
@@ -276,9 +384,6 @@ ALL_IMAGES=(
   "clerum/stdio-bridge:test"
   "clerum/control-ui:test"
   "clerum/profile-ui:test"
-  "clerum/airtable-mcp-server:test"
-  "clerum/web-search-mcp:v1"
-  "clerum/doc-generator-mcp:v1"
   "clerum/mock-mcp-server:test"
   "clerum/mock-stdio-mcp-server:test"
   "clerum/workspace-files-controller:test"
@@ -290,6 +395,10 @@ fi
 
 if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
   ALL_IMAGES+=("clerum/playwright-mcp-server:test")
+fi
+
+if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
+  ALL_IMAGES+=("clerum/airtable-mcp-server:test")
 fi
 
 if [ "$SKIP_UIS" = true ]; then
@@ -304,28 +413,165 @@ if [ "$SKIP_UIS" = true ]; then
 fi
 
 # ---- Verify-only mode ----
+# The verify set is NOT ALL_IMAGES. ALL_IMAGES is the BUILD list (its ordering
+# and Dockerfile arguments are hand-written per call). What must be verified is
+# the ref each pod will actually pull, which splits on `published`, not on the
+# mode: a published+deployed image runs from ghcr in ghcr mode, and the
+# unpublished ones are built locally and verified under their clerum/* ref.
+#
+# The two e2e_only fixtures are NOT verified on the default ghcr path: nothing
+# builds them there, so demanding them fails a healthy default cluster with a
+# remedy that can never supply them (they are published:false, so no pull can
+# fetch them). They come back with --include-e2e-fixtures /
+# MINIKUBE_SEED_PROFILE=e2e, and in local mode, where a full build builds every
+# fixture.
+#
+# The registry-distributed MCP servers (airtable-mcp-server, web-search-mcp)
+# are absent from this set entirely, because they are
+# deployed_to_minikube:false -- minikube setup neither builds nor pulls them,
+# so demanding them would fail every cluster. airtable-mcp-server is an opt-in
+# local build (MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE) for the SEED_PROFILE=e2e demo
+# instance; like mcp-host-desktop and playwright-server before it, an opt-in
+# image is not part of the verify contract.
 if [ "$VERIFY_ONLY" = true ]; then
-  echo -e "\n${BOLD}=== Verifying Images in Minikube ===${NC}"
+  # What the cluster RUNS decides what gets verified. The env var is only a
+  # fallback for a cluster nothing has built or pulled into yet.
+  VERIFY_SOURCE_ORIGIN="the IMAGE_SOURCE environment variable (no image manifest yet)"
+  RECORDED_IMAGE_SOURCE="$(recorded_image_source)"
+  if [ -n "$RECORDED_IMAGE_SOURCE" ]; then
+    if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
+      log "deploy/minikube/.image-manifest.json records imageSource=${RECORDED_IMAGE_SOURCE};"
+      log "verifying that, not the '${IMAGE_SOURCE}' this shell would have used."
+    fi
+    IMAGE_SOURCE="$RECORDED_IMAGE_SOURCE"
+    VERIFY_SOURCE_ORIGIN="deploy/minikube/.image-manifest.json"
+  fi
+
+  echo -e "\n${BOLD}=== Verifying Images in Minikube (IMAGE_SOURCE=${IMAGE_SOURCE}) ===${NC}"
+  log "mode from ${VERIFY_SOURCE_ORIGIN}"
+
+  GHCR_TAG=""
+  if [ "$IMAGE_SOURCE" = ghcr ]; then
+    if ! GHCR_TAG="$(resolve_ghcr_tag)"; then
+      err "could not resolve the ghcr tag this cluster runs"
+      exit 1
+    fi
+    # A tagless ref (ghcr.io/evenfire-ai/control-api:) matches nothing in the
+    # daemon, so an empty resolution would report every image missing rather
+    # than reporting that the resolution failed.
+    if [ -z "$GHCR_TAG" ]; then
+      err "resolved an empty ghcr tag; refusing to verify tagless image refs"
+      exit 1
+    fi
+    # Same shape as VERIFY_SOURCE_ORIGIN above: the operator has to be able to
+    # tell a recorded coordinate from the committed pin when the answer surprises
+    # them.
+    VERIFY_TAG_ORIGIN="deploy/components/ghcr-images (the committed pin)"
+    if [ -n "${MINIKUBE_IMAGE_TAG:-}" ]; then
+      VERIFY_TAG_ORIGIN="the MINIKUBE_IMAGE_TAG environment variable"
+    elif [ -n "$(recorded_image_tag)" ]; then
+      VERIFY_TAG_ORIGIN="deploy/minikube/.image-manifest.json"
+    fi
+    log "tag ${GHCR_TAG} from ${VERIFY_TAG_ORIGIN}"
+    if [ "$INCLUDE_E2E_FIXTURES" = false ]; then
+      log "excluding the E2E-only fixtures; 'make minikube-setup-e2e' builds them (SEED_PROFILE=e2e to check them)"
+    fi
+  fi
+
+  VERIFY_IMAGES=()
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    VERIFY_IMAGES+=("$ref")
+  done < <(node -e '
+    import("'"$PROJECT_DIR"'/scripts/release/images-manifest.mjs").then(m => {
+      const refs = m.minikubeVerifyRefs({
+        mode: process.argv[1],
+        tag: process.argv[2],
+        includeE2eFixtures: process.argv[3] === "true",
+      })
+      for (const ref of refs) process.stdout.write(`${ref}\n`)
+    }).catch(err => {
+      process.stderr.write(`images-manifest read failed: ${err.message}\n`)
+      process.exit(1)
+    })' "$IMAGE_SOURCE" "$GHCR_TAG" "$INCLUDE_E2E_FIXTURES")
+
+  # An empty verify set means the manifest read failed or the mode is wrong.
+  # "0 of 0 images missing" is not a pass.
+  if [ "${#VERIFY_IMAGES[@]}" -eq 0 ]; then
+    err "the manifest produced zero images to verify; refusing to report success on an empty set"
+    exit 1
+  fi
+
+  if [ "$SKIP_UIS" = true ]; then
+    FILTERED_VERIFY=()
+    for image in "${VERIFY_IMAGES[@]}"; do
+      case "$image" in
+        */control-ui:*|*/profile-ui:*) continue ;;
+        *) FILTERED_VERIFY+=("$image") ;;
+      esac
+    done
+    VERIFY_IMAGES=("${FILTERED_VERIFY[@]}")
+  fi
+
   fail_count=0
-  for img in "${ALL_IMAGES[@]}"; do
+  for img in "${VERIFY_IMAGES[@]}"; do
     sha=$(minikube_image_id "$img")
     if [ "$sha" = "NOT_FOUND" ]; then
       err "MISSING: ${img}"
-      ((fail_count++))
+      # NOT ((fail_count++)): post-increment evaluates to the OLD value, so the
+      # first miss (0) makes the arithmetic command exit 1 and `set -e` aborts
+      # the loop. That reports ONE missing image when several are missing, and
+      # sends you round the pull/verify loop once per image.
+      fail_count=$((fail_count + 1))
     else
       ok "${img} (${sha:7:12})"
     fi
   done
   echo ""
   if [ "$fail_count" -eq 0 ]; then
-    echo -e "${GREEN}${BOLD}All ${#ALL_IMAGES[@]} images present in minikube.${NC}"
+    echo -e "${GREEN}${BOLD}All ${#VERIFY_IMAGES[@]} images present in minikube.${NC}"
   else
-    echo -e "${RED}${BOLD}${fail_count} of ${#ALL_IMAGES[@]} images missing!${NC}"
-    echo -e "${RED}Run: make minikube-build-images${NC}"
+    echo -e "${RED}${BOLD}${fail_count} of ${#VERIFY_IMAGES[@]} images missing!${NC}"
+    # The remedy follows the mode this cluster was actually built in. Telling a
+    # locally built cluster to pull would replace its clerum/*:test tags with
+    # release images -- a fix that breaks exactly what it claims to repair.
+    if [ "$IMAGE_SOURCE" = ghcr ]; then
+      echo -e "${RED}Run: make minikube-pull-images   (tag ${GHCR_TAG})${NC}"
+    else
+      echo -e "${RED}Run: make minikube-build-images${NC}"
+    fi
     exit 1
   fi
   exit 0
 fi
+
+# Pull the public third-party images (postgres, redis, nginx, ...) without
+# building anything. The ghcr path needs them: no clerum image build runs
+# there, so nothing else pulls them into the daemon.
+#
+# It has to sit AFTER the `if [ -n "$ONLY_SVC" ]` normalizer near the top,
+# which forces SKIP_PUBLIC=true for any --only run; setting ONLY_SVC here
+# reaches build_image's filter (a runtime read) without tripping that.
+if [ "$PUBLIC_ONLY" = true ]; then
+  SKIP_PUBLIC=false
+  ONLY_SVC="__none__"
+fi
+
+# Section banner for the build phases below.
+#
+# On the default IMAGE_SOURCE=ghcr path, full-setup.sh calls this script as
+# `--public-only`, which forces ONLY_SVC to a sentinel that matches no image:
+# every build_image call below returns without building. Printing
+# "=== Building Core Services ===" there tells a developer watching the setup
+# that 28 images are being built when none are, which is the exact confusion
+# the pull-by-default work exists to remove. Suppress the banners on the path
+# that builds nothing.
+build_section() {
+  if [ "$PUBLIC_ONLY" = true ]; then
+    return 0
+  fi
+  echo -e "\n${BOLD}=== $1 ===${NC}"
+}
 
 # ---- Build function ----
 build_image() {
@@ -426,7 +672,7 @@ reuse_image_as_tag() {
 
 # ---- Build all services ----
 
-echo -e "\n${BOLD}=== Building Core Services ===${NC}"
+build_section "Building Core Services"
 
 build_image "hcc" \
   "${PROJECT_DIR}" \
@@ -533,7 +779,7 @@ build_image "workspace-files-controller" \
   "${PROJECT_DIR}/workspace-files-controller" \
   "clerum/workspace-files-controller:test"
 
-echo -e "\n${BOLD}=== Building UI Services ===${NC}"
+build_section "Building UI Services"
 
 if [ "$SKIP_UIS" = true ]; then
   warn "Skipping Control UI, Profile UI, and Desktop App image builds (--skip-uis)."
@@ -551,11 +797,33 @@ fi
 # `make minikube-deploy-evenfire-registry` to build + deploy it. This script
 # only builds clerum-monorepo services.
 
-echo -e "\n${BOLD}=== Building MCP Servers ===${NC}"
+# MCP servers are distributed through the evenfire registry and installed on
+# demand: a registry install copies the catalog entry's fully-qualified
+# imageRef straight into McpServer.spec.image (control-api/src/routes/admin/
+# registry.ts:1088) and the kubelet pulls it. Nothing on that path wants a
+# locally loaded clerum/* alias, so minikube setup neither builds nor pulls
+# these images -- they are deployed_to_minikube:false in deploy/images.json.
+#
+# The two that remain here are opt-in only:
+#   playwright-mcp-server -- heavy, never deployed by the minikube overlay.
+#   airtable-mcp-server   -- named by its LOCAL ref in the SEED_PROFILE=e2e
+#                            demo instance (deploy/overlays/minikube/
+#                            instances-e2e/airtable-server.yaml), which is
+#                            applied with `kubectl apply -f`, outside kustomize,
+#                            so the ghcr component never rewrites it. HCC forces
+#                            imagePullPolicy=IfNotPresent on minikube, so that
+#                            ref must already be in the daemon. full-setup.sh
+#                            sets MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE for exactly
+#                            that branch and nothing else.
+build_section "Building MCP Servers"
 
-build_image "airtable-mcp" \
-  "${PROJECT_DIR}/mcp-servers/airtable" \
-  "clerum/airtable-mcp-server:test"
+if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
+  build_image "airtable-mcp" \
+    "${PROJECT_DIR}/mcp-servers/airtable" \
+    "clerum/airtable-mcp-server:test"
+else
+  warn "Skipping the optional Airtable MCP image. The registry installs this connector on demand; set MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true (or --include-airtable-mcp-image) for the SEED_PROFILE=e2e demo instance."
+fi
 
 if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
   if [ "$MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
@@ -571,15 +839,7 @@ else
   warn "Skipping optional Playwright MCP local image. The default minikube overlay does not deploy clerum/playwright-mcp-server:test; GKE publishes this image as playwright-server:<tag>."
 fi
 
-build_image "web-search-mcp" \
-  "${PROJECT_DIR}/mcp-servers/web-search" \
-  "clerum/web-search-mcp:v1"
-
-build_image "doc-generator-mcp" \
-  "${PROJECT_DIR}/mcp-servers/doc-generator" \
-  "clerum/doc-generator-mcp:v1"
-
-echo -e "\n${BOLD}=== Building Test Fixtures ===${NC}"
+build_section "Building Test Fixtures"
 
 build_image "mock-mcp" \
   "${PROJECT_DIR}/tests/e2e/fixtures/mock-mcp-server" \
@@ -625,13 +885,51 @@ if [ "$SKIP_PUBLIC" = false ]; then
 fi
 
 # ---- Generate build manifest JSON ----
-MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+# MANIFEST_FILE is declared at the top of the script; the verify path needs it
+# too and exits long before this point.
 mkdir -p "$(dirname "$MANIFEST_FILE")"
 echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
+
+# How this cluster's images were acquired, read back by --verify-only.
+# pull-images.sh writes "ghcr"; this script only ever BUILDS, so a full run
+# writes "local" regardless of the IMAGE_SOURCE env var, which describes what
+# the cluster renders, not what just happened here.
+#
+# A partial run (--only=<svc>, and --public-only, which sets ONLY_SVC) acquires
+# a subset and must not redefine the mode: `make minikube-setup-e2e` builds the
+# two E2E fixtures and the opt-in airtable-mcp-server image with --only AFTER
+# the ghcr pull. Carry the recorded value forward instead, and fall back to the
+# env var only when nothing is recorded yet.
+#
+# imageTag rides along for exactly the same reason. A pre-gate shadow build is
+# an --only run, so dropping the tag here would make the next pre-gate fall back
+# to the committed pin and declare a `MINIKUBE_IMAGE_TAG=latest` cluster out of
+# sync on every run. A full build has no ghcr coordinate at all, so it clears
+# the key rather than leaving a stale one behind.
+MANIFEST_IMAGE_SOURCE="local"
+MANIFEST_IMAGE_TAG=""
+if [ -n "$ONLY_SVC" ]; then
+  MANIFEST_IMAGE_SOURCE="$(recorded_image_source)"
+  if [ -z "$MANIFEST_IMAGE_SOURCE" ]; then
+    MANIFEST_IMAGE_SOURCE="$IMAGE_SOURCE"
+  fi
+  MANIFEST_IMAGE_TAG="$(recorded_image_tag)"
+  if [ -z "$MANIFEST_IMAGE_TAG" ] && [ "$MANIFEST_IMAGE_SOURCE" = ghcr ]; then
+    # Charset-checked before it is interpolated into JSON: an unusable value
+    # would make the whole manifest unparseable, which every reader here
+    # correctly treats as "nothing recorded" -- silently losing the mode too.
+    case "${MINIKUBE_IMAGE_TAG:-}" in
+      "" | *[!A-Za-z0-9._-]*) MANIFEST_IMAGE_TAG="" ;;
+      *) MANIFEST_IMAGE_TAG="${MINIKUBE_IMAGE_TAG}" ;;
+    esac
+  fi
+fi
 {
   echo "{"
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
   echo "  \"profile\": \"${PROFILE}\","
+  echo "  \"imageSource\": \"${MANIFEST_IMAGE_SOURCE}\","
+  echo "  \"imageTag\": \"${MANIFEST_IMAGE_TAG}\","
   echo "  \"images\": {"
   count=0
   total=${#ALL_IMAGES[@]}
@@ -652,9 +950,17 @@ echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
 ok "Manifest: deploy/minikube/.image-manifest.json"
 
 # ---- Summary ----
-echo -e "\n${BOLD}=== Build Summary ===${NC}"
+# Same reason as build_section: on the --public-only (IMAGE_SOURCE=ghcr) path
+# nothing was built, so "All images built" is a false report of the run.
+if [ "$PUBLIC_ONLY" = true ]; then
+  echo -e "\n${BOLD}=== Public Image Summary ===${NC}"
+else
+  echo -e "\n${BOLD}=== Build Summary ===${NC}"
+fi
 if [ ${#FAILED_IMAGES[@]} -eq 0 ]; then
-  if [ "$MINIKUBE_MULTI_NODE" = true ]; then
+  if [ "$PUBLIC_ONLY" = true ]; then
+    echo -e "${GREEN}${BOLD}Public third-party images loaded into minikube '${PROFILE}'. No images were built.${NC}"
+  elif [ "$MINIKUBE_MULTI_NODE" = true ]; then
     echo -e "${GREEN}${BOLD}All images built and loaded into multi-node minikube '${PROFILE}'.${NC}"
   else
     echo -e "${GREEN}${BOLD}All images built directly in minikube '${PROFILE}' (no transfer needed).${NC}"

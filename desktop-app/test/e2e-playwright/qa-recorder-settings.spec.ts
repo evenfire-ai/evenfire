@@ -22,8 +22,8 @@ import {
 // of the always-on read-only journey without a confirm flag.
 
 test('optional QA recorder: Desktop settings journey — appearance and notifications', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
@@ -87,8 +87,8 @@ test('optional QA recorder: Desktop settings journey — appearance and notifica
 })
 
 test('optional QA recorder: Desktop settings journey — information and configuration', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined
