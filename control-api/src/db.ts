@@ -2286,6 +2286,321 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
   `)
 }
 
+/**
+ * Reconcile all Plugin Workload SDK contracts that were edited in-place after
+ * their migrations had already run on long-lived databases. This is one
+ * forward-only migration on purpose: the migration runner never replays a
+ * recorded version, so the repair must be an explicit new step rather than a
+ * re-run of an historical migration.
+ */
+async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Bound the wait for the table locks so a stuck concurrent writer cannot make
+    -- this migration hang indefinitely. EXCLUSIVE conflicts with the ROW EXCLUSIVE
+    -- that ordinary INSERT/UPDATE/DELETE take (e.g. the trace-retention prune's
+    -- DELETE FROM agent_run_events), so if such a writer holds its lock past this
+    -- timeout the LOCK/DDL below fails loudly (exit 1) rather than stalling. 60s
+    -- sits well above the bounded prune wake-transaction and well below the deploy's
+    -- 300s kubectl-wait budget, so a transient writer is tolerated but a genuinely
+    -- stuck one surfaces fast. The migration Job sets backoffLimit 2 with
+    -- restartPolicy Never (deploy script, same PR), so a transient lock_timeout
+    -- abort re-runs on a fresh pod -- up to 3 attempts -- instead of failing the
+    -- deploy outright; the body is idempotent, so a retry is safe.
+    SET LOCAL lock_timeout = '60s';
+
+    -- Runtime writers do not take the initDb advisory lock. Hold the table locks
+    -- in the same logical order as finalization (invocation -> receipt ->
+    -- provider attempt) before replacing validators or fencing rows.
+    -- EXCLUSIVE MODE (not SHARE ROW EXCLUSIVE) conflicts with the ROW SHARE that
+    -- finalization's SELECT ... FOR UPDATE takes, so a concurrent finalization
+    -- cannot hold row locks and deadlock against the ACCESS EXCLUSIVE that the
+    -- ALTERs below acquire; plain readers (ACCESS SHARE) are still allowed. This
+    -- closes the rolling-deploy race in which a writer could change a row between
+    -- the ambiguity check and the repair UPDATE.
+    LOCK TABLE
+      plugin_workload_sdk_invocations,
+      plugin_workload_sdk_invocation_attempts,
+      plugin_workload_sdk_provider_attempts,
+      agent_run_events
+      IN EXCLUSIVE MODE;
+
+    CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+    RETURNS BOOLEAN
+    LANGUAGE sql
+    IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+      SELECT COALESCE(CASE
+        WHEN event_kind IS NULL THEN FALSE
+        WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+        ELSE jsonb_typeof(value) = 'object'
+         AND octet_length(value::text) <= 16384
+         AND value ?& ARRAY[
+           'request_ref', 'provider', 'model', 'source_kind',
+           'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+           'cache_tokens_reported'
+         ]
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_object_keys(value) AS key_name
+            WHERE key_name NOT IN (
+              'request_ref', 'provider', 'model', 'source_kind',
+              'input_tokens', 'output_tokens', 'cache_read_tokens',
+              'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
+            )
+         )
+         AND jsonb_typeof(value->'request_ref') = 'string'
+         AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+         AND jsonb_typeof(value->'provider') = 'string'
+         AND jsonb_typeof(value->'model') = 'string'
+         AND jsonb_typeof(value->'source_kind') = 'string'
+         AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
+         AND jsonb_typeof(value->'input_tokens') = 'number'
+         AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'output_tokens') = 'number'
+         AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+         AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+         AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+         AND (
+           NOT (value ? 'iteration')
+           OR (
+             jsonb_typeof(value->'iteration') = 'number'
+             AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+           )
+         )
+         AND (
+           NOT (value ? 'prompt_bridge')
+           OR (
+             jsonb_typeof(value->'prompt_bridge') = 'object'
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value->'prompt_bridge') AS key_name
+                WHERE key_name NOT IN (
+                  'invocation_id', 'attempt_generation', 'target_ref',
+                  'fallback_used', 'attempt_count', 'provider_attempt_id',
+                  'provider_attempt_index'
+                )
+             )
+             AND value->'prompt_bridge' ?& ARRAY[
+               'invocation_id', 'attempt_generation', 'target_ref',
+               'fallback_used', 'attempt_count', 'provider_attempt_id',
+               'provider_attempt_index'
+             ]
+             AND jsonb_typeof(value->'prompt_bridge'->'invocation_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_generation') = 'number'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_index') = 'number'
+             AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+             AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-4]$'
+             AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+             AND char_length(value->'prompt_bridge'->>'target_ref') BETWEEN 1 AND 256
+             AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
+             AND (value->'prompt_bridge'->>'attempt_count') ~ '^[1-4]$'
+           )
+         )
+      END, FALSE);
+    $$;
+
+    ALTER FUNCTION governed_trace_safe_metadata(JSONB)
+      SET search_path = pg_catalog, public;
+    ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      SET search_path = pg_catalog, public;
+
+    REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    REVOKE ALL ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB)
+      TO control_api_runtime, trace_maintenance_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      TO control_api_runtime;
+
+    -- Changing a function body does not recheck rows already accepted by a
+    -- CHECK that calls it, so scan every historical row fail-closed. Run the scan
+    -- FIRST, while only the EXCLUSIVE table lock is held (plain readers still
+    -- allowed), before the DROP/ADD CONSTRAINT below take ACCESS EXCLUSIVE -- this
+    -- keeps the expensive full scan out of the reader-blocking window. On failure
+    -- the message carries a bounded sample of offending (id:event_type) rows so an
+    -- operator can triage from the log. No row is rewritten or deleted: an invalid
+    -- append-only history aborts the whole migration and requires an explicit
+    -- data-governance decision.
+    DO $$
+    DECLARE
+      invalid_count BIGINT := 0;
+      invalid_sample TEXT := '';
+      offending RECORD;
+    BEGIN
+      FOR offending IN
+        SELECT COUNT(*) OVER () AS total, event_id, event_type
+          FROM agent_run_events
+         WHERE governed_trace_safe_agent_run_metadata(event_type, payload_metadata)
+               IS DISTINCT FROM TRUE
+         ORDER BY occurred_at
+         LIMIT 10
+      LOOP
+        invalid_count := offending.total;
+        invalid_sample := invalid_sample
+          || CASE WHEN invalid_sample = '' THEN '' ELSE ', ' END
+          || offending.event_id::text || ':' || offending.event_type;
+      END LOOP;
+      IF invalid_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % historical agent_run_events rows with invalid payload metadata (first % shown): %',
+          invalid_count, LEAST(invalid_count, 10), invalid_sample;
+      END IF;
+    END
+    $$;
+
+    -- History is clean: the fail-closed scan above ran under the EXCLUSIVE table
+    -- lock (plain readers proceed) and already proved every row passes, emitting a
+    -- triage sample on failure. Reinstall the named constraint with a single
+    -- validating ADD CONSTRAINT: it takes ACCESS EXCLUSIVE and scans once. A
+    -- NOT VALID + separate VALIDATE would buy nothing here -- applyPendingMigrations
+    -- holds this transaction open until COMMIT, so the ADD's ACCESS EXCLUSIVE (and
+    -- the reader blocking it implies) is held through any later VALIDATE anyway; the
+    -- split would just scan the table a second time under the same lock profile.
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_check;
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_payload_metadata_check;
+    ALTER TABLE agent_run_events
+      ADD CONSTRAINT agent_run_events_check
+      CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE);
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      ALTER COLUMN contract_version SET DEFAULT 1;
+
+    DO $$
+    DECLARE ambiguous_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO ambiguous_count
+        FROM plugin_workload_sdk_invocations invocations
+       WHERE invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+      IF ambiguous_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % v2 invocations without leases with a physical provider attempt',
+          ambiguous_count;
+      END IF;
+    END
+    $$;
+
+    CREATE TEMP TABLE plugin_workload_sdk_runtime_reconciled_invocations (
+      invocation_id UUID PRIMARY KEY,
+      attempt_generation INTEGER NOT NULL
+    ) ON COMMIT DROP;
+
+    INSERT INTO plugin_workload_sdk_runtime_reconciled_invocations (invocation_id, attempt_generation)
+    SELECT id, attempt_generation
+      FROM plugin_workload_sdk_invocations
+     WHERE contract_version = 2
+       AND status = 'in_progress'
+       AND lease_expires_at IS NULL;
+
+    DO $$
+    DECLARE expected_count BIGINT;
+    DECLARE fenced_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO expected_count
+        FROM plugin_workload_sdk_runtime_reconciled_invocations;
+
+      UPDATE plugin_workload_sdk_invocations invocations
+         SET contract_version = 1,
+             status = 'failed',
+             authorization_decision = CASE
+               WHEN authorization_decision = 'authorized' THEN 'migration_interrupted'
+               ELSE authorization_decision
+             END,
+             updated_at = now(),
+             completed_at = COALESCE(completed_at, now()),
+             lease_expires_at = NULL
+       WHERE invocations.id IN (
+         SELECT invocation_id
+           FROM plugin_workload_sdk_runtime_reconciled_invocations
+       )
+         AND invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+
+      GET DIAGNOSTICS fenced_count = ROW_COUNT;
+      -- Belt-and-braces: under the EXCLUSIVE lock held above nothing can change the
+      -- captured set between the snapshot and this UPDATE, and the ambiguity check
+      -- already aborted on any physical attempt, so fenced_count always equals
+      -- expected_count. This guard is defence-in-depth and is not expected to fire.
+      IF fenced_count <> expected_count THEN
+        RAISE EXCEPTION
+          'plugin workload SDK invocation state changed during reconciliation (fenced % of % captured); aborting the migration',
+          fenced_count, expected_count;
+      END IF;
+    END
+    $$;
+
+    UPDATE plugin_workload_sdk_invocation_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status = 'in_progress';
+
+    UPDATE plugin_workload_sdk_provider_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status IN ('reserved', 'in_progress');
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_invocations_v2_lease_check;
+    ALTER TABLE plugin_workload_sdk_invocations
+      ADD CONSTRAINT plugin_workload_sdk_invocations_v2_lease_check
+      CHECK (
+        contract_version = 1
+        OR status <> 'in_progress'
+        OR lease_expires_at IS NOT NULL
+      );
+
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_provider_attempts_status_check;
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
+      CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped'));
+
+    -- Reset the statement-scoped lock timeout set at the top of this migration.
+    -- applyPendingMigrations runs every pending migration in one transaction, so
+    -- without this a later 0091+ applied in the same batch would silently inherit
+    -- the 60s timeout. 0090 is currently last (so this is latent today), but keep
+    -- the transaction state hygienic for whatever ships next.
+    SET LOCAL lock_timeout = '0';
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5143,6 +5458,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',
     apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess,
+  },
+  {
+    version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
+    apply: reconcilePluginWorkloadSdkRuntimeContracts,
   },
 ]
 
