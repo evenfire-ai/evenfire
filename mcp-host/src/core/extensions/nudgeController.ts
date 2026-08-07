@@ -14,24 +14,19 @@
  * - After maxNudges: accept whatever text the LLM returns (safety valve)
  * - After any tool is called: accept text responses (nudge served its purpose)
  */
-
-import { LoopController } from "../interfaces";
-import {
-  ChatMessage,
-  ToolDefinition,
-  PendingApproval,
-} from "../types";
+import { LoopController } from '../interfaces'
+import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
 
 export class NudgeController implements LoopController {
-  private readonly delegate: LoopController;
-  private readonly maxNudges: number;
+  private readonly delegate: LoopController
+  private readonly maxNudges: number
 
-  private toolsExecutedInLoop: boolean = false;
-  private nudgeCount: number = 0;
+  private toolsExecutedInLoop: boolean = false
+  private nudgeCount: number = 0
 
   constructor(delegate: LoopController, maxNudges: number = 3) {
-    this.delegate = delegate;
-    this.maxNudges = maxNudges;
+    this.delegate = delegate
+    this.maxNudges = maxNudges
   }
 
   /**
@@ -41,30 +36,30 @@ export class NudgeController implements LoopController {
   shouldAccept(content: string, iteration: number): boolean {
     // If tools were used, accept whatever the LLM says
     if (this.toolsExecutedInLoop) {
-      return this.delegate.shouldAccept(content, iteration);
+      return this.delegate.shouldAccept(content, iteration)
     }
 
     // Safety valve: if we've nudged enough, accept the text
     if (this.nudgeCount >= this.maxNudges) {
-      return this.delegate.shouldAccept(content, iteration);
+      return this.delegate.shouldAccept(content, iteration)
     }
 
     // No tools used and under max nudges -> reject
-    return false;
+    return false
   }
 
   /**
    * When text is rejected, inject a nudge message.
    */
   onTextRejected(content: string, iteration: number): ChatMessage | null {
-    this.nudgeCount++;
+    this.nudgeCount++
 
     return {
-      role: "user",
+      role: 'user',
       content:
-        "You have tools available. Please use the appropriate tool(s) to answer the question " +
-        "rather than responding from memory alone. Check the available tools and try again.",
-    };
+        'You have tools available. Please use the appropriate tool(s) to answer the question ' +
+        'rather than responding from memory alone. Check the available tools and try again.',
+    }
   }
 
   /**
@@ -72,29 +67,27 @@ export class NudgeController implements LoopController {
    */
   beforeTool(
     toolName: string,
-    params: Record<string, unknown>,
-  ): "proceed" | "skip" | { type: "suspend"; approval: PendingApproval } {
-    this.toolsExecutedInLoop = true;
-    return this.delegate.beforeTool(toolName, params);
+    params: Record<string, unknown>
+  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
+    this.toolsExecutedInLoop = true
+    return this.delegate.beforeTool(toolName, params)
   }
 
   onExhaustion(iteration: number): string {
-    return this.delegate.onExhaustion(iteration);
+    return this.delegate.onExhaustion(iteration)
   }
 
-  async refreshTools(
-    currentTools: ToolDefinition[],
-  ): Promise<ToolDefinition[]> {
-    return this.delegate.refreshTools(currentTools);
+  async refreshTools(currentTools: ToolDefinition[]): Promise<ToolDefinition[]> {
+    return this.delegate.refreshTools(currentTools)
   }
 
   /** Test helper: get current nudge count */
   getNudgeCount(): number {
-    return this.nudgeCount;
+    return this.nudgeCount
   }
 
   /** Test helper: check if tools have been executed */
   hasToolsExecuted(): boolean {
-    return this.toolsExecutedInLoop;
+    return this.toolsExecutedInLoop
   }
 }

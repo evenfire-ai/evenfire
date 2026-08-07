@@ -11,26 +11,25 @@
  * Health check: GET /health on the same port.
  * MCP endpoint: POST /mcp
  */
-
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { IncomingMessage, ServerResponse, createServer } from "http";
-import { randomUUID } from "crypto";
-import { z } from "zod";
-import fs from "fs";
-import path from "path";
-import MarkdownIt from "markdown-it";
-import ExcelJS from "exceljs";
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { randomUUID } from 'crypto'
+import ExcelJS from 'exceljs'
+import fs from 'fs'
+import { IncomingMessage, ServerResponse, createServer } from 'http'
+import MarkdownIt from 'markdown-it'
+import path from 'path'
+import { z } from 'zod'
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const PORT = parseInt(process.env.PORT || "3000", 10);
-const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
+const PORT = parseInt(process.env.PORT || '3000', 10)
+const OUTPUT_DIR = process.env.OUTPUT_DIR || '/output'
 
 // Ensure output directory exists on startup
-fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+fs.mkdirSync(OUTPUT_DIR, { recursive: true })
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,35 +39,33 @@ fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 function sanitizeFilename(title: string): string {
   return title
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 100);
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 100)
 }
 
 /** Strip HTML tags from a string to produce plain text. */
 function stripHtml(html: string): string {
   return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 /**
  * Wrap HTML body content in a full, print-ready HTML document with professional
  * CSS styling (fonts, margins, headers, page-break rules).
  */
-function wrapHtmlDocument(title: string, bodyHtml: string, format: "a4" | "letter"): string {
-  const pageSize = format === "a4"
-    ? "210mm 297mm"
-    : "8.5in 11in";
+function wrapHtmlDocument(title: string, bodyHtml: string, format: 'a4' | 'letter'): string {
+  const pageSize = format === 'a4' ? '210mm 297mm' : '8.5in 11in'
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -215,22 +212,22 @@ function wrapHtmlDocument(title: string, bodyHtml: string, format: "a4" | "lette
 <body>
   <div class="doc-header">
     <h1>${escapeHtml(title)}</h1>
-    <div class="meta">Generated on ${new Date().toISOString().split("T")[0]} by Clerum Doc Generator</div>
+    <div class="meta">Generated on ${new Date().toISOString().split('T')[0]} by Clerum Doc Generator</div>
   </div>
   <div class="doc-content">
     ${bodyHtml}
   </div>
 </body>
-</html>`;
+</html>`
 }
 
 /** Basic HTML entity escaping. */
 function escapeHtml(str: string): string {
   return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }
 
 // ---------------------------------------------------------------------------
@@ -239,163 +236,168 @@ function escapeHtml(str: string): string {
 
 function createDocGeneratorServer(): McpServer {
   const server = new McpServer({
-    name: "doc-generator",
-    version: "1.0.0",
-  });
+    name: 'doc-generator',
+    version: '1.0.0',
+  })
 
-  const md = new MarkdownIt({ html: true, linkify: true, typographer: true });
+  const md = new MarkdownIt({ html: true, linkify: true, typographer: true })
 
   // ---- Tool 1: generate_pdf (HTML output) --------------------------------
 
   server.tool(
-    "generate_pdf",
-    "Converts markdown content to a professional, print-ready HTML document. Also writes a plain-text version. Returns the file path and size.",
+    'generate_pdf',
+    'Converts markdown content to a professional, print-ready HTML document. Also writes a plain-text version. Returns the file path and size.',
     {
-      content: z.string().describe("Markdown content to convert"),
-      title: z.string().describe("Document title"),
-      format: z
-        .enum(["a4", "letter"])
-        .default("a4")
-        .describe("Page format (a4 or letter)"),
+      content: z.string().describe('Markdown content to convert'),
+      title: z.string().describe('Document title'),
+      format: z.enum(['a4', 'letter']).default('a4').describe('Page format (a4 or letter)'),
     },
-    async ({ content, title, format }: { content: string; title: string; format: "a4" | "letter" }) => {
-      const safeName = sanitizeFilename(title);
-      const htmlPath = path.join(OUTPUT_DIR, `${safeName}.html`);
-      const txtPath = path.join(OUTPUT_DIR, `${safeName}.txt`);
+    async ({
+      content,
+      title,
+      format,
+    }: {
+      content: string
+      title: string
+      format: 'a4' | 'letter'
+    }) => {
+      const safeName = sanitizeFilename(title)
+      const htmlPath = path.join(OUTPUT_DIR, `${safeName}.html`)
+      const txtPath = path.join(OUTPUT_DIR, `${safeName}.txt`)
 
       // Render markdown to HTML body
-      const bodyHtml = md.render(content);
+      const bodyHtml = md.render(content)
 
       // Wrap in full styled document
-      const fullHtml = wrapHtmlDocument(title, bodyHtml, format);
+      const fullHtml = wrapHtmlDocument(title, bodyHtml, format)
 
       // Write HTML
-      fs.writeFileSync(htmlPath, fullHtml, "utf-8");
+      fs.writeFileSync(htmlPath, fullHtml, 'utf-8')
 
       // Write plain text version
-      const plainText = `${title}\n${"=".repeat(title.length)}\n\n${stripHtml(bodyHtml)}`;
-      fs.writeFileSync(txtPath, plainText, "utf-8");
+      const plainText = `${title}\n${'='.repeat(title.length)}\n\n${stripHtml(bodyHtml)}`
+      fs.writeFileSync(txtPath, plainText, 'utf-8')
 
-      const stats = fs.statSync(htmlPath);
+      const stats = fs.statSync(htmlPath)
 
       return {
         content: [
           {
-            type: "text" as const,
+            type: 'text' as const,
             text: JSON.stringify({
               filePath: htmlPath,
               textFilePath: txtPath,
               sizeBytes: stats.size,
-              format: "html",
+              format: 'html',
             }),
           },
         ],
-      };
+      }
     }
-  );
+  )
 
   // ---- Tool 2: generate_excel --------------------------------------------
 
   server.tool(
-    "generate_excel",
-    "Creates an Excel (.xlsx) workbook with styled sheets. Supports multiple sheets with headers and rows, bold headers, auto-width columns, and alternating row colors.",
+    'generate_excel',
+    'Creates an Excel (.xlsx) workbook with styled sheets. Supports multiple sheets with headers and rows, bold headers, auto-width columns, and alternating row colors.',
     {
       sheets: z
         .array(
           z.object({
-            name: z.string().describe("Worksheet name"),
-            headers: z.array(z.string()).describe("Column headers"),
-            rows: z.array(z.array(z.string())).describe("Row data (array of arrays)"),
+            name: z.string().describe('Worksheet name'),
+            headers: z.array(z.string()).describe('Column headers'),
+            rows: z.array(z.array(z.string())).describe('Row data (array of arrays)'),
           })
         )
-        .describe("Array of sheet definitions"),
-      title: z.string().describe("Workbook filename title"),
+        .describe('Array of sheet definitions'),
+      title: z.string().describe('Workbook filename title'),
     },
     async ({
       sheets,
       title,
     }: {
-      sheets: Array<{ name: string; headers: string[]; rows: string[][] }>;
-      title: string;
+      sheets: Array<{ name: string; headers: string[]; rows: string[][] }>
+      title: string
     }) => {
-      const safeName = sanitizeFilename(title);
-      const xlsxPath = path.join(OUTPUT_DIR, `${safeName}.xlsx`);
+      const safeName = sanitizeFilename(title)
+      const xlsxPath = path.join(OUTPUT_DIR, `${safeName}.xlsx`)
 
-      const workbook = new ExcelJS.Workbook();
-      workbook.creator = "Clerum Doc Generator";
-      workbook.created = new Date();
+      const workbook = new ExcelJS.Workbook()
+      workbook.creator = 'Clerum Doc Generator'
+      workbook.created = new Date()
 
       for (const sheet of sheets) {
-        const ws = workbook.addWorksheet(sheet.name);
+        const ws = workbook.addWorksheet(sheet.name)
 
         // Set columns with headers and auto-width estimation
-        ws.columns = sheet.headers.map((header) => {
+        ws.columns = sheet.headers.map(header => {
           // Estimate width: max of header length and longest cell in that column
-          const colIndex = sheet.headers.indexOf(header);
+          const colIndex = sheet.headers.indexOf(header)
           const maxDataLen = sheet.rows.reduce((max, row) => {
-            const cellLen = (row[colIndex] || "").length;
-            return cellLen > max ? cellLen : max;
-          }, 0);
-          const width = Math.max(header.length, maxDataLen, 10) + 4;
+            const cellLen = (row[colIndex] || '').length
+            return cellLen > max ? cellLen : max
+          }, 0)
+          const width = Math.max(header.length, maxDataLen, 10) + 4
 
-          return { header, key: header, width: Math.min(width, 50) };
-        });
+          return { header, key: header, width: Math.min(width, 50) }
+        })
 
         // Style header row: bold, white text on dark background
-        const headerRow = ws.getRow(1);
-        headerRow.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        const headerRow = ws.getRow(1)
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 }
         headerRow.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FF16213E" },
-        };
-        headerRow.alignment = { vertical: "middle", horizontal: "left" };
-        headerRow.height = 24;
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF16213E' },
+        }
+        headerRow.alignment = { vertical: 'middle', horizontal: 'left' }
+        headerRow.height = 24
 
         // Add data rows
         for (let rowIdx = 0; rowIdx < sheet.rows.length; rowIdx++) {
-          const dataRow = sheet.rows[rowIdx];
-          const rowObj: Record<string, string> = {};
+          const dataRow = sheet.rows[rowIdx]
+          const rowObj: Record<string, string> = {}
           sheet.headers.forEach((h, i) => {
-            rowObj[h] = dataRow[i] || "";
-          });
-          const excelRow = ws.addRow(rowObj);
+            rowObj[h] = dataRow[i] || ''
+          })
+          const excelRow = ws.addRow(rowObj)
 
           // Alternating row colors
           if (rowIdx % 2 === 0) {
             excelRow.fill = {
-              type: "pattern",
-              pattern: "solid",
-              fgColor: { argb: "FFF9FAFB" },
-            };
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF9FAFB' },
+            }
           }
 
-          excelRow.alignment = { vertical: "middle" };
+          excelRow.alignment = { vertical: 'middle' }
         }
 
         // Add thin borders to all cells with data
-        const lastRow = ws.rowCount;
-        const lastCol = sheet.headers.length;
+        const lastRow = ws.rowCount
+        const lastCol = sheet.headers.length
         for (let r = 1; r <= lastRow; r++) {
           for (let c = 1; c <= lastCol; c++) {
-            const cell = ws.getCell(r, c);
+            const cell = ws.getCell(r, c)
             cell.border = {
-              top: { style: "thin", color: { argb: "FFE5E7EB" } },
-              bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
-              left: { style: "thin", color: { argb: "FFE5E7EB" } },
-              right: { style: "thin", color: { argb: "FFE5E7EB" } },
-            };
+              top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            }
           }
         }
       }
 
-      await workbook.xlsx.writeFile(xlsxPath);
-      const stats = fs.statSync(xlsxPath);
+      await workbook.xlsx.writeFile(xlsxPath)
+      const stats = fs.statSync(xlsxPath)
 
       return {
         content: [
           {
-            type: "text" as const,
+            type: 'text' as const,
             text: JSON.stringify({
               filePath: xlsxPath,
               sizeBytes: stats.size,
@@ -403,105 +405,105 @@ function createDocGeneratorServer(): McpServer {
             }),
           },
         ],
-      };
+      }
     }
-  );
+  )
 
   // ---- Tool 3: list_artifacts --------------------------------------------
 
   server.tool(
-    "list_artifacts",
-    "Lists all generated files in the output directory with name, path, size, and creation date.",
+    'list_artifacts',
+    'Lists all generated files in the output directory with name, path, size, and creation date.',
     {},
     async () => {
-      let entries: string[];
+      let entries: string[]
       try {
-        entries = fs.readdirSync(OUTPUT_DIR);
+        entries = fs.readdirSync(OUTPUT_DIR)
       } catch {
-        entries = [];
+        entries = []
       }
 
       const files = entries
-        .map((name) => {
-          const filePath = path.join(OUTPUT_DIR, name);
+        .map(name => {
+          const filePath = path.join(OUTPUT_DIR, name)
           try {
-            const stats = fs.statSync(filePath);
-            if (!stats.isFile()) return null;
+            const stats = fs.statSync(filePath)
+            if (!stats.isFile()) return null
             return {
               name,
               path: filePath,
               sizeBytes: stats.size,
               createdAt: stats.birthtime.toISOString(),
-            };
+            }
           } catch {
-            return null;
+            return null
           }
         })
-        .filter((f) => f !== null);
+        .filter(f => f !== null)
 
       return {
         content: [
           {
-            type: "text" as const,
+            type: 'text' as const,
             text: JSON.stringify({ files }),
           },
         ],
-      };
+      }
     }
-  );
+  )
 
-  return server;
+  return server
 }
 
 // ---------------------------------------------------------------------------
 // StreamableHTTP Transport (raw http, matching mock-mcp-server pattern)
 // ---------------------------------------------------------------------------
 
-const transports = new Map<string, StreamableHTTPServerTransport>();
+const transports = new Map<string, StreamableHTTPServerTransport>()
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse) {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  const sessionId = req.headers['mcp-session-id'] as string | undefined
 
   // Existing session
   if (sessionId && transports.has(sessionId)) {
-    const transport = transports.get(sessionId)!;
-    await transport.handleRequest(req, res);
-    return;
+    const transport = transports.get(sessionId)!
+    await transport.handleRequest(req, res)
+    return
   }
 
   // New POST = new session (initialize)
-  if (req.method === "POST") {
+  if (req.method === 'POST') {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-    });
+    })
 
     // Connect a fresh McpServer to this transport BEFORE handling the request.
-    const server = createDocGeneratorServer();
-    await server.connect(transport);
+    const server = createDocGeneratorServer()
+    await server.connect(transport)
 
     // Handle the incoming initialize request.
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res)
 
     // Extract session ID assigned by the transport.
-    const assignedSessionId = (transport as any).sessionId as string | undefined;
+    const assignedSessionId = (transport as any).sessionId as string | undefined
     if (assignedSessionId) {
-      transports.set(assignedSessionId, transport);
-      console.log(`[DocGenerator] New session: ${assignedSessionId}`);
+      transports.set(assignedSessionId, transport)
+      console.log(`[DocGenerator] New session: ${assignedSessionId}`)
     }
 
     transport.onclose = () => {
       if (assignedSessionId) {
-        transports.delete(assignedSessionId);
-        console.log(`[DocGenerator] Session closed: ${assignedSessionId}`);
+        transports.delete(assignedSessionId)
+        console.log(`[DocGenerator] Session closed: ${assignedSessionId}`)
       }
-    };
+    }
 
-    return;
+    return
   }
 
   // Non-POST without session
-  res.writeHead(400, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Bad request - send POST to initialize" }));
+  res.writeHead(400, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'Bad request - send POST to initialize' }))
 }
 
 // ---------------------------------------------------------------------------
@@ -510,40 +512,40 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
 
 const httpServer = createServer(async (req, res) => {
   // Health check
-  if (req.url === "/health" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
+  if (req.url === '/health' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(
       JSON.stringify({
-        status: "ok",
-        tools: ["generate_pdf", "generate_excel", "list_artifacts"],
+        status: 'ok',
+        tools: ['generate_pdf', 'generate_excel', 'list_artifacts'],
         outputDir: OUTPUT_DIR,
       })
-    );
-    return;
+    )
+    return
   }
 
   // MCP endpoint
-  if (req.url === "/mcp") {
+  if (req.url === '/mcp') {
     try {
-      await handleMcp(req, res);
+      await handleMcp(req, res)
     } catch (e) {
-      console.error("[DocGenerator] Error:", e);
+      console.error('[DocGenerator] Error:', e)
       if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(e) }));
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(e) }))
       }
     }
-    return;
+    return
   }
 
   // Not found
-  res.writeHead(404, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Not found" }));
-});
+  res.writeHead(404, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'Not found' }))
+})
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`[DocGenerator] StreamableHTTP server listening on port ${PORT}`);
-  console.log(`[DocGenerator] Output directory: ${OUTPUT_DIR}`);
-  console.log(`[DocGenerator] Health check: GET http://0.0.0.0:${PORT}/health`);
-  console.log(`[DocGenerator] MCP endpoint:  POST http://0.0.0.0:${PORT}/mcp`);
-});
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`[DocGenerator] StreamableHTTP server listening on port ${PORT}`)
+  console.log(`[DocGenerator] Output directory: ${OUTPUT_DIR}`)
+  console.log(`[DocGenerator] Health check: GET http://0.0.0.0:${PORT}/health`)
+  console.log(`[DocGenerator] MCP endpoint:  POST http://0.0.0.0:${PORT}/mcp`)
+})

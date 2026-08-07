@@ -272,7 +272,10 @@ export interface UserGrantSummary {
 }
 
 /** All of a user's grants across recipes (for the Profile UI "Connected accounts" list). */
-export async function listUserOAuthGrants(db: DbClient, userId: string): Promise<UserGrantSummary[]> {
+export async function listUserOAuthGrants(
+  db: DbClient,
+  userId: string
+): Promise<UserGrantSummary[]> {
   const result = await db.query(
     `SELECT recipe_namespace, recipe_name, oauth_client_id, provider, background, updated_at
      FROM oauth_grants

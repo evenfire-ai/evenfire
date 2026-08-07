@@ -1,13 +1,16 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { DbClient } from '../src/db.js'
 import {
-  setUserGrantBackground,
-  listBackgroundUserGrants,
   getOAuthGrant,
+  listBackgroundUserGrants,
   oauthGrantExists,
+  setUserGrantBackground,
 } from '../src/oauth/store.js'
 
-function fakeDb(rows: unknown[] = []): { db: DbClient; calls: { text: string; values: unknown[] }[] } {
+function fakeDb(rows: unknown[] = []): {
+  db: DbClient
+  calls: { text: string; values: unknown[] }[]
+} {
   const calls: { text: string; values: unknown[] }[] = []
   const db: DbClient = {
     query: async (text: string, values: unknown[] = []) => {
@@ -32,7 +35,11 @@ describe('store background', () => {
     expect(calls[0].text).toContain('UPDATE oauth_grants')
     expect(calls[0].text).toContain("grant_kind = 'user'")
     expect(calls[0].values).toEqual([
-      'sandbox-recipes', 'leadforge', 'user-1', 'google-gmail', true,
+      'sandbox-recipes',
+      'leadforge',
+      'user-1',
+      'google-gmail',
+      true,
     ])
   })
 
@@ -50,7 +57,11 @@ describe('store background', () => {
 
   it('getOAuthGrant with requireBackground adds the background filter', async () => {
     const { db, calls } = fakeDb([])
-    await getOAuthGrant(db, Buffer.alloc(32), { ...KEY, grantKind: 'user', requireBackground: true })
+    await getOAuthGrant(db, Buffer.alloc(32), {
+      ...KEY,
+      grantKind: 'user',
+      requireBackground: true,
+    })
     expect(calls[0].text).toContain('AND background = true')
   })
 

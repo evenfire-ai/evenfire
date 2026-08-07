@@ -1,5 +1,5 @@
+import { describe, expect, it } from 'vitest'
 import { createHmac } from 'node:crypto'
-import { describe, it, expect } from 'vitest'
 import { signOAuthState, verifyOAuthState } from '../src/oauth/state.js'
 
 const SECRET = 'x'.repeat(40)

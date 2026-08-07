@@ -73,7 +73,7 @@ const MOCK_RECIPE_ENTRY: RegistryEntry = {
   tags: ['analytics', 'reporting'],
   trust_level: 'mid',
   quality_tier: 'unverified',
-  visibility: 'private',
+  visibility: 'public',
   status: 'published',
   server_mode: null,
   transport: null,
@@ -156,16 +156,27 @@ describe('RegistryCatalog tabs and columns', () => {
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    for (const heading of ['Name', 'Version', 'Visibility']) {
+    for (const heading of ['Name', 'Version']) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
     for (const actionHeading of ['Installation', 'Edit or remove']) {
       expect(screen.getByRole('columnheader', { name: actionHeading })).toBeInTheDocument()
     }
     expect(screen.queryByRole('columnheader', { name: 'View details' })).not.toBeInTheDocument()
-    for (const removed of ['Type', 'Category', 'Trust', 'Quality', 'Downloads']) {
+    for (const removed of ['Type', 'Category', 'Trust', 'Quality', 'Downloads', 'Visibility']) {
       expect(screen.queryByRole('columnheader', { name: removed })).not.toBeInTheDocument()
     }
+  })
+
+  it('excludes private entries from the Marketplace', async () => {
+    mockApiSuccess([
+      MOCK_MCP_ENTRY,
+      { ...MOCK_MCP_ENTRY, id: '3', name: 'private-search', visibility: 'private' },
+    ])
+    render(<RegistryCatalog />)
+
+    expect(await screen.findByText('brave-search')).toBeInTheDocument()
+    expect(screen.queryByText('private-search')).not.toBeInTheDocument()
   })
 
   it('shows the top-level Connectors tab, no public Plugins tab', async () => {
@@ -200,6 +211,30 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/entries/brave-search/1.0.0'
     )
+  })
+
+  it('sorts connectors by name and version from their headers', async () => {
+    mockApiSuccess([
+      MOCK_MCP_ENTRY,
+      { ...MOCK_MCP_ENTRY, id: '3', name: 'zebra-search', version: '1.2.0' },
+      { ...MOCK_MCP_ENTRY, id: '4', name: 'alpha-search', version: '2.0.0' },
+    ])
+    render(<RegistryCatalog />)
+    await screen.findByText('brave-search')
+
+    const listedNames = () =>
+      Array.from(document.querySelectorAll('.cu-marketplace-table .cu-registry-name')).map(
+        element => element.textContent
+      )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'brave-search', 'zebra-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by version descending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by version ascending' }))
+    expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
   })
 })
 
@@ -330,12 +365,12 @@ describe('RegistryCatalog state handling', () => {
   it('renders a skeleton across the compact columns while capability is resolving', () => {
     vi.mocked(api.getRegistryCatalog).mockReturnValue(new Promise(() => {}))
     // Role is unknown while capability resolves, so the curator-only actions
-    // column is absent and the six visible columns render 30 skeleton cells
+    // column is absent and the four visible columns render 20 skeleton cells
     // across five rows.
     vi.mocked(api.getPublishScope).mockReturnValue(new Promise(() => {}))
     const { container } = render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(30)
+    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(20)
   })
 
   it('shows an API error', async () => {

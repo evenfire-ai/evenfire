@@ -1,6 +1,6 @@
+import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { describe, expect, it, vi } from 'vitest'
 import { createAdminHostEnvRouter } from '../src/routes/admin/hostEnv.js'
 import { HostEnvService, HostEnvServiceError } from '../src/services/hostEnvService.js'
 
@@ -9,8 +9,14 @@ import { HostEnvService, HostEnvServiceError } from '../src/services/hostEnvServ
  * to drive HostEnvService without spinning up a real cluster.
  */
 function createFakeCoreApi() {
-  const cms: Record<string, { metadata: { name: string; resourceVersion: string }; data?: Record<string, string> }> = {}
-  const secrets: Record<string, { metadata: { name: string; resourceVersion: string }; data?: Record<string, string> }> = {}
+  const cms: Record<
+    string,
+    { metadata: { name: string; resourceVersion: string }; data?: Record<string, string> }
+  > = {}
+  const secrets: Record<
+    string,
+    { metadata: { name: string; resourceVersion: string }; data?: Record<string, string> }
+  > = {}
 
   return {
     state: { cms, secrets },
@@ -35,7 +41,10 @@ function createFakeCoreApi() {
         const cur = cms[req.name]
         if (!cur) throw { code: 404 }
         cms[req.name] = {
-          metadata: { name: req.name, resourceVersion: String(Number(cur.metadata.resourceVersion) + 1) },
+          metadata: {
+            name: req.name,
+            resourceVersion: String(Number(cur.metadata.resourceVersion) + 1),
+          },
           data: req.body.data,
         }
         return cms[req.name]
@@ -48,7 +57,11 @@ function createFakeCoreApi() {
     }),
     createNamespacedSecret: vi.fn(
       async (req: {
-        body: { metadata: { name: string }; stringData?: Record<string, string>; data?: Record<string, string> }
+        body: {
+          metadata: { name: string }
+          stringData?: Record<string, string>
+          data?: Record<string, string>
+        }
       }) => {
         const name = req.body.metadata.name
         if (secrets[name]) throw { code: 409 }
@@ -65,7 +78,11 @@ function createFakeCoreApi() {
     replaceNamespacedSecret: vi.fn(
       async (req: {
         name: string
-        body: { metadata: { name: string }; stringData?: Record<string, string>; data?: Record<string, string> }
+        body: {
+          metadata: { name: string }
+          stringData?: Record<string, string>
+          data?: Record<string, string>
+        }
       }) => {
         const cur = secrets[req.name]
         if (!cur) throw { code: 404 }
@@ -75,7 +92,10 @@ function createFakeCoreApi() {
         }
         for (const [k, v] of Object.entries(req.body.data ?? {})) encoded[k] = v
         secrets[req.name] = {
-          metadata: { name: req.name, resourceVersion: String(Number(cur.metadata.resourceVersion) + 1) },
+          metadata: {
+            name: req.name,
+            resourceVersion: String(Number(cur.metadata.resourceVersion) + 1),
+          },
           data: encoded,
         }
         return secrets[req.name]
@@ -86,7 +106,10 @@ function createFakeCoreApi() {
 
 function buildApp() {
   const fake = createFakeCoreApi()
-  const service = new HostEnvService(fake as unknown as Parameters<typeof HostEnvService>[0], 'mcp-host')
+  const service = new HostEnvService(
+    fake as unknown as Parameters<typeof HostEnvService>[0],
+    'mcp-host'
+  )
   const gateway = { hostEnv: () => service } as never
   const app = express()
   app.use(express.json())
@@ -107,9 +130,7 @@ describe('routes/hostEnv', () => {
       .put('/admin/hosts/trader/env')
       .send([{ key: 'FEATURE_FLAG', value: 'on', secret: false }])
       .expect(200)
-    expect(res.body.keys).toEqual([
-      expect.objectContaining({ key: 'FEATURE_FLAG', secret: false }),
-    ])
+    expect(res.body.keys).toEqual([expect.objectContaining({ key: 'FEATURE_FLAG', secret: false })])
     expect(res.body.showOnce).toEqual({})
     expect(fake.state.cms['host-trader-env']).toBeDefined()
     expect(fake.state.secrets['host-trader-env-secret']).toBeDefined() // upsert creates both even if empty

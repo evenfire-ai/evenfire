@@ -14,22 +14,22 @@ spec:
         app: mailpit
     spec:
       containers:
-      - name: mailpit
-        image: axllent/mailpit:latest
-        ports:
-        - containerPort: 1025
-          name: smtp
-        - containerPort: 1143
-          name: imap
-        - containerPort: 8025
-          name: web
-        resources:
-          requests:
-            memory: "64Mi"
-            cpu: "50m"
-          limits:
-            memory: "128Mi"
-            cpu: "200m"
+        - name: mailpit
+          image: axllent/mailpit:latest
+          ports:
+            - containerPort: 1025
+              name: smtp
+            - containerPort: 1143
+              name: imap
+            - containerPort: 8025
+              name: web
+          resources:
+            requests:
+              memory: '64Mi'
+              cpu: '50m'
+            limits:
+              memory: '128Mi'
+              cpu: '200m'
 ---
 apiVersion: v1
 kind: Service
@@ -40,12 +40,12 @@ spec:
   selector:
     app: mailpit
   ports:
-  - name: smtp
-    port: 1025
-    targetPort: 1025
-  - name: imap
-    port: 1143
-    targetPort: 1143
-  - name: web
-    port: 8025
-    targetPort: 8025
+    - name: smtp
+      port: 1025
+      targetPort: 1025
+    - name: imap
+      port: 1143
+      targetPort: 1143
+    - name: web
+      port: 8025
+      targetPort: 8025

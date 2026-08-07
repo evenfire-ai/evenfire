@@ -278,95 +278,97 @@ export function RegistryInstallForm({ entry, onCancel, onInstalled }: RegistryIn
               <details className="cu-registry-install-configuration">
                 <summary>Configuration</summary>
                 <div className="cu-registry-install-configuration__body">
-                <div className="cu-field cu-field--compact">
-                  <label htmlFor="ri-name">Server name</label>
-                  <input
-                    id="ri-name"
-                    className="cu-input"
-                    value={serverName}
-                    onChange={event =>
-                      setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
-                    }
-                    placeholder="my-mcp-server"
-                  />
-                  {serverName && !nameValid ? (
-                    <p className="cu-field__error">
-                      Must be a valid K8s name (lowercase, alphanumeric, hyphens, max 63 chars).
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className="cu-field cu-field--compact">
-                  <label htmlFor="ri-context">Context</label>
-                  <select
-                    id="ri-context"
-                    className="cu-input"
-                    value={contextRef}
-                    onChange={event => setContextRef(event.target.value)}
-                  >
-                    <option value="">Select a context...</option>
-                    {contexts.map(context => (
-                      <option key={context.name} value={context.name}>
-                        {context.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {credHasKeys ? (
-                  <fieldset className="cu-form-section">
-                    <legend className="cu-section-title">
-                      Credentials ({credSchema!.authType}
-                      {credRequired ? '' : ' - optional'})
-                    </legend>
-                    {credSchema!.keys.map(key => (
-                      <div className="cu-field cu-field--compact" key={key.name}>
-                        <label htmlFor={`ri-cred-${key.name}`}>{key.label}</label>
-                        <input
-                          id={`ri-cred-${key.name}`}
-                          className="cu-input"
-                          type={
-                            key.kind === 'api-key' || key.kind === 'password' ? 'password' : 'text'
-                          }
-                          value={credValues[key.name] ?? ''}
-                          onChange={event =>
-                            setCredValues(previous => ({
-                              ...previous,
-                              [key.name]: event.target.value,
-                            }))
-                          }
-                          onPaste={event => pasteCredentialValue(key.name, event)}
-                          autoComplete="new-password"
-                          placeholder={key.description}
-                        />
-                      </div>
-                    ))}
-                    {credRequired ? (
-                      <div
-                        className={`cu-banner ${credStarted && !credComplete ? 'cu-banner--error' : 'cu-banner--info'}`}
-                      >
-                        {credStarted && !credComplete
-                          ? `Complete all credential fields or clear them all to install pending. Missing: ${missingCredentialKeys.join(', ')}.`
-                          : 'Leave all credential fields empty to install now and add this connector secret later from Secrets, or fill every field to create it during install.'}
-                      </div>
+                  <div className="cu-field cu-field--compact">
+                    <label htmlFor="ri-name">Server name</label>
+                    <input
+                      id="ri-name"
+                      className="cu-input"
+                      value={serverName}
+                      onChange={event =>
+                        setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                      }
+                      placeholder="my-mcp-server"
+                    />
+                    {serverName && !nameValid ? (
+                      <p className="cu-field__error">
+                        Must be a valid K8s name (lowercase, alphanumeric, hyphens, max 63 chars).
+                      </p>
                     ) : null}
-                  </fieldset>
-                ) : null}
-                <EgressEditor
-                  allowCidr
-                  description="Review and adjust the egress contract that will be installed from this Marketplace entry. The final CRD is created from this selection, not from the Marketplace warning alone."
-                  initialBindings={registryInitialEgressBindings}
-                  key={`${entry.name}-${entry.version}-${JSON.stringify(registryInitialEgressBindings ?? [])}`}
-                  onChange={(nextBindings, status) => {
-                    setEgressBindings(nextBindings)
-                    setEgressStatus(status)
-                  }}
-                />
-                {remoteRequiresEgress && egressStatus?.mode === 'none' ? (
-                  <div className="cu-banner cu-banner--error" role="alert">
-                    Remote connectors must keep exact-host egress to the selected vendor endpoint.
                   </div>
-                ) : null}
+
+                  <div className="cu-field cu-field--compact">
+                    <label htmlFor="ri-context">Context</label>
+                    <select
+                      id="ri-context"
+                      className="cu-input"
+                      value={contextRef}
+                      onChange={event => setContextRef(event.target.value)}
+                    >
+                      <option value="">Select a context...</option>
+                      {contexts.map(context => (
+                        <option key={context.name} value={context.name}>
+                          {context.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {credHasKeys ? (
+                    <fieldset className="cu-form-section">
+                      <legend className="cu-section-title">
+                        Credentials ({credSchema!.authType}
+                        {credRequired ? '' : ' - optional'})
+                      </legend>
+                      {credSchema!.keys.map(key => (
+                        <div className="cu-field cu-field--compact" key={key.name}>
+                          <label htmlFor={`ri-cred-${key.name}`}>{key.label}</label>
+                          <input
+                            id={`ri-cred-${key.name}`}
+                            className="cu-input"
+                            type={
+                              key.kind === 'api-key' || key.kind === 'password'
+                                ? 'password'
+                                : 'text'
+                            }
+                            value={credValues[key.name] ?? ''}
+                            onChange={event =>
+                              setCredValues(previous => ({
+                                ...previous,
+                                [key.name]: event.target.value,
+                              }))
+                            }
+                            onPaste={event => pasteCredentialValue(key.name, event)}
+                            autoComplete="new-password"
+                            placeholder={key.description}
+                          />
+                        </div>
+                      ))}
+                      {credRequired ? (
+                        <div
+                          className={`cu-banner ${credStarted && !credComplete ? 'cu-banner--error' : 'cu-banner--info'}`}
+                        >
+                          {credStarted && !credComplete
+                            ? `Complete all credential fields or clear them all to install pending. Missing: ${missingCredentialKeys.join(', ')}.`
+                            : 'Leave all credential fields empty to install now and add this connector secret later from Secrets, or fill every field to create it during install.'}
+                        </div>
+                      ) : null}
+                    </fieldset>
+                  ) : null}
+                  <EgressEditor
+                    allowCidr
+                    description="Review and adjust the egress contract that will be installed from this Marketplace entry. The final CRD is created from this selection, not from the Marketplace warning alone."
+                    initialBindings={registryInitialEgressBindings}
+                    key={`${entry.name}-${entry.version}-${JSON.stringify(registryInitialEgressBindings ?? [])}`}
+                    onChange={(nextBindings, status) => {
+                      setEgressBindings(nextBindings)
+                      setEgressStatus(status)
+                    }}
+                  />
+                  {remoteRequiresEgress && egressStatus?.mode === 'none' ? (
+                    <div className="cu-banner cu-banner--error" role="alert">
+                      Remote connectors must keep exact-host egress to the selected vendor endpoint.
+                    </div>
+                  ) : null}
                 </div>
               </details>
             ) : null}

@@ -1,8 +1,8 @@
 import { Router } from 'express'
 import { pool } from '../../db.js'
 import {
-  requireValidExternalSessionToken,
   type ExternalAuthedRequest,
+  requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { deleteOAuthGrant, listUserOAuthGrants } from '../../oauth/store.js'
 

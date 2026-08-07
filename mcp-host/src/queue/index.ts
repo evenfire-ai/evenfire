@@ -2,5 +2,5 @@
  * Queue module exports.
  */
 
-export * from "./types";
-export * from "./messageQueue";
+export * from './types'
+export * from './messageQueue'

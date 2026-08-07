@@ -102,9 +102,7 @@ describe('admin per-user grants', () => {
 
   it('[SEC] GET forces namespace to sandbox-recipes (ignores any path-supplied namespace)', async () => {
     storeMock.listUserGrantsForClient.mockResolvedValue([])
-    await request(app)
-      .get('/admin/recipes/leadforge/oauth/google-gmail/user-grants')
-      .expect(200)
+    await request(app).get('/admin/recipes/leadforge/oauth/google-gmail/user-grants').expect(200)
     const call = storeMock.listUserGrantsForClient.mock.calls[0] as unknown[]
     const key = call[1] as { recipeNamespace: string }
     expect(key.recipeNamespace).toBe(SANDBOX_NS)

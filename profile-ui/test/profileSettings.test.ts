@@ -27,7 +27,10 @@ test('normalizeProfileChannels fills missing social network keys', () => {
 })
 
 test('uniqueTrimmed removes blanks and exact duplicates while preserving order', () => {
-  assert.deepEqual(uniqueTrimmed([' @testuser ', '', '@testuser', '@other']), ['@testuser', '@other'])
+  assert.deepEqual(uniqueTrimmed([' @testuser ', '', '@testuser', '@other']), [
+    '@testuser',
+    '@other',
+  ])
 })
 
 test('normalizeProfileChannels stores Telegram handles with @ prefix', () => {

@@ -157,11 +157,7 @@ describe('GfsDelegationPanel', () => {
 
     await screen.findByText('Some selected subjects are invalid and were rejected.')
     expect(onGrant).toHaveBeenCalledTimes(1)
-    expect(onGrant).toHaveBeenCalledWith(
-      ['user:successful', 'team:blocked'],
-      ['read'],
-      false
-    )
+    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'], false)
     expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
   })

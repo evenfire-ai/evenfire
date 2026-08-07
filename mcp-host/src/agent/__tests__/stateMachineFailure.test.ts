@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
-import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import { MessageQueue } from '../../queue'
 import type { TaskError } from '../../queue/types'
 import { AgentStateMachine } from '../stateMachine'

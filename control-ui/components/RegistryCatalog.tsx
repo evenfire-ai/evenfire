@@ -25,15 +25,30 @@ import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '../lib/trustLevel'
 
 type MarketplaceTab = 'connectors' | 'plugins'
+type CatalogSortKey = 'name' | 'version'
+type SortDirection = 'asc' | 'desc'
 
 const REGISTRY_COLUMNS: TableHeaderColumn[] = [
   { key: 'expand', ariaLabel: 'Expand Marketplace entry' },
   { key: 'name', label: 'Name' },
   { key: 'version', label: 'Version' },
-  { key: 'visibility', label: 'Visibility' },
   { key: 'install', align: 'right', ariaLabel: 'Installation' },
   { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
 ]
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split('.')
+  const rightParts = right.split('.')
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const leftPart = Number.parseInt(leftParts[index] ?? '0', 10)
+    const rightPart = Number.parseInt(rightParts[index] ?? '0', 10)
+    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
+      return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+    }
+    if (leftPart !== rightPart) return leftPart - rightPart
+  }
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+}
 
 export default function RegistryCatalog() {
   const pathname = usePathname()
@@ -53,6 +68,8 @@ export default function RegistryCatalog() {
   const [installError, setInstallError] = useState('')
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
+  const [sortKey, setSortKey] = useState<CatalogSortKey | null>(null)
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [removeTarget, setRemoveTarget] = useState<RegistryEntry | null>(null)
   const [removing, setRemoving] = useState(false)
@@ -69,7 +86,14 @@ export default function RegistryCatalog() {
   const connectionState = capability?.connectionState ?? null
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
-  const columns = isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
+  const columns = (
+    isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
+  ).map(column => {
+    if (column.key === 'name' || column.key === 'version') {
+      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+    }
+    return column
+  })
 
   useEffect(() => {
     void loadData()
@@ -141,7 +165,8 @@ export default function RegistryCatalog() {
     [activeEntryType, entries]
   )
   const filtered = useMemo(() => {
-    return tabEntries.filter(entry => {
+    const visibleEntries = tabEntries.filter(entry => {
+      if (entry.visibility === 'private') return false
       if (categoryFilter !== 'all' && entry.category !== categoryFilter) return false
       if (!search) return true
       const query = search.toLowerCase()
@@ -151,9 +176,51 @@ export default function RegistryCatalog() {
         entry.tags.some(tag => tag.toLowerCase().includes(query))
       )
     })
-  }, [categoryFilter, search, tabEntries])
+    if (!sortKey) return visibleEntries
+
+    const direction = sortDirection === 'asc' ? 1 : -1
+    return [...visibleEntries].sort((left, right) => {
+      const comparison =
+        sortKey === 'name'
+          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+          : compareVersions(left.version, right.version)
+      return comparison * direction
+    })
+  }, [categoryFilter, search, sortDirection, sortKey, tabEntries])
 
   const isInitialLoad = loading && entries.length === 0
+
+  function toggleSort(key: CatalogSortKey) {
+    if (sortKey === key) {
+      setSortDirection(direction => (direction === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setSortKey(key)
+    setSortDirection(key === 'version' ? 'desc' : 'asc')
+  }
+
+  function renderSortHeader(key: CatalogSortKey, label: string) {
+    const isActive = sortKey === key
+    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
+    const nextDirection = isActive
+      ? sortDirection === 'asc'
+        ? 'descending'
+        : 'ascending'
+      : key === 'version'
+        ? 'descending'
+        : 'ascending'
+    return (
+      <button
+        type="button"
+        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        onClick={() => toggleSort(key)}
+        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
+        aria-pressed={isActive}
+      >
+        {label} {indicator}
+      </button>
+    )
+  }
 
   function isEntryInstalled(entry: RegistryEntry): boolean {
     if (entry.entry_type === 'mcp-server') {
@@ -397,17 +464,6 @@ export default function RegistryCatalog() {
                           ) : null}
                         </td>
                         <td className="cu-code-text">{entry.version}</td>
-                        <td>
-                          {entry.visibility ? (
-                            <span
-                              className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
-                            >
-                              {entry.visibility === 'public' ? 'Public' : 'Private'}
-                            </span>
-                          ) : (
-                            <span className="cu-muted">—</span>
-                          )}
-                        </td>
                         <td
                           className="cu-table__cell-actions cu-marketplace-action-cell"
                           onClick={event => event.stopPropagation()}

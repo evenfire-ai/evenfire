@@ -153,10 +153,7 @@ export async function handleOAuthCallback(
   // ─── 3. Read clientId + clientSecret from K8s Secrets ─────────────────
   let clientIdSecret: Record<string, string>
   try {
-    clientIdSecret = await deps.secretReader.read(
-      clientDecl.clientIdRef.name,
-      recipeNamespace
-    )
+    clientIdSecret = await deps.secretReader.read(clientDecl.clientIdRef.name, recipeNamespace)
   } catch (err) {
     if (err instanceof SecretNotFoundError) {
       return { kind: 'secret_missing', secret: clientDecl.clientIdRef.name }

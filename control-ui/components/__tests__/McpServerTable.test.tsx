@@ -20,6 +20,7 @@ function makeItem(overrides: {
   image?: string
   contextRef?: string
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
+  enabled?: boolean
   conditions?: McpServerCondition[] | undefined
   hasStatus?: boolean
 }) {
@@ -28,6 +29,7 @@ function makeItem(overrides: {
     spec: {
       image: string
       contextRef: string
+      enabled?: boolean
       transport: { type: 'sse' | 'streamableHttp' | 'stdio'; url: string }
     }
     status?: { conditions?: McpServerCondition[] }
@@ -39,6 +41,7 @@ function makeItem(overrides: {
     spec: {
       image: overrides.image ?? 'ghcr.io/example/mcp:1.0',
       contextRef: overrides.contextRef ?? 'context1',
+      enabled: overrides.enabled,
       transport: {
         type: overrides.transportType ?? 'streamableHttp',
         url: 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp',
@@ -135,6 +138,59 @@ describe('McpServerTable — search filter by condition text', () => {
 
     expect(screen.getByText('broken-server')).toBeInTheDocument()
     expect(screen.queryByText('healthy-server')).not.toBeInTheDocument()
+  })
+})
+
+describe('McpServerTable — column sorting', () => {
+  it('sorts connectors by name, enabled state, and status from their headers', () => {
+    const items = [
+      makeItem({
+        name: 'zebra-server',
+        enabled: true,
+        conditions: [{ type: 'Ready', status: 'True' }],
+      }),
+      makeItem({ name: 'alpha-server', enabled: false, hasStatus: false }),
+      makeItem({
+        name: 'bravo-server',
+        enabled: true,
+        conditions: [{ type: 'SomeOther', status: 'Unknown' }],
+      }),
+      makeItem({
+        name: 'charlie-server',
+        enabled: false,
+        conditions: [{ type: 'SecretResolved', status: 'False' }],
+      }),
+    ]
+    render(<McpServerTable items={items} />)
+
+    const listedNames = () =>
+      Array.from(document.querySelectorAll('.cu-connectors-table .cu-expandable-row__name')).map(
+        element => element.textContent
+      )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
+    expect(listedNames()).toEqual([
+      'alpha-server',
+      'bravo-server',
+      'charlie-server',
+      'zebra-server',
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by enabled ascending' }))
+    expect(listedNames()).toEqual([
+      'alpha-server',
+      'charlie-server',
+      'zebra-server',
+      'bravo-server',
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by status ascending' }))
+    expect(listedNames()).toEqual([
+      'charlie-server',
+      'bravo-server',
+      'zebra-server',
+      'alpha-server',
+    ])
   })
 })
 

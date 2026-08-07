@@ -4,13 +4,17 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
-import { CreateFlowPanel } from '@components/CreateFlowPanel'
-import { CreatePageHeader } from '@components/CreatePageHeader'
-import { DashboardLayout } from '@components/DashboardLayout'
+import { DetailPageShell } from '@components/DetailPageShell'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
+import {
+  CONNECTOR_EDIT_DEFAULT_TAB,
+  CONNECTOR_EDIT_TABS,
+  CONNECTOR_EDIT_TAB_LABELS,
+  type ConnectorEditTab,
+} from '@constants/connectorEdit'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServer, updateMcpServer } from '@lib/api'
 import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
@@ -38,11 +42,18 @@ function resolveEnvSecret(spec: Record<string, unknown> | undefined): EnvSecret 
   return { name: candidate.name, keys }
 }
 
+function parseConnectorEditTab(value: string | string[] | undefined): ConnectorEditTab {
+  const candidate = Array.isArray(value) ? value[0] : value
+  return CONNECTOR_EDIT_TABS.find(tab => tab === candidate) ?? CONNECTOR_EDIT_DEFAULT_TAB
+}
+
 export default function EditMcpServerPage() {
   const router = useRouter()
-  const params = useParams<{ name: string }>()
+  const params = useParams<{ name: string; tab?: string | string[] }>()
   const name = decodeURIComponent(params?.name ?? '')
   const { showToast } = useToast()
+
+  const activeTab = parseConnectorEditTab(params?.tab)
 
   const [server, setServer] = useState<McpServerResource | null>(null)
   const [loading, setLoading] = useState(true)
@@ -54,6 +65,14 @@ export default function EditMcpServerPage() {
 
   function backToList() {
     router.push(CONTROL_ROUTES.connectors.root)
+  }
+
+  function selectTab(next: ConnectorEditTab) {
+    if (next === CONNECTOR_EDIT_DEFAULT_TAB) {
+      router.replace(CONTROL_ROUTES.connectors.edit(name))
+    } else {
+      router.replace(CONTROL_ROUTES.connectors.editTab(name, next))
+    }
   }
 
   const handleEgressChange = useCallback(
@@ -110,91 +129,106 @@ export default function EditMcpServerPage() {
     }
   }
 
+  const envSecret = server?.spec
+    ? resolveEnvSecret(server.spec as Record<string, unknown>)
+    : undefined
+
   return (
     <AuthGate>
-      <DashboardLayout isDetailPage>
-        <CreateFlowPanel
-          header={
-            <CreatePageHeader
-              icon={<IconCable />}
-              title={`Edit Connector: ${name}`}
-              subtitle="Update explicit external egress for this connector."
-              backLabel="Back to connectors"
-              onBack={backToList}
-            />
-          }
-        >
-          {loading ? (
-            <FormSectionsSkeleton
-              className="cu-connector-edit-form"
-              label="Connector"
-              primaryActionLabel="Save egress"
-              sections={3}
-            />
-          ) : loadError ? (
-            <div className="cu-connector-edit-form">
-              <div className="cu-banner cu-banner--error" role="alert">
-                {loadError}
+      <DetailPageShell<ConnectorEditTab>
+        activeTab={activeTab}
+        backLabel="Back to connectors"
+        icon={<IconCable />}
+        onBack={backToList}
+        onTabChange={selectTab}
+        subtitle="Update external egress and rotate credentials for this connector."
+        tabAriaLabel="Connector edit sections"
+        tabClassName="cu-tabs--compact"
+        tabs={CONNECTOR_EDIT_TABS.map(tab => ({
+          value: tab,
+          label: CONNECTOR_EDIT_TAB_LABELS[tab],
+          href:
+            tab === CONNECTOR_EDIT_DEFAULT_TAB
+              ? CONTROL_ROUTES.connectors.edit(name)
+              : CONTROL_ROUTES.connectors.editTab(name, tab),
+        }))}
+        title={`Edit Connector: ${name}`}
+        error={loadError || undefined}
+      >
+        {loading ? (
+          activeTab === 'credentials' ? (
+            <div
+              role="status"
+              aria-busy="true"
+              aria-label="Loading connector credentials"
+              className="cu-body-loading-skeleton"
+            >
+              <section className="cu-body-loading-skeleton__section">
+                <span className="cu-skeleton cu-body-loading-skeleton__heading" />
+                <span className="cu-skeleton cu-body-loading-skeleton__line" />
+                <div className="cu-body-loading-skeleton__fields">
+                  <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                  <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                </div>
+              </section>
+            </div>
+          ) : (
+            <FormSectionsSkeleton label="Connector" primaryActionLabel="Save egress" sections={2} />
+          )
+        ) : server ? (
+          activeTab === 'credentials' ? (
+            <UpdateConnectorCredentials serverName={name} envSecret={envSecret} />
+          ) : (
+            <form className="cu-connector-edit-content" onSubmit={handleSave}>
+              <div className="cu-connector-edit-meta">
+                <div>
+                  <strong>Image:</strong>{' '}
+                  <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
+                </div>
+                <div>
+                  <strong>Context:</strong>{' '}
+                  <code>
+                    {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
+                  </code>
+                </div>
               </div>
-            </div>
-          ) : server ? (
-            <div className="cu-connector-edit-form">
-              <form className="cu-create-content cu-connector-edit-content" onSubmit={handleSave}>
-                <div className="cu-connector-edit-meta">
-                  <div>
-                    <strong>Image:</strong>{' '}
-                    <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
-                  </div>
-                  <div>
-                    <strong>Context:</strong>{' '}
-                    <code>
-                      {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
-                    </code>
-                  </div>
-                </div>
 
-                <EgressEditor
-                  allowCidr
-                  key={`${name}-${JSON.stringify(server.spec?.egressBindings ?? [])}`}
-                  initialBindings={server.spec?.egressBindings as EgressBinding[] | undefined}
-                  onChange={handleEgressChange}
-                  title="External Egress"
-                  description="Adjust only the external egress contract. Other connector settings are preserved."
-                />
-
-                {saveError ? (
-                  <div className="cu-banner cu-banner--error" role="alert">
-                    {saveError}
-                  </div>
-                ) : null}
-
-                <div className="cu-create-actions">
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--ghost"
-                    disabled={saving}
-                    onClick={backToList}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="cu-btn cu-btn--primary"
-                    disabled={saving || Boolean(egressStatus?.errors.length)}
-                  >
-                    {saving ? 'Saving...' : 'Save egress'}
-                  </button>
-                </div>
-              </form>
-
-              <UpdateConnectorCredentials
-                serverName={name}
-                envSecret={resolveEnvSecret(server.spec as Record<string, unknown> | undefined)}
+              <EgressEditor
+                allowCidr
+                key={`${name}-${JSON.stringify(server.spec?.egressBindings ?? [])}`}
+                initialBindings={server.spec?.egressBindings as EgressBinding[] | undefined}
+                onChange={handleEgressChange}
+                title="External Egress"
+                description="Adjust only the external egress contract. Other connector settings are preserved."
               />
-            </div>
-          ) : null}
-        </CreateFlowPanel>
-      </DashboardLayout>
+
+              {saveError ? (
+                <div className="cu-banner cu-banner--error" role="alert">
+                  {saveError}
+                </div>
+              ) : null}
+
+              <div className="cu-create-actions">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost"
+                  disabled={saving}
+                  onClick={backToList}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="cu-btn cu-btn--primary"
+                  disabled={saving || Boolean(egressStatus?.errors.length)}
+                >
+                  {saving ? 'Saving...' : 'Save egress'}
+                </button>
+              </div>
+            </form>
+          )
+        ) : null}
+      </DetailPageShell>
     </AuthGate>
   )
 }

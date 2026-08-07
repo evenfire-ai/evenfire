@@ -71,7 +71,8 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
     requireInternalService('rpc-proxy'),
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } = req.body ?? {}
+        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } =
+          req.body ?? {}
         if (
           typeof recipeNs !== 'string' ||
           typeof recipeName !== 'string' ||

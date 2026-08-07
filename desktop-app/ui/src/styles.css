@@ -12590,21 +12590,56 @@ pre {
 
 .composer-reference-submenu {
   left: calc(100% + var(--space-1));
-  bottom: auto;
-  max-height: min(340px, 70vh);
-  overflow: auto;
+  bottom: calc(var(--space-1) + 34px);
+  top: auto;
+  max-height: min(420px, 65vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.composer-reference-submenu::-webkit-scrollbar {
+  width: 8px;
+}
+
+.composer-reference-submenu::-webkit-scrollbar-thumb {
+  background: rgba(var(--edge-rgb), 0.4);
+  border-radius: 4px;
+}
+
+.composer-reference-submenu::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--edge-rgb), 0.6);
 }
 
 .composer-reference-submenu--plugins {
-  top: var(--space-1);
+  bottom: calc(var(--space-1) + 68px);
 }
 
 .composer-reference-submenu--connectors {
-  top: calc(var(--space-1) + 34px);
+  bottom: calc(var(--space-1) + 34px);
 }
 
 .composer-reference-submenu--agent-files {
+  bottom: var(--space-1);
+}
+
+.composer-inline .composer-reference-submenu {
+  bottom: auto;
+  top: var(--space-1);
+}
+
+.composer-inline .composer-reference-submenu--plugins {
+  top: var(--space-1);
+  bottom: auto;
+}
+
+.composer-inline .composer-reference-submenu--connectors {
+  top: calc(var(--space-1) + 34px);
+  bottom: auto;
+}
+
+.composer-inline .composer-reference-submenu--agent-files {
   top: calc(var(--space-1) + 68px);
+  bottom: auto;
 }
 
 .composer-inline .composer-reference-menu-panel {

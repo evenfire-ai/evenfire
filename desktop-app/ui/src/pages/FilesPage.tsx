@@ -986,7 +986,9 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                     <GfsDelegationPanel
                       affordances={affordances}
                       subjectOptions={grantSubjectOptions}
-                      subjectOptionsLoading={teamDirectoryQuery.isFetching || myAgentsQuery.isFetching}
+                      subjectOptionsLoading={
+                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
+                      }
                       subjectOptionsError={mergeErrorMessages(
                         teamDirectoryQuery.error,
                         myAgentsQuery.error

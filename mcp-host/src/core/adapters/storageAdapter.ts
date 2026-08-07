@@ -1,5 +1,5 @@
-import { Storage } from "../interfaces";
-import { Conversation } from "../types";
+import { Storage } from '../interfaces'
+import { Conversation } from '../types'
 
 /**
  * In-memory conversation storage.
@@ -11,22 +11,22 @@ import { Conversation } from "../types";
  * - External database
  */
 export class InMemoryStorage implements Storage {
-  private conversations = new Map<string, Conversation>();
-  private systemPrompt: string | null = null;
+  private conversations = new Map<string, Conversation>()
+  private systemPrompt: string | null = null
 
   async loadConversation(id: string): Promise<Conversation | null> {
-    return this.conversations.get(id) ?? null;
+    return this.conversations.get(id) ?? null
   }
 
   async saveConversation(conversation: Conversation): Promise<void> {
-    this.conversations.set(conversation.id, conversation);
+    this.conversations.set(conversation.id, conversation)
   }
 
   async loadSystemPrompt(): Promise<string | null> {
-    return this.systemPrompt;
+    return this.systemPrompt
   }
 
   setSystemPrompt(prompt: string): void {
-    this.systemPrompt = prompt;
+    this.systemPrompt = prompt
   }
 }

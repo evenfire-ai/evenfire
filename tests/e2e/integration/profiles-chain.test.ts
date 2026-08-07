@@ -18,7 +18,8 @@ import {
 } from './helpers.integration.js'
 
 const TEST_EMAIL = process.env.E2E_DEV_LOGIN_EMAIL || 'test@clerum.io'
-const TEST_PASSWORD = process.env.E2E_DESKTOP_PASSWORD || process.env.ADMIN_PASSWORD || 'changeme123!'
+const TEST_PASSWORD =
+  process.env.E2E_DESKTOP_PASSWORD || process.env.ADMIN_PASSWORD || 'changeme123!'
 
 let sessionToken = ''
 let clusterAvailable = false

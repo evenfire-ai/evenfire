@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest'
-import { getAccessToken } from '../src/oauth/tokenHelper.js'
+import { describe, expect, it, vi } from 'vitest'
 import * as store from '../src/oauth/store.js'
+import { getAccessToken } from '../src/oauth/tokenHelper.js'
 
 const deps = {
   db: { query: async () => ({ rows: [] }) } as never,

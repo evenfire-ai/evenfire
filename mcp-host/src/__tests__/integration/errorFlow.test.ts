@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentStateMachine } from '../../agent'
 import { LlmErrorCode } from '../../core/errors'
+import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { ClassifiedError, SingleTurnProvider } from '../../llm'
 import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
-import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import type { ProgressEvent } from '../../progress/types'
 import { MessageQueue } from '../../queue'
 

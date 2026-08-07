@@ -365,9 +365,11 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
   })
 
   it('includes background:true in the control-api payload when the body sets it', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
-      jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
-    )
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
+      )
 
     await request(makeApp())
       .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')
@@ -384,9 +386,11 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
   })
 
   it('includes background:false in the control-api payload when background is omitted', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
-      jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
-    )
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
+      )
 
     await request(makeApp())
       .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')

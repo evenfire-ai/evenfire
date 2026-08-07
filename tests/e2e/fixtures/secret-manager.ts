@@ -22,55 +22,54 @@
  * await cleanupTestSecret('mcp-mongodb-credentials', 'mcp-server');
  * ```
  */
-
-import { execSync } from 'child_process';
-import { KubeConfig, CoreV1Api } from '@kubernetes/client-node';
+import { CoreV1Api, KubeConfig } from '@kubernetes/client-node'
+import { execSync } from 'child_process'
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface SecretCredentials {
-  [key: string]: string;
+  [key: string]: string
 }
 
 export interface TestSecretOptions {
-  namespace?: string;
-  labels?: Record<string, string>;
-  annotations?: Record<string, string>;
+  namespace?: string
+  labels?: Record<string, string>
+  annotations?: Record<string, string>
 }
 
 export interface SecretMountInfo {
-  secretName: string;
-  namespace: string;
+  secretName: string
+  namespace: string
   envVars: Array<{
-    name: string;
+    name: string
     secretKeyRef: {
-      name: string;
-      key: string;
-    };
-  }>;
+      name: string
+      key: string
+    }
+  }>
   volumes: Array<{
-    name: string;
+    name: string
     secret: {
-      secretName: string;
-    };
-  }>;
+      secretName: string
+    }
+  }>
 }
 
 // =============================================================================
 // Kubernetes Client Setup
 // =============================================================================
 
-let k8sCoreApi: CoreV1Api | null = null;
+let k8sCoreApi: CoreV1Api | null = null
 
 function getK8sCoreApi(): CoreV1Api {
   if (!k8sCoreApi) {
-    const kc = new KubeConfig();
-    kc.loadFromDefault(); // Uses ~/.kube/config or minikube config
-    k8sCoreApi = kc.makeApiClient(CoreV1Api);
+    const kc = new KubeConfig()
+    kc.loadFromDefault() // Uses ~/.kube/config or minikube config
+    k8sCoreApi = kc.makeApiClient(CoreV1Api)
   }
-  return k8sCoreApi;
+  return k8sCoreApi
 }
 
 // =============================================================================
@@ -96,17 +95,17 @@ export async function createTestSecret(
   credentials: SecretCredentials,
   options: TestSecretOptions = {}
 ): Promise<void> {
-  const { namespace = 'mcp-server', labels = {}, annotations = {} } = options;
+  const { namespace = 'mcp-server', labels = {}, annotations = {} } = options
 
   // Derive secret name from server name
-  const secretName = `mcp-${serverName}-credentials`;
+  const secretName = `mcp-${serverName}-credentials`
 
   // Create metadata with standard labels
   const metadata: Record<string, any> = {
     name: secretName,
     namespace,
     labels: {
-      'app': `mcp-${serverName}`,
+      app: `mcp-${serverName}`,
       'clerum.io/test': 'true',
       'clerum.io/e2e': 'true',
       ...labels,
@@ -115,12 +114,12 @@ export async function createTestSecret(
       'clerum.io/generated-by': 'secret-manager.ts',
       ...annotations,
     },
-  };
+  }
 
   // Build secret data (values must be base64 encoded)
-  const data: Record<string, string> = {};
+  const data: Record<string, string> = {}
   for (const [key, value] of Object.entries(credentials)) {
-    data[key] = Buffer.from(value, 'utf-8').toString('base64');
+    data[key] = Buffer.from(value, 'utf-8').toString('base64')
   }
 
   const secret = {
@@ -129,20 +128,20 @@ export async function createTestSecret(
     type: 'Opaque',
     metadata,
     data,
-  };
+  }
 
   try {
-    const api = getK8sCoreApi();
-    await api.createNamespacedSecret(namespace, secret);
-    console.log(`[SecretManager] Created secret: ${secretName} in namespace ${namespace}`);
+    const api = getK8sCoreApi()
+    await api.createNamespacedSecret(namespace, secret)
+    console.log(`[SecretManager] Created secret: ${secretName} in namespace ${namespace}`)
   } catch (error: any) {
     if (error.statusCode === 409) {
       // Secret already exists - update it
-      const api = getK8sCoreApi();
-      await api.replaceNamespacedSecret(secretName, namespace, secret);
-      console.log(`[SecretManager] Updated secret: ${secretName} in namespace ${namespace}`);
+      const api = getK8sCoreApi()
+      await api.replaceNamespacedSecret(secretName, namespace, secret)
+      console.log(`[SecretManager] Updated secret: ${secretName} in namespace ${namespace}`)
     } else {
-      throw new Error(`Failed to create secret ${secretName}: ${error.message}`);
+      throw new Error(`Failed to create secret ${secretName}: ${error.message}`)
     }
   }
 }
@@ -167,8 +166,8 @@ export async function createMultipleSecrets(
 ): Promise<void> {
   const promises = Object.entries(servers).map(([serverName, credentials]) =>
     createTestSecret(serverName, credentials, options)
-  );
-  await Promise.all(promises);
+  )
+  await Promise.all(promises)
 }
 
 // =============================================================================
@@ -185,9 +184,13 @@ export async function createMongoTestSecret(
   connectionString: string = 'mongodb://localhost:27017/test',
   options: TestSecretOptions = {}
 ): Promise<void> {
-  await createTestSecret('mongodb-server', {
-    'connection-string': connectionString,
-  }, options);
+  await createTestSecret(
+    'mongodb-server',
+    {
+      'connection-string': connectionString,
+    },
+    options
+  )
 }
 
 /**
@@ -200,9 +203,13 @@ export async function createAirtableTestSecret(
   apiKey: string = 'patDummyDummyDummyDummyDummyDummyDummyDummyDummyDummyDummy',
   options: TestSecretOptions = {}
 ): Promise<void> {
-  await createTestSecret('airtable-server', {
-    'api-key': apiKey,
-  }, options);
+  await createTestSecret(
+    'airtable-server',
+    {
+      'api-key': apiKey,
+    },
+    options
+  )
 }
 
 /**
@@ -210,13 +217,11 @@ export async function createAirtableTestSecret(
  *
  * @param options - Optional configuration applied to all secrets
  */
-export async function createAllMcpTestSecrets(
-  options: TestSecretOptions = {}
-): Promise<void> {
+export async function createAllMcpTestSecrets(options: TestSecretOptions = {}): Promise<void> {
   await Promise.all([
     createMongoTestSecret(undefined, options),
     createAirtableTestSecret(undefined, options),
-  ]);
+  ])
 }
 
 // =============================================================================
@@ -236,14 +241,14 @@ export async function verifySecretExists(
   namespace: string = 'mcp-server'
 ): Promise<boolean> {
   try {
-    const api = getK8sCoreApi();
-    await api.readNamespacedSecret(secretName, namespace);
-    return true;
+    const api = getK8sCoreApi()
+    await api.readNamespacedSecret(secretName, namespace)
+    return true
   } catch (error: any) {
     if (error.statusCode === 404) {
-      return false;
+      return false
     }
-    throw error;
+    throw error
   }
 }
 
@@ -259,17 +264,17 @@ export async function getSecretContents(
   secretName: string,
   namespace: string = 'mcp-server'
 ): Promise<Record<string, string>> {
-  const api = getK8sCoreApi();
-  const { body } = await api.readNamespacedSecret(secretName, namespace);
+  const api = getK8sCoreApi()
+  const { body } = await api.readNamespacedSecret(secretName, namespace)
 
-  const decoded: Record<string, string> = {};
+  const decoded: Record<string, string> = {}
   if (body.data) {
     for (const [key, value] of Object.entries(body.data)) {
-      decoded[key] = Buffer.from(value as string, 'base64').toString('utf-8');
+      decoded[key] = Buffer.from(value as string, 'base64').toString('utf-8')
     }
   }
 
-  return decoded;
+  return decoded
 }
 
 /**
@@ -290,18 +295,18 @@ export async function verifySecretMounted(
   secretName: string,
   namespace: string = 'mcp-server'
 ): Promise<SecretMountInfo> {
-  const api = getK8sCoreApi();
-  const { body: pod } = await api.readNamespacedPod(podName, namespace);
+  const api = getK8sCoreApi()
+  const { body: pod } = await api.readNamespacedPod(podName, namespace)
 
   const mountInfo: SecretMountInfo = {
     secretName,
     namespace,
     envVars: [],
     volumes: [],
-  };
+  }
 
   // Check containers for envFrom and env secretKeyRef
-  const containers = pod.spec?.containers || [];
+  const containers = pod.spec?.containers || []
   for (const container of containers) {
     // Check envFrom
     if (container.envFrom) {
@@ -313,7 +318,7 @@ export async function verifySecretMounted(
               name: secretName,
               key: '*',
             },
-          });
+          })
         }
       }
     }
@@ -325,32 +330,32 @@ export async function verifySecretMounted(
           mountInfo.envVars.push({
             name: env.name,
             secretKeyRef: env.valueFrom.secretKeyRef as any,
-          });
+          })
         }
       }
     }
   }
 
   // Check volumes
-  const volumes = pod.spec?.volumes || [];
+  const volumes = pod.spec?.volumes || []
   for (const volume of volumes) {
     if (volume.secret?.secretName === secretName) {
       mountInfo.volumes.push({
         name: volume.name,
         secret: volume.secret as any,
-      });
+      })
     }
   }
 
-  const isMounted = mountInfo.envVars.length > 0 || mountInfo.volumes.length > 0;
+  const isMounted = mountInfo.envVars.length > 0 || mountInfo.volumes.length > 0
 
   console.log(`[SecretManager] Secret ${secretName} mount check:`, {
     mounted: isMounted,
     envVars: mountInfo.envVars.length,
     volumes: mountInfo.volumes.length,
-  });
+  })
 
-  return mountInfo;
+  return mountInfo
 }
 
 // =============================================================================
@@ -368,13 +373,13 @@ export async function cleanupTestSecret(
   namespace: string = 'mcp-server'
 ): Promise<void> {
   try {
-    const api = getK8sCoreApi();
-    await api.deleteNamespacedSecret(secretName, namespace);
-    console.log(`[SecretManager] Deleted secret: ${secretName} from namespace ${namespace}`);
+    const api = getK8sCoreApi()
+    await api.deleteNamespacedSecret(secretName, namespace)
+    console.log(`[SecretManager] Deleted secret: ${secretName} from namespace ${namespace}`)
   } catch (error: any) {
     if (error.statusCode !== 404) {
       // Ignore 404 (already deleted), throw other errors
-      throw new Error(`Failed to delete secret ${secretName}: ${error.message}`);
+      throw new Error(`Failed to delete secret ${secretName}: ${error.message}`)
     }
   }
 }
@@ -386,10 +391,8 @@ export async function cleanupTestSecret(
  *
  * @param namespace - Namespace to clean up
  */
-export async function cleanupAllTestSecrets(
-  namespace: string = 'mcp-server'
-): Promise<void> {
-  const api = getK8sCoreApi();
+export async function cleanupAllTestSecrets(namespace: string = 'mcp-server'): Promise<void> {
+  const api = getK8sCoreApi()
   const { body } = await api.listNamespacedSecret(
     namespace,
     undefined, // pretty
@@ -398,14 +401,14 @@ export async function cleanupAllTestSecrets(
     undefined, // fieldSelector
     undefined, // labelSelector
     'clerum.io/test=true' // labelSelector to filter test secrets
-  );
+  )
 
   const deletePromises = body.items.map(secret =>
     cleanupTestSecret(secret.metadata!.name!, namespace)
-  );
+  )
 
-  await Promise.all(deletePromises);
-  console.log(`[SecretManager] Cleaned up ${deletePromises.length} test secret(s)`);
+  await Promise.all(deletePromises)
+  console.log(`[SecretManager] Cleaned up ${deletePromises.length} test secret(s)`)
 }
 
 // =============================================================================
@@ -428,24 +431,25 @@ export function createMcpTestSecretsBeforeEach(
   options: TestSecretOptions = {}
 ): () => Promise<void> {
   return async () => {
-    const secrets: Record<string, SecretCredentials> = {};
+    const secrets: Record<string, SecretCredentials> = {}
 
     if (servers.includes('mongodb-server')) {
       secrets['mongodb-server'] = {
-        'connection-string': process.env.MONGODB_CONNECTION_STRING ||
-          'mongodb://localhost:27017/test',
-      };
+        'connection-string':
+          process.env.MONGODB_CONNECTION_STRING || 'mongodb://localhost:27017/test',
+      }
     }
 
     if (servers.includes('airtable-server')) {
       secrets['airtable-server'] = {
-        'api-key': process.env.AIRTABLE_API_KEY ||
+        'api-key':
+          process.env.AIRTABLE_API_KEY ||
           'patDummyDummyDummyDummyDummyDummyDummyDummyDummyDummyDummy',
-      };
+      }
     }
 
-    await createMultipleSecrets(secrets, options);
-  };
+    await createMultipleSecrets(secrets, options)
+  }
 }
 
 /**
@@ -465,10 +469,10 @@ export function cleanupMcpTestSecretsAfterEach(
 ): () => Promise<void> {
   return async () => {
     for (const server of servers) {
-      const secretName = `mcp-${server}-credentials`;
-      await cleanupTestSecret(secretName, namespace);
+      const secretName = `mcp-${server}-credentials`
+      await cleanupTestSecret(secretName, namespace)
     }
-  };
+  }
 }
 
 // =============================================================================
@@ -483,7 +487,7 @@ export function cleanupMcpTestSecretsAfterEach(
  * @returns Base64-encoded string
  */
 export function encodeSecretValue(value: string): string {
-  return Buffer.from(value, 'utf-8').toString('base64');
+  return Buffer.from(value, 'utf-8').toString('base64')
 }
 
 /**
@@ -494,7 +498,7 @@ export function encodeSecretValue(value: string): string {
  * @returns Decoded string value
  */
 export function decodeSecretValue(encodedValue: string): string {
-  return Buffer.from(encodedValue, 'base64').toString('utf-8');
+  return Buffer.from(encodedValue, 'base64').toString('utf-8')
 }
 
 /**
@@ -509,9 +513,9 @@ function kubectl(...args: string[]): string {
     return execSync(`kubectl ${args.join(' ')}`, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    })
   } catch (error: any) {
-    throw new Error(`kubectl command failed: ${error.message}`);
+    throw new Error(`kubectl command failed: ${error.message}`)
   }
 }
 
@@ -527,23 +531,30 @@ export function createTestSecretKubectl(
   credentials: SecretCredentials,
   namespace: string = 'mcp-server'
 ): void {
-  const secretName = `mcp-${serverName}-credentials`;
+  const secretName = `mcp-${serverName}-credentials`
 
   // Build --from-literal arguments
   const literalArgs = Object.entries(credentials)
     .map(([key, value]) => `--from-literal=${key}=${value}`)
-    .join(' ');
+    .join(' ')
 
   const command = [
-    'create', 'secret', 'generic', secretName,
+    'create',
+    'secret',
+    'generic',
+    secretName,
     `--namespace=${namespace}`,
     literalArgs,
     '--dry-run=client',
-    '-o', 'yaml',
+    '-o',
+    'yaml',
     '|',
-    'kubectl', 'apply', '-f', '-',
-  ].join(' ');
+    'kubectl',
+    'apply',
+    '-f',
+    '-',
+  ].join(' ')
 
-  kubectl(command);
-  console.log(`[SecretManager] Created secret via kubectl: ${secretName}`);
+  kubectl(command)
+  console.log(`[SecretManager] Created secret via kubectl: ${secretName}`)
 }

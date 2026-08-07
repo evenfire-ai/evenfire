@@ -10,8 +10,7 @@
  *   4. Policy is channel_users -> true for any user
  *   5. Policy is designated_approvers -> check approvers list
  */
-
-import type { ApprovalConfig } from "./approvalTypes";
+import type { ApprovalConfig } from './approvalTypes'
 
 export class ApprovalResolver {
   /**
@@ -27,55 +26,55 @@ export class ApprovalResolver {
     userId: string,
     channelType: string | undefined,
     _channelId: string | undefined,
-    config: ApprovalConfig | undefined,
+    config: ApprovalConfig | undefined
   ): boolean {
     // 1. No config -> default to cli_only (safest)
     if (!config) {
-      return false;
+      return false
     }
 
     // CLI users (no channelType) always allowed -- they use /approve /deny endpoints directly
     if (!channelType) {
-      return true;
+      return true
     }
 
     // 2. Policy is cli_only -> block all channel users
-    if (config.defaultPolicy === "cli_only") {
-      return false;
+    if (config.defaultPolicy === 'cli_only') {
+      return false
     }
 
     // 3. Check channel-level enabled flag
-    const channelKey = channelType as "telegram" | "email" | "slack";
-    const channelConfig = config.channels[channelKey];
+    const channelKey = channelType as 'telegram' | 'email' | 'slack'
+    const channelConfig = config.channels[channelKey]
 
     // If channel config exists and is explicitly disabled -> block
     if (channelConfig && !channelConfig.enabled) {
-      return false;
+      return false
     }
 
     // If channel config not specified -> treated as enabled (opt-out model)
 
     // 4. Policy is channel_users -> any user can approve
-    if (config.defaultPolicy === "channel_users") {
-      return true;
+    if (config.defaultPolicy === 'channel_users') {
+      return true
     }
 
     // 5. Policy is designated_approvers -> check approvers list
-    if (config.defaultPolicy === "designated_approvers") {
+    if (config.defaultPolicy === 'designated_approvers') {
       if (!channelConfig || !channelConfig.approvers) {
         // No approvers list defined -> block all
-        return false;
+        return false
       }
 
       if (channelConfig.approvers.length === 0) {
         // Empty approvers list -> block all
-        return false;
+        return false
       }
 
-      return channelConfig.approvers.includes(userId);
+      return channelConfig.approvers.includes(userId)
     }
 
     // Unknown policy -> block by default
-    return false;
+    return false
   }
 }

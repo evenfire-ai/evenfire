@@ -40,16 +40,17 @@ External-facing user-scoped JSON-RPC proxy for MCP servers and MCP hosts.
 
 Host runtime routes in `rpc-proxy` are REST-oriented and scope-specific. The status stream is a read-only telemetry channel.
 
-| Endpoint | Method | Required Scope | Access Type | Transport |
-| --- | --- | --- | --- | --- |
-| `/api/v1/rpc/hosts/:hostRef/messages` | `POST` | `host:message:invoke` | Write | REST |
-| `/api/v1/rpc/hosts/:hostRef/activity` | `GET` | `host:activity:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/activity/stream` | `GET` | `host:activity:read` | Read-only | SSE |
-| `/api/v1/rpc/hosts/:hostRef/status` | `GET` | `host:status:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/health` | `GET` | `host:health:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/status/stream` | `GET` | `host:status:read` | Read-only | SSE |
+| Endpoint                                     | Method | Required Scope        | Access Type | Transport |
+| -------------------------------------------- | ------ | --------------------- | ----------- | --------- |
+| `/api/v1/rpc/hosts/:hostRef/messages`        | `POST` | `host:message:invoke` | Write       | REST      |
+| `/api/v1/rpc/hosts/:hostRef/activity`        | `GET`  | `host:activity:read`  | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/activity/stream` | `GET`  | `host:activity:read`  | Read-only   | SSE       |
+| `/api/v1/rpc/hosts/:hostRef/status`          | `GET`  | `host:status:read`    | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/health`          | `GET`  | `host:health:read`    | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/status/stream`   | `GET`  | `host:status:read`    | Read-only   | SSE       |
 
 Notes:
+
 - `status/stream` does not accept request bodies and must not be used for message submission.
 - `activity/stream` is read-only telemetry and never accepts message submission payloads.
 - `activity` and `activity/stream` never include chain-of-thought/internal reasoning text.
@@ -126,6 +127,7 @@ Critical variables:
 - `RPC_PROXY_CONTROL_API_CACHE_TTL_MS`
 
 Required in production:
+
 - `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`
 
 `RPC_PROXY_JWT_PUBLIC_KEY` must match the public key for `CONTROL_API_RPC_JWT_PRIVATE_KEY`.

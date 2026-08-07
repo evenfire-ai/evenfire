@@ -138,8 +138,7 @@ describe('routes/recipe-oauth — GET /recipe-oauth/users (SEC-6)', () => {
   })
 
   it('401 without a broker token', async () => {
-    const res = await request(app)
-      .get('/api/v1/recipe-oauth/users?oauthClientId=google-gmail')
+    const res = await request(app).get('/api/v1/recipe-oauth/users?oauthClientId=google-gmail')
 
     expect(res.status).toBe(401)
   })

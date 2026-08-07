@@ -417,7 +417,9 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                                 aria-label="Refresh user grants"
                               >
                                 <IconRefresh
-                                  className={ugState.loadState === 'loading' ? 'cu-spin' : undefined}
+                                  className={
+                                    ugState.loadState === 'loading' ? 'cu-spin' : undefined
+                                  }
                                   width={14}
                                   height={14}
                                 />

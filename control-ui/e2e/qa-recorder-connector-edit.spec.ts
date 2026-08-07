@@ -237,6 +237,14 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
+      // The connector edit screen is split into tabs; the rotation flow lives
+      // on the Credentials tab — navigate there via the tab link.
+      await page.getByRole('tab', { name: 'Credentials', exact: true }).click()
+      await expect(page).toHaveURL(
+        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/credentials$`),
+        { timeout: 20_000 }
+      )
+
       // The section names the Secret and the key -> env var mapping — names
       // only, never the stored value.
       await expect(page.getByText(secretName, { exact: true })).toBeVisible({ timeout: 20_000 })

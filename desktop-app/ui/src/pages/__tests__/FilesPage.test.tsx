@@ -710,7 +710,9 @@ describe('FilesPage', () => {
 
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    const subjectPicker = await screen.findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
     await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
     fireEvent.focus(subjectPicker)
     const userLabel = await screen.findByText('Test Two')
@@ -872,7 +874,9 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    const subjectPicker = await screen.findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
@@ -945,7 +949,9 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    const subjectPicker = await screen.findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))

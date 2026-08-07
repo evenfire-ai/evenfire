@@ -14,48 +14,46 @@
  *   import "./logger";
  */
 
-const COMPONENT_RE = /^\[([^\]]+)\]\s*/;
+const COMPONENT_RE = /^\[([^\]]+)\]\s*/
 
-const originalLog = console.log.bind(console);
-const originalError = console.error.bind(console);
-const originalWarn = console.warn.bind(console);
+const originalLog = console.log.bind(console)
+const originalError = console.error.bind(console)
+const originalWarn = console.warn.bind(console)
 
 function formatArgs(args: unknown[]): string {
-  return args
-    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-    .join(" ");
+  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
 }
 
 function emit(level: string, args: unknown[]): void {
-  const raw = formatArgs(args);
+  const raw = formatArgs(args)
 
   // Skip empty lines and separator lines (====, ----)
-  const trimmed = raw.trim();
-  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return;
+  const trimmed = raw.trim()
+  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return
 
-  let component = "";
-  let msg = raw;
+  let component = ''
+  let msg = raw
 
-  const match = raw.match(COMPONENT_RE);
+  const match = raw.match(COMPONENT_RE)
   if (match) {
-    component = match[1];
-    msg = raw.slice(match[0].length);
+    component = match[1]
+    msg = raw.slice(match[0].length)
   }
 
   const entry: Record<string, string> = {
     timestamp: new Date().toISOString(),
     level,
     msg: msg.trim(),
-  };
-
-  if (component) {
-    entry.component = component;
   }
 
-  const writer = level === "error" ? originalError : originalLog;
-  writer(JSON.stringify(entry));
+  if (component) {
+    entry.component = component
+  }
+
+  const writer = level === 'error' ? originalError : originalLog
+  writer(JSON.stringify(entry))
 }
 
-console.log = (...args: unknown[]) => emit("info", args);
-console.error = (...args: unknown[]) => emit("error", args);
-console.warn = (...args: unknown[]) => emit("warn", args);
+console.log = (...args: unknown[]) => emit('info', args)
+console.error = (...args: unknown[]) => emit('error', args)
+console.warn = (...args: unknown[]) => emit('warn', args)

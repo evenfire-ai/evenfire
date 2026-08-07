@@ -12,7 +12,6 @@
  * The poll-loop tests (section 2) inject a mock watcher via ChannelReader's
  * constructor path so no real k8s network call is made.
  */
-
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CommunicationChannelCRD } from '../src/types'
 
@@ -62,7 +61,9 @@ describe('CommunicationChannelWatcher.resyncChannels()', () => {
     } catch {
       // Kubeconfig may not be present in CI — construct a minimal object that
       // exercises the resyncChannels logic via prototype injection.
-      watcher = Object.create(mod.CommunicationChannelWatcher.prototype) as InstanceType<typeof mod.CommunicationChannelWatcher>
+      watcher = Object.create(mod.CommunicationChannelWatcher.prototype) as InstanceType<
+        typeof mod.CommunicationChannelWatcher
+      >
       ;(watcher as any).channels = new Map()
       ;(watcher as any).hostRef = 'test-host'
       ;(watcher as any).namespace = 'channels'
@@ -74,9 +75,7 @@ describe('CommunicationChannelWatcher.resyncChannels()', () => {
   it('calls listChannels() to refresh the in-memory cache', async () => {
     const { watcher } = await makeRealWatcher()
 
-    const listChannelsSpy = vi
-      .spyOn(watcher, 'listChannels')
-      .mockResolvedValue([])
+    const listChannelsSpy = vi.spyOn(watcher, 'listChannels').mockResolvedValue([])
 
     await watcher.resyncChannels()
 
@@ -155,9 +154,9 @@ describe('CommunicationChannelWatcher.resyncChannels()', () => {
     vi.useFakeTimers()
 
     const { mod } = await makeRealWatcher()
-    const watcher = Object.create(
-      mod.CommunicationChannelWatcher.prototype
-    ) as InstanceType<typeof mod.CommunicationChannelWatcher>
+    const watcher = Object.create(mod.CommunicationChannelWatcher.prototype) as InstanceType<
+      typeof mod.CommunicationChannelWatcher
+    >
     ;(watcher as any).channels = new Map()
     ;(watcher as any).hostRef = 'test-host'
     ;(watcher as any).namespace = 'channels'
@@ -166,23 +165,26 @@ describe('CommunicationChannelWatcher.resyncChannels()', () => {
     // resyncChannels succeeds; startWatch always rejects (simulates transient API error).
     vi.spyOn(watcher, 'resyncChannels').mockResolvedValue(undefined)
     const startWatchError = new Error('transient api error')
-    const startWatchSpy = vi
-      .spyOn(watcher, 'startWatch')
-      .mockRejectedValue(startWatchError)
+    const startWatchSpy = vi.spyOn(watcher, 'startWatch').mockRejectedValue(startWatchError)
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     // Replicate the guarded reconnect body from k8sClient.ts to assert it catches
     // errors and schedules a retry rather than propagating an unhandled rejection.
     let uncaughtError: unknown = undefined
-    process.once('unhandledRejection', (reason) => { uncaughtError = reason })
+    process.once('unhandledRejection', reason => {
+      uncaughtError = reason
+    })
 
     const reconnectBody = async () => {
       try {
         await watcher.resyncChannels()
         await watcher.startWatch()
       } catch (reconnectErr) {
-        console.error('[K8s] Reconnect callback failed, scheduling another reconnect:', reconnectErr)
+        console.error(
+          '[K8s] Reconnect callback failed, scheduling another reconnect:',
+          reconnectErr
+        )
         // Schedule another reconnect — mirroring the guarded code in k8sClient.ts.
         setTimeout(() => watcher.startWatch(), 5000)
       }
