@@ -824,9 +824,9 @@ describe('App deep-link orchestration', () => {
     })
 
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    const nativeMountFailures = currentController.pushToast.mock.calls.filter(
-      ([message, tone]) => message === 'native mount failed' && tone === 'error'
-    )
+    const nativeMountFailures = vi
+      .mocked(currentController.pushToast)
+      .mock.calls.filter(([message, tone]) => message === 'native mount failed' && tone === 'error')
     expect(nativeMountFailures).toHaveLength(1)
     expect(currentController.pushToast).toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
