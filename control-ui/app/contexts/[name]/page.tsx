@@ -179,6 +179,7 @@ export default function ContextDetailsPage() {
   const [resolvedContextId, setResolvedContextId] = useState(isNew ? '' : routeName)
 
   const [contextNameDraft, setContextNameDraft] = useState(isNew ? '' : routeName)
+  const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
   const [mcpServersDraft, setMcpServersDraft] = useState<string[]>([])
   const [sharedFileSystemsDraft, setSharedFileSystemsDraft] = useState<
@@ -191,6 +192,7 @@ export default function ContextDetailsPage() {
   const [editing, setEditing] = useState(isNew)
   const [savedDescription, setSavedDescription] = useState('')
   const [savedContextName, setSavedContextName] = useState('')
+  const [savedDisplayName, setSavedDisplayName] = useState('')
 
   const [activeTab, setActiveTab] = useState<ContextTab>(() => parseContextTab(params.tab))
 
@@ -271,6 +273,8 @@ export default function ContextDetailsPage() {
         setContextNameDraft(resolvedName)
         setSavedContextName(resolvedName)
         setResolvedContextId(resolvedContext)
+        setDisplayNameDraft(spec.displayName || '')
+        setSavedDisplayName(spec.displayName || '')
         setDescriptionDraft(spec.description || '')
         setSavedDescription(spec.description || '')
         const servers = Array.isArray(spec.mcpServers)
@@ -366,7 +370,7 @@ export default function ContextDetailsPage() {
         .map(host => ({
           name: String(host.metadata?.name || '').trim(),
           contextRef: String(host.spec?.contextRef || '').trim(),
-          displayName: getAgentDisplayName(String(host.metadata?.name || '')),
+          displayName: getAgentDisplayName(String(host.metadata?.name || ''), allHosts),
         }))
         .filter(agent => agent.name && agent.contextRef !== resolvedContextId)
         .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.name.localeCompare(b.name)),
@@ -387,21 +391,28 @@ export default function ContextDetailsPage() {
   function startEditing() {
     setSavedDescription(descriptionDraft)
     setSavedContextName(contextNameDraft)
+    setSavedDisplayName(displayNameDraft)
     setEditing(true)
   }
 
   function cancelEditing() {
     setDescriptionDraft(savedDescription)
     setContextNameDraft(savedContextName)
+    setDisplayNameDraft(savedDisplayName)
     setEditing(false)
     setError('')
   }
 
   async function save() {
     if (!canSave) return
+    const trimmedDisplay = displayNameDraft.trim()
+    // Full-replace safety: echo every spec field the form knows about
+    // (identifier + all editables). The visible name lives in spec.displayName;
+    // omit it when empty so an unset display stays absent, not "".
     const payload = {
       spec: {
         contextId: contextNameDraft.trim(),
+        ...(trimmedDisplay ? { displayName: trimmedDisplay } : {}),
         description: descriptionDraft.trim(),
         mcpServers: mcpServersDraft,
         sharedFileSystems: sharedFileSystemsDraft,
@@ -423,6 +434,7 @@ export default function ContextDetailsPage() {
         setResolvedContextId(payload.spec.contextId)
         setSavedDescription(descriptionDraft)
         setSavedContextName(contextNameDraft)
+        setSavedDisplayName(trimmedDisplay)
         setEditing(false)
       }
       showToast('Context saved.', { tone: 'success' })
@@ -440,6 +452,8 @@ export default function ContextDetailsPage() {
       await updateContext(routeName, {
         spec: {
           contextId: resolvedContextId,
+          // Echo the persisted display name so a connector edit never drops it.
+          ...(savedDisplayName.trim() ? { displayName: savedDisplayName.trim() } : {}),
           description: descriptionDraft.trim(),
           mcpServers: nextServers,
           sharedFileSystems: sharedFileSystemsDraft,
@@ -461,6 +475,8 @@ export default function ContextDetailsPage() {
       await updateContext(routeName, {
         spec: {
           contextId: resolvedContextId,
+          // Echo the persisted display name so an SFS edit never drops it.
+          ...(savedDisplayName.trim() ? { displayName: savedDisplayName.trim() } : {}),
           description: descriptionDraft.trim(),
           mcpServers: mcpServersDraft,
           sharedFileSystems: nextRefs,
@@ -789,7 +805,7 @@ export default function ContextDetailsPage() {
         header={
           <CreatePageHeader
             icon={<IconGroupWork />}
-            title={routeName}
+            title={savedDisplayName.trim() || routeName}
             subtitle="Review details, manage connectors, agents, teams, and members."
             backLabel="Back to contexts"
             onBack={() => router.push(CONTROL_ROUTES.contexts.root)}
@@ -1241,12 +1257,21 @@ export default function ContextDetailsPage() {
             <div className="cu-modal-panel__body">
               <div className="cu-field" style={{ marginBottom: 0 }}>
                 <label htmlFor="ctx-name">Name</label>
+                <input id="ctx-name" className="cu-input" value={contextNameDraft} readOnly />
+                <span className="cu-field__hint">
+                  This is the context identifier, not editable.
+                </span>
+              </div>
+              <div className="cu-field" style={{ marginBottom: 0 }}>
+                <label htmlFor="ctx-display">Display name</label>
                 <input
-                  id="ctx-name"
+                  id="ctx-display"
                   className="cu-input"
-                  value={contextNameDraft}
-                  disabled
-                  style={{ opacity: 0.6 }}
+                  value={displayNameDraft}
+                  onChange={event => setDisplayNameDraft(event.target.value)}
+                  disabled={busy}
+                  placeholder="Human-readable name"
+                  autoFocus
                 />
               </div>
               <div className="cu-field" style={{ marginBottom: 0 }}>
@@ -1259,7 +1284,6 @@ export default function ContextDetailsPage() {
                   disabled={busy}
                   rows={3}
                   placeholder="Human-readable context description"
-                  autoFocus
                 />
               </div>
             </div>

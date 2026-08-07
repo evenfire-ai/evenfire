@@ -15,7 +15,6 @@ import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
 import {
-  apiGet,
   apiSend,
   getAdminTeamAgents,
   getAdminUserAgents,
@@ -46,7 +45,7 @@ import {
   validateLlmPolicy,
   validateLlmSecretData,
 } from '../../../lib/llm'
-import type { ChannelResource, HostTab } from './types'
+import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
@@ -200,7 +199,6 @@ export default function HostDetailsPage() {
         })),
     [allTeams, teamIdsWithAccess]
   )
-  const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
     [allowedCatalog, providerDraft]
@@ -426,142 +424,6 @@ export default function HostDetailsPage() {
           : {}),
       }
 
-      if (nextHostName !== routeName) {
-        let createdNewHost = false
-        const updatedChannels: Array<{ name: string; previousSpec: ChannelResource['spec'] }> = []
-        const previousUserAgentNamesById = new Map<string, string[]>()
-        const previousTeamAgentNamesById = new Map<string, string[]>()
-        try {
-          await apiSend('POST', '/api/v1/admin/hosts', {
-            metadata: { name: nextHostName },
-            spec: nextSpec,
-          })
-          createdNewHost = true
-
-          const channels = (await apiGet('/api/v1/admin/communication-channels')) as {
-            items?: ChannelResource[]
-          }
-          for (const channel of channels.items || []) {
-            if (String(channel.spec?.hostRef || '').trim() !== routeName) continue
-            const channelName = String(channel.metadata?.name || '').trim()
-            if (!channelName) continue
-            await apiSend(
-              'PUT',
-              `/api/v1/admin/communication-channels/${encodeURIComponent(channelName)}`,
-              {
-                spec: {
-                  ...(channel.spec || {}),
-                  hostRef: nextHostName,
-                },
-              }
-            )
-            updatedChannels.push({ name: channelName, previousSpec: channel.spec })
-          }
-
-          for (const user of usersWithAccess) {
-            const userAccess = await getAdminUserAgents(user.id)
-            const previousAgentNames = (userAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousUserAgentNamesById.set(user.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminUserAgents(user.id, nextAgentNames, [
-              ...(userAccess.agentNames || []),
-              ...(userAccess.deletedAgentNames || []),
-            ])
-          }
-
-          for (const team of teamsWithAccess) {
-            const teamAccess = await getAdminTeamAgents(team.id)
-            const previousAgentNames = (teamAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousTeamAgentNamesById.set(team.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminTeamAgents(team.id, nextAgentNames, [
-              ...(teamAccess.agentNames || []),
-              ...(teamAccess.deletedAgentNames || []),
-            ])
-          }
-
-          await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
-          showToast('Agent renamed and updated.', { tone: 'success' })
-          router.replace(CONTROL_ROUTES.agents.detail(nextHostName))
-          return true
-        } catch (renameError) {
-          const rollbackErrors: string[] = []
-          if (createdNewHost) {
-            for (const [teamId, previousAgentNames] of Array.from(
-              previousTeamAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminTeamAgents(teamId)
-                await updateAdminTeamAgents(teamId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`team ${teamId}: ${rollbackMessage}`)
-              }
-            }
-            for (const [userId, previousAgentNames] of Array.from(
-              previousUserAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminUserAgents(userId)
-                await updateAdminUserAgents(userId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`member ${userId}: ${rollbackMessage}`)
-              }
-            }
-            for (const channel of [...updatedChannels].reverse()) {
-              try {
-                await apiSend(
-                  'PUT',
-                  `/api/v1/admin/communication-channels/${encodeURIComponent(channel.name)}`,
-                  {
-                    spec: {
-                      ...(channel.previousSpec || {}),
-                      hostRef: routeName,
-                    },
-                  }
-                )
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`channel ${channel.name}: ${rollbackMessage}`)
-              }
-            }
-            try {
-              await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(nextHostName)}`)
-            } catch (rollbackError) {
-              const rollbackMessage =
-                rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-              rollbackErrors.push(`agent ${nextHostName}: ${rollbackMessage}`)
-            }
-          }
-          if (rollbackErrors.length > 0) {
-            const renameMessage =
-              renameError instanceof Error ? renameError.message : 'Failed to rename agent'
-            throw new Error(`${renameMessage} (rollback issues: ${rollbackErrors.join('; ')})`)
-          }
-          throw renameError
-        }
-      }
-
       const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
         // AP-6: carry the resourceVersion captured at form load so the API
@@ -776,7 +638,7 @@ export default function HostDetailsPage() {
   )
 
   async function grantUserAccess() {
-    if (selectedUserIdsToGrant.length === 0 || hasPendingRename) return
+    if (selectedUserIdsToGrant.length === 0) return
     setBusy(true)
     setError('')
     try {
@@ -809,7 +671,6 @@ export default function HostDetailsPage() {
   }
 
   async function revokeUserAccess(userId: string) {
-    if (hasPendingRename) return
     const user = usersWithAccess.find(item => item.id === userId)
     const shouldRevoke = await confirm({
       title: 'Revoke Member Access',
@@ -842,7 +703,7 @@ export default function HostDetailsPage() {
   }
 
   async function grantTeamAccess() {
-    if (selectedTeamIdsToGrant.length === 0 || hasPendingRename) return
+    if (selectedTeamIdsToGrant.length === 0) return
     setBusy(true)
     setError('')
     try {
@@ -875,7 +736,6 @@ export default function HostDetailsPage() {
   }
 
   async function revokeTeamAccess(teamId: string) {
-    if (hasPendingRename) return
     const team = teamsWithAccess.find(item => item.id === teamId)
     const shouldRevoke = await confirm({
       title: 'Revoke Team Access',
@@ -928,13 +788,6 @@ export default function HostDetailsPage() {
       backLabel="Back to agents"
       error={error}
       icon={<IconRobot />}
-      notice={
-        hasPendingRename ? (
-          <div className="cu-banner cu-banner--warning">
-            Save agent rename before changing user or team access.
-          </div>
-        ) : null
-      }
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle="Configuration and access for this agent."
@@ -1017,15 +870,28 @@ export default function HostDetailsPage() {
               <div className="cu-field">
                 <label htmlFor="host-name">Name</label>
                 {editingOverview ? (
+                  <>
+                    <input id="host-name" value={hostNameDraft} readOnly />
+                    <span className="cu-field__hint">
+                      This is the agent identifier, not editable.
+                    </span>
+                  </>
+                ) : (
+                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                )}
+              </div>
+              <div className="cu-field">
+                <label htmlFor="host-display">Display name</label>
+                {editingOverview ? (
                   <input
-                    id="host-name"
-                    value={hostNameDraft}
-                    onChange={e => setHostNameDraft(e.target.value)}
+                    id="host-display"
+                    value={hostDisplayDraft}
+                    onChange={e => setHostDisplayDraft(e.target.value)}
                     disabled={busy}
                     autoFocus
                   />
                 ) : (
-                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
                 )}
               </div>
               <div className="cu-field" style={{ marginBottom: 0 }}>
@@ -1375,7 +1241,7 @@ export default function HostDetailsPage() {
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
                 onClick={() => setShowAddUser(true)}
-                disabled={busy || hasPendingRename}
+                disabled={busy}
               >
                 Add member
               </button>
@@ -1425,7 +1291,7 @@ export default function HostDetailsPage() {
                               type="button"
                               className="cu-btn cu-btn--icon cu-btn--danger-icon"
                               onClick={() => void revokeUserAccess(user.id)}
-                              disabled={busy || hasPendingRename}
+                              disabled={busy}
                               title="Revoke"
                               aria-label="Revoke member access"
                             >
@@ -1461,7 +1327,7 @@ export default function HostDetailsPage() {
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
                 onClick={() => setShowAddTeam(true)}
-                disabled={busy || hasPendingRename}
+                disabled={busy}
               >
                 Add team
               </button>
@@ -1511,7 +1377,7 @@ export default function HostDetailsPage() {
                               type="button"
                               className="cu-btn cu-btn--icon cu-btn--danger-icon"
                               onClick={() => void revokeTeamAccess(team.id)}
-                              disabled={busy || hasPendingRename}
+                              disabled={busy}
                               title="Revoke"
                               aria-label="Revoke team access"
                             >
@@ -1578,7 +1444,7 @@ export default function HostDetailsPage() {
                 searchPlaceholder="Search members..."
                 selectionLabel="Selected members"
                 emptyLabel="No available members."
-                disabled={busy || hasPendingRename}
+                disabled={busy}
               />
             </div>
 
@@ -1598,7 +1464,7 @@ export default function HostDetailsPage() {
                   await grantUserAccess()
                   setShowAddUser(false)
                 }}
-                disabled={busy || selectedUserIdsToGrant.length === 0 || hasPendingRename}
+                disabled={busy || selectedUserIdsToGrant.length === 0}
               >
                 {selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
               </button>
@@ -1657,7 +1523,7 @@ export default function HostDetailsPage() {
                 searchPlaceholder="Search teams..."
                 selectionLabel="Selected teams"
                 emptyLabel="No available teams."
-                disabled={busy || hasPendingRename}
+                disabled={busy}
               />
             </div>
 
@@ -1677,7 +1543,7 @@ export default function HostDetailsPage() {
                   await grantTeamAccess()
                   setShowAddTeam(false)
                 }}
-                disabled={busy || selectedTeamIdsToGrant.length === 0 || hasPendingRename}
+                disabled={busy || selectedTeamIdsToGrant.length === 0}
               >
                 {selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
               </button>

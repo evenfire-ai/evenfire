@@ -7944,6 +7944,14 @@ textarea.cu-input {
   font-size: 0.8125rem;
 }
 
+/* Secondary identity line under a primary display name (e.g. the immutable
+   slug shown beneath an agent's editable display name). */
+.cu-table__cell-subtle {
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.125rem;
+}
+
 .cu-table__cell-numeric {
   color: var(--cu-text-muted);
   font-variant-numeric: tabular-nums;

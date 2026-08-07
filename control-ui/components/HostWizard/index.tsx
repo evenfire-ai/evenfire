@@ -895,7 +895,9 @@ export function HostWizard({
       )
 
       const hostSpec: Record<string, unknown> = {
-        host: normalizedHostName,
+        // Visible name is the free text the operator typed; metadata.name and
+        // every reference (channels.hostRef, access grants) use the derived slug.
+        host: hostName.trim() || normalizedHostName,
         contextRef: resolvedContextName,
         secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
         channels: channelRefs,
@@ -984,14 +986,14 @@ export function HostWizard({
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <Field
-              description="Automatically formatted to lowercase with hyphens."
-              label="Agent metadata name"
+              description="Type any name — the identifier is derived automatically."
+              label="Agent name"
               required
             >
               <span className="cu-agent-input-shell">
                 <TextInput
                   value={hostName}
-                  onChange={e => setHostName(toKebabInput(e.target.value))}
+                  onChange={e => setHostName(e.target.value)}
                   placeholder="agent-name"
                   autoFocus
                 />
@@ -1001,6 +1003,11 @@ export function HostWizard({
                   </span>
                 ) : null}
               </span>
+              {toKebabCase(hostName) ? (
+                <span className="cu-field__hint">
+                  Identifier: <code>{toKebabCase(hostName)}</code>
+                </span>
+              ) : null}
             </Field>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
             {SHOW_STATELESS_AGENT_SELECTOR ? (
@@ -1052,8 +1059,8 @@ export function HostWizard({
               <div>
                 <strong>Naming conventions</strong>
                 <p>
-                  Use lowercase letters, numbers, and hyphens only. Must start with a letter and be
-                  3-63 characters long.
+                  The display name can be anything. Its identifier is derived automatically as a
+                  lowercase, hyphenated slug and cannot be changed later.
                 </p>
               </div>
             </div>

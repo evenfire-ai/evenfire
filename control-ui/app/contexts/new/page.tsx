@@ -12,7 +12,7 @@ import { IconGroupWork } from '@components/Sidebar/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { createContext, getMcpServers } from '@lib/api'
-import { toKebabCase, toKebabInput } from '@lib/string'
+import { toKebabCase } from '@lib/string'
 
 const STEPS = ['Context', 'Connectors'] as const
 
@@ -85,10 +85,14 @@ export default function CreateContextPage() {
     setError('')
     try {
       const nextName = toKebabCase(contextName)
+      const trimmedDisplay = contextName.trim()
       await createContext({
         metadata: { name: nextName },
         spec: {
           contextId: nextName,
+          // Store the free-text name the user typed as the visible display name;
+          // metadata.name/contextId stay the derived RFC1123 slug.
+          ...(trimmedDisplay ? { displayName: trimmedDisplay } : {}),
           description: description.trim(),
           mcpServers: selectedServers,
         },
@@ -131,11 +135,16 @@ export default function CreateContextPage() {
                   <TextInput
                     id="ctx-name"
                     value={contextName}
-                    onChange={event => setContextName(toKebabInput(event.target.value))}
+                    onChange={event => setContextName(event.target.value)}
                     disabled={busy}
-                    placeholder="context1"
+                    placeholder="Context 1"
                     autoFocus
                   />
+                  {toKebabCase(contextName) ? (
+                    <span className="cu-field__hint">
+                      Identifier: <code>{toKebabCase(contextName)}</code>
+                    </span>
+                  ) : null}
                 </Field>
 
                 <Field label="Description" htmlFor="ctx-description">

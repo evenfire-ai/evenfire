@@ -90,15 +90,20 @@ export function HostTable({
       items.map(i => {
         const namespace = i.metadata?.namespace || 'default'
         const name = i.metadata?.name || 'unknown'
+        // The visible name is the editable spec.host; the slug (metadata.name)
+        // stays as secondary identity. Empty-after-trim falls back to the slug
+        // (legacy Hosts, mirrors accessReconciliation), never a blank label.
+        const displayName =
+          String((i.spec as { host?: string } | undefined)?.host || '').trim() || name
         const key = `${namespace}/${name}`
-        return { key, namespace, name, item: i }
+        return { key, namespace, name, displayName, item: i }
       }),
     [items]
   )
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
     if (!normalizedSearch) return rows
-    return rows.filter(({ name, namespace, item }) => {
+    return rows.filter(({ name, displayName, namespace, item }) => {
       const spec = item.spec || {}
       const lifecycle = getHostLifecycleInfo(item)
       const contextRef = String(spec.contextRef || '').trim()
@@ -109,6 +114,7 @@ export function HostTable({
       const modelProviderLabel = modelProvider ? getProviderLabel(modelProvider) : ''
       return [
         name,
+        displayName,
         namespace,
         lifecycle.label,
         lifecycle.state,
@@ -186,7 +192,7 @@ export function HostTable({
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
             <tbody>
-              {filteredRows.map(({ key, namespace, name, item }) => {
+              {filteredRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextRef = rawContext || '-'
                 const contextClickable = Boolean(rawContext)
@@ -227,8 +233,11 @@ export function HostTable({
                         }}
                         onKeyDown={e => e.stopPropagation()}
                       >
-                        {name}
+                        {displayName}
                       </button>
+                      {displayName !== name ? (
+                        <div className="cu-table__cell-subtle">{name}</div>
+                      ) : null}
                     </td>
                     <td>
                       <HostLifecycleBadge lifecycle={lifecycle} />

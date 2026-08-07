@@ -783,6 +783,9 @@ export type ContextSharedFileSystemStatus = {
 }
 export type ContextSpec = {
   contextId: string
+  // Editable, human-visible name (free text). Optional/new: existing contexts
+  // won't have it, so consumers fall back to `metadata.name`.
+  displayName?: string
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
