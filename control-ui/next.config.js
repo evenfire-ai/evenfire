@@ -12,7 +12,13 @@ const nextConfig = {
     root: path.join(__dirname, '..'),
   },
   async rewrites() {
-    const controlApiDestination = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
+    // NOTE: `/control-api/:path*` is intentionally NOT rewritten here. It is served by
+    // the app-router handler app/control-api/[...path]/route.ts, which streams the body
+    // (no 10MiB proxyClientMaxBodySize truncation) and honours the runtime-configurable
+    // CONTROL_API_PROXY_TIMEOUT_MS. Routing it through a rewrite sends it via Next's
+    // internal proxy, which silently truncates request bodies at 10MiB and hard-caps at
+    // a 30s proxyTimeout — the "Request timed out" / "request aborted" failure on large
+    // GFS uploads. The handler reads CONTROL_API_INTERNAL_URL for its upstream.
     return [
       { source: '/agents', destination: '/hosts' },
       { source: '/agents/:path*', destination: '/hosts/:path*' },
@@ -39,10 +45,6 @@ const nextConfig = {
       { source: '/marketplace/:path*', destination: '/registry/:path*' },
       { source: '/cost-and-usage/:path*', destination: '/cost/:path*' },
       { source: '/settings/ui', destination: '/settings' },
-      {
-        source: '/control-api/:path*',
-        destination: `${controlApiDestination}/:path*`,
-      },
     ]
   },
   async redirects() {

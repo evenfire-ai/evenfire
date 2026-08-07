@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
 import { useActivityController } from '../useActivityController'
 
 const AGENT_A = ['agent-a']
@@ -34,6 +34,14 @@ function installChatIndexMock() {
 
 describe('useActivityController', () => {
   afterEach(() => {
+    // Unmount the rendered hook so useActivityController's effect cleanup runs
+    // (cancelled = true) BEFORE the jsdom environment is torn down. Several tests
+    // render the hook without awaiting its async index/message reads; without an
+    // unmount those promises resolve post-teardown and setState on a live tree,
+    // which React flushes via the scheduler after `window` is gone —
+    // "ReferenceError: window is not defined" as an unhandled error that fails
+    // the whole run even though every assertion passed.
+    cleanup()
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
