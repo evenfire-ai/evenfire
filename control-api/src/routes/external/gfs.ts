@@ -614,17 +614,21 @@ async function proxyMutationToGfsc(
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   headers['author' + 'ization'] = ['Bearer', token].join(' ')
   let upstream: Response
+  // A TOTAL deadline (not the header-only one the streaming read proxies use):
+  // a mutation response is a small JSON body, so bounding the whole fetch+read
+  // exchange is correct — the read proxies stream large bodies and must clear the
+  // timer after headers, but here we want the whole exchange bounded. Without a
+  // timeout a hung gfsc pinned the desktop upload indefinitely (#281/H1).
+  const deadline = AbortSignal.timeout(config.gfscProxyTimeoutMs)
   try {
     upstream = await fetch(target, {
       method,
       headers,
       body: JSON.stringify(req.body ?? {}),
-      // Homologous with the operator proxy (routes/gfs/proxy.ts): without this the
-      // fetch had NO timeout — a hung gfsc pinned the desktop upload indefinitely.
-      signal: AbortSignal.timeout(config.gfscProxyTimeoutMs),
+      signal: deadline,
     })
   } catch (err) {
-    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    const timedOut = deadline.aborted || (err instanceof Error && err.name === 'TimeoutError')
     rootLogger.error(
       { err, gfscPath, method, timeoutMs: config.gfscProxyTimeoutMs },
       timedOut
@@ -634,10 +638,27 @@ async function proxyMutationToGfsc(
     res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
     return
   }
+  // The same deadline also bounds this response-body read. If gfsc sent headers
+  // and then stalled the body, text() rejects — classify it (504/502) instead of
+  // letting it reject uncaught into a generic 500. Read BEFORE committing status,
+  // so a read failure can still set the right code.
+  let text: string
+  try {
+    text = await upstream.text()
+  } catch (err) {
+    const timedOut =
+      deadline.aborted ||
+      (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError'))
+    rootLogger.error(
+      { err, gfscPath, method, status: upstream.status, timeoutMs: config.gfscProxyTimeoutMs },
+      'gfs external mutation proxy: gfsc response body read failed'
+    )
+    res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+    return
+  }
   res.status(upstream.status)
   const contentType = upstream.headers.get('content-type')
   if (contentType) res.setHeader('content-type', contentType)
-  const text = await upstream.text()
   // Never silent: surface a gfsc 4xx/5xx at this hop (the base64 RangeError 500 was
   // invisible here before) while forwarding the body verbatim.
   if (upstream.status >= 500) {
