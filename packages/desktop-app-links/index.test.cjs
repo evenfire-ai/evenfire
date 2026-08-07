@@ -49,6 +49,20 @@ test('web and desktop links use the same canonical route contract', () => {
   })
 })
 
+test('literal percent routes use the decoded canonical wire representation', () => {
+  const deepLink = links.buildSandboxUiDeepLink({
+    recipeNs: 'sandbox-recipes',
+    recipeName: 'task-board',
+    path: '/literal%percent',
+  })
+
+  assert.equal(new URL(deepLink).searchParams.get('path'), '/literal%percent')
+  assert.deepEqual(links.parseSandboxUiDeepLink(deepLink), {
+    appRef: 'sandbox-recipes/task-board',
+    path: '/literal%percent',
+  })
+})
+
 test('route normalization canonicalizes safe percent-encoded paths once', () => {
   for (const [input, expected] of [
     ['/café', '/café'],

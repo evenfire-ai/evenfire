@@ -36,3 +36,11 @@ Wire-contract changes must be additive by default:
 - Producers must keep emitting the existing `app` hostname plus `path` and `team` parameter names
   for the supported migration window.
 - Any breaking wire change requires a separate versioning design before it ships.
+
+New clients represent `path` as decoded canonical route text on the wire and percent-encode each
+segment only when navigating the embedded browser. Desktop versions released before that navigation
+boundary was added may not open a literal-percent segment, such as `literal%percent`, from a link
+created by a newer producer. Deployments with mixed client versions should avoid sharing
+literal-percent routes until supported desktops have been updated. Changing this representation to
+support older clients would be a breaking wire change and requires the separate versioning design
+described above.
