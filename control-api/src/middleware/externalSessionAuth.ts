@@ -1,9 +1,14 @@
 import { NextFunction, Request, Response } from 'express'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
+import {
+  type LiveTeamMembershipAuthorization,
+  authorizeLiveTeamMembership,
+} from '../services/directory/index.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
+  externalTeamAuth?: Extract<LiveTeamMembershipAuthorization, { status: 'active' }>['membership']
 }
 
 function extractUserSessionToken(req: Request): string {
@@ -43,14 +48,29 @@ export function requireExternalUserParamMatch(paramName = 'userId') {
   }
 }
 
-export function requireExternalTeamParamMatch(paramName = 'teamId') {
-  return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
+export function requireExternalTeamParamMatch(
+  paramName = 'teamId',
+  source: 'params' | 'query' = 'params'
+) {
+  return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const claims = req.externalAuth
-    const requestedTeamId = String(req.params?.[paramName] || '').trim()
+    const requestedTeamId = String(req[source]?.[paramName] || '').trim()
     if (!claims || !requestedTeamId || claims.teamId !== requestedTeamId) {
-      res.status(403).json({ error: 'Forbidden' })
+      res.status(403).json({ error: 'team_context_mismatch' })
       return
     }
+
+    const authorization = await authorizeLiveTeamMembership(claims.userId, requestedTeamId)
+    if (authorization.status === 'unavailable') {
+      res.status(503).json({ error: authorization.code })
+      return
+    }
+    if (authorization.status === 'denied') {
+      res.status(403).json({ error: authorization.code })
+      return
+    }
+
+    req.externalTeamAuth = authorization.membership
     next()
   }
 }
@@ -81,9 +101,9 @@ export function rejectBodyUserTeamMismatch(
 
 export function requireExternalRole(allowedRoles: TeamRole[]) {
   return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
-    const role = req.externalAuth?.role
+    const role = req.externalTeamAuth?.role
     if (!role || !allowedRoles.includes(role)) {
-      res.status(403).json({ error: 'Forbidden' })
+      res.status(403).json({ error: 'team_role_insufficient' })
       return
     }
     next()

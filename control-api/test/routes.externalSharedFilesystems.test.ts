@@ -7,6 +7,7 @@ import { K8sNotFoundError } from '../src/services/resourceService.js'
 const mockVerifyExternalSessionToken = vi.fn()
 const mockGetUserContexts = vi.fn()
 const mockGetTeamContexts = vi.fn()
+const mockAuthorizeLiveTeamMembership = vi.fn()
 const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
@@ -14,6 +15,7 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 }))
 
 vi.mock('../src/services/directory/index.js', () => ({
+  authorizeLiveTeamMembership: (...args: unknown[]) => mockAuthorizeLiveTeamMembership(...args),
   getUserContexts: (...args: unknown[]) => mockGetUserContexts(...args),
   getTeamContexts: (...args: unknown[]) => mockGetTeamContexts(...args),
 }))
@@ -69,6 +71,11 @@ beforeEach(() => {
   mockVerifyExternalSessionToken.mockReset()
   mockGetUserContexts.mockReset()
   mockGetTeamContexts.mockReset()
+  mockAuthorizeLiveTeamMembership.mockReset()
+  mockAuthorizeLiveTeamMembership.mockResolvedValue({
+    status: 'active',
+    membership: { team_id: 'team-1', role: 'member', team_name: 'Team One' },
+  })
   mockSignWfcBrowsingCredential.mockReset()
   mockSignWfcBrowsingCredential.mockReturnValue({ token: 'browsing-token', expiresInSeconds: 60 })
 })
@@ -145,6 +152,69 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
       .set('x-user-session-token', 'dummy')
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
+  })
+
+  it('denies a team-only context after the claimed membership is removed', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockAuthorizeLiveTeamMembership.mockResolvedValue({
+      status: 'denied',
+      code: 'team_membership_inactive',
+    })
+    mockGetTeamContexts.mockResolvedValue({ teamId: 'team-1', contextIds: ['ctx-team'] })
+    const getResource = vi.fn().mockResolvedValue({ spec: { sharedFileSystems: [] } })
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'dummy')
+      .expect(403)
+      .expect({ error: 'team_membership_inactive' })
+
+    expect(mockGetTeamContexts).not.toHaveBeenCalled()
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('keeps a directly granted context available after final-team removal', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: ['ctx-a'] })
+    mockAuthorizeLiveTeamMembership.mockResolvedValue({
+      status: 'denied',
+      code: 'team_membership_inactive',
+    })
+    mockGetTeamContexts.mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    const getResource = vi.fn().mockResolvedValue({ spec: { sharedFileSystems: [] } })
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-a/shared-filesystems')
+      .set('x-user-session-token', 'dummy')
+      .expect(200)
+      .expect({ items: [] })
+
+    expect(mockAuthorizeLiveTeamMembership).not.toHaveBeenCalled()
+    expect(mockGetTeamContexts).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when team membership reconciliation is unavailable', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockAuthorizeLiveTeamMembership.mockResolvedValue({
+      status: 'unavailable',
+      code: 'team_authorization_unavailable',
+    })
+    mockGetTeamContexts.mockResolvedValue({ teamId: 'team-1', contextIds: ['ctx-team'] })
+    const getResource = vi.fn().mockResolvedValue({ spec: { sharedFileSystems: [] } })
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'dummy')
+      .expect(503)
+      .expect({ error: 'team_authorization_unavailable' })
+
+    expect(mockGetTeamContexts).not.toHaveBeenCalled()
+    expect(getResource).not.toHaveBeenCalled()
   })
 
   it('returns 403 when caller has no access to the context', async () => {

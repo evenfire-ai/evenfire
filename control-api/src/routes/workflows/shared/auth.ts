@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import { isAdminTokenRevoked } from '../../../services/adminAuthService.js'
+import { authorizeLiveTeamMembership } from '../../../services/directory/index.js'
 import type { WorkflowCaller } from '../../../services/workflows/types.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
@@ -7,8 +8,8 @@ import {
   type McpHostControlScope,
   verifyMcpHostControlJwt,
 } from '../../../utils/auth/mcpHostJwtToken.js'
-import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
+import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
 function getUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
@@ -40,16 +41,32 @@ export async function requireAdminWorkflowCaller(
   return { kind: 'admin-ui', userId: adminClaims.sub }
 }
 
-export function requireExternalWorkflowCaller(
+export async function requireExternalWorkflowCaller(
   req: Request,
   res: Response
-): Extract<WorkflowCaller, { kind: 'user-session' }> | null {
+): Promise<Extract<WorkflowCaller, { kind: 'user-session' }> | null> {
   const userSessionToken = getUserSessionToken(req)
   if (!userSessionToken || userSessionToken.length > 4096) return unauthorized(res)
 
   const claims = verifyExternalSessionToken(userSessionToken)
   if (!claims) return unauthorized(res)
-  return { kind: 'user-session', claims }
+  if (!claims.teamId) return { kind: 'user-session', claims }
+
+  const teamAuthorization = await authorizeLiveTeamMembership(claims.userId, claims.teamId)
+  if (teamAuthorization.status === 'unavailable') {
+    res.status(503).json({ error: teamAuthorization.code })
+    return null
+  }
+  if (teamAuthorization.status === 'denied') {
+    return {
+      kind: 'user-session',
+      claims: { ...claims, teamId: null, role: 'member' },
+    }
+  }
+  return {
+    kind: 'user-session',
+    claims: { ...claims, role: teamAuthorization.membership.role },
+  }
 }
 
 export function requireMcpHostControlWorkflowCaller(

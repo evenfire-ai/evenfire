@@ -10,6 +10,7 @@ import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 const svc = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
   acceptInvitationForEmail: vi.fn(),
+  authorizeLiveTeamMembership: vi.fn(),
   createInvitation: vi.fn(),
   createTeamForUser: vi.fn(),
   findMemberRole: vi.fn(),
@@ -113,6 +114,10 @@ describe('routes/profile', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+    })
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'active',
+      membership: { team_id: 't1', role: 'member', team_name: 'Team One' },
     })
   })
 
@@ -366,6 +371,45 @@ describe('routes/profile', () => {
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/teams/t2/agents')
     ).expect(403)
+  })
+
+  it('denies a removed team while direct Agent and Context endpoints remain available', async () => {
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'denied',
+      code: 'team_membership_inactive',
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+    svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-a'] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(request(app).get('/external/teams/t1/members'))
+      .expect(403)
+      .expect({ error: 'team_membership_inactive' })
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/agents')
+    ).expect(200)
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/contexts')
+    ).expect(200)
+  })
+
+  it('live-authorizes the directory query team without changing its response shape', async () => {
+    svc.searchDirectory.mockResolvedValue([{ id: 'u2', email: 'two@example.com' }])
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/directory/search?teamId=t1&q=two')
+    )
+      .expect(200)
+      .expect({ items: [{ id: 'u2', email: 'two@example.com' }] })
+
+    expect(svc.authorizeLiveTeamMembership).toHaveBeenCalledWith('u1', 't1')
   })
 
   it('allows membership lookup for another team when user claim matches', async () => {
@@ -652,6 +696,81 @@ describe('routes/profile', () => {
       ['mcp:servers:list'],
       ['host-a'],
       [] // extraGrantedScopes — no UI-bearing recipe in this mock
+    )
+  })
+
+  it('denies team-derived RPC issuance after the claimed membership is removed', async () => {
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'denied',
+      code: 'team_membership_inactive',
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: [] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-agent'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'stale-team-rpc-token',
+      accessScope: 'team',
+      teamId: 't1',
+      scopes: ['host:message:invoke'],
+      hostRefs: ['team-agent'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({
+        sessionToken: userSessionToken,
+        scopes: ['host:message:invoke'],
+        hostRefs: ['team-agent'],
+      })
+      .expect(403)
+      .expect({ error: 'team_membership_inactive' })
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('uses the current membership role for RPC token attribution', async () => {
+    const adminSessionToken = signExternalSessionToken({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: 't1',
+      role: 'admin',
+    })
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'active',
+      membership: { team_id: 't1', role: 'member', team_name: 'Team One' },
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: [] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-agent'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'rpc-token',
+      accessScope: 'team',
+      teamId: 't1',
+      scopes: ['host:message:invoke'],
+      hostRefs: ['team-agent'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({
+        sessionToken: adminSessionToken,
+        scopes: ['host:message:invoke'],
+        hostRefs: ['team-agent'],
+      })
+      .expect(200)
+
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'u1', teamId: 't1', role: 'member' },
+      ['host:message:invoke'],
+      ['team-agent'],
+      []
     )
   })
 

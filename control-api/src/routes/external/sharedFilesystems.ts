@@ -10,7 +10,11 @@ import {
   listActiveContextIds,
   partitionAccessValues,
 } from '../../services/directory/accessReconciliation.js'
-import { getTeamContexts, getUserContexts } from '../../services/directory/index.js'
+import {
+  authorizeLiveTeamMembership,
+  getTeamContexts,
+  getUserContexts,
+} from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { WFC_BROWSING_READ_SCOPE, signWfcBrowsingToken } from '../../utils/auth/wfcBrowsingToken.js'
 import { wfcServiceUrl } from '../../utils/wfcServiceUrl.js'
@@ -45,9 +49,14 @@ type ContextResource = {
 }
 
 type SharedFilesystemsRequestCache = {
-  accessibleContextIds?: Promise<Set<string>>
+  contextAccess?: Map<string, Promise<ContextAccessDecision>>
   contexts?: Map<string, Promise<ContextResource>>
 }
+
+type ContextAccessDecision =
+  | { status: 'authorized' }
+  | { status: 'denied'; code: 'Forbidden' | 'team_membership_inactive' }
+  | { status: 'unavailable'; code: 'team_authorization_unavailable' }
 
 class ContextAccessReconciliationError extends Error {
   constructor(cause: unknown) {
@@ -57,12 +66,12 @@ class ContextAccessReconciliationError extends Error {
   }
 }
 
-async function loadAccessibleContextIds(
+async function loadContextAccess(
   gateway: K8sGateway,
   userId: string,
-  teamId: string | null
-): Promise<Set<string>> {
-  const accessible = new Set<string>()
+  teamId: string | null,
+  contextId: string
+): Promise<ContextAccessDecision> {
   let activeContextIds: string[]
   try {
     activeContextIds = await listActiveContextIds(gateway)
@@ -70,19 +79,26 @@ async function loadAccessibleContextIds(
     console.warn('[external/shared-filesystems] context reconciliation failed:', err)
     throw new ContextAccessReconciliationError(err)
   }
+  if (!activeContextIds.includes(contextId)) {
+    return { status: 'denied', code: 'Forbidden' }
+  }
   const userCtx = await getUserContexts(userId)
   const userContextIds = partitionAccessValues(userCtx.contextIds, activeContextIds).active
-  for (const id of userContextIds) {
-    accessible.add(id)
+  if (userContextIds.includes(contextId)) {
+    return { status: 'authorized' }
   }
-  if (teamId && teamId.trim()) {
-    const teamCtx = await getTeamContexts(teamId.trim())
-    const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
-    for (const id of teamContextIds) {
-      accessible.add(id)
-    }
+  const normalizedTeamId = teamId?.trim() || ''
+  if (!normalizedTeamId) {
+    return { status: 'denied', code: 'Forbidden' }
   }
-  return accessible
+  const teamAuthorization = await authorizeLiveTeamMembership(userId, normalizedTeamId)
+  if (teamAuthorization.status !== 'active') return teamAuthorization
+
+  const teamCtx = await getTeamContexts(normalizedTeamId)
+  const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
+  return teamContextIds.includes(contextId)
+    ? { status: 'authorized' }
+    : { status: 'denied', code: 'Forbidden' }
 }
 
 function requestCache(res: { locals: Record<string, unknown> }): SharedFilesystemsRequestCache {
@@ -92,31 +108,41 @@ function requestCache(res: { locals: Record<string, unknown> }): SharedFilesyste
   return locals[key]
 }
 
-function loadAccessibleContextIdsForRequest(
+function loadContextAccessForRequest(
   gateway: K8sGateway,
   req: ExternalAuthedRequest,
-  res: { locals: Record<string, unknown> }
-): Promise<Set<string>> {
+  res: { locals: Record<string, unknown> },
+  contextId: string
+): Promise<ContextAccessDecision> {
   const cache = requestCache(res)
   const claims = req.externalAuth!
-  cache.accessibleContextIds ??= loadAccessibleContextIds(gateway, claims.userId, claims.teamId)
-  return cache.accessibleContextIds
+  cache.contextAccess ??= new Map()
+  let decision = cache.contextAccess.get(contextId)
+  if (!decision) {
+    decision = loadContextAccess(gateway, claims.userId, claims.teamId, contextId)
+    cache.contextAccess.set(contextId, decision)
+  }
+  return decision
 }
 
-async function resolveAccessibleContextIdsForRequest(
+async function authorizeContextForRequest(
   gateway: K8sGateway,
   req: ExternalAuthedRequest,
   res: {
     locals: Record<string, unknown>
     status: (code: number) => { json: (body: unknown) => void }
-  }
-): Promise<Set<string> | null> {
+  },
+  contextId: string
+): Promise<boolean> {
   try {
-    return await loadAccessibleContextIdsForRequest(gateway, req, res)
+    const decision = await loadContextAccessForRequest(gateway, req, res, contextId)
+    if (decision.status === 'authorized') return true
+    res.status(decision.status === 'unavailable' ? 503 : 403).json({ error: decision.code })
+    return false
   } catch (err) {
     if (!(err instanceof ContextAccessReconciliationError)) throw err
     res.status(503).json({ error: 'context_reconciliation_unavailable' })
-    return null
+    return false
   }
 }
 
@@ -209,12 +235,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
         return
       }
 
-      const accessible = await resolveAccessibleContextIdsForRequest(gateway, req, res)
-      if (!accessible) return
-      if (!accessible.has(contextId)) {
-        res.status(403).json({ error: 'Forbidden' })
-        return
-      }
+      if (!(await authorizeContextForRequest(gateway, req, res, contextId))) return
 
       let ctx: ContextResource
       try {
@@ -295,12 +316,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
       // SFS must actually be referenced by that Context. Without the second
       // check, a user with access to context A could browse any SFS in the
       // cluster by name.
-      const accessible = await resolveAccessibleContextIdsForRequest(gateway, req, res)
-      if (!accessible) return
-      if (!accessible.has(contextId)) {
-        res.status(403).json({ error: 'Forbidden' })
-        return
-      }
+      if (!(await authorizeContextForRequest(gateway, req, res, contextId))) return
 
       let ctx: ContextResource
       try {

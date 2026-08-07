@@ -7,6 +7,7 @@ import { MockGateway } from './mockGateway.js'
 const RECIPE_NS = 'sandbox-recipes'
 
 const mockPoolQuery = vi.fn()
+const mockLiveMembershipQuery = vi.fn()
 const mockWithTransaction = vi.fn()
 const mockIssueWorkflowControlToken = vi.fn()
 const mockVerifyWorkflowControlToken = vi.fn()
@@ -18,7 +19,10 @@ const mockIsAdminTokenRevoked = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   pool: {
-    query: (...args: unknown[]) => mockPoolQuery(...args),
+    query: (text: unknown, ...args: unknown[]) =>
+      String(text).includes('SELECT tm.team_id, tm.role, t.name AS team_name')
+        ? mockLiveMembershipQuery(text, ...args)
+        : mockPoolQuery(text, ...args),
   },
   withTransaction: (...args: unknown[]) => mockWithTransaction(...args),
 }))
@@ -115,6 +119,11 @@ describe('routes/external/workflows', () => {
 
   beforeEach(() => {
     mockPoolQuery.mockReset()
+    mockLiveMembershipQuery.mockReset()
+    mockLiveMembershipQuery.mockResolvedValue({
+      rows: [{ team_id: 'team-1', role: 'member', team_name: 'Team One' }],
+      rowCount: 1,
+    })
     mockWithTransaction.mockReset()
     mockIssueWorkflowControlToken.mockReset()
     mockVerifyWorkflowControlToken.mockReset()

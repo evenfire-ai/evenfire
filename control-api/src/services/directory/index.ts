@@ -26,6 +26,7 @@ export {
   acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
+  authorizeLiveTeamMembership,
   getInvitationByToken,
   addMemberToTeam,
   createPasswordSetupInvitationForUser,
@@ -62,6 +63,7 @@ export {
   updateProfile,
   updateUserPassword,
 } from './membership.js'
+export type { LiveTeamMembershipAuthorization } from './membership.js'
 
 export {
   getTeamContexts,

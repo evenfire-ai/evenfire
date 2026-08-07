@@ -4,6 +4,7 @@ import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import {
+  authorizeLiveTeamMembership,
   getTeamAgents,
   getUserAgents,
   googleLoginData,
@@ -186,6 +187,17 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       const claims = verifyExternalSessionToken(sessionToken)
       if (!claims) return res.status(401).json({ error: 'Unauthorized' })
+      let currentRole = claims.role
+      if (claims.teamId) {
+        const teamAuthorization = await authorizeLiveTeamMembership(claims.userId, claims.teamId)
+        if (teamAuthorization.status === 'unavailable') {
+          return res.status(503).json({ error: teamAuthorization.code })
+        }
+        if (teamAuthorization.status === 'denied') {
+          return res.status(403).json({ error: teamAuthorization.code })
+        }
+        currentRole = teamAuthorization.membership.role
+      }
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {
@@ -229,7 +241,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       ) {
         extraScopes.push('sandbox:ui:view')
       }
-      const auth = { userId: claims.userId, teamId: claims.teamId, role: claims.role }
+      const auth = { userId: claims.userId, teamId: claims.teamId, role: currentRole }
       const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
       if (!result) {
         // Distinguish "you need a team for this" from a generic scope failure so

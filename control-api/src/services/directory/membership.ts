@@ -396,6 +396,29 @@ export async function findMembership(userId: string, teamId: string) {
   )
 }
 
+export type LiveTeamMembershipAuthorization =
+  | {
+      status: 'active'
+      membership: { team_id: string; role: TeamRole; team_name: string }
+    }
+  | { status: 'denied'; code: 'team_membership_inactive' }
+  | { status: 'unavailable'; code: 'team_authorization_unavailable' }
+
+export async function authorizeLiveTeamMembership(
+  userId: string,
+  teamId: string
+): Promise<LiveTeamMembershipAuthorization> {
+  try {
+    const membership = await findMembership(userId, teamId)
+    if (!membership) {
+      return { status: 'denied', code: 'team_membership_inactive' }
+    }
+    return { status: 'active', membership }
+  } catch {
+    return { status: 'unavailable', code: 'team_authorization_unavailable' }
+  }
+}
+
 export async function getMe(userId: string, teamId: string) {
   const result = await pool.query(
     `SELECT u.id, u.email, u.name, u.picture,
