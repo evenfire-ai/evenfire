@@ -32,12 +32,9 @@ import { planWrite, WriteError } from "./write";
  * through this — the stack is intentionally multi-line and is not user-tainted.
  */
 export function sanitizeForLog(value: string): string {
-  let out = "";
-  for (const ch of value.slice(0, 512)) {
-    const code = ch.codePointAt(0) ?? 0;
-    out += code < 0x20 || code === 0x7f ? "?" : ch;
-  }
-  return out;
+  // Replace CR/LF, other C0 controls, and DEL with '?' (CodeQL-recognized
+  // log-injection barrier), then bound length to guard against log flooding.
+  return value.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 512);
 }
 
 /**
