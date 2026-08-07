@@ -26,8 +26,8 @@
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
-    "@clerum/llm-providers": "file:../packages/llm-providers",
     "@aws-sdk/client-bedrock-runtime": "^3.895.0",
+    "@clerum/llm-providers": "file:../packages/llm-providers",
     "@google/genai": "^2.10.0",
     "@kubernetes/client-node": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -66,6 +66,7 @@
     "@typescript-eslint/eslint-plugin": "^8.59.0",
     "@typescript-eslint/parser": "^8.59.0",
     "eslint": "^10.2.1",
+    "fast-check": "^4.9.0",
     "supertest": "^7.2.2",
     "typescript": "^5.3.0",
     "vitest": "^4.0.18"

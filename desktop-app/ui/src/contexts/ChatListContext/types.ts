@@ -14,8 +14,11 @@ export interface ChatListContextValue {
   activeChatId: string | null
   chatList: SidebarChatEntry[]
   chatListLoading: boolean
+  chatListMoreLoading?: boolean
+  chatListHasMoreRemoteSessions?: boolean
   latestChatSessions: LatestSidebarChatEntry[]
   latestChatSessionsLoading: boolean
+  loadMoreChatSessions?: () => Promise<void>
   /** Per-chat session lifecycle, keyed by chatId. Drives D.5 badges/banners. */
   sessionStateByChatId: Record<string, SessionStateLite>
   /**

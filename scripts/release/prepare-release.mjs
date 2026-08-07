@@ -7,7 +7,13 @@
 //        [--minimum-desktop-version 0.6.0]
 import { execFileSync, execFileSync as run } from 'node:child_process'
 import process from 'node:process'
-import { COORDINATES, SEMVER_RE, argValue, compareVersions } from './release-coordinates.mjs'
+import {
+  COORDINATES,
+  SEMVER_RE,
+  argValue,
+  compareVersions,
+  writtenCoordinatePaths,
+} from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
 
@@ -69,6 +75,16 @@ if (compareVersions(version, current) <= 0) {
   die(`--version ${version} is not greater than the current desktop version ${current}`)
 }
 
+// Resolved BEFORE the first write, so a coordinate table that cannot describe
+// what it is about to touch stops the cut instead of producing a half-cut tree
+// plus a recovery instruction that would not fully undo it.
+let writtenPaths
+try {
+  writtenPaths = writtenCoordinatePaths()
+} catch (error) {
+  die(error.message)
+}
+
 for (const coordinate of COORDINATES) {
   // Rows without a write are owned by the delegated updater below.
   coordinate.write?.(ROOT, version)
@@ -85,14 +101,19 @@ if (minimumDesktopVersion) {
 try {
   execFileSync('node', manifestArgs, { cwd: ROOT, stdio: 'inherit' })
 } catch (error) {
-  // The coordinate loop above has already written package.json and the lockfile.
+  // The coordinate loop above has already written every path in writtenPaths.
   // Say so, rather than leaving a raw stack trace and a half-written tree.
+  //
+  // The list is DERIVED from the coordinate table, not typed out here. The
+  // hardcoded version named the two desktop files and never learned about the
+  // ghcr pin, so following the discard command reverted the version and left
+  // the pin bumped -- still half-cut, by the command offered to un-cut it.
   die(
-    `The release cut wrote desktop-app/package.json and package-lock.json to ${version}, ` +
+    `The release cut wrote ${writtenPaths.join(', ')} to ${version}, ` +
       `then the manifest update failed (${error.message}).\n` +
       `The tree is half-cut. Either re-run this same command once the cause is fixed ` +
       `(it compares against the last committed version, so re-running is safe), ` +
-      `or discard with \`git checkout -- desktop-app/package.json desktop-app/package-lock.json\`.`
+      `or discard with \`git checkout -- ${writtenPaths.join(' ')}\`.`
   )
 }
 

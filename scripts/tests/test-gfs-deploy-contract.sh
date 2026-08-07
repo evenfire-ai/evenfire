@@ -92,7 +92,11 @@ assert_minikube_upgrade_classifier() {
      "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
-assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'kustomize deploy/overlays/minikube'
+# The block ends where the overlay apply begins. That apply no longer names a
+# fixed overlay: it resolves one from the mode the cluster's images were
+# acquired in (scripts/minikube/image-mode.sh), so the resolver call is the
+# anchor.
+assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
 assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'incremental_build_images'
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"

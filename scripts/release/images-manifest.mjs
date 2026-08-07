@@ -44,6 +44,22 @@ function load() {
     if (typeof image.deployed_to_minikube !== 'boolean') {
       throw new Error(`${MANIFEST_PATH}: ${image.name} must set deployed_to_minikube explicitly`)
     }
+    // e2e_only marks a fixture that ONLY `make minikube-setup-e2e` acquires.
+    // Optional, so absent means false, but a present value must be a real
+    // boolean: `"e2e_only": "false"` is truthy and would silently drop the
+    // image from the default verify set.
+    if ('e2e_only' in image && typeof image.e2e_only !== 'boolean') {
+      throw new Error(`${MANIFEST_PATH}: ${image.name} sets a non-boolean e2e_only`)
+    }
+    // A published image is pulled on the default path, so it is never an
+    // E2E-only fixture. The pair would make minikubeVerifyRefs() drop a ref
+    // the cluster actually runs.
+    if (image.published && image.e2e_only) {
+      throw new Error(
+        `${MANIFEST_PATH}: ${image.name} is published AND e2e_only -- a published image is ` +
+          `acquired on the default path and must stay in the verify set`
+      )
+    }
     if ('pull_in_ghcr_mode' in image) {
       throw new Error(
         `${MANIFEST_PATH}: ${image.name} stores pull_in_ghcr_mode; it is derived ` +
@@ -86,4 +102,45 @@ export function pullInGhcrMode() {
 // some use :v1 rather than :test.
 export function localRef(image) {
   return `clerum/${image.local_name ?? image.name}:${image.local_tag ?? 'test'}`
+}
+
+export const GHCR_NAMESPACE = 'ghcr.io/evenfire-ai'
+
+// The refs `build-images.sh --verify-only` must find in the cluster.
+//
+// This is NOT the build list (ALL_IMAGES in build-images.sh): that list is
+// hand-ordered with per-image Dockerfile arguments. It is the set of refs the
+// pods actually pull, which is why it splits on `published` -- a
+// published+deployed image runs from ghcr in ghcr mode, an unpublished one is
+// built locally and runs under its clerum/* ref in BOTH modes.
+//
+// `mode` must describe how the cluster's images were ACQUIRED, not what
+// IMAGE_SOURCE happens to default to in the caller's shell. Verifying ghcr
+// refs on a locally built cluster reports every image missing; verifying
+// clerum/* on a ghcr cluster reports "all present" against images no pod
+// references. Both are worse than no check.
+export function minikubeVerifyRefs({ mode, tag, includeE2eFixtures = false } = {}) {
+  if (mode !== 'ghcr' && mode !== 'local') {
+    throw new Error(`minikubeVerifyRefs: mode must be 'ghcr' or 'local', got '${mode}'`)
+  }
+  if (mode === 'ghcr' && !tag) {
+    throw new Error('minikubeVerifyRefs: ghcr mode needs a tag to build a ref from')
+  }
+  const fromGhcr = new Set(pullInGhcrMode().map(i => i.name))
+  const refs = []
+  for (const image of IMAGES) {
+    if (!image.deployed_to_minikube) continue
+    // The E2E-only fixtures are published:false, so ghcr cannot supply them,
+    // and the default ghcr setup path does not build them either -- only
+    // `make minikube-setup-e2e` does. Demanding them there fails a healthy
+    // cluster with a remedy that can never work. The local path is different:
+    // a full build_images run builds every fixture, so they stay in the set.
+    if (image.e2e_only && mode === 'ghcr' && !includeE2eFixtures) continue
+    if (mode === 'ghcr' && fromGhcr.has(image.name)) {
+      refs.push(`${GHCR_NAMESPACE}/${image.name}:${tag}`)
+    } else {
+      refs.push(localRef(image))
+    }
+  }
+  return refs
 }
