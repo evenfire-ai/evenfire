@@ -985,26 +985,15 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
-    this.stopAllStreams()
-    this.sessionToken = null
-    this.me = null
-    this.profileUiBaseUrlCache = null
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    unbindChatStore()
-    // Grants survive logout (they are keyed by userId), but every cached SDK
-    // result must not: the next user of this machine gets nothing of this one's.
-    tryGetPluginSdkRuntime()?.notifySessionChanged(false)
     this.logoutInProgress = true
     try {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       this.clearAuthenticatedSessionState()
       await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      // Grants survive logout (they are keyed by userId), but every cached SDK
+      // result must not: the next user of this machine gets nothing of this one's.
+      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
     } finally {
       this.logoutInProgress = false
     }
