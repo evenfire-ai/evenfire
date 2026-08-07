@@ -10,17 +10,34 @@ import type { McpServerCondition } from '@lib/api'
  * `reason: 'SecretResolved'` (the condition TYPE reused as a reason, a value the
  * producer never emits) survived in the resolver fixtures for two rounds.
  *
- * Producer sites, all in `host-context-controller/src/reconciler.ts`:
+ * THESE BUILDERS ARE NOT TRUSTED ON THEIR OWN (R1-H2).
  *
- * | builder             | type            | status  | reason              | written at |
- * |---------------------|-----------------|---------|---------------------|------------|
- * | `secretFound`       | SecretResolved  | 'True'  | 'SecretFound'       | :1981 (managed), :2063 (WRC-owned) |
- * | `secretNotFound`    | SecretResolved  | 'False' | 'SecretNotFound'    | :1872 / :2041, reason from validateSecret :468-472 |
- * | `secretMissingKey`  | SecretResolved  | 'False' | 'SecretMissingKey'  | :1872 / :2041, reason from validateSecret :456-459 |
- * | `secretAccessDenied`| SecretResolved  | 'False' | 'SecretAccessDenied'| :1872 / :2041, reason from validateSecret :474-479 |
+ * A handwritten mirror of the producer is exactly as stale as the author who
+ * wrote it, and a UI suite cannot tell the difference: if HCC changed a status,
+ * reason or message, both the mocked producer output and the assertion would
+ * keep encoding the old triple and stay green.
  *
- * The messages are copied from the same producer branches, so a fixture reads
- * like a real resource dump rather than an approximation of one.
+ * So the mirror is checked, executably, by
+ * `../secretResolvedProducerContract.test.ts`. That suite reads
+ * `host-context-controller/src/reconciler.ts` off disk, extracts the real
+ * `SecretResolved` condition writes and `validateSecret` failure results, and
+ * asserts every builder below reproduces exactly those triples — messages
+ * included, placeholder by placeholder. A producer contract change turns it
+ * red, and a producer site it can no longer find throws rather than passing on
+ * an empty match set.
+ *
+ * The builders are:
+ *
+ * | builder              | status  | reason               |
+ * |----------------------|---------|----------------------|
+ * | `secretFound`        | 'True'  | 'SecretFound'        |
+ * | `secretNotFound`     | 'False' | 'SecretNotFound'     |
+ * | `secretMissingKey`   | 'False' | 'SecretMissingKey'   |
+ * | `secretAccessDenied` | 'False' | 'SecretAccessDenied' |
+ *
+ * `ReadError` — the producer's fourth failure reason — has no builder on
+ * purpose; the contract suite covers it by extraction and fails if a FIFTH
+ * reason ever appears unmodelled.
  *
  * Anything the producer CANNOT emit — a `SecretResolved` at status `Unknown`, a
  * reason carried by the wrong condition type, a malformed or absent
@@ -44,7 +61,7 @@ const DEFAULT_ENV_VAR = 'LINEAR_WORKSPACE'
 type Stamped = { at: string }
 
 /** `SecretResolved=True` — the Secret exists and every declared key is present.
- *  reconciler.ts:1981 (managed) and :2063 (WRC-owned) write this exact triple. */
+ *  Both producer success sites — managed and WRC-owned — write this triple. */
 export function secretFound({ at }: Stamped): McpServerCondition {
   return {
     type: SECRET_RESOLVED,
@@ -57,7 +74,7 @@ export function secretFound({ at }: Stamped): McpServerCondition {
 
 /** `SecretResolved=False/SecretNotFound` — the Secret does not exist. This is
  *  the ONLY condition that may send a managed connector to the create form.
- *  Message from reconciler.ts:468 (the k8s 404 branch of validateSecret). */
+ *  Message from validateSecret's k8s-404 branch. */
 export function secretNotFound({
   at,
   secretName = DEFAULT_SECRET_NAME,
@@ -74,7 +91,7 @@ export function secretNotFound({
 
 /** `SecretResolved=False/SecretMissingKey` — the Secret EXISTS but lacks a
  *  declared key. The rotate merge-patch adds it, so this must never reach the
- *  create form. Message from reconciler.ts:456-457. */
+ *  create form. Message from validateSecret's missing-key branch. */
 export function secretMissingKey({
   at,
   secretName = DEFAULT_SECRET_NAME,
@@ -97,7 +114,7 @@ export function secretMissingKey({
 }
 
 /** `SecretResolved=False/SecretAccessDenied` — the Secret may well exist; HCC
- *  could not read it (k8s 401/403). Message from reconciler.ts:476-477. */
+ *  could not read it (k8s 401/403). Message from validateSecret's 401/403 branch. */
 export function secretAccessDenied({
   at,
   secretName = DEFAULT_SECRET_NAME,
