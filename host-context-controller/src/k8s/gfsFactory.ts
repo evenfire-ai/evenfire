@@ -95,6 +95,8 @@ export interface GfsFactoryConfig {
   syncCopyMaxObjects?: string
   syncCopyMaxBytes?: string
   syncCopyTimeoutMs?: string
+  /** Optional largest mutation body gfsc accepts (bytes), passed through to gfsc. */
+  maxWriteBodyBytes?: string
   /** Optional kube-dns Service ClusterIP /32 for GKE NodeLocal DNS + Calico. */
   nodeLocalDnsCidr?: string
 }
@@ -258,12 +260,13 @@ export function buildPvc(
 function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
   const pgSecretName = role === 'writer' ? config.pgSecretName : config.readerPgSecretName
   const pgSecretKey = role === 'writer' ? config.pgSecretKey : config.readerPgSecretKey
-  const copyEnvEntries: ReadonlyArray<readonly [string, string | undefined]> = [
+  const passthroughEnvEntries: ReadonlyArray<readonly [string, string | undefined]> = [
     ['GFS_SYNC_COPY_MAX_OBJECTS', config.syncCopyMaxObjects],
     ['GFS_SYNC_COPY_MAX_BYTES', config.syncCopyMaxBytes],
     ['GFS_SYNC_COPY_TIMEOUT_MS', config.syncCopyTimeoutMs],
+    ['GFS_MAX_WRITE_BODY_BYTES', config.maxWriteBodyBytes],
   ]
-  const copyEnv = copyEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
+  const passthroughEnv = passthroughEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
     value === undefined ? [] : [{ name, value }]
   )
 
@@ -292,7 +295,7 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
         },
       },
     },
-    ...copyEnv,
+    ...passthroughEnv,
   ]
 }
 

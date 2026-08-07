@@ -490,7 +490,7 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 10 MB per file.', 'error')
+      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 16 MB per file.', 'error')
     )
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(createFile).not.toHaveBeenCalled()

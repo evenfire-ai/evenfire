@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+// The MOCKED config object (defined below); mutating gfscProxyTimeoutMs drives a
+// real deadline abort in the read-proxy timeout test.
+import { config } from '../src/config.js'
 
 /**
  * Unit tests for the end-user gfs surface on the /external (Session-JWT) plane.
@@ -30,6 +33,7 @@ vi.mock('../src/config.js', () => ({
   config: {
     gfscBaseUrl: 'http://gfsc.gfs.svc:8087',
     gfscWriteBaseUrl: 'http://gfsc-writer.gfs.svc:8087',
+    gfscProxyTimeoutMs: 300_000,
     // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
     hostsNamespace: 'mcp-host',
   },
@@ -124,6 +128,7 @@ beforeEach(() => {
   )
   mockAppendPermissionEvents.mockResolvedValue(null)
   mockSignGfsToken.mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
+  ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 300_000
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -1028,6 +1033,7 @@ describe('user resource mutations via gfsc proxy', () => {
         method: 'POST',
         headers: expect.objectContaining({ 'content-type': 'application/json' }),
         body: JSON.stringify({ name: 'docs', kind: 'directory' }),
+        signal: expect.any(AbortSignal),
       }
     )
   })
@@ -1060,8 +1066,75 @@ describe('user resource mutations via gfsc proxy', () => {
         method: 'DELETE',
         headers: expect.objectContaining({ 'content-type': 'application/json' }),
         body: JSON.stringify({ ifMatch: 3 }),
+        signal: expect.any(AbortSignal),
       }
     )
+  })
+
+  it('returns 504 gfsc_timeout when the gfsc mutation fetch times out', async () => {
+    auth()
+    const fetchMock = vi.fn(async () => {
+      const err = new Error('The operation was aborted due to timeout')
+      err.name = 'TimeoutError'
+      throw err
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app)
+      .post(`/external/gfs/resources/${R}/children`)
+      .set('x-user-session-token', 'sess')
+      .send({ name: 'docs', kind: 'file', contentBase64: 'AAAA' })
+    expect(res.status).toBe(504)
+    expect(res.body).toEqual({ error: 'gfsc_timeout' })
+  })
+
+  it('returns 504 when gfsc sends mutation headers then stalls the response body', async () => {
+    // The response-body read is bounded by the same deadline; a stall after
+    // headers must classify as 504 (via the guarded text()), not reject uncaught
+    // into a generic 500. The mock wires the deadline signal to the body stream
+    // the way undici does, then never sends bytes.
+    auth()
+    ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 20
+    const fetchMock = vi.fn((_url: string, init: { signal: AbortSignal }) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              init.signal.addEventListener('abort', () => controller.error(init.signal.reason))
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      )
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app)
+      .post(`/external/gfs/resources/${R}/children`)
+      .set('x-user-session-token', 'sess')
+      .send({ name: 'docs', kind: 'file', contentBase64: 'AAAA' })
+
+    expect(res.status).toBe(504)
+    expect(res.body).toEqual({ error: 'gfsc_timeout' })
+  })
+
+  it('forwards a gfsc 5xx on a user mutation verbatim (never a silent 500)', async () => {
+    auth()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: false, error: { code: 'internal' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app)
+      .post(`/external/gfs/resources/${R}/children`)
+      .set('x-user-session-token', 'sess')
+      .send({ name: 'docs', kind: 'file', contentBase64: 'AAAA' })
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'internal' } })
   })
 })
 
@@ -1315,5 +1388,90 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
         allowed
       )
     ).toEqual([1, 2])
+  })
+})
+
+describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
+  const readPath = `/external/gfs/proxy/${R}`
+
+  it('streams a 200 body and forwards content headers with a read gfs.read token', async () => {
+    auth()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('file-bytes-here', {
+          status: 200,
+          headers: {
+            'content-type': 'text/plain',
+            'content-length': '15',
+            'content-disposition': 'attachment; filename="f.bin"',
+          },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app).get(readPath).set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toBe('text/plain')
+    expect(res.headers['content-length']).toBe('15')
+    expect(res.headers['content-disposition']).toBe('attachment; filename="f.bin"')
+    expect(res.text).toBe('file-bytes-here')
+    expect(mockSignGfsToken).toHaveBeenCalledWith({
+      subject: U1,
+      drive: 'main',
+      scopes: ['gfs.read'],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://gfsc.gfs.svc:8087/v1/resources/${R}/content`,
+      expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('returns 504 gfsc_timeout on a REAL header-deadline abort (AbortError, signal.aborted)', async () => {
+    auth()
+    ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 20
+    const fetchMock = vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason))
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app).get(readPath).set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(504)
+    expect(res.body).toEqual({ error: 'gfsc_timeout' })
+    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true)
+  })
+
+  it('returns 502 gfsc_unreachable when the gfsc read fetch fails', async () => {
+    auth()
+    const fetchMock = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app).get(readPath).set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'gfsc_unreachable' })
+  })
+
+  it('forwards a gfsc 5xx error body verbatim (never a silent 500)', async () => {
+    auth()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: false, error: { code: 'internal', message: 'boom' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app).get(readPath).set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'internal', message: 'boom' } })
   })
 })

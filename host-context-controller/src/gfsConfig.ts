@@ -67,6 +67,11 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     syncCopyMaxObjects: process.env.GFS_SYNC_COPY_MAX_OBJECTS,
     syncCopyMaxBytes: process.env.GFS_SYNC_COPY_MAX_BYTES,
     syncCopyTimeoutMs: process.env.GFS_SYNC_COPY_TIMEOUT_MS,
+    // Largest mutation body gfsc accepts (bytes). Passed through to the gfsc pod so
+    // ops can raise the upload ceiling above gfsc's 16MiB default (base64 inflates a
+    // raw file ×1.34, so a 16MB file needs ~22.4MB here). Raise the client cap and
+    // gfsc memory (CONTEXT_MAPPER_GFSC_LIMIT_MEMORY) together.
+    maxWriteBodyBytes: process.env.GFS_MAX_WRITE_BODY_BYTES,
     nodeLocalDnsCidr: parseNodeLocalDnsCidr(env('CONTEXT_MAPPER_NODELOCAL_DNS_CIDR', '')),
   }
 }

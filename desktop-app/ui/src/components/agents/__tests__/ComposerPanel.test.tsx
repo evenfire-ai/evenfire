@@ -2,9 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ComposerPanel } from '../ComposerPanel'
 
-const composerStyles = readFileSync('ui/src/styles.css', 'utf8')
+// Resolve the stylesheet relative to THIS test file (not process.cwd()) so the
+// test passes regardless of the directory vitest is launched from. CI runs it
+// from desktop-app/ui, where the old cwd-relative 'ui/src/styles.css' resolved
+// to desktop-app/ui/ui/src/styles.css and failed with ENOENT.
+const composerStyles = readFileSync(resolve(__dirname, '../../../styles.css'), 'utf8')
 
 const composerState = {
   composerImageAttachments: [],

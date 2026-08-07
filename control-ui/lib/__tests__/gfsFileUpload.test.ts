@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_MAX_BYTES, GFS_FILE_UPLOAD_MAX_MEGABYTES } from '@constants/gfsFileUpload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 
 describe('assertGfsFileUploadSize', () => {
@@ -9,7 +9,7 @@ describe('assertGfsFileUploadSize', () => {
 
   it('rejects files above the upload limit', () => {
     expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES + 1)).toThrow(
-      'GFS uploads are limited to 10 MB per file.'
+      `GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`
     )
   })
 })
