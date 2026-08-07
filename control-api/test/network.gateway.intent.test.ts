@@ -380,6 +380,26 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(Math.ceil((webCap * 4) / 3)).toBeLessThan(GFSC_WRITE_CAP)
   })
 
+  it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {
+    // RC3: a base64 GFS upload holds ~5 transient body copies; at 256Mi two
+    // concurrent uploads OOMKilled the pod (exit 137). The base fix was inert in
+    // minikube until the overlay was also raised — re-pinning any overlay below
+    // 768Mi silently reintroduces the 7.5MB-PDF OOM, so assert it executably.
+    const controlApiLimitMi = (yaml: string): number => {
+      const doc = yamlDocs(yaml).find(
+        d => /kind:\s*Deployment/.test(d) && /name:\s*control-api\b/.test(d)
+      )
+      expect(doc, 'control-api Deployment not found').toBeTruthy()
+      const m = doc!.match(/limits:[\s\S]*?memory:\s*(\d+)Mi/)
+      expect(m, 'control-api limits.memory (Mi) not found').not.toBeNull()
+      return Number(m![1])
+    }
+    const base = controlApiLimitMi(read(`${BASE}/control-plane/control-api.yaml`))
+    const minikube = controlApiLimitMi(read(`${OVERLAYS}/minikube/patches/resource-limits.yaml`))
+    expect(base).toBeGreaterThanOrEqual(768)
+    expect(minikube).toBeGreaterThanOrEqual(768)
+  })
+
   it('keeps the Minikube control-api Marketplace on the shared registry', () => {
     const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
 

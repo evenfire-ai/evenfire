@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { config } from '../src/config.js'
 import {
   GfsClient,
   type GfsTransport,
@@ -424,8 +423,10 @@ describe('GfsClient resource mutations', () => {
       {
         token: 'tok',
         body: { name: 'docs', kind: 'directory' },
-        // Uploads use the generous GFS upload deadline, not the 60s app default.
-        timeoutMs: config.gfsUploadTimeoutMs,
+        // Assert the concrete 300000, not config.gfsUploadTimeoutMs: vitest treats
+        // {timeoutMs: undefined} as equal to a call without the key, so referencing
+        // config would make this pass vacuously if the field were ever dropped.
+        timeoutMs: 300000,
       }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
@@ -435,7 +436,7 @@ describe('GfsClient resource mutations', () => {
       {
         token: 'tok',
         body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' },
-        timeoutMs: config.gfsUploadTimeoutMs,
+        timeoutMs: 300000,
       }
     )
   })
@@ -456,7 +457,7 @@ describe('GfsClient resource mutations', () => {
       {
         token: 'tok',
         body: { contentBase64: 'aGVsbG8=', ifMatch: 1 },
-        timeoutMs: config.gfsUploadTimeoutMs,
+        timeoutMs: 300000,
       }
     )
     expect(requestJson).toHaveBeenNthCalledWith(

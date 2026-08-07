@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+// Imports the MOCKED config object below; mutating gfscProxyTimeoutMs on it lets a
+// test drive a real deadline abort (see the 504 timeout test).
+import { config } from '../src/config.js'
 
 const mockSignGfsToken = vi.hoisted(() => vi.fn())
 
@@ -43,6 +46,8 @@ async function buildApp() {
 beforeEach(() => {
   mockSignGfsToken.mockReset()
   mockSignGfsToken.mockReturnValue({ token: 'x' })
+  // Reset the (mutable) mocked timeout so a test that shrinks it can't leak into others.
+  ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 300_000
 })
 
 afterEach(() => vi.unstubAllGlobals())
@@ -93,12 +98,19 @@ describe('/api/v1/gfs/proxy', () => {
     )
   })
 
-  it('returns 504 gfsc_timeout when the gfsc fetch times out', async () => {
-    const fetchMock = vi.fn(async () => {
-      const err = new Error('The operation was aborted due to timeout')
-      err.name = 'TimeoutError'
-      throw err
-    })
+  it('returns 504 gfsc_timeout on a REAL deadline abort (AbortError, signal.aborted)', async () => {
+    // The proxy aborts its OWN AbortController via setTimeout, so a real timeout
+    // surfaces as AbortError with signal.aborted===true — NOT a TimeoutError. A
+    // fetch mock that respects the signal (rejects with signal.reason on abort)
+    // exercises the real `deadline.signal.aborted` branch; injecting a TimeoutError
+    // (as before) only hit the defensive fallback and left the real path untested.
+    ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 20
+    const fetchMock = vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason))
+        })
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     const app = await buildApp()
@@ -108,6 +120,9 @@ describe('/api/v1/gfs/proxy', () => {
 
     expect(res.status).toBe(504)
     expect(res.body).toEqual({ error: 'gfsc_timeout' })
+    // Prove the mock actually saw an aborted signal (i.e. the real timeout path ran).
+    const init = fetchMock.mock.calls[0][1]
+    expect(init.signal.aborted).toBe(true)
   })
 
   it('returns 502 gfsc_unreachable when the gfsc fetch fails', async () => {
