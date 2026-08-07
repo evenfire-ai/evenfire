@@ -5,7 +5,7 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
-import { K8sConflictError } from '../../services/resourceService.js'
+import { K8sConflictError, K8sNotFoundError } from '../../services/resourceService.js'
 import { ClerumResourceType } from '../../types.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
@@ -18,6 +18,7 @@ import {
 } from './communicationChannelSpecHelpers.js'
 import { validateHostSecretRef } from './hostSecrets.js'
 import { validateHostSpec } from './hostSpecValidation.js'
+import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -310,6 +311,25 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         credentials?: Record<string, string>
       }
 
+      // FIX-A1: validate metadata.name (RFC1123) for ALL plurals BEFORE any spec
+      // validation or side effect (e.g. CC credentials Secret creation). An
+      // invalid name would otherwise reach K8s and its 422 would collapse to 500.
+      const nameIssue = validateResourceName(body.metadata?.name)
+      if (nameIssue) {
+        res.status(422).json(nameIssue)
+        return
+      }
+
+      // F0.3: identifier/display field validation for hosts + contexts (create =
+      // no ratchet; every present field is validated).
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, null)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
+      }
+
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
         if (errors.length > 0) {
@@ -458,6 +478,30 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           resourceVersion?: string
         }
         spec: Record<string, unknown>
+      }
+
+      // F0.3 RATCHET: for hosts + contexts, validate an identifier/display field
+      // ONLY IF its value changed vs the current CR, so a legacy resource whose
+      // spec.host / contextId is out of norm is never blocked for other edits.
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        let currentSpec: Record<string, unknown> | null = null
+        try {
+          const current = (await gateway.getResource(plural, req.params.name, ns)) as {
+            spec?: Record<string, unknown>
+          } | null
+          currentSpec = recordValue(current?.spec)
+        } catch (err) {
+          // Missing resource: fall through with currentSpec=null (validate every
+          // present field). The subsequent updateResource surfaces the real 404.
+          // getResource wraps a namespaced 404 as K8sNotFoundError (httpStatus),
+          // which extractK8sStatusCode does not read, so check both.
+          if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
+        }
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, currentSpec)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
       }
 
       if (plural === 'communicationchannels' && body.spec) {

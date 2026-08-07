@@ -1207,3 +1207,199 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
     expect(res.body.errors[0].field).toBe('spec.secretRef')
   })
 })
+
+describe('routes/resources — metadata.name validation (FIX-A1 / UT-1)', () => {
+  function makeApp(gateway: MockGateway) {
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    return app
+  }
+
+  const PLURALS = ['hosts', 'contexts', 'communication-channels', 'mcp-servers'] as const
+
+  it('accepts an RFC1123 metadata.name for all 4 plurals (201)', async () => {
+    for (const plural of PLURALS) {
+      const gateway = new MockGateway('mcp-host')
+      await request(makeApp(gateway))
+        .post(`/admin/${plural}`)
+        .send({ metadata: { name: 'sales-agent' }, spec: {} })
+        .expect(201)
+    }
+  })
+
+  it('rejects a metadata.name with spaces+capitals with 422 invalid_name for all 4 plurals', async () => {
+    for (const plural of PLURALS) {
+      const gateway = new MockGateway('mcp-host')
+      const res = await request(makeApp(gateway))
+        .post(`/admin/${plural}`)
+        .send({ metadata: { name: 'Sales Agent' }, spec: {} })
+        .expect(422)
+      expect(res.body.error).toBe('invalid_name')
+      expect(res.body.field).toBe('metadata.name')
+      expect(typeof res.body.message).toBe('string')
+    }
+  })
+
+  it('rejects the full invalid-name table with 422 invalid_name (hosts)', async () => {
+    const invalidNames = [
+      '', // empty
+      'a'.repeat(64), // 64+ chars (max label length is 63)
+      '-x', // leading hyphen
+      'x-', // trailing hyphen
+      'UPPER', // uppercase
+      'esp ace', // space
+      'under_score', // underscore
+      'dot.name', // dot
+      '\u{1F680}', // emoji
+    ]
+    for (const name of invalidNames) {
+      const gateway = new MockGateway('mcp-host')
+      const res = await request(makeApp(gateway))
+        .post('/admin/hosts')
+        .send({ metadata: { name }, spec: {} })
+        .expect(422)
+      expect(res.body.error).toBe('invalid_name')
+      expect(res.body.field).toBe('metadata.name')
+    }
+  })
+})
+
+describe('routes/resources — display & identifier spec validation (F0.3 / UT-6)', () => {
+  function makeApp(gateway: MockGateway) {
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    return app
+  }
+
+  it('accepts a free-text display spec.host (spaces + capitals) on create (201)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'product-agent' },
+        spec: { host: 'Product Agents', contextRef: 'c1' },
+      })
+      .expect(201)
+  })
+
+  it('rejects a spec.host longer than 120 chars (422)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const res = await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'product-agent' },
+        spec: { host: 'x'.repeat(200), contextRef: 'c1' },
+      })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.host')
+  })
+
+  it('rejects a spec.displayName with a control character on context create (422)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const res = await request(makeApp(gateway))
+      .post('/admin/contexts')
+      .send({
+        metadata: { name: 'my-context' },
+        spec: {
+          contextId: 'my-context',
+          mcpServers: [],
+          displayName: `bad${String.fromCharCode(7)}name`,
+        },
+      })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.displayName')
+  })
+
+  it('accepts a free-text display spec.displayName (spaces + capitals) on context create (201)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    await request(makeApp(gateway))
+      .post('/admin/contexts')
+      .send({
+        metadata: { name: 'my-context' },
+        spec: { contextId: 'my-context', mcpServers: [], displayName: 'My Context' },
+      })
+      .expect(201)
+  })
+
+  it('rejects a non-RFC1123 spec.contextId on context create (422)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const res = await request(makeApp(gateway))
+      .post('/admin/contexts')
+      .send({
+        metadata: { name: 'my-context' },
+        spec: { contextId: 'My Context', mcpServers: [] },
+      })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.contextId')
+  })
+
+  it('accepts an RFC1123 spec.contextId on context create (201)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    await request(makeApp(gateway))
+      .post('/admin/contexts')
+      .send({
+        metadata: { name: 'my-context' },
+        spec: { contextId: 'my-context', mcpServers: [] },
+      })
+      .expect(201)
+  })
+
+  it('ratchet: PUT of a legacy host with an out-of-norm spec.host, WITHOUT changing it, succeeds (200)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const legacyHost = 'x'.repeat(200)
+    // Seed a legacy CR directly (bypassing router validation) to simulate pre-existing bad data.
+    await gateway.createResource(
+      'hosts',
+      { metadata: { name: 'legacy-host' }, spec: { host: legacyHost, contextRef: 'c1' } },
+      config.hostsNamespace
+    )
+    // Edit an unrelated field; spec.host is echoed unchanged.
+    await request(makeApp(gateway))
+      .put('/admin/hosts/legacy-host')
+      .send({ spec: { host: legacyHost, contextRef: 'c2' } })
+      .expect(200)
+  })
+
+  it('ratchet: PUT that changes spec.host to an invalid value is rejected (422)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    await gateway.createResource(
+      'hosts',
+      { metadata: { name: 'legacy-host' }, spec: { host: 'Fine Name', contextRef: 'c1' } },
+      config.hostsNamespace
+    )
+    const res = await request(makeApp(gateway))
+      .put('/admin/hosts/legacy-host')
+      .send({ spec: { host: 'y'.repeat(200), contextRef: 'c1' } })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.host')
+  })
+
+  it('ratchet: PUT of a legacy context with an out-of-norm spec.contextId, WITHOUT changing it, succeeds (200)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    await gateway.createResource(
+      'contexts',
+      { metadata: { name: 'legacy-ctx' }, spec: { contextId: 'Legacy Ctx', mcpServers: [] } },
+      config.contextsNamespace
+    )
+    await request(makeApp(gateway))
+      .put('/admin/contexts/legacy-ctx')
+      .send({ spec: { contextId: 'Legacy Ctx', mcpServers: ['a'] } })
+      .expect(200)
+  })
+
+  it('ratchet: PUT that changes spec.contextId to an invalid value is rejected (422)', async () => {
+    const gateway = new MockGateway('mcp-server')
+    await gateway.createResource(
+      'contexts',
+      { metadata: { name: 'legacy-ctx' }, spec: { contextId: 'legacy-ctx', mcpServers: [] } },
+      config.contextsNamespace
+    )
+    const res = await request(makeApp(gateway))
+      .put('/admin/contexts/legacy-ctx')
+      .send({ spec: { contextId: 'New Bad Id', mcpServers: [] } })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.contextId')
+  })
+})
