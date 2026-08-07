@@ -131,8 +131,13 @@ spec:
             # gfsc write cap is 24MiB (GFS_MAX_WRITE_BODY_BYTES), i.e. a 16MB raw file
             # → ~22.4MB body → ~125MiB transient over the ~86MiB idle baseline. At 256Mi
             # 2 concurrent uploads OOMKilled (exit 137) the pod; 768Mi holds ~5 concurrent
-            # worst-case uploads with margin. The minikube overlay must not reduce this
-            # (see deploy/overlays/minikube/patches/resource-limits.yaml).
+            # worst-case uploads with margin. EVERY overlay must keep >=768Mi or the OOM
+            # returns exactly where the 7.5MB PDF failure was reported:
+            #   - deploy/overlays/minikube/patches/resource-limits.yaml (in this repo)
+            #   - keyper-labs/evenfire-infra gcp-dev/gcp-prod patches/resource-limits.yaml
+            #     (private infra repo — both currently pin 512Mi; a companion PR must
+            #     raise them to 768Mi before/with the next GKE deploy, or RC3 is inert
+            #     in dev/prod exactly as it was in minikube before the audit caught it).
             memory: 768Mi
           requests:
             cpu: 50m
