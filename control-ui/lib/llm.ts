@@ -189,6 +189,17 @@ export function getLlmCredentialGroup(provider: LlmProvider): LlmCredentialGroup
   )
 }
 
+// Derive the providers a Secret can serve from its data-key NAMES alone. Secret
+// values never reach the control UI: a provider is available only when every
+// required key in its registry group is present (e.g. both Bedrock keys).
+export function getProvidersWithCompleteCredentials(secretKeys: string[]): LlmProvider[] {
+  const keys = new Set(secretKeys)
+  return LLM_CREDENTIAL_GROUPS.filter(group => {
+    const requiredSlots = group.slots.filter(slot => slot.required)
+    return requiredSlots.length > 0 && requiredSlots.every(slot => keys.has(slot.dataKey))
+  }).map(group => group.provider)
+}
+
 // The canonical (registry) credential dataKeys a provider loads by default —
 // e.g. `['openai-api-key']`, or the Bedrock access-key pair. Used to project the
 // per-provider credential blocks of the domain and to detect when a fallback

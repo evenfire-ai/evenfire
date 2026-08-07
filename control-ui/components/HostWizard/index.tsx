@@ -30,6 +30,7 @@ import {
   getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
+  getProvidersWithCompleteCredentials,
   isProviderUsable,
   projectCredentialDraft,
   resolveDefaultModel,
@@ -369,12 +370,29 @@ export function HostWizard({
     [mcpServers]
   )
 
-  const secretNames = useMemo(
+  const secretOptions = useMemo(
     () =>
       existingSecrets
-        .map(s => s.name || s.metadata?.name)
-        .filter((v): v is string => Boolean(v))
-        .sort(),
+        .map(secret => {
+          const name = secret.name || secret.metadata?.name
+          if (!name) return null
+          const providers = Array.isArray(secret.keys)
+            ? getProvidersWithCompleteCredentials(secret.keys)
+            : null
+          const providerSummary =
+            providers === null
+              ? 'Provider keys unavailable'
+              : providers.length > 0
+                ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
+                : 'No recognized provider credentials'
+          return {
+            value: name,
+            label: name,
+            meta: `${secret.metadata?.namespace || HOST_NAMESPACE} · ${providerSummary}`,
+          }
+        })
+        .filter((option): option is WizardSelectOption => option !== null)
+        .sort((left, right) => left.value.localeCompare(right.value)),
     [existingSecrets]
   )
   const selectedContextOption = useMemo(
@@ -429,10 +447,6 @@ export function HostWizard({
     }
     return Array.from(keys)
   }, [llmKeyDraft, llmPolicy])
-  const secretOptions = useMemo(
-    () => secretNames.map(name => ({ value: name, label: name, meta: HOST_NAMESPACE })),
-    [secretNames]
-  )
   const memberAccessOptions = useMemo(
     () =>
       users.map(user => ({
@@ -1447,9 +1461,22 @@ export function HostWizard({
             <div className="cu-agent-access-section">
               <strong>Credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or reuse a shared Kubernetes Secret.
+                Store this agent&apos;s own LLM credentials, or use a shared Kubernetes Secret.
               </span>
               <div className="cu-agent-radio-group">
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    checked={secretMode === 'existing'}
+                    onChange={() => setSecretMode('existing')}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Use an existing Secret</span>
+                    <span className="cu-agent-radio__description">
+                      Select a saved Kubernetes Secret that already contains LLM API keys.
+                    </span>
+                  </span>
+                </label>
                 <label className="cu-agent-radio cu-agent-radio--card">
                   <input
                     type="radio"
@@ -1460,19 +1487,6 @@ export function HostWizard({
                     <span className="cu-agent-radio__title">New credential</span>
                     <span className="cu-agent-radio__description">
                       Create a new Secret for this agent. Its name is derived from the agent name.
-                    </span>
-                  </span>
-                </label>
-                <label className="cu-agent-radio cu-agent-radio--card">
-                  <input
-                    type="radio"
-                    checked={secretMode === 'existing'}
-                    onChange={() => setSecretMode('existing')}
-                  />
-                  <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Reuse an existing Secret</span>
-                    <span className="cu-agent-radio__description">
-                      Select a saved Kubernetes Secret that already contains LLM API keys.
                     </span>
                   </span>
                 </label>
@@ -1539,6 +1553,7 @@ export function HostWizard({
                   : undefined
               }
               secretKeys={secretMode === 'new' ? llmSecretKeys : []}
+              fallbackProvidersInitiallyCollapsed
               disabled={busy}
             />
           </div>

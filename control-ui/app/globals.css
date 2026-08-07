@@ -7154,6 +7154,37 @@ textarea.cu-input {
   gap: 0.5rem;
 }
 
+.cu-llm-config__block-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cu-llm-config__block-toggle:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.cu-llm-config__block-toggle-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.cu-llm-config__block-toggle svg {
+  color: var(--cu-text-muted);
+  transition: transform 150ms ease;
+}
+
+.cu-llm-config__block-toggle svg.is-expanded {
+  transform: rotate(90deg);
+}
+
 .cu-llm-config__block-title {
   font-weight: 600;
   font-size: 0.95rem;

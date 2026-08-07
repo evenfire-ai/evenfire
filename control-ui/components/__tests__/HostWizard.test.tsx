@@ -61,7 +61,7 @@ if (!Element.prototype.scrollIntoView) {
 
 async function renderWizard(props?: {
   mcpServers?: Array<{ metadata?: { name?: string; namespace?: string } }>
-  existingSecrets?: Array<{ name?: string }>
+  existingSecrets?: Array<{ name?: string; keys?: string[] }>
 }) {
   const onCreated = vi.fn().mockResolvedValue(undefined)
   const onClose = vi.fn()
@@ -113,7 +113,7 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
   // Step 2: Model & Credentials — default model is valid; reuse the secret we provided.
-  fireEvent.click(screen.getByLabelText(/Reuse an existing Secret/i))
+  fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
   fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -136,6 +136,53 @@ afterEach(() => {
 })
 
 describe('HostWizard — credential draft is projected onto the active provider domain', () => {
+  it('shows every provider with complete credentials for an existing Secret', async () => {
+    await renderWizard({
+      existingSecrets: [
+        {
+          name: 'shared-llm-keys',
+          keys: ['openai-api-key', 'aws-access-key-id', 'aws-secret-access-key'],
+        },
+      ],
+    })
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
+    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+
+    expect(screen.getByText('Providers: OpenAI, Amazon Bedrock')).toBeInTheDocument()
+  })
+
+  it('leads with an existing Secret and keeps fallback providers collapsed in create', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    const existingCard = screen.getByLabelText(/Use an existing Secret/i).closest('label')
+    const newCard = screen.getByLabelText(/New credential/i).closest('label')
+    expect(existingCard).not.toBeNull()
+    expect(newCard).not.toBeNull()
+    expect(existingCard?.compareDocumentPosition(newCard as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+
+    const fallbackToggle = screen.getByRole('button', { name: /Fallback providers/i })
+    expect(fallbackToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: 'Add fallback provider' })).not.toBeInTheDocument()
+    fireEvent.click(fallbackToggle)
+    expect(screen.getByRole('button', { name: 'Add fallback provider' })).toBeInTheDocument()
+  })
+
   it('a Bedrock fallback key does NOT block save nor get written once the fallback is removed', async () => {
     await renderWizard()
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
@@ -156,6 +203,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
 
     // Add a fallback and switch it to Bedrock (a different provider than the
     // primary), then type ONLY one of its two required keys.
+    fireEvent.click(screen.getByRole('button', { name: /Fallback providers/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Add fallback provider' }))
     fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
       target: { value: 'bedrock' },

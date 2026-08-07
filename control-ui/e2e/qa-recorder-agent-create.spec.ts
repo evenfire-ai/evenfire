@@ -106,7 +106,7 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await clickWizardNext(page)
 
       await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()
-      await page.getByLabel(/Reuse an existing Secret/i).check()
+      await page.getByLabel(/Use an existing Secret/i).check()
       await page.getByRole('button', { name: /select secret/i }).click()
       const secretOption = page.locator('.cu-agent-select__option').filter({ hasText: secretName })
       await expect(secretOption.first()).toBeVisible()

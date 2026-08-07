@@ -8,6 +8,8 @@ export type McpServer = {
 export type SecretMeta = {
   metadata?: { name?: string; namespace?: string }
   name?: string
+  // Data-key names only; Secret values are never included in this response.
+  keys?: string[]
   type?: string
 }
 

@@ -312,7 +312,7 @@ async function canReachAgentChannelsStep(page: Page): Promise<boolean> {
 
   // Model & Credentials: reuse an existing host Secret and rely on the
   // allowlist to auto-select a model. Abort if none is available.
-  const reuseSecret = page.getByText('Reuse an existing Secret', { exact: true })
+  const reuseSecret = page.getByText('Use an existing Secret', { exact: true })
   if (!(await reuseSecret.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
   await reuseSecret.click()
   const secretPicker = page.locator('.cu-agent-select__button').first()
