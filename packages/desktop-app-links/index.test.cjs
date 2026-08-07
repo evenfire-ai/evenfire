@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const fc = require('fast-check')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
@@ -111,6 +112,65 @@ test('route normalization rejects unstable segment-edge whitespace', () => {
     ),
     true
   )
+})
+
+test('accepted generated routes preserve their canonical deep-link target', () => {
+  const segmentArbitrary = fc
+    .array(
+      fc.constantFrom('a', 'Z', '0', '-', '_', '.', 'é', '中', '+', '%', ' ', '%20', '%2520'),
+      { minLength: 1, maxLength: 8 }
+    )
+    .map(tokens => tokens.join(''))
+  const routeArbitrary = fc
+    .array(segmentArbitrary, { minLength: 1, maxLength: 6 })
+    .map(segments => `/${segments.join('/')}`)
+
+  fc.assert(
+    fc.property(routeArbitrary, input => {
+      const canonical = links.normalizeSandboxUiRoute(input)
+      if (canonical === null || canonical === undefined) return
+
+      assert.equal(links.normalizeSandboxUiRoute(canonical), canonical)
+
+      const target = { appRef: 'sandbox-recipes/property-app', path: canonical }
+      const parsed = links.parseSandboxUiDeepLink(
+        links.buildSandboxUiDeepLink({
+          recipeNs: 'sandbox-recipes',
+          recipeName: 'property-app',
+          path: canonical,
+        })
+      )
+      assert.deepEqual(parsed, target)
+      assert.equal(links.sandboxUiDeepLinkTargetsEqual(target, parsed), true)
+    }),
+    { numRuns: 1_000 }
+  )
+})
+
+test('route contract covers canonical tokens and rejects unsafe encoded forms', () => {
+  for (const [input, expected] of [
+    ['/space%20here', '/space here'],
+    ['/already%2520encoded', '/already encoded'],
+    ['/literal%percent', '/literal%percent'],
+    ['/literal%25percent', '/literal%percent'],
+    ['/plus+sign', '/plus+sign'],
+    ['/café', '/café'],
+  ]) {
+    assert.equal(links.normalizeSandboxUiRoute(input), expected)
+  }
+
+  for (const input of [
+    '/%20leading',
+    '/trailing%20',
+    '/%2520recursive-leading',
+    '/recursive-trailing%2520',
+    '/safe/..',
+    '/safe/%252e%252e',
+    '/safe%252Fadmin',
+    '/control%2500',
+  ]) {
+    assert.equal(links.normalizeSandboxUiRoute(input), null)
+  }
 })
 
 test('shared app links carry only client-side pathnames', () => {
