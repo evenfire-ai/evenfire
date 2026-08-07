@@ -158,18 +158,23 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (!userId || !email || !teamId || !TEAM_ROLES.includes(role)) {
         return res.status(400).json({ error: 'invalid payload' })
       }
-      const membership = await pool.query(
-        `SELECT 1
-           FROM users u
-           JOIN team_members tm ON tm.user_id = u.id
-          WHERE u.id = $1
-            AND LOWER(u.email) = LOWER($2)
-            AND tm.team_id = $3
-            AND tm.role = $4
-            AND tm.status = 'active'
-          LIMIT 1`,
-        [userId, email, teamId, role]
-      )
+      let membership
+      try {
+        membership = await pool.query(
+          `SELECT 1
+             FROM users u
+             JOIN team_members tm ON tm.user_id = u.id
+            WHERE u.id = $1
+              AND LOWER(u.email) = LOWER($2)
+              AND tm.team_id = $3
+              AND tm.role = $4
+              AND tm.status = 'active'
+            LIMIT 1`,
+          [userId, email, teamId, role]
+        )
+      } catch {
+        return res.status(503).json({ error: 'team_authorization_unavailable' })
+      }
       if ((membership.rowCount ?? 0) === 0) {
         return res.status(403).json({ error: 'membership_not_found' })
       }

@@ -15,7 +15,7 @@ import {
   listActiveContextIds,
 } from '../../services/directory/accessReconciliation.js'
 import {
-  findMembership,
+  authorizeLiveTeamMembership,
   getMe,
   getTeamAgents,
   getTeamContexts,
@@ -160,14 +160,15 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/users/:userId/memberships/:teamId',
     requireExternalUserParamMatch(),
-    async (req, res, next) => {
-      try {
-        const membership = await findMembership(req.params.userId, req.params.teamId)
-        if (!membership) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(membership)
-      } catch (error) {
-        return next(error)
+    async (req, res) => {
+      const authorization = await authorizeLiveTeamMembership(req.params.userId, req.params.teamId)
+      if (authorization.status === 'unavailable') {
+        return res.status(503).json({ error: authorization.code })
       }
+      if (authorization.status === 'denied') {
+        return res.status(403).json({ error: authorization.code })
+      }
+      return res.status(200).json(authorization.membership)
     }
   )
 

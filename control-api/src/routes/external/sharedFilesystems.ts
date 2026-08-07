@@ -82,7 +82,12 @@ async function loadContextAccess(
   if (!activeContextIds.includes(contextId)) {
     return { status: 'denied', code: 'Forbidden' }
   }
-  const userCtx = await getUserContexts(userId)
+  let userCtx: Awaited<ReturnType<typeof getUserContexts>>
+  try {
+    userCtx = await getUserContexts(userId)
+  } catch (err) {
+    throw new ContextAccessReconciliationError(err)
+  }
   const userContextIds = partitionAccessValues(userCtx.contextIds, activeContextIds).active
   if (userContextIds.includes(contextId)) {
     return { status: 'authorized' }
@@ -94,7 +99,12 @@ async function loadContextAccess(
   const teamAuthorization = await authorizeLiveTeamMembership(userId, normalizedTeamId)
   if (teamAuthorization.status !== 'active') return teamAuthorization
 
-  const teamCtx = await getTeamContexts(normalizedTeamId)
+  let teamCtx: Awaited<ReturnType<typeof getTeamContexts>>
+  try {
+    teamCtx = await getTeamContexts(normalizedTeamId)
+  } catch (err) {
+    throw new ContextAccessReconciliationError(err)
+  }
   const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
   return teamContextIds.includes(contextId)
     ? { status: 'authorized' }

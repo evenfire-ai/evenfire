@@ -217,6 +217,22 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
     expect(getResource).not.toHaveBeenCalled()
   })
 
+  it('fails closed when team context access reconciliation is unavailable', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetTeamContexts.mockRejectedValue(new Error('directory unavailable'))
+    const getResource = vi.fn()
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'dummy')
+      .expect(503)
+      .expect({ error: 'context_reconciliation_unavailable' })
+
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
   it('returns 403 when caller has no access to the context', async () => {
     validAuth()
     mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: ['ctx-other'] })

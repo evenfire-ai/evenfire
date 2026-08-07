@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { pool } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalRouter } from '../src/routes/external/index.js'
 import { createRpcAccessRouter } from '../src/routes/rpc-access/index.js'
@@ -373,6 +374,22 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
+  it('returns unavailable when replacement session membership validation fails', async () => {
+    const query = vi.spyOn(pool, 'query').mockRejectedValue(new Error('database unavailable'))
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    try {
+      await withInternalServiceAuth(request(app).post('/external/auth/session-token'))
+        .send({ userId: 'u1', email: 'u@example.com', teamId: 't1', role: 'member' })
+        .expect(503)
+        .expect({ error: 'team_authorization_unavailable' })
+    } finally {
+      query.mockRestore()
+    }
+  })
+
   it('denies a removed team while direct Agent and Context endpoints remain available', async () => {
     svc.authorizeLiveTeamMembership.mockResolvedValue({
       status: 'denied',
@@ -418,6 +435,10 @@ describe('routes/profile', () => {
       role: 'member',
       team_name: 'best team',
     })
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'active',
+      membership: { team_id: 't2', role: 'member', team_name: 'best team' },
+    })
 
     const app = express()
     app.use(express.json())
@@ -426,6 +447,40 @@ describe('routes/profile', () => {
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/users/u1/memberships/t2')
     ).expect(200)
+  })
+
+  it('returns a stable denial when a requested replacement team is no longer active', async () => {
+    svc.findMembership.mockResolvedValue(null)
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'denied',
+      code: 'team_membership_inactive',
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/memberships/t2')
+    )
+      .expect(403)
+      .expect({ error: 'team_membership_inactive' })
+  })
+
+  it('returns unavailable when replacement-team membership lookup fails', async () => {
+    svc.findMembership.mockRejectedValue(new Error('database unavailable'))
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'unavailable',
+      code: 'team_authorization_unavailable',
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/memberships/t2')
+    )
+      .expect(503)
+      .expect({ error: 'team_authorization_unavailable' })
   })
 
   it('returns initial team directory for all user memberships without switching team claims', async () => {
