@@ -52,6 +52,62 @@ function deferred<T>() {
 }
 
 describe('pendingChatSelection effect', () => {
+  it('opens the newest server session after first paint when the local index is empty', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'server-latest',
+          turnCount: 2,
+          messageCount: 4,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
+
+    const { result } = renderController({ navItem: 'chat' })
+
+    await waitFor(() => expect(result.current.activeChatId).toBe('server-latest'))
+  })
+
+  it('does not fabricate message totals for summaries from older servers', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'legacy-summary',
+          turnCount: 7,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
+
+    const { result } = renderController({ navItem: 'chat' })
+
+    await waitFor(() =>
+      expect(result.current.chatList).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'legacy-summary',
+            messageCount: 0,
+          }),
+        ])
+      )
+    )
+  })
+
   it('latest → switches to the most recent chat', async () => {
     clerum.chat.getIndex.mockResolvedValue({
       version: 1,
@@ -71,7 +127,13 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-latest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-latest')
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'c-latest',
+      undefined,
+      { limit: 40 }
+    )
   })
 
   it('latest → overrides an older visible chat when explicitly requested', async () => {
@@ -99,7 +161,13 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-newest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-newest')
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'c-newest',
+      undefined,
+      { limit: 40 }
+    )
   })
 
   it('latest → does not override a chat auto-created while the list load is in flight', async () => {
@@ -155,6 +223,17 @@ describe('pendingChatSelection effect', () => {
   })
 
   it('none → selects nothing and clears the spinner', async () => {
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'must-not-auto-select',
+          turnCount: 1,
+          messageCount: 2,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
     const { result, rerender } = renderController({ navItem: 'agents' })
     await settleMount()
 
@@ -166,6 +245,7 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.chatMessagesLoading).toBe(false))
+    await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
     expect(result.current.activeChatId).toBeNull()
   })
 
@@ -190,7 +270,9 @@ describe('pendingChatSelection effect', () => {
       expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
         'agent-x',
         'agent-x',
-        'c-specific'
+        'c-specific',
+        undefined,
+        { limit: 40 }
       )
     )
     await waitFor(() => expect(result.current.activeChatId).toBe('c-specific'))

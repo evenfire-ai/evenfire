@@ -110,3 +110,62 @@ describe('R2 — reconstruct.parseModelSelections tolerance', () => {
     expect(conversation.modelSelections).toEqual({ openai: 'gpt' })
   })
 })
+
+describe('reconstructConversation — activity timestamp', () => {
+  it('preserves the materialized activity when retained messages are older', () => {
+    const persistedSession: PersistedSession = {
+      session: {
+        id: 'activity-session',
+        session_key: SESSION_KEY,
+        source: 'rpc',
+        user_id: 'u-1',
+        team_id: null,
+        channel_type: 'rpc',
+        channel_id: 'agent-x',
+        thread_id: 'chat-1',
+        model: null,
+        model_selections: null,
+        system_prompt_stable_hash: null,
+        parent_session_id: null,
+        started_at: 100,
+        last_activity_at: 200,
+        ended_at: null,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cache_tokens_reported: 0,
+        title: null,
+        state: 'idle',
+        active_task_id: null,
+        active_trace_context: null,
+      },
+      messages: [
+        {
+          session_id: 'activity-session',
+          ordinal: 0,
+          role: 'user',
+          content: 'retained',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 150,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: 1,
+        },
+      ],
+      pending_approval: null,
+    }
+
+    expect(reconstructConversation(persistedSession).conversation.updated_at).toEqual(
+      new Date(200_000)
+    )
+  })
+})

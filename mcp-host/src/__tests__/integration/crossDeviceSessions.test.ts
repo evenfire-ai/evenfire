@@ -24,33 +24,10 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import request from 'supertest'
 import { ConversationManager } from '../../core/conversation/conversation'
-import type { Conversation } from '../../core/types'
-import { ConversationState } from '../../core/types'
-import { getDisplayName } from '../../progress/intentExtraction'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
 import { handleSessionMessagesRoute, handleSessionsListRoute } from '../../server/routes'
-
-// D.1 — mirrors main.ts `sessionStateView`: expose state/activeTaskId/pendingApproval.
-function stateView(conversation: Conversation) {
-  const state =
-    conversation.state === ConversationState.Processing
-      ? ('processing' as const)
-      : conversation.state === ConversationState.AwaitingApproval
-        ? ('awaiting_approval' as const)
-        : ('idle' as const)
-  const pendingApproval =
-    conversation.state === ConversationState.AwaitingApproval && conversation.pending_approval
-      ? {
-          requestId: conversation.pending_approval.request_id,
-          displayName: getDisplayName(conversation.pending_approval.tool_name),
-        }
-      : undefined
-  return {
-    state,
-    activeTaskId: state === 'idle' ? undefined : conversation.activeTaskId,
-    pendingApproval,
-  }
-}
+import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
+import { decodeSessionsCursor, sessionsCursorScope } from '../../server/wireProjections'
 
 function makeApp(convManager: ConversationManager) {
   const app = express()
@@ -74,38 +51,17 @@ function makeApp(convManager: ConversationManager) {
     next()
   })
 
-  // Closures mirror main.ts — same prefix filter, same mapping shape.
+  // Wire the REAL production handlers (createSessionRouteHandlers) over a real
+  // ConversationManager — no reimplemented pagination/mapping. `redactToolError`
+  // is a passthrough here (tool-error redaction has its own coverage and is not
+  // exercised by these transcripts).
+  const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+    getConversationManager: () => convManager,
+    redactToolError: (_toolName, rawError) => rawError,
+  })
   const handlers = makeHandlers({
-    sessionsListHandler: (userSub: string) => {
-      const entries = convManager.listSessionsForUser(`${userSub}:rpc:`)
-      return {
-        items: entries.map(({ conversation, agent, chatId }) => ({
-          agent,
-          chatId,
-          turnCount: conversation.turns.length,
-          lastActivityAt: conversation.updated_at.toISOString(),
-          ...stateView(conversation),
-        })),
-      }
-    },
-    sessionMessagesHandler: (userSub: string, agentName: string, chatId: string) => {
-      // Direct O(1) key lookup — mirrors the main.ts fix.
-      const key = `${userSub}:rpc:${agentName}:${chatId}`
-      const conversation = convManager.getSessionByKey(key)
-      if (!conversation) return null
-      return {
-        agent: agentName,
-        chatId,
-        ...stateView(conversation),
-        turns: conversation.turns.map(t => ({
-          number: t.number,
-          user_input: t.user_input,
-          response: t.response,
-          started_at: t.started_at.toISOString(),
-          completed_at: t.completed_at ? t.completed_at.toISOString() : undefined,
-        })),
-      }
-    },
+    sessionsListHandler: handleSessionsList,
+    sessionMessagesHandler: handleSessionMessages,
   })
 
   app.get('/v1/runtime/sessions', async (req, res) => {
@@ -162,6 +118,9 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
       agent: 'agent-x',
       chatId: 'chat-1',
       turnCount: 1,
+      // 1 completed turn = 1 user + 1 assistant response = 2 visible messages.
+      // The real handler emits messageCount; the previous fake omitted it.
+      messageCount: 2,
     })
     expect(typeof listRes.body.items[0].lastActivityAt).toBe('string')
 
@@ -357,5 +316,39 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
       .set('x-test-sub', 'user-A')
       .expect(200)
     expect(yRes.body.turns[0].user_input).toBe('y1')
+  })
+
+  it('paginates with a real decodable nextCursor that advances to the next page exactly once', async () => {
+    await seedConversation(convManager, 'user-A', 'agent-x', 'chat-1', 'q1', 'a1')
+    await seedConversation(convManager, 'user-A', 'agent-x', 'chat-2', 'q2', 'a2')
+
+    const firstPage = await request(app)
+      .get('/v1/runtime/sessions?limit=1')
+      .set('x-test-sub', 'user-A')
+      .expect(200)
+    expect(firstPage.body.items).toHaveLength(1)
+    expect(typeof firstPage.body.nextCursor).toBe('string')
+
+    // The token is a REAL, scope-bound cursor — decodable only with the same
+    // (user, no-agent) scope the handler encoded it under, and its stripped key
+    // is `${agent}:${chatId}` of the last item on the page.
+    const decoded = decodeSessionsCursor(
+      firstPage.body.nextCursor,
+      sessionsCursorScope('user-A', undefined)
+    )
+    expect(decoded).not.toBeNull()
+    expect(decoded!.key).toBe(`${firstPage.body.items[0].agent}:${firstPage.body.items[0].chatId}`)
+
+    const secondPage = await request(app)
+      .get(`/v1/runtime/sessions?limit=1&cursor=${encodeURIComponent(firstPage.body.nextCursor)}`)
+      .set('x-test-sub', 'user-A')
+      .expect(200)
+    expect(secondPage.body.items).toHaveLength(1)
+    // Catalog exhausted → no further cursor.
+    expect(secondPage.body.nextCursor).toBeUndefined()
+
+    // Exactly-once coverage across the two pages.
+    const seen = [firstPage.body.items[0].chatId, secondPage.body.items[0].chatId]
+    expect(new Set(seen)).toEqual(new Set(['chat-1', 'chat-2']))
   })
 })

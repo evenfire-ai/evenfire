@@ -21,10 +21,17 @@ export interface PreparedStatements {
   deleteUnrehydratablePendingApprovals: Statement
   deletePendingApprovalsBySession: Statement
   updateSessionCounters: Statement
+  updateSessionSummaryAfterInsert: Statement
+  recomputeSessionMessageSummary: Statement
   updateSessionPromptStableHash: Statement
   updateSessionModelSelections: Statement
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
+  selectSessionSummariesByPrefix: Statement
+  selectSessionTurnBounds: Statement
+  selectMessagesBySessionNewestTurns: Statement
+  selectMessagesBySessionTurnsBefore: Statement
+  selectMessagesBySessionTurnsAfter: Statement
 
   insertMessage: Statement
   selectMessagesBySession: Statement
@@ -55,7 +62,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         id, session_key, source, user_id, team_id,
         channel_type, channel_id, thread_id,
         model, model_selections, system_prompt_stable_hash, parent_session_id,
-        started_at, ended_at, end_reason,
+        started_at, last_activity_at, turn_count, ended_at, end_reason,
         message_count, tool_call_count,
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
         cache_tokens_reported,
@@ -64,7 +71,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         @id, @session_key, @source, @user_id, @team_id,
         @channel_type, @channel_id, @thread_id,
         @model, @model_selections, @system_prompt_stable_hash, @parent_session_id,
-        @started_at, @ended_at, @end_reason,
+        @started_at, @last_activity_at, @turn_count, @ended_at, @end_reason,
         @message_count, @tool_call_count,
         @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
         @cache_tokens_reported,
@@ -106,8 +113,8 @@ export function prepareStatements(db: Database): PreparedStatements {
        LIMIT @limit
     `),
     selectSessionMaxOrdinalTurn: db.prepare(`
-      SELECT COALESCE(MAX(ordinal), -1)    AS max_ordinal,
-             COALESCE(MAX(turn_number), 0) AS max_turn
+      SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal,
+             MAX(turn_number)           AS max_turn
         FROM messages
        WHERE session_id = @session_id
     `),
@@ -178,11 +185,180 @@ export function prepareStatements(db: Database): PreparedStatements {
              cache_tokens_reported = cache_tokens_reported | @cache_reported
        WHERE id = @id
     `),
+    updateSessionSummaryAfterInsert: db.prepare(`
+      UPDATE sessions
+         SET last_activity_at = CASE
+               WHEN last_activity_at IS NULL OR last_activity_at < @timestamp
+                 THEN @timestamp
+               ELSE last_activity_at
+             END,
+             turn_count = turn_count + CASE
+               WHEN @turn_number IS NOT NULL
+                AND (
+                 SELECT COUNT(*)
+                   FROM messages
+                  WHERE session_id = @id
+                    AND turn_number = @turn_number
+               ) = 1
+                 THEN 1
+               ELSE 0
+             END,
+             message_count = message_count + @visible_message_delta
+       WHERE id = @id
+    `),
+    recomputeSessionMessageSummary: db.prepare(`
+      UPDATE sessions
+         SET last_activity_at = MAX(
+               COALESCE(last_activity_at, started_at),
+               started_at,
+               COALESCE(
+                 (SELECT MAX(timestamp) FROM messages WHERE session_id = @id),
+                 started_at
+               )
+             ),
+             turn_count = (
+               SELECT COUNT(DISTINCT turn_number)
+                 FROM messages
+                WHERE session_id = @id
+                  AND turn_number IS NOT NULL
+             ),
+             message_count = (
+               SELECT COUNT(*)
+                 FROM messages
+                WHERE session_id = @id
+                  AND (
+                    role = 'user'
+                    OR (role = 'assistant' AND tool_calls IS NULL)
+                  )
+             )
+       WHERE id = @id
+    `),
     selectSessionBySessionKey: db.prepare(`
       SELECT * FROM sessions WHERE session_key = ?
     `),
     selectSessionsByPrefix: db.prepare(`
       SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
+    `),
+    selectSessionSummariesByPrefix: db.prepare(`
+      WITH scoped_sessions AS (
+        SELECT *
+         FROM sessions
+         WHERE user_id = @user_id
+           AND session_key >= @prefix_start
+           AND session_key < @prefix_end
+           AND (
+             (@agent_scoped = 1 AND length(session_key) > length(@prefix_start))
+             OR
+             (
+               @agent_scoped = 0
+               AND instr(substr(session_key, length(@prefix_start) + 1), ':') > 1
+               AND instr(substr(session_key, length(@prefix_start) + 1), ':')
+                 < length(substr(session_key, length(@prefix_start) + 1))
+             )
+           )
+           AND (
+             @cursor_updated_at IS NULL
+             OR COALESCE(last_activity_at, started_at) < @cursor_updated_at
+             OR (
+               COALESCE(last_activity_at, started_at) = @cursor_updated_at
+               AND session_key > @cursor_key
+             )
+           )
+         ORDER BY COALESCE(last_activity_at, started_at) DESC, session_key ASC
+         LIMIT @limit
+      ),
+      ranked_approvals AS (
+        SELECT pa.session_id,
+               pa.request_id,
+               pa.tool_name,
+               ROW_NUMBER() OVER (
+                 PARTITION BY pa.session_id
+                 ORDER BY pa.registered_at ASC, pa.request_id ASC
+               ) AS approval_rank
+          FROM pending_approvals pa
+          JOIN scoped_sessions s ON s.id = pa.session_id
+      )
+      SELECT s.*,
+             COALESCE(s.last_activity_at, s.started_at) AS summary_last_activity_at,
+             COALESCE(s.turn_count, 0) AS summary_turn_count,
+             pa.request_id AS pending_request_id,
+             pa.tool_name AS pending_tool_name
+        FROM scoped_sessions s
+        LEFT JOIN ranked_approvals pa
+          ON pa.session_id = s.id
+         AND pa.approval_rank = 1
+       ORDER BY summary_last_activity_at DESC, s.session_key ASC
+    `),
+    selectSessionTurnBounds: db.prepare(`
+      SELECT (
+               SELECT turn_number
+                 FROM messages
+                WHERE session_id = @session_id
+                  AND turn_number IS NOT NULL
+                ORDER BY turn_number ASC
+                LIMIT 1
+             ) AS first_turn_number,
+             (
+               SELECT turn_number
+                 FROM messages
+                WHERE session_id = @session_id
+                  AND turn_number IS NOT NULL
+                ORDER BY turn_number DESC
+                LIMIT 1
+             ) AS last_turn_number
+    `),
+    selectMessagesBySessionNewestTurns: db.prepare(`
+      WITH selected_turns AS (
+        SELECT turn_number
+          FROM messages
+         WHERE session_id = @session_id
+           AND turn_number IS NOT NULL
+         GROUP BY turn_number
+         ORDER BY turn_number DESC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+       WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
+       ORDER BY m.turn_number ASC, m.ordinal ASC
+    `),
+    selectMessagesBySessionTurnsBefore: db.prepare(`
+      WITH selected_turns AS (
+        SELECT turn_number
+          FROM messages
+         WHERE session_id = @session_id
+           AND turn_number IS NOT NULL
+           AND turn_number < @before_turn
+         GROUP BY turn_number
+         ORDER BY turn_number DESC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+       WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
+       ORDER BY m.turn_number ASC, m.ordinal ASC
+    `),
+    selectMessagesBySessionTurnsAfter: db.prepare(`
+      WITH selected_turns AS (
+        SELECT turn_number
+          FROM messages
+         WHERE session_id = @session_id
+           AND turn_number IS NOT NULL
+           AND turn_number > @after_turn
+         GROUP BY turn_number
+         ORDER BY turn_number ASC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+       WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
+       ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
 
     insertMessage: db.prepare(`
@@ -226,7 +402,12 @@ export function prepareStatements(db: Database): PreparedStatements {
       DELETE FROM pending_approvals WHERE request_id = ?
     `),
     selectPendingApprovalsAll: db.prepare(`
-      SELECT pa.*, s.session_key AS session_key
+      SELECT pa.*,
+             s.session_key AS session_key,
+             s.user_id AS session_user_id,
+             s.channel_type AS session_channel_type,
+             s.channel_id AS session_channel_id,
+             s.thread_id AS session_thread_id
         FROM pending_approvals pa
         JOIN sessions s
           ON s.id = pa.session_id
@@ -235,7 +416,11 @@ export function prepareStatements(db: Database): PreparedStatements {
        ORDER BY pa.registered_at ASC
     `),
     selectPendingApprovalBySession: db.prepare(`
-      SELECT * FROM pending_approvals WHERE session_id = ? LIMIT 1
+      SELECT *
+        FROM pending_approvals
+       WHERE session_id = ?
+       ORDER BY registered_at ASC, request_id ASC
+       LIMIT 1
     `),
 
     sweepExpiredApprovals: db.prepare(`

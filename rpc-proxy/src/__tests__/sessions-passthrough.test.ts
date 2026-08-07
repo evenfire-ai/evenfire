@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createApp } from '../app.js'
 import { createRpcRouter } from '../routes/rpc.js'
 
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
@@ -77,6 +78,84 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions')
     expect((init as RequestInit).method).toBe('GET')
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('forwards only supported session pagination query parameters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({ items: [], nextCursor: 'next-page' }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions?limit=25&cursor=current&userId=other')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?limit=25&cursor=current')
+  })
+
+  it('bounds and scopes session pagination before forwarding upstream', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions?agent=chatllm&limit=500')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?agent=chatllm&limit=100')
+  })
+
+  it('maps an upstream body timeout to a sanitized gateway timeout', async () => {
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => Promise.reject(timeout),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(createApp())
+      .get('/api/v1/rpc/hosts/chatllm/sessions')
+      .set('authorization', 'Bearer user-token')
+      .expect(504)
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+  })
+
+  it.each([
+    '/rpc/hosts/chatllm/sessions?limit=1.5',
+    '/rpc/hosts/chatllm/sessions?limit=0x10',
+    '/rpc/hosts/chatllm/sessions?limit=1e2',
+    '/rpc/hosts/chatllm/sessions?limit=1&limit=2',
+    '/rpc/hosts/chatllm/sessions?cursor=',
+    '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
+    '/rpc/hosts/chatllm/sessions?agent=one&agent=two',
+    '/rpc/hosts/chatllm/sessions?agent=',
+    '/rpc/hosts/chatllm/sessions?agent=%20%20',
+    '/rpc/hosts/chatllm/sessions?agent=.',
+    '/rpc/hosts/chatllm/sessions?agent=agent:other',
+    '/rpc/hosts/chatllm/sessions?agent=agent%0Aother',
+    '/rpc/hosts/chat%2Fllm/sessions',
+    '/rpc/hosts/chat%0Allm/sessions',
+  ])('rejects malformed session pagination before forwarding upstream: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp()).get(path).set('authorization', 'Bearer user-token').expect(400)
+
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 403 if the user cannot access the host', async () => {
@@ -121,8 +200,127 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
       .expect(200)
 
     expect(res.body).toEqual(upstream)
-    const [url] = fetchMock.mock.calls[0]
+    const [url, init] = fetchMock.mock.calls[0]
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages')
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('forwards only supported message pagination query parameters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () =>
+        JSON.stringify({
+          agent: 'chatllm',
+          chatId: 'c1',
+          totalTurns: 10,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          turns: [],
+        }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=5&beforeTurn=6&userId=other')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=5&beforeTurn=6'
+    )
+  })
+
+  it('clamps transcript limits before forwarding upstream', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ agent: 'chatllm', chatId: 'c1', turns: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=999')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=200'
+    )
+  })
+
+  it('forwards the zero after-turn boundary under the correct parameter name', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ agent: 'chatllm', chatId: 'c1', turns: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=5&afterTurn=0')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=5&afterTurn=0'
+    )
+  })
+
+  it.each([
+    '?limit=1.5',
+    '?limit=0x10',
+    '?limit=1e2',
+    '?limit=1&limit=2',
+    '?beforeTurn=1.5',
+    '?beforeTurn=0x10',
+    '?beforeTurn=1e2',
+    '?beforeTurn=1&beforeTurn=2',
+    '?afterTurn=1.5',
+    '?afterTurn=0x10',
+    '?afterTurn=1e2',
+    '?afterTurn=1&afterTurn=2',
+    '?beforeTurn=2&afterTurn=1',
+  ])('rejects malformed transcript pagination before forwarding upstream: %s', async query => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get(`/rpc/hosts/chatllm/sessions/chatllm/c1/messages${query}`)
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects unsafe transcript route segments before forwarding upstream', async () => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/agent%3Aother/c1/messages')
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/rpc/hosts/chatllm/sessions/agent%0Aother/c1/messages',
+    '/rpc/hosts/chatllm/sessions/agent/chat%0Aother/messages',
+  ])('rejects control-bearing transcript route segments: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp()).get(path).set('authorization', 'Bearer user-token').expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 404 when the upstream returns 404', async () => {
@@ -187,6 +385,7 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions/chatllm/c1/context-breakdown')
     expect((init as RequestInit).method).toBe('GET')
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
   it('returns 404 (anti-enumeration) verbatim when the upstream returns 404', async () => {
@@ -203,6 +402,18 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
       .expect(404)
 
     expect(res.body).toEqual({ error: 'session not found' })
+  })
+
+  it('rejects unsafe route segments before forwarding upstream', async () => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/agent%3Aother/c1/context-breakdown')
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 403 if the user cannot access the host', async () => {
