@@ -41,6 +41,15 @@ type ExternalGfsRequest = ExternalAuthedRequest & {
   gfsSubjectKeys?: string[]
 }
 
+class GfsTeamAuthorizationUnavailableError extends Error {
+  readonly code = 'team_authorization_unavailable'
+
+  constructor() {
+    super('GFS team authorization is unavailable')
+    this.name = 'GfsTeamAuthorizationUnavailableError'
+  }
+}
+
 function ridOf(resourceId: string): string {
   return resourceId.replace(/-/g, '').toLowerCase()
 }
@@ -60,11 +69,15 @@ function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[]
 async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<string>> {
   const claims = req.externalAuth!
   const subjects = new Set<string>([`user:${claims.userId}`])
-  if (claims.teamId) subjects.add(`team:${claims.teamId}`)
-  const result = await pool.query(
-    `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
-    [claims.userId]
-  )
+  let result
+  try {
+    result = await pool.query(
+      `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
+      [claims.userId]
+    )
+  } catch {
+    throw new GfsTeamAuthorizationUnavailableError()
+  }
   for (const row of result.rows as { team_id: unknown }[]) {
     subjects.add(`team:${String(row.team_id)}`)
   }
@@ -73,11 +86,19 @@ async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<s
 
 async function attachExternalGfsCallerSubjects(
   req: import('express').Request,
-  _res: import('express').Response,
+  res: import('express').Response,
   next: NextFunction
 ): Promise<void> {
   const externalReq = req as ExternalGfsRequest
-  externalReq.gfsSubjectKeys = [...(await externalCallerSubjects(externalReq))]
+  try {
+    externalReq.gfsSubjectKeys = [...(await externalCallerSubjects(externalReq))]
+  } catch (error) {
+    if (error instanceof GfsTeamAuthorizationUnavailableError) {
+      res.status(503).json({ error: error.code })
+      return
+    }
+    throw error
+  }
   next()
 }
 
@@ -343,7 +364,16 @@ export function createExternalGfsRouter(): Router {
     '/external/gfs/resources',
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const drive = driveOf(req.query.drive)
-      const subjects = await externalCallerSubjects(req)
+      let subjects: Set<string>
+      try {
+        subjects = await externalCallerSubjects(req)
+      } catch (error) {
+        if (error instanceof GfsTeamAuthorizationUnavailableError) {
+          res.status(503).json({ error: error.code })
+          return
+        }
+        throw error
+      }
       const { types, ids } = subjectColumns(subjects)
       if (types.length === 0) {
         res.status(200).json({ ok: true, data: { items: [], nextCursor: null } })

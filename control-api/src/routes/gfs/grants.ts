@@ -95,7 +95,6 @@ export function resolveCaller(req: Request): GfsCaller {
     const preResolved = (req as RequestWithResolvedGfsSubjects).gfsSubjectKeys
     const subjects = new Set(preResolved && preResolved.length > 0 ? preResolved : [key])
     subjects.add(key)
-    if (external.teamId) subjects.add(`team:${external.teamId}`)
     return { isOperator: false, subjects, actorKey: key }
   }
   throw new GfsGrantError(401, 'unauthenticated')

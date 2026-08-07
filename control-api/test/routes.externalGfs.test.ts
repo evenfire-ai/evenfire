@@ -338,6 +338,29 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
     expect(res.status).toBe(200)
     const insert = mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO gfs_grants'))
     expect(insert?.[1]?.[6]).toBe(`user:${U1}`)
+    const authorityLookup = mockQuery.mock.calls.find(c =>
+      String(c[0]).includes('authority_grants AS')
+    )
+    expect(authorityLookup?.[1]?.[2]).toEqual(['user', 'team'])
+    expect(authorityLookup?.[1]?.[3]).toEqual([U1, T2])
+  })
+
+  it('fails closed when active-team subject expansion is unavailable', async () => {
+    auth()
+    mockQuery.mockRejectedValue(new Error('membership store unavailable'))
+
+    const app = await buildApp()
+    await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: ['read'],
+        inherit: false,
+      })
+      .expect(503)
+      .expect({ error: 'team_authorization_unavailable' })
   })
 
   it('rejects a non-UUID user subject id → 400 subject_invalid', async () => {
@@ -1139,6 +1162,18 @@ describe('user resource mutations via gfsc proxy', () => {
 })
 
 describe('GET /external/gfs/resources', () => {
+  it('fails closed when accessible-resource team expansion is unavailable', async () => {
+    auth()
+    mockQuery.mockRejectedValue(new Error('membership store unavailable'))
+
+    const app = await buildApp()
+    await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'sess')
+      .expect(503)
+      .expect({ error: 'team_authorization_unavailable' })
+  })
+
   it('lists readable direct user resources and active-team resources as Desktop entry points', async () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
