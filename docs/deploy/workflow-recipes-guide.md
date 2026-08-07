@@ -832,10 +832,17 @@ kubectl -n sandbox-recipes get networkpolicies
 ```bash
 make minikube-gen-keys          # Generate RSA-4096 keys (WRC signing + JWT)
 make minikube-apply-secrets     # Apply secrets + configmaps
-make minikube-build-images      # Build + load coordinator + mcp-host images
-make minikube-deploy-all        # Deploy all services via the Kustomize minikube overlay
+make minikube-pull-images       # Pull coordinator + mcp-host images (default mode)
+make minikube-deploy-all        # Deploy all services via the Kustomize overlay for this cluster's mode
 make minikube-deploy-instances  # Apply CRD instances (context, host)
 ```
+
+On a cluster set up with `make minikube-setup-local`, swap
+`minikube-pull-images` for `make minikube-build-images`. The coordinator and
+mcp-host images the reconciler spawns follow the same mode: they run as
+`ghcr.io/evenfire-ai/...` on a default cluster and `clerum/*:test` on a local
+one. See
+[minikube.md § Workflow Env Vars](minikube.md#workflow-env-vars).
 
 ### Workflow-specific troubleshooting
 

@@ -32,6 +32,14 @@ async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 describe('ghost-terminal Resend (D.4 AC11)', () => {
   it('exposes failedAgentSend with the original input when the stream closes without a terminal', async () => {
     clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-ghost' })
@@ -78,5 +86,46 @@ describe('ghost-terminal Resend (D.4 AC11)', () => {
 
     // No assistant reply persisted for the ghost terminal (D.3 behavior preserved).
     expect(clerum.chat.appendMessages.mock.calls.length).toBe(appendCallsBefore)
+  })
+
+  it('keeps loud stream-loss recovery alive when the active chat is reopened', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-same-chat' })
+    clerum.rpc.getTaskResult.mockRejectedValue(new Error('404 not found'))
+    const recovery = deferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    clerum.rpc.loadSessionMessages.mockImplementation(() => recovery.promise)
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('keep the recovery loud')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-same-chat')).toBe(true))
+    const chatId = result.current.activeChatId
+    expect(chatId).toBeTruthy()
+
+    act(() => {
+      clerum.emitTaskProgress('task-same-chat', { type: 'closed' })
+    })
+    await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1))
+
+    let reopen!: Promise<void>
+    act(() => {
+      reopen = result.current.switchToChat('agent-x', chatId!)
+    })
+    recovery.resolve({
+      agent: 'agent-x',
+      chatId: chatId!,
+      state: 'idle',
+      turns: [],
+    })
+    await act(async () => {
+      await reopen
+    })
+
+    await waitFor(() =>
+      expect(result.current.failedAgentSend?.content).toBe('keep the recovery loud')
+    )
+    expect(result.current.agentError).toBeTruthy()
+    expect(clerum.rpc.getTaskResult).toHaveBeenCalledWith('agent-x', 'task-same-chat', ['agent-x'])
   })
 })

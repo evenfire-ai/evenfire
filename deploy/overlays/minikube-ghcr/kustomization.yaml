@@ -1,0 +1,19 @@
+# The default minikube overlay, rendered against published ghcr images instead
+# of locally built clerum/* ones. Selected by
+# scripts/minikube/full-setup.sh when IMAGE_SOURCE=ghcr (the default).
+#
+# This file stays thin ON PURPOSE. Everything about the cluster lives in
+# ../minikube; the only difference is the image coordinate, which the component
+# owns. Adding a patch here would fork the two modes' cluster shape and make a
+# ghcr-mode gate stop proving anything about a local-mode one.
+#
+# ACTIVE_MINIKUBE_KUSTOMIZE_DIR (where the generated k8s-api-ip.yaml lands)
+# stays ../minikube; only ACTIVE_MINIKUBE_RENDER_DIR points here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../minikube
+
+components:
+  - ../../components/ghcr-images

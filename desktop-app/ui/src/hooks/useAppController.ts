@@ -46,6 +46,7 @@ import {
   type WorkflowSelectionState,
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
+import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
 
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
@@ -94,6 +95,21 @@ export async function loadWorkflowRunsWithArtifactsForApprovalRefresh(
   })
 }
 
+interface SessionIdentityRef {
+  current: string | null
+}
+
+export function scheduleAfterFirstPaintForSession(
+  sessionIdentityRef: SessionIdentityRef,
+  expectedIdentity: string,
+  task: () => Promise<unknown>
+): void {
+  scheduleAfterFirstPaint(async () => {
+    if (sessionIdentityRef.current !== expectedIdentity) return
+    await task()
+  })
+}
+
 export function useAppController() {
   const queryClient = useQueryClient()
 
@@ -104,6 +120,7 @@ export function useAppController() {
   // ─── Global status state (owned by coordinator, not auth) ───
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
+  const [postPaintDataReady, setPostPaintDataReady] = useState(false)
 
   // Build fullSetStatus using refs to avoid circular dependencies
   const setStatusTextRef = useRef(setStatusText)
@@ -136,7 +153,8 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
-  const authenticatedWorkspaceIdentityRef = useRef<string | null>(null)
+  const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
+  const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
 
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
@@ -235,9 +253,11 @@ export function useAppController() {
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
+    currentUserId: auth.me?.id,
     currentTeamId,
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     navItem: nav.navItem,
     pushToast,
     pushNotification: notif.pushNotification,
@@ -298,7 +318,7 @@ export function useAppController() {
   // ─── Host pre-warm (authenticated catalog only — see the hook's anti-flapping doc) ───
   useHostPrewarmController({
     agentNames: agentsData.agentNames,
-    isAuthenticated: auth.isAuthenticated,
+    isAuthenticated: auth.isAuthenticated && postPaintDataReady,
   })
 
   // ─── Desktop ───
@@ -311,6 +331,7 @@ export function useAppController() {
   const activity = useActivityController({
     selectedAgent: nav.selectedAgent,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     chatList: chat.chatList,
     progressByAgentMessage: chat.progressByAgentMessage,
     agentNames: agentsData.agentNames,
@@ -326,7 +347,7 @@ export function useAppController() {
   }, [])
 
   const refreshAgentsData = useCallback(async () => {
-    await agentsData.refreshWithCatalog(getCatalogRefreshPromise())
+    return agentsData.refreshWithCatalog(getCatalogRefreshPromise())
   }, [agentsData.refreshWithCatalog, getCatalogRefreshPromise])
 
   const refreshContextsData = useCallback(async () => {
@@ -360,10 +381,36 @@ export function useAppController() {
   }, [queryClient])
 
   const refreshAuthenticatedData = useCallback(
-    async (options: { initialLoad?: boolean } = {}) => {
+    async (options: { initialLoad?: boolean; sessionIdentity?: string } = {}) => {
       const refreshTeams = options.initialLoad
         ? teamsData.refreshInitialDirectory
         : teamsData.refresh
+      if (options.initialLoad) {
+        const scheduledIdentity = options.sessionIdentity
+        if (!scheduledIdentity) return false
+        let agentsLoaded = false
+        try {
+          agentsLoaded = await refreshAgentsData()
+        } catch (error) {
+          console.warn('[startup] failed to load the initial agent catalog', error)
+        } finally {
+          scheduleAfterFirstPaintForSession(
+            activeAuthenticatedSessionIdentityRef,
+            scheduledIdentity,
+            async () => {
+              setPostPaintDataReady(true)
+              await Promise.all([
+                refreshContextsData(),
+                refreshMcpServersData(),
+                refreshTeams(),
+                refreshWorkflowsData(),
+                notif.handleRefreshPendingApprovals({ silent: true }),
+              ])
+            }
+          )
+        }
+        return agentsLoaded
+      }
       return Promise.all([
         refreshAgentsData(),
         refreshContextsData(),
@@ -379,6 +426,7 @@ export function useAppController() {
       refreshContextsData,
       refreshMcpServersData,
       refreshWorkflowsData,
+      setPostPaintDataReady,
       teamsData.refresh,
       teamsData.refreshInitialDirectory,
     ]
@@ -386,26 +434,21 @@ export function useAppController() {
 
   const refreshWorkspaceDataForRoute = useCallback(
     async (route: NavItem) => {
-      let cycleCatalogPromise: Promise<AccessCatalog> | null = null
-      const getCycleCatalogPromise = () => {
-        if (!cycleCatalogPromise) {
-          cycleCatalogPromise = getCatalogRefreshPromise()
-        }
-        return cycleCatalogPromise
-      }
-
+      // Route refreshes deliberately update only the visible section. Hidden
+      // route data remains deferred until that route becomes visible; shared
+      // menu/composer data is loaded by the post-paint bootstrap instead.
       const refreshers = [
         {
           route: DESKTOP_ROUTES.agents,
-          refresh: () => agentsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => agentsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.contexts,
-          refresh: () => contextsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => contextsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.connectors,
-          refresh: () => mcpServersData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => mcpServersData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
         { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },
@@ -418,10 +461,8 @@ export function useAppController() {
             ? DESKTOP_ROUTES.teams
             : route
       const current = refreshers.find(entry => entry.route === activeRoute)
-      const remaining = refreshers.filter(entry => entry.route !== activeRoute)
 
       if (current) await current.refresh()
-      await Promise.all(remaining.map(entry => entry.refresh()))
     },
     [
       agentsData.refreshWithCatalog,
@@ -503,7 +544,12 @@ export function useAppController() {
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
         currentTeamIdRef.current = sessionState.me.teamId || teamId
-        authenticatedWorkspaceIdentityRef.current = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        activeAuthenticatedSessionIdentityRef.current = switchedIdentity
+        authenticatedSessionIdentityRef.current = switchedIdentity
+        // Team switching owns a complete foreground refresh. If it invalidated
+        // the login-time post-paint callback, re-enable deferred menu data here.
+        setPostPaintDataReady(true)
         await refreshAuthenticatedData()
         if (announce) {
           const teamName =
@@ -524,6 +570,7 @@ export function useAppController() {
       chat.resetChat,
       fullSetStatus,
       refreshAuthenticatedData,
+      setPostPaintDataReady,
       teamsData.teams,
     ]
   )
@@ -593,6 +640,7 @@ export function useAppController() {
         auth.setMe(sessionState.me)
 
         if (!authenticated || !sessionState.me) {
+          setPostPaintDataReady(false)
           auth.setDesktopReleaseStatus(null)
           await chat.stopAllActivityStreams()
           agentsData.reset()
@@ -603,7 +651,8 @@ export function useAppController() {
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           chat.resetChat()
           notif.resetNotifications()
-          authenticatedWorkspaceIdentityRef.current = null
+          activeAuthenticatedSessionIdentityRef.current = null
+          authenticatedSessionIdentityRef.current = null
           if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
           return
         }
@@ -612,9 +661,20 @@ export function useAppController() {
         auth.setEmail(sessionState.me.email || '')
         void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
-        if (authenticatedWorkspaceIdentityRef.current !== sessionIdentity) {
-          authenticatedWorkspaceIdentityRef.current = sessionIdentity
-          await refreshAuthenticatedData({ initialLoad: true })
+        activeAuthenticatedSessionIdentityRef.current = sessionIdentity
+        if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
+          setPostPaintDataReady(false)
+          const loaded = await refreshAuthenticatedData({
+            initialLoad: true,
+            sessionIdentity,
+          })
+          if (loaded && activeAuthenticatedSessionIdentityRef.current === sessionIdentity) {
+            authenticatedSessionIdentityRef.current = sessionIdentity
+          }
+        } else {
+          // A prior post-paint callback may have been invalidated by an identity
+          // transition. An already-initialized matching session is ready now.
+          setPostPaintDataReady(true)
         }
         if (!preserveNav) {
           nav.handleNavSelect(DESKTOP_ROUTES.chat)
@@ -644,6 +704,7 @@ export function useAppController() {
       queryClient,
       refreshAuthenticatedData,
       resetWorkflowsData,
+      setPostPaintDataReady,
       teamsData.reset,
     ]
   )
@@ -668,7 +729,8 @@ export function useAppController() {
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
       queryClient.clear()
-      authenticatedWorkspaceIdentityRef.current = null
+      activeAuthenticatedSessionIdentityRef.current = null
+      authenticatedSessionIdentityRef.current = null
       await window.clerum.auth.logout()
       chat.resetChat()
       notif.resetNotifications()
@@ -1145,10 +1207,14 @@ export function useAppController() {
     sessionStateByChatId: chat.sessionStateByChatId,
     sessionStateByChatKey: chat.sessionStateByChatKey,
     chatListLoading: chat.chatListLoading,
+    chatListMoreLoading: chat.chatListMoreLoading,
+    chatListHasMoreRemoteSessions: chat.chatListHasMoreRemoteSessions,
     latestChatSessions: chat.latestChatSessions,
     latestChatSessionsLoading: chat.latestChatSessionsLoading,
     chatMessages: chat.chatMessages,
     chatMessagesLoading: chat.chatMessagesLoading,
+    hasOlderMessages: chat.hasOlderMessages,
+    olderMessagesLoading: chat.olderMessagesLoading,
     composerImageAttachments: chat.composerImageAttachments,
     composerReferenceAttachments: chat.composerReferenceAttachments,
     agentSending: chat.agentSending,
@@ -1165,6 +1231,8 @@ export function useAppController() {
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
     handleSelectChat: chat.handleSelectChat,
+    handleLoadOlderMessages: chat.handleLoadOlderMessages,
+    loadMoreChatSessions: chat.loadMoreChatSessions,
     handleSendAgentMessage: chat.handleSendAgentMessage,
     handleRetryFailedAgentSend: chat.handleRetryFailedAgentSend,
     clearComposerSendError: chat.clearComposerSendError,

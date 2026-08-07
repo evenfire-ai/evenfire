@@ -6057,6 +6057,24 @@ h3 {
   gap: var(--space-2-5);
 }
 
+.chat-history-page-control {
+  display: flex;
+  justify-content: center;
+  padding-block: var(--space-1);
+}
+
+.virtualized-message-chunk {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 720px;
+}
+
+.chat-thread-dedicated .virtualized-message-chunk {
+  gap: var(--space-2-5);
+}
+
 .chat-empty-state {
   align-content: center;
   justify-items: center;

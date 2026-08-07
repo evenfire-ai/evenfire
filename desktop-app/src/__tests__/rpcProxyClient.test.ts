@@ -12,6 +12,473 @@ vi.mock('../config.js', () => ({
   },
 }))
 
+describe('RpcProxyClient.listSessions', () => {
+  let client: RpcProxyClient
+
+  beforeEach(() => {
+    client = new RpcProxyClient()
+    vi.restoreAllMocks()
+  })
+
+  it.each(['.', '..', 'host/name', 'host\\name', 'host\nforged', 'x'.repeat(501)])(
+    'rejects an unsafe host path before issuing a request: %s',
+    async hostRef => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+
+      await expect(client.listSessions('rpc-token', hostRef)).rejects.toThrow(/unsafe path segment/)
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['agent:rpc', 'agent\nforged', 'x'.repeat(201)])(
+    'rejects an unsafe session agent before issuing a request: %s',
+    async agent => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+
+      await expect(client.loadSessionMessages('rpc-token', 'host', agent, 'chat')).rejects.toThrow(
+        /unsafe path segment/
+      )
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('accepts legacy session catalog responses that omit optional metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turnCount: 1,
+          lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    })
+  })
+
+  it('treats nullable optional session metadata as absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              messageCount: null,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+              state: null,
+              activeTaskId: null,
+              pendingApproval: null,
+              tokens: null,
+            },
+          ],
+          nextCursor: null,
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turnCount: 1,
+          lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    })
+  })
+
+  it('keeps valid catalog entries when one item is malformed and omits unknown states', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            { chatId: 'malformed', turnCount: 1, lastActivityAt: '2026-01-01T00:00:00Z' },
+            {
+              agent: 'agent-a',
+              chatId: 'valid',
+              turnCount: 1,
+              lastActivityAt: '2026-01-02T00:00:00Z',
+              state: 'new_additive_state',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'valid',
+          turnCount: 1,
+          lastActivityAt: '2026-01-02T00:00:00Z',
+        },
+      ],
+      droppedItemCount: 1,
+    })
+  })
+
+  it('surfaces a dropped malformed session instead of losing it silently (R1-H1)', async () => {
+    // Wire response the server (mcp-host) would send: 3 sessions, the 2nd corrupt
+    // (turnCount is a non-integer, which the parser rejects). A silent partial parse
+    // would return only the 2 valid ones with no trace — a user's chat vanishing from
+    // "Latest sessions" with no way for the renderer to know. The parser must instead
+    // keep the valid items AND make the loss observable (warn with the index + a
+    // droppedItemCount on the result).
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              agent: 'agent-a',
+              chatId: 'chat-corrupt',
+              turnCount: 1.5,
+              lastActivityAt: '2026-01-02T00:00:00.000Z',
+            },
+            {
+              agent: 'agent-a',
+              chatId: 'chat-b',
+              turnCount: 2,
+              lastActivityAt: '2026-01-03T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    const result = await client.listSessions('token', 'host')
+
+    // Observable result (T4): the two valid chats are returned...
+    expect(result.items.map(item => item.chatId)).toEqual(['chat-a', 'chat-b'])
+    // ...and the loss is observable — a count on the result the renderer can read...
+    expect(result.droppedItemCount).toBe(1)
+    // ...and a warn carrying the index of the dropped item in main-process logs.
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('index 1'), expect.anything())
+  })
+
+  it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid session catalog counts: %s',
+    async invalidCount => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                agent: 'agent-a',
+                chatId: 'chat-a',
+                turnCount: invalidCount,
+                lastActivityAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          }),
+        })
+      )
+
+      await expect(client.listSessions('token', 'host')).rejects.toThrow(/turnCount/)
+    }
+  )
+
+  it('rejects a malformed sessions items container', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: {} }) })
+    )
+    await expect(client.listSessions('token', 'host')).rejects.toThrow(/items/)
+  })
+
+  it('accepts legacy message responses that omit optional paging metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({ agent: 'agent-a', chatId: 'chat-a', turns: [{ number: 1 }] })
+  })
+
+  it('treats nullable optional message metadata as absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          totalTurns: null,
+          oldestTurnNumber: null,
+          latestTurnNumber: null,
+          hasMoreBefore: null,
+          hasMoreAfter: null,
+          state: null,
+          activeTaskId: null,
+          pendingApproval: null,
+          tokens: null,
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: null,
+              started_at: '2026-01-01T00:00:00.000Z',
+              completed_at: null,
+              tokens: null,
+              tool_steps: null,
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).resolves.toEqual(
+      {
+        agent: 'agent-a',
+        chatId: 'chat-a',
+        turns: [
+          {
+            number: 1,
+            user_input: 'hello',
+            started_at: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      }
+    )
+  })
+
+  it('accepts zero-based turn metadata emitted by the session service', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          totalTurns: 1,
+          oldestTurnNumber: 0,
+          latestTurnNumber: 0,
+          turns: [
+            {
+              number: 0,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({
+      oldestTurnNumber: 0,
+      latestTurnNumber: 0,
+      turns: [{ number: 0 }],
+    })
+  })
+
+  it('rejects malformed tool_steps before they can reach persisted chat state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: 'world',
+              started_at: '2026-01-01T00:00:00.000Z',
+              tool_steps: 'PWNED',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /tool_steps/
+    )
+  })
+
+  it('accepts producer-shaped tool_steps and validates their optional fields', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              response: 'world',
+              started_at: '2026-01-01T00:00:00.000Z',
+              tool_steps: [
+                {
+                  toolName: 'search',
+                  displayName: 'Search',
+                  state: 'error',
+                  durationMs: 12,
+                  errorSummary: 'timed out',
+                },
+              ],
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({
+      turns: [
+        {
+          tool_steps: [
+            {
+              toolName: 'search',
+              displayName: 'Search',
+              state: 'error',
+              durationMs: 12,
+              errorSummary: 'timed out',
+            },
+          ],
+        },
+      ],
+    })
+  })
+
+  it.each([
+    ['oldestTurnNumber', -1],
+    ['oldestTurnNumber', 0.5],
+    ['oldestTurnNumber', Number.MAX_SAFE_INTEGER + 1],
+    ['latestTurnNumber', -1],
+    ['latestTurnNumber', 0.5],
+    ['latestTurnNumber', Number.MAX_SAFE_INTEGER + 1],
+    ['turn number', -1],
+    ['turn number', 0.5],
+    ['turn number', Number.MAX_SAFE_INTEGER + 1],
+  ])('rejects invalid %s values: %s', async (field, invalidValue) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          ...(field === 'oldestTurnNumber' ? { oldestTurnNumber: invalidValue } : {}),
+          ...(field === 'latestTurnNumber' ? { latestTurnNumber: invalidValue } : {}),
+          turns: [
+            {
+              number: field === 'turn number' ? invalidValue : 0,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /session messages response/
+    )
+  })
+
+  it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid message metadata counts: %s',
+    async invalidCount => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            agent: 'agent-a',
+            chatId: 'chat-a',
+            totalTurns: invalidCount,
+            turns: [],
+          }),
+        })
+      )
+
+      await expect(
+        client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+      ).rejects.toThrow(/totalTurns/)
+    }
+  )
+
+  it('rejects a message response for a different session identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ agent: 'agent-b', chatId: 'chat-a', turns: [] }),
+      })
+    )
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /identity/
+    )
+  })
+})
+
 describe('RpcProxyClient.cancelTask', () => {
   let client: RpcProxyClient
 

@@ -1,4 +1,5 @@
 import { app, safeStorage } from 'electron'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,7 +16,7 @@ const LEGACY_ACCOUNT = 'session-token'
  * `-` separator, and a 12-hex sha256 suffix. Every call site feeds `envKey`
  * straight into keychain account names and on-disk file names, so validate the
  * shape before interpolating — defense in depth mirroring the
- * `assertSafeSegment` guard in chatStore/chatStoreBinding. Today all callers
+ * `assertSafeFilesystemSegment` guard in chatStore/chatStoreBinding. Today all callers
  * pass sanitized `getActiveEnvKey()` output, so a mismatch signals a bug (or a
  * tampered value), never a normal input.
  */
@@ -99,17 +100,62 @@ async function legacyFilePath(): Promise<string> {
   return path.join(await resolvedStorageBase(), 'session-token.json')
 }
 
+function isUnsupportedDirectorySyncError(error: unknown): boolean {
+  if (process.platform !== 'win32') return false
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EISDIR' || code === 'EPERM' || code === 'EINVAL' || code === 'ENOTSUP'
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+  try {
+    handle = await fs.open(directoryPath, 'r')
+    await handle.sync()
+  } catch (error) {
+    if (!isUnsupportedDirectorySyncError(error)) throw error
+  } finally {
+    await handle?.close()
+  }
+}
+
+async function writeTokenFileAtomic(filePath: string, value: string | Uint8Array): Promise<void> {
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+  try {
+    handle = await fs.open(temporaryPath, 'w', 0o600)
+    await handle.writeFile(value)
+    await handle.sync()
+    await handle.close()
+    handle = null
+    await fs.rename(temporaryPath, filePath)
+    await syncDirectory(path.dirname(filePath))
+  } catch (error) {
+    await handle?.close().catch(() => undefined)
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+async function removeTokenFileDurably(filePath: string): Promise<void> {
+  await fs.unlink(filePath)
+  await syncDirectory(path.dirname(filePath))
+}
+
 export class TokenStore {
   /**
    * Read the session token for `envKey`. Falls back keytar → safeStorage file,
-   * then does a one-time best-effort migration of the pre-per-env GLOBAL slot
-   * into this environment's slot. Migrating the legacy token is safe: it was
-   * issued for whatever environment was last active (which is the environment
-   * being restored at startup), and an env mismatch simply fails `getMe` and
-   * drops the user back to login — never a cross-env leak, since after the
-   * migration the legacy slot is deleted.
+   * optional older env-key aliases, then does a one-time best-effort migration
+   * of the pre-per-env GLOBAL slot into this environment's slot.
+   *
+   * The legacy env-key aliases are explicit caller-provided upgrade paths, such
+   * as REST-only `resolveEnvKey(rest)` → REST+RPC `resolveEnvKey(rest, rpc)`.
+   * When one is found, it is copied to the new slot and deleted from the old
+   * slot so it cannot be read into another runtime boundary later.
    */
-  async getSessionToken(envKey: string): Promise<string | null> {
+  async getSessionToken(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<string | null> {
     assertEnvKey(envKey)
     const account = accountFor(envKey)
     const keytar = await loadKeytar()
@@ -145,7 +191,77 @@ export class TokenStore {
       // No per-env plain-text token — fall through to legacy migration.
     }
 
+    const migratedScopedToken = await this.migrateLegacyEnvToken(
+      envKey,
+      options.legacyEnvKeys ?? [],
+      keytar
+    )
+    if (migratedScopedToken) return migratedScopedToken
+
     return this.migrateLegacyGlobalToken(envKey, keytar)
+  }
+
+  /**
+   * One-time migration from older environment-scoped account/file names into
+   * the current env key. Used when the env-key derivation changes but the REST
+   * origin still matches the token issuer.
+   */
+  private async migrateLegacyEnvToken(
+    envKey: string,
+    legacyEnvKeys: readonly string[],
+    keytar: KeytarModule | null
+  ): Promise<string | null> {
+    const candidates = Array.from(
+      new Set(
+        legacyEnvKeys.map(key => String(key || '').trim()).filter(key => key && key !== envKey)
+      )
+    )
+    for (const legacyEnvKey of candidates) {
+      assertEnvKey(legacyEnvKey)
+      const legacyAccount = accountFor(legacyEnvKey)
+      if (keytar) {
+        try {
+          const token = await keytar.getPassword(SERVICE, legacyAccount)
+          if (token) {
+            await this.setSessionToken(token, envKey)
+            await keytar.deletePassword(SERVICE, legacyAccount).catch(() => {})
+            return token
+          }
+        } catch {
+          // keychain unavailable — try file fallbacks below.
+        }
+      }
+
+      if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
+        try {
+          const file = await encryptedFilePath(legacyEnvKey)
+          const encrypted = await fs.readFile(file)
+          const token = safeStorage.decryptString(encrypted)
+          if (token) {
+            await this.setSessionToken(token, envKey)
+            await removeTokenFileDurably(file).catch(() => {})
+            return token
+          }
+        } catch {
+          // no legacy encrypted file — fall through to plain-text.
+        }
+      }
+
+      try {
+        const file = await plainFilePath(legacyEnvKey)
+        const raw = await fs.readFile(file, 'utf8')
+        const data = JSON.parse(raw) as { token?: unknown }
+        const token = typeof data.token === 'string' && data.token ? data.token : null
+        if (token) {
+          await this.setSessionToken(token, envKey)
+          await removeTokenFileDurably(file).catch(() => {})
+          return token
+        }
+      } catch {
+        // no legacy plain-text file — try next candidate.
+      }
+    }
+    return null
   }
 
   /**
@@ -180,7 +296,7 @@ export class TokenStore {
         const token = safeStorage.decryptString(encrypted)
         if (token) {
           await this.setSessionToken(token, envKey)
-          await fs.unlink(file).catch(() => {})
+          await removeTokenFileDurably(file).catch(() => {})
           return token
         }
       } catch {
@@ -195,8 +311,8 @@ export class TokenStore {
       const data = JSON.parse(raw) as { token?: unknown }
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
-        await this.setSessionToken(token, envKey).catch(() => {})
-        await fs.unlink(file).catch(() => {})
+        await this.setSessionToken(token, envKey)
+        await removeTokenFileDurably(file).catch(() => {})
       }
       return token
     } catch {
@@ -219,37 +335,55 @@ export class TokenStore {
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
       const file = await encryptedFilePath(envKey)
-      await fs.writeFile(file, safeStorage.encryptString(token), { mode: 0o600 })
+      await writeTokenFileAtomic(file, safeStorage.encryptString(token))
       return
     }
 
     const file = await plainFilePath(envKey)
-    await fs.writeFile(file, JSON.stringify({ token }), { encoding: 'utf8', mode: 0o600 })
+    await writeTokenFileAtomic(file, JSON.stringify({ token }))
   }
 
-  async clearSessionToken(envKey: string): Promise<void> {
+  async clearSessionToken(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<void> {
     assertEnvKey(envKey)
-    const account = accountFor(envKey)
+    const legacyEnvKeys = Array.from(
+      new Set(
+        (options.legacyEnvKeys ?? [])
+          .map(key => String(key || '').trim())
+          .filter(key => key && key !== envKey)
+      )
+    )
+    for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
+    const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = await loadKeytar()
     if (keytar) {
-      try {
-        await keytar.deletePassword(SERVICE, account)
-      } catch {
-        // Continue cleaning up file-based storage even if keychain fails.
+      const deleteKeychainPassword = async (account: string) => {
+        try {
+          await keytar.deletePassword(SERVICE, account)
+        } catch {
+          // Keychain cleanup is best-effort; continue through the scoped files.
+        }
+      }
+      for (const scopedEnvKey of scopedEnvKeys) {
+        await deleteKeychainPassword(accountFor(scopedEnvKey))
       }
       // Best-effort cleanup of the legacy global slot so it can't be migrated
       // into another environment later.
-      await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
+      await deleteKeychainPassword(LEGACY_ACCOUNT)
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
     await Promise.all([
-      encryptedFilePath(envKey)
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-      plainFilePath(envKey)
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+      ...scopedEnvKeys.flatMap(scopedEnvKey => [
+        encryptedFilePath(scopedEnvKey)
+          .then(file => fs.unlink(file))
+          .catch(() => {}),
+        plainFilePath(scopedEnvKey)
+          .then(file => fs.unlink(file))
+          .catch(() => {}),
+      ]),
       legacyEncryptedFilePath()
         .then(file => fs.unlink(file))
         .catch(() => {}),
