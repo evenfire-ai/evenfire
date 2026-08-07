@@ -184,4 +184,83 @@ describe('control-ui control-api proxy route', () => {
       expect(timeoutSpy).not.toHaveBeenCalled()
     })
   })
+
+  describe('request body is capped via CONTROL_UI_PROXY_MAX_BODY_BYTES (pre-auth DoS guard)', () => {
+    const ENV_KEY = 'CONTROL_UI_PROXY_MAX_BODY_BYTES'
+    let savedEnv: string | undefined
+
+    beforeEach(() => {
+      savedEnv = process.env[ENV_KEY]
+    })
+
+    afterEach(() => {
+      if (savedEnv === undefined) delete process.env[ENV_KEY]
+      else process.env[ENV_KEY] = savedEnv
+    })
+
+    it('rejects with 413 on a declared content-length above the cap, without calling upstream', async () => {
+      process.env[ENV_KEY] = '1024'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': '2048' },
+        body: 'x'.repeat(2048),
+      })
+
+      const res = await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
+
+      expect(res.status).toBe(413)
+      await expect(res.json()).resolves.toEqual({ error: 'payload_too_large' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects with 413 when a streamed body without content-length exceeds the cap', async () => {
+      process.env[ENV_KEY] = '16'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(10))
+          controller.enqueue(new Uint8Array(10)) // 20 bytes total > 16-byte cap
+          controller.close()
+        },
+      })
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        body: stream,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+
+      const res = await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
+
+      expect(res.status).toBe(413)
+      await expect(res.json()).resolves.toEqual({ error: 'payload_too_large' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('forwards a body that is within the cap', async () => {
+      process.env[ENV_KEY] = String(1024 * 1024)
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const payload = JSON.stringify({ name: 'deck.pdf', kind: 'file', contentBase64: 'AAAA' })
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      })
+
+      const res = await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+
+      expect(res.status).toBe(200)
+      expect(Buffer.from(init.body as ArrayBuffer).toString('utf8')).toBe(payload)
+    })
+  })
 })

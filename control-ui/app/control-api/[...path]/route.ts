@@ -28,6 +28,64 @@ function resolveProxyTimeoutMs(): number {
     : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
 }
 
+// Runtime-configurable cap on the request body this proxy will buffer, homologous
+// with the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES, 24MiB). This handler runs
+// BEFORE any auth (auth lives in control-api, downstream), so without a cap an
+// unauthenticated caller could stream an arbitrarily large body and OOM the pod.
+// An absent, non-integer, non-positive, or out-of-range value falls back to the
+// default. Set CONTROL_UI_PROXY_MAX_BODY_BYTES on the deployment to change it.
+const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024
+const MAX_BODY_BYTES_CEILING = 512 * 1024 * 1024
+function resolveMaxBodyBytes(): number {
+  const raw = process.env.CONTROL_UI_PROXY_MAX_BODY_BYTES
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_BODY_BYTES_CEILING
+    ? parsed
+    : DEFAULT_MAX_BODY_BYTES
+}
+
+// Read the request body without ever buffering more than `cap` bytes: stops and
+// returns 'too-large' as soon as the running total exceeds the cap, so a huge (or
+// content-length-lying) body cannot exhaust memory before it is rejected.
+async function readBodyCapped(
+  stream: ReadableStream<Uint8Array> | null,
+  cap: number
+): Promise<ArrayBuffer | null | 'too-large'> {
+  if (!stream) return null
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > cap) {
+        await reader.cancel()
+        return 'too-large'
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  if (total === 0) return null
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out.buffer
+}
+
+// Remove CR/LF before a user-controlled value reaches a log sink (CWE-117); the
+// empty-string replace enumerating the newline is the barrier CodeQL recognizes.
+function stripCrlf(value: string): string {
+  return value.replace(/[\n\r]/g, '')
+}
+
 // Headers this proxy must never forward upstream. Beyond the classic RFC 9110
 // hop-by-hop set, undici's fetch() refuses to send `Expect` at all — forwarding it
 // throws `NotSupportedError: expect header not supported` and turns any upload
@@ -85,8 +143,20 @@ async function proxyControlApi(
   const headers = copyRequestHeaders(req)
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
-  const rawBody = hasBody ? await req.arrayBuffer() : undefined
-  const body = rawBody && rawBody.byteLength > 0 ? rawBody : undefined
+  let body: ArrayBuffer | undefined
+  if (hasBody) {
+    const cap = resolveMaxBodyBytes()
+    // Fast path: reject a declared-oversize length before reading a single byte.
+    const declared = Number(req.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > cap) {
+      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    }
+    const read = await readBodyCapped(req.body, cap)
+    if (read === 'too-large') {
+      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    }
+    body = read ?? undefined
+  }
   // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
   // including long-lived SSE notification streams — rely solely on the client's own
   // abort signal, so this timeout can never cut a streaming response.
@@ -121,7 +191,7 @@ async function proxyControlApi(
     // Fail-loud: surface the underlying cause (undici wraps the real reason in
     // err.cause) so a proxy failure is never undiagnosable from the pod logs.
     console.error('[control-api proxy] request failed', {
-      url: upstreamUrl,
+      url: stripCrlf(upstreamUrl),
       method: req.method,
       status,
       message,
