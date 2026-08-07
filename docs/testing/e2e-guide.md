@@ -45,14 +45,26 @@ minikube start -p clerum-test \
 ### 2. Bootstrap infrastructure
 
 The canonical setup is the Makefile path — it starts the `clerum-test`
-profile, installs CRDs, creates secrets/config, builds images in minikube's
-Docker daemon, deploys manifests, waits for rollouts, and seeds local test
-data (12 idempotent steps):
+profile, installs CRDs, creates secrets/config, acquires images, deploys
+manifests, waits for rollouts, and seeds local test data (12 idempotent steps):
 
 ```bash
-make minikube-setup
+MINIKUBE_IMAGE_TAG=latest make minikube-setup
 make minikube-status
 ```
+
+Setup builds nothing by default: it pulls the 23 published service images from
+`ghcr.io/evenfire-ai`. `MINIKUBE_IMAGE_TAG=latest` is required until the next
+release is tagged and promoted, because the manifests pin that not-yet-cut tag.
+`make minikube-setup-local` (equivalently `IMAGE_SOURCE=local`) builds every
+image in minikube's Docker daemon instead and needs no override. Which mode a
+cluster is in is recorded in `deploy/minikube/.image-manifest.json`, and it
+decides which image refs the pods run — see
+[`../deploy/minikube.md`](../deploy/minikube.md).
+
+For the E2E fixture set (test user, `e2e-*` recipes, demo MCP servers), use
+`make minikube-setup-e2e`. In ghcr mode that pulls the published images and then
+builds the two unpublished E2E coordinator fixtures locally.
 
 > `scripts/bootstrap-cluster.sh` is an older, partial bootstrap (no full JWT
 > chain, UIs, or user seed). E2E suites need the full setup above — do not use
@@ -264,7 +276,7 @@ Common test-related issues:
 
 - **409 on first-time setup** → `make minikube-setup ARGS="--reset-db --skip-build"`
 - **Postgres WAL corruption after cold start** → `make minikube-setup ARGS="--reset-db --skip-build"` (auto-detected)
-- **Pod `ImagePullBackOff`** → `make minikube-setup` (rebuilds images with `:test` tag and `imagePullPolicy: IfNotPresent`)
+- **Pod `ImagePullBackOff`** → `make minikube-verify-images` reports the cluster's mode and every missing ref; then re-pull with `make minikube-pull-images` (ghcr mode, which reuses the tag the cluster recorded) or rebuild with `make minikube-build-images` (local mode), and `make minikube-restart-all`. Every pod runs `imagePullPolicy: IfNotPresent`, so the ref only has to be present in the daemon.
 - **`401: "Invalid token"` from chatllm** → `make minikube-gen-keys` followed by `make minikube-sync-auth-key` (auto-syncs + restarts). See the JWT auth chain notes at the top of the root `Makefile`.
 - **Port-forward drops after pod restart** → re-run `make minikube-pf-desktop`
 - **Desktop app shows no agents after login** → `scripts/minikube/seed-test-data.sh`

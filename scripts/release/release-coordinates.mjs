@@ -8,11 +8,14 @@
 //   equals   - must equal the release version (build inputs, declarations)
 //   floor    - a compatibility floor; must be <= the version, moves only on request
 //   counter  - a per-service counter; must equal ITS OWN package.json, not the version
-//   pointer  - names an artifact; equality here, plus existence checking once a
-//              release-images.yml workflow exists (it does not exist in this repo yet)
+//   pointer  - names an artifact; equality ONLY, never existence
 //
-// A future workstream would append the ghcr component pointer row. Do not add
-// it before deploy/components/ghcr-images/kustomization.yaml exists.
+// The ghcr component pointer row is the eighth coordinate, added by the image-
+// consumption workstream once deploy/components/ghcr-images/kustomization.yaml
+// existed. Its assertion is deliberately NOT "and the artifact exists": the
+// v<version> images are created by release-images.yml ON THE TAG, so they
+// cannot pre-exist when the release-prep PR is checked. Existence is the split
+// checker's other half.
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -62,6 +65,26 @@ export function parseManifest(raw) {
   return JSON.parse(normalized)
 }
 
+const GHCR_COMPONENT = 'deploy/components/ghcr-images/kustomization.yaml'
+
+// One `newTag:` line of an images[] row. [ \t] rather than \s on purpose: \s
+// matches newlines, so `^\s+` can begin on a blank line and swallow the line
+// separator into the match.
+const GHCR_NEW_TAG_RE = /^([ \t]*newTag:[ \t]*)(\S+)[ \t]*$/gm
+
+function readGhcrComponent(root) {
+  const abs = path.join(root, GHCR_COMPONENT)
+  try {
+    return fs.readFileSync(abs, 'utf8')
+  } catch (error) {
+    throw new Error(
+      `PARSE_ERROR: cannot read the ghcr release pin at ${GHCR_COMPONENT} ` +
+        `(${error.code ?? error.message}). That file is a release coordinate; ` +
+        `it must exist in the tree being cut or checked.`
+    )
+  }
+}
+
 function manifestField(root, field) {
   const raw = fs.readFileSync(path.join(root, 'external-rest-api/src/releaseManifest.ts'), 'utf8')
   const manifest = parseManifest(raw)
@@ -72,9 +95,18 @@ function manifestField(root, field) {
 // are written by update-desktop-release-manifest.mjs, which prepare-release
 // delegates to rather than duplicating its renderer, so those rows declare
 // `writtenBy` instead. The writer skips any row without a `write`.
+//
+// Every `write` row also carries `path`: the repo-relative file that write
+// touches. `name` cannot serve -- the ghcr row is named for the FIELD it pins
+// ('deploy/components/ghcr-images newTag'), not for a file. prepare-release.mjs
+// derives its half-cut recovery instruction from these paths, so a new writing
+// coordinate cannot be added without the recovery text learning about it. See
+// writtenCoordinatePaths() below, which fails loudly on a `write` row that
+// forgets its `path` rather than printing a short list that silently omits it.
 export const COORDINATES = [
   {
     name: 'desktop-app/package.json',
+    path: 'desktop-app/package.json',
     assert: 'equals',
     read: root => readJson(root, 'desktop-app/package.json').version,
     write: (root, version) => {
@@ -85,6 +117,7 @@ export const COORDINATES = [
   },
   {
     name: 'desktop-app/package-lock.json',
+    path: 'desktop-app/package-lock.json',
     assert: 'equals',
     read: root => {
       const j = readJson(root, 'desktop-app/package-lock.json')
@@ -132,8 +165,67 @@ export const COORDINATES = [
     read: root => manifestField(root, 'rpcProxyVersion'),
     writtenBy: 'update-desktop-release-manifest.mjs',
   },
+  {
+    name: 'deploy/components/ghcr-images newTag',
+    path: GHCR_COMPONENT,
+    assert: 'pointer',
+    // Reads EVERY newTag, not just the first: a half-applied rewrite leaves
+    // mixed tags, and the puller would then fetch two different releases into
+    // one cluster. Returning the joined distinct set makes that state
+    // unmistakable in the failure message instead of invisible. Zero rows join
+    // to '', which the checker reports as (empty) and rejects -- a guard that
+    // scanned nothing must fail, not agree.
+    read: root => {
+      const raw = readGhcrComponent(root)
+      const tags = [...raw.matchAll(GHCR_NEW_TAG_RE)].map(m => m[2])
+      return [...new Set(tags)].join('/')
+    },
+    write: (root, version) => {
+      const raw = readGhcrComponent(root)
+      // Every row, anchored per line. A `latest`/`stable` value would also be
+      // rewritten, which is correct: the committed component must never carry
+      // a moving tag, and MINIKUBE_IMAGE_TAG is the render-time lever instead.
+      let rewritten = 0
+      const next = raw.replace(GHCR_NEW_TAG_RE, (_match, prefix) => {
+        rewritten += 1
+        return `${prefix}v${version}`
+      })
+      // A writer that wrote nothing is a failed cut, not a no-op. Saying so
+      // here beats leaving the stale pin for the checker to find on the PR.
+      if (rewritten === 0) {
+        throw new Error(
+          `PARSE_ERROR: ${GHCR_COMPONENT} has no newTag: rows matching ` +
+            `${GHCR_NEW_TAG_RE}, so the release pin could not be written`
+        )
+      }
+      fs.writeFileSync(path.join(root, GHCR_COMPONENT), next)
+    },
+  },
 ]
 
 export function readCounterPackage(root, rel) {
   return readJson(root, rel).version
+}
+
+// Every repo-relative file the coordinate loop in prepare-release.mjs writes.
+//
+// Derived, never listed by hand: the recovery instruction printed after a
+// half-cut release used a hardcoded `desktop-app/package.json
+// desktop-app/package-lock.json`, and when the ghcr pin became the eighth
+// coordinate the instruction kept naming two files out of three. Following it
+// verbatim reverted the version and left the pin bumped -- a tree that is still
+// half-cut, produced by the very command offered to un-cut it.
+//
+// A `write` row with no `path` throws instead of being skipped: a quietly
+// short list is exactly the failure this function exists to end.
+export function writtenCoordinatePaths() {
+  return COORDINATES.filter(c => c.write).map(c => {
+    if (!c.path) {
+      throw new Error(
+        `release-coordinates: coordinate '${c.name}' owns a write but declares no path, ` +
+          `so the half-cut recovery instruction would silently omit the file it wrote`
+      )
+    }
+    return c.path
+  })
 }

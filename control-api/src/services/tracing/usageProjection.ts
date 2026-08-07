@@ -59,7 +59,10 @@ function actorId(binding: WorkflowRunBinding): string | null {
   return binding.actorType === 'user' || binding.actorType === 'admin' ? binding.actorId : null
 }
 
-function tokenUsagePayload(usage: LlmUsageEvent): TokenUsagePayload {
+// Exported (behavior unchanged) so the real-Postgres runtime-contract test can
+// build its "valid payload" fixture from the actual producer instead of a
+// hand-typed copy that could drift out of sync with this shape.
+export function tokenUsagePayload(usage: LlmUsageEvent): TokenUsagePayload {
   return {
     request_ref: sha256(usage.request_id.toLowerCase()),
     provider: usage.provider,

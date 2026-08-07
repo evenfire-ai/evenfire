@@ -124,6 +124,27 @@ describe('resetChat / clearActiveChat', () => {
     expect(result.current.chatMessages).toEqual([])
   })
 
+  it('resetChat drops pending selections from the prior session', async () => {
+    const { result, rerender } = renderController({ agentNames: ['agent-x', 'agent-y'] })
+    await settleMount()
+
+    act(() => {
+      result.current.setPendingChatSelection('agent-y', 'prior-user-chat')
+      result.current.resetChat()
+    })
+    rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith('agent-y'))
+    expect(result.current.activeChatId).toBeNull()
+    expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
+      'agent-y',
+      'agent-y',
+      'prior-user-chat',
+      undefined,
+      expect.anything()
+    )
+  })
+
   it('clearActiveChat deselects and drops the per-chat error/resend banner', async () => {
     clerum.rpc.invokeHostMessage.mockRejectedValue(new Error('network down'))
     const { result } = renderController()

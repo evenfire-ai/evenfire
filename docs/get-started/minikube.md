@@ -25,9 +25,25 @@ git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required — no default ships) and ONE LLM key
 # (setup infers the matching provider)
-make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
-make minikube-status    # wait for every deployment READY
+MINIKUBE_IMAGE_TAG=latest make minikube-setup   # first run ~15 min (pulling images dominates); re-run safe
+make minikube-status                            # wait for every deployment READY
 ```
+
+**You do not build images.** `make minikube-setup` pulls all 23 service images
+from `ghcr.io/evenfire-ai`, published for `linux/amd64` and `linux/arm64`, so an
+Apple Silicon Mac pulls a native image rather than compiling anything. MCP
+servers stay out of the cluster and are installed on demand from the evenfire
+registry.
+
+`MINIKUBE_IMAGE_TAG=latest` is required today: the manifests pin the next
+release tag, and its images only exist once that release is promoted. Without
+the override the pull fails with a message naming this variable. Drop it after
+the release is cut. If minikube itself fails to start, add
+`MINIKUBE_MEMORY=9216` — the 10240 MB default exceeds a stock Docker Desktop
+ceiling.
+
+To build every image from source instead, use `make minikube-setup-local`
+(equivalently `IMAGE_SOURCE=local`), which needs no tag override.
 
 ## Say hello (desktop app)
 

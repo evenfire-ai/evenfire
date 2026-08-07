@@ -45,11 +45,23 @@ describe('ConversationManager.listSessionsForUser', () => {
 
   it('extracts agent and chatId correctly even if auth.sub contains a colon', async () => {
     const keyWithColonSub = `admin:u-99:rpc:agent-y:chat-7`
-    await manager.getOrCreate(keyWithColonSub)
+    await manager.getOrCreate(keyWithColonSub, { userId: 'admin:u-99' })
     const result = manager.listSessionsForUser('admin:u-99:rpc:')
     expect(result).toHaveLength(1)
     expect(result[0].agent).toBe('agent-y')
     expect(result[0].chatId).toBe('chat-7')
+  })
+
+  it('does not list an overlapping colon-bearing owner for a shorter subject', async () => {
+    const callerUserId = 'u1'
+    const ownerUserId = 'u1:rpc:a'
+    const key = `${ownerUserId}:rpc:agent-x:chat-1`
+    await manager.getOrCreate(key, { userId: ownerUserId })
+
+    expect(manager.listSessionsForUser(`${ownerUserId}:rpc:`).map(session => session.key)).toEqual([
+      key,
+    ])
+    expect(manager.listSessionsForUser(`${callerUserId}:rpc:`)).toEqual([])
   })
 
   it('skips malformed entries (no colon after prefix) without throwing', async () => {
@@ -108,5 +120,18 @@ describe('ConversationManager.getSessionByKey', () => {
     })
     await manager.getOrCreate(keyA)
     expect(manager.getSessionByKey(keyB)).toBeUndefined()
+  })
+
+  it('fails authenticated exact-key reads closed on an ownership mismatch', async () => {
+    const ownerUserId = 'subject:rpc:embedded'
+    const key = `${ownerUserId}:rpc:agent-x:chat-1`
+    const conv = await manager.getOrCreate(key, { userId: ownerUserId })
+
+    await expect(manager.getSessionByKeyForUserAsync(key, ownerUserId)).resolves.toBe(conv)
+    await expect(manager.getSessionByKeyForUserAsync(key, 'subject')).resolves.toBeUndefined()
+    await expect(manager.getOrCreate(key, { userId: 'subject' })).rejects.toMatchObject({
+      name: 'ConversationError',
+      code: 'CONV_OWNERSHIP_MISMATCH',
+    })
   })
 })

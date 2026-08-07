@@ -14,10 +14,10 @@ This directory contains MCP server implementations, test suites, and Kubernetes 
 | **[MongoDB](./mongodb/README.md)**             | MongoDB integration for querying, aggregation, and schema inspection                    | StreamableHTTP | 3000 | Tested — dedicated unit-test suite |
 | **[Web Search](./web-search/README.md)**       | Brave Search API web/news search and page fetching (first-party source)                 | StreamableHTTP | 3000 | Available — no test suite yet      |
 | **[Playwright](./playwright/README.md)**       | Browser automation via the upstream Microsoft Playwright MCP image                      | StreamableHTTP | 8931 | Available — no test suite yet      |
-| **[Doc Generator](./doc-generator/README.md)** | Markdown → print-ready HTML documents and Excel (.xlsx) generation (first-party source) | StreamableHTTP | 3000 | Available — no test suite yet      |
+| **[Doc Generator](./doc-generator/README.md)** | Markdown → print-ready HTML documents and Excel (.xlsx) generation (first-party source) | StreamableHTTP | 3000 | Source only — no image, no tests   |
 | **[Alpha Vantage](./alphavantage/README.md)**  | Secret template only — no Dockerfile, source, or CRD yet                                | —              | —    | Experimental stub                  |
 
-"Tested" refers to the unit-test suites under `__tests__/` in this package (see [Testing](#testing)); the servers marked "available" build and deploy but do not have test suites here yet. Web Search and Doc Generator ship no in-tree `mcpserver.yaml` — see their READMEs for how to deploy them.
+"Tested" refers to the unit-test suites under `__tests__/` in this package (see [Testing](#testing)); the servers marked "available" build and deploy but do not have test suites here yet. Doc Generator is "source only" because nothing in this repo builds or publishes an image for it: it has no row in `deploy/images.json` and no publish-matrix entry, so running it means building its Dockerfile yourself. Web Search and Doc Generator ship no in-tree `mcpserver.yaml` — see their READMEs for how to deploy them.
 
 ## Project Structure
 

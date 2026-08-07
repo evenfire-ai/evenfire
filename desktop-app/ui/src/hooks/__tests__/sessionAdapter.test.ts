@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { mergeAuthoritativeServerMessages } from '../../../../src/chatMessageMerge'
+import type { ChatMessage } from '../../../../src/types'
 import { turnsToChatMessages } from '../sessionAdapter'
 
 describe('turnsToChatMessages', () => {
@@ -46,6 +48,45 @@ describe('turnsToChatMessages', () => {
     expect(msgs[0]?.attachments).toMatchObject([
       { type: 'connector', label: 'mcp-coingecko-remote' },
     ])
+  })
+
+  it('merges an image-only optimistic turn using producer-shaped attachments', () => {
+    const existing: ChatMessage[] = [
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        content: '',
+        timestamp: 1,
+        attachments: [
+          {
+            id: 'photo',
+            type: 'uploaded_file',
+            label: 'photo.png',
+            mimeType: 'image/png',
+          },
+        ],
+      },
+      {
+        id: 'optimistic-assistant',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 2,
+      },
+    ]
+    const incoming = turnsToChatMessages([
+      {
+        number: 7,
+        user_input: '[Attached images]\n- photo.png',
+        response: 'done',
+        started_at: new Date(120_001).toISOString(),
+        completed_at: new Date(120_002).toISOString(),
+      },
+    ])
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming)
+
+    expect(merged.map(message => message.id)).toEqual(['turn-7-user', 'turn-7-assistant'])
+    expect(merged[0]?.attachments).toMatchObject([{ type: 'uploaded_file', label: 'photo.png' }])
   })
 
   it('preserves turn order for multi-turn transcripts', () => {

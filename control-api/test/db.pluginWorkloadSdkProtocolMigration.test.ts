@@ -70,16 +70,16 @@ describe('plugin workload SDK protocol migration', () => {
     expect(contractEntries).toEqual([['plugin_workload_sdk_credential_ticket_jtis', 'legacy_dml']])
   })
 
-  it('registers the credential-ticket ACL repair as migration 0089', () => {
+  it('registers the credential-ticket ACL repair as migration 0089 before the runtime reconciliation', () => {
     const dbPath = join(dirname(fileURLToPath(import.meta.url)), '../src/db.ts')
     const source = readFileSync(dbPath, 'utf8')
 
     expect(source).toMatch(
       /version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',\s+apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess/
     )
-    expect(
-      source.indexOf("version: '0089_plugin_workload_sdk_credential_ticket_runtime_access'")
-    ).toBe(source.lastIndexOf("version: '"))
+    expect(source).toMatch(
+      /version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',\s+apply: reconcilePluginWorkloadSdkRuntimeContracts/
+    )
   })
 
   it('preserves only complete ordered active policies while adding the attempt ledger', async () => {
