@@ -258,9 +258,12 @@ export class K8sGateway {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    // N1 — forwards an already-read CR snapshot so ResourceService.updateResource
+    // can skip a redundant apiserver GET (see the admin PUT ratchet in resources.ts).
+    options?: Parameters<ResourceService['updateResource']>[4]
   ): Promise<unknown> {
-    return this.resources.updateResource(plural, name, body, namespace)
+    return this.resources.updateResource(plural, name, body, namespace, options)
   }
 
   /**

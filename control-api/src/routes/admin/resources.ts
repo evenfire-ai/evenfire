@@ -5,7 +5,11 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
-import { K8sConflictError, K8sNotFoundError } from '../../services/resourceService.js'
+import {
+  K8sConflictError,
+  K8sNotFoundError,
+  type MutableResourceSnapshot,
+} from '../../services/resourceService.js'
 import { ClerumResourceType } from '../../types.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
@@ -480,16 +484,24 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         spec: Record<string, unknown>
       }
 
+      // N1 — the CR read by the ratchet below is handed to updateResource so a
+      // hosts/contexts PUT reads the apiserver ONCE, not twice (updateResource
+      // already reads `current` internally). Undefined for non hosts/contexts
+      // plurals and on the 404 path, where updateResource reads afresh and
+      // surfaces the real 404.
+      let ratchetCurrent: MutableResourceSnapshot | undefined
+
       // F0.3 RATCHET: for hosts + contexts, validate an identifier/display field
       // ONLY IF its value changed vs the current CR, so a legacy resource whose
       // spec.host / contextId is out of norm is never blocked for other edits.
       if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
         let currentSpec: Record<string, unknown> | null = null
         try {
-          const current = (await gateway.getResource(plural, req.params.name, ns)) as {
-            spec?: Record<string, unknown>
-          } | null
+          const current = (await gateway.getResource(plural, req.params.name, ns)) as
+            | (MutableResourceSnapshot & { spec?: Record<string, unknown> })
+            | null
           currentSpec = recordValue(current?.spec)
+          ratchetCurrent = current ?? undefined
         } catch (err) {
           // Missing resource: fall through with currentSpec=null (validate every
           // present field). The subsequent updateResource surfaces the real 404.
@@ -561,7 +573,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           }
         : body
       try {
-        const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Only the ratchet path (hosts/contexts) has a pre-read to hand off; the
+        // CC/mcpservers paths call with the original 4-arg arity untouched.
+        const updated = ratchetCurrent
+          ? await gateway.updateResource(plural, req.params.name, updateBody, ns, {
+              preReadCurrent: ratchetCurrent,
+            })
+          : await gateway.updateResource(plural, req.params.name, updateBody, ns)
         if (plural === 'communicationchannels' && body.spec) {
           const missingField = missingPersistedProviderSetting(updateBody.spec, updated)
           if (missingField) {
