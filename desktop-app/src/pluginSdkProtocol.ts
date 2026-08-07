@@ -1,5 +1,5 @@
 /**
- * Plugin UI SDK wire contract (spec `docs/features/plugin-ui-sdk-1.md` §5).
+ * Plugin UI SDK wire contract.
  *
  * Shared by three worlds that never share a module graph at runtime: the
  * embed preload (isolated world, no Node), the main process, and the trusted

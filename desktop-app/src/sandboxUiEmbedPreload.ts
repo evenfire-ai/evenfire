@@ -30,7 +30,7 @@ const PLUGIN_SDK_EVENT_CHANNEL = 'clerum:plugin-sdk:event'
  *     `clerum.onOauthCompleted(cb)` — OAuth completion envelope, on its own
  *        legacy channel.
  *
- *   Plugin UI SDK (spec `docs/features/plugin-ui-sdk-1.md` §7):
+ *   Plugin UI SDK:
  *     `clerum.sdk.*`           — version, capability list, batched consent,
  *                                grant state, events.
  *     `clerum.identity/org/agents/contexts/mcp/gfs/theme/notifications`
