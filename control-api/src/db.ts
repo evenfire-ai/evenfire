@@ -2302,9 +2302,10 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
     -- timeout the LOCK/DDL below fails loudly (exit 1) rather than stalling. 60s
     -- sits well above the bounded prune wake-transaction and well below the deploy's
     -- 300s kubectl-wait budget, so a transient writer is tolerated but a genuinely
-    -- stuck one surfaces fast. NOTE: the migration Job runs with backoffLimit 0, so a
-    -- timeout aborts the deploy and the deploy must be re-run; raising the Job's
-    -- backoffLimit (deploy script, out of this PR's scope) would let it self-retry.
+    -- stuck one surfaces fast. The migration Job sets backoffLimit 2 with
+    -- restartPolicy Never (deploy script, same PR), so a transient lock_timeout
+    -- abort re-runs on a fresh pod -- up to 3 attempts -- instead of failing the
+    -- deploy outright; the body is idempotent, so a retry is safe.
     SET LOCAL lock_timeout = '60s';
 
     -- Runtime writers do not take the initDb advisory lock. Hold the table locks

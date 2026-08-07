@@ -356,6 +356,9 @@ build_job_manifest() {
         # DELETE) holds its lock past that timeout the Job exits 1. The migration
         # body is idempotent, so re-running is safe; restartPolicy Never makes each
         # retry a fresh pod, giving backoffLimit + 1 attempts before the deploy fails.
+        # Note: 3 attempts, each waiting up to the 60s lock_timeout plus pod startup,
+        # can approach the 300s kubectl-wait budget below against a persistently stuck
+        # writer; raise that wait if such contention is expected.
         "backoffLimit" => 2,
         "ttlSecondsAfterFinished" => 600,
         "template" => {

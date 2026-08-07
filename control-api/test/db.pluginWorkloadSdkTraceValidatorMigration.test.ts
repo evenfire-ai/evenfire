@@ -77,7 +77,12 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     expect(recordCalls).toHaveLength(1)
   })
 
-  it('keeps the migration fail-closed for unknown top-level and nested metadata', async () => {
+  // This is a SQL-text pinning test (pure toContain over the migration body),
+  // not a behavioral fail-closed proof. The behavioral proof -- unknown
+  // top-level/nested keys actually rejected by the installed validator and
+  // CHECK constraint -- lives in the real-Postgres integration suite
+  // (db.pluginWorkloadSdkRuntimeContract.realPostgres.integration.test.ts).
+  it('pins the 0090 migration SQL text (nested prompt_bridge allowlist, type pins, revoke scope)', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0090_plugin_workload_sdk_runtime_contract_reconciliation'

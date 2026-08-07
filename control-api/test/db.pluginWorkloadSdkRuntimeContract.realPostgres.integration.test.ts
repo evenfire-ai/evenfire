@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import { initDb } from '../src/db.js'
+import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import {
   type PromptBridgeFinalizationInput,
   finalizePromptBridgeInTransaction,
 } from '../src/services/pluginWorkloadSdkFinalization.js'
+import { tokenUsagePayload } from '../src/services/tracing/usageProjection.js'
+import type { LlmUsageEvent } from '../src/services/usageEvents.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -24,10 +26,127 @@ async function commit(client: PoolClient): Promise<void> {
   await client.query('COMMIT')
 }
 
+// The historical validator installed by restoreHistoricalRuntimeState() below
+// must be the VERBATIM governed_trace_safe_agent_run_metadata definition
+// shipped by migration 0065_governed_session_replay_and_prompt_history. The
+// transcription lives in this constant so the "pins the historical validator
+// fixture" test can anchor it (whitespace-insensitively) against the real 0065
+// SQL captured from CONTROL_API_MIGRATIONS -- if 0065 ever changes, this suite
+// fails loudly instead of silently exercising a stale historical contract.
+const HISTORICAL_0065_VALIDATOR_SQL = `CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT CASE
+            WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+            ELSE jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND value ?& ARRAY[
+               'request_ref', 'provider', 'model', 'source_kind',
+               'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+               'cache_tokens_reported'
+             ]
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'request_ref', 'provider', 'model', 'source_kind',
+                  'input_tokens', 'output_tokens', 'cache_read_tokens',
+                  'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
+                )
+             )
+             AND jsonb_typeof(value->'request_ref') = 'string'
+             AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+             AND jsonb_typeof(value->'provider') = 'string'
+             AND jsonb_typeof(value->'model') = 'string'
+             AND jsonb_typeof(value->'source_kind') = 'string'
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
+             AND jsonb_typeof(value->'input_tokens') = 'number'
+             AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'output_tokens') = 'number'
+             AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+             AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+             AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+             AND (
+               NOT (value ? 'iteration')
+               OR (
+                 jsonb_typeof(value->'iteration') = 'number'
+                 AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
+               )
+             )
+          END;
+        $$;`
+
+function normalizeSqlWhitespace(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim()
+}
+
+async function capture0065MigrationSql(): Promise<string> {
+  const migration0065 = CONTROL_API_MIGRATIONS.find(candidate =>
+    candidate.version.startsWith('0065_')
+  )
+  if (!migration0065) {
+    throw new Error('no 0065_* migration is registered in CONTROL_API_MIGRATIONS')
+  }
+  const captured: string[] = []
+  await migration0065.apply({
+    query: async (text: string) => {
+      captured.push(text)
+      return { rows: [], rowCount: 0 }
+    },
+  })
+  return captured.join('\n')
+}
+
 describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real PostgreSQL', () => {
   const database = `control_api_sdk_contract_${randomBytes(6).toString('hex')}`
   let adminPool: Pool
   let dbPool: Pool
+
+  // Invocations the 0090 fencing must NOT touch (seeded in the main test
+  // before its successful migration run, re-checked after the body re-run in
+  // the idempotency test): a terminal v2 invocation and a v2 invocation whose
+  // lease is still live.
+  const preservedTerminalInvocationId = randomUUID()
+  const preservedLeasedInvocationId = randomUUID()
+
+  async function fetchPreservedInvocations() {
+    const result = await dbPool.query<{
+      recipe_name: string
+      contract_version: number
+      status: string
+      lease_expires_at: Date | null
+    }>(
+      `SELECT recipe_name, contract_version, status, lease_expires_at
+         FROM plugin_workload_sdk_invocations
+        WHERE id = ANY($1::uuid[])
+        ORDER BY recipe_name`,
+      [[preservedLeasedInvocationId, preservedTerminalInvocationId]]
+    )
+    return result.rows
+  }
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
@@ -136,81 +255,25 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
   }
 
   async function restoreHistoricalRuntimeState(): Promise<void> {
-    // The validator body below is the VERBATIM
+    // HISTORICAL_0065_VALIDATOR_SQL is the VERBATIM
     // governed_trace_safe_agent_run_metadata definition shipped by migration
-    // 0065_governed_session_replay_and_prompt_history (control-api/src/db.ts).
+    // 0065_governed_session_replay_and_prompt_history, anchored against the
+    // real migration SQL by the "pins the historical validator fixture" test.
     // It is intentionally permissive where 0090 hardens: prompt_bridge is
     // allowed, invocation_id/provider_attempt_id only need to match the lax
     // '^[0-9a-f-]{36}$' shape, provider_attempt_index/attempt_count are
     // uncapped, target_ref has no length cap, and there is no allowlist for
     // nested prompt_bridge keys. Installing the real historical validator (not
     // a strawman) lets the test seed rows 0065 accepted and 0090 must reject.
+    //
+    // The remaining pre-0090 state below (RESET search_path, the GRANT set,
+    // the contract_version DEFAULT 2, and the dropped/permissive constraints)
+    // is NOT derivable from CONTROL_API_MIGRATIONS: it accumulated through
+    // in-place edits of the bootstrap schema (pluginWorkloadSdkSchema.ts and
+    // friends) rather than versioned migrations, so there is no historical SQL
+    // text to anchor it against. It is transcribed here by hand on purpose.
     await dbPool.query(`
-      CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
-      RETURNS BOOLEAN
-      LANGUAGE sql
-      IMMUTABLE
-      AS $$
-        SELECT CASE
-          WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
-          ELSE jsonb_typeof(value) = 'object'
-           AND octet_length(value::text) <= 16384
-           AND value ?& ARRAY[
-             'request_ref', 'provider', 'model', 'source_kind',
-             'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
-             'cache_tokens_reported'
-           ]
-           AND NOT EXISTS (
-             SELECT 1
-               FROM jsonb_object_keys(value) AS key_name
-              WHERE key_name NOT IN (
-                'request_ref', 'provider', 'model', 'source_kind',
-                'input_tokens', 'output_tokens', 'cache_read_tokens',
-                'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
-              )
-           )
-           AND jsonb_typeof(value->'request_ref') = 'string'
-           AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
-           AND jsonb_typeof(value->'provider') = 'string'
-           AND jsonb_typeof(value->'model') = 'string'
-           AND jsonb_typeof(value->'source_kind') = 'string'
-           AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
-           AND jsonb_typeof(value->'input_tokens') = 'number'
-           AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
-           AND jsonb_typeof(value->'output_tokens') = 'number'
-           AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
-           AND jsonb_typeof(value->'cache_read_tokens') = 'number'
-           AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
-           AND jsonb_typeof(value->'cache_write_tokens') = 'number'
-           AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
-           AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
-           AND (
-             NOT (value ? 'iteration')
-             OR (
-               jsonb_typeof(value->'iteration') = 'number'
-               AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
-             )
-           )
-           AND (
-             NOT (value ? 'prompt_bridge')
-             OR (
-               jsonb_typeof(value->'prompt_bridge') = 'object'
-               AND value->'prompt_bridge' ?& ARRAY[
-                 'invocation_id', 'attempt_generation', 'target_ref',
-                 'fallback_used', 'attempt_count', 'provider_attempt_id',
-                 'provider_attempt_index'
-               ]
-               AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
-               AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
-               AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
-               AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
-               AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
-               AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
-               AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
-             )
-           )
-        END;
-      $$;
+      ${HISTORICAL_0065_VALIDATOR_SQL}
       ALTER FUNCTION governed_trace_safe_metadata(JSONB) RESET search_path;
       ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB) RESET search_path;
       REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB)
@@ -290,29 +353,73 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
   }
 
   function validPayload(invocationId = randomUUID(), providerAttemptId = randomUUID()) {
-    return {
-      request_ref: 'a'.repeat(64),
+    // Built by the REAL producer (tokenUsagePayload in
+    // services/tracing/usageProjection.ts) from a fully-populated
+    // LlmUsageEvent, so any drift in the producer's payload shape breaks this
+    // suite instead of leaving it green over a hand-typed stale copy.
+    const usage: LlmUsageEvent = {
+      request_id: 'plugin-workload-sdk-runtime-contract-request',
+      ts: new Date().toISOString(),
+      run_id: null,
+      host_ref: 'mcp-host/integration',
+      context_ref: null,
+      team_id: null,
       provider: 'openai',
       model: 'gpt-4o-mini',
+      llm_secret_name: 'openai-api-key',
       source_kind: 'plugin_workload_sdk',
+      user_id: null,
+      sender: null,
+      channel_type: null,
+      recipe_name: null,
+      cron_job_id: null,
+      task_id: null,
+      iteration: null,
       input_tokens: 23,
       output_tokens: 11,
       cache_read_tokens: 0,
       cache_write_tokens: 0,
       cache_tokens_reported: false,
-      prompt_bridge: {
+      prompt_bridge_metadata: {
         invocation_id: invocationId,
-        attempt_generation: 1,
         target_ref: 'primary-openai',
+        credential_slot: 'openai-api-key',
         fallback_used: false,
         attempt_count: 1,
+        attempt_generation: 1,
         provider_attempt_id: providerAttemptId,
         provider_attempt_index: 1,
       },
     }
+    const payload = tokenUsagePayload(usage)
+    if (!payload.prompt_bridge) {
+      throw new Error(
+        'tokenUsagePayload dropped prompt_bridge for a fully-populated plugin_workload_sdk usage event'
+      )
+    }
+    return { ...payload, prompt_bridge: payload.prompt_bridge }
   }
 
-  it('repairs the historical runtime contracts, finalizes usage, and is idempotent', async () => {
+  it('pins the historical validator fixture to the verbatim 0065 migration SQL', async () => {
+    // Anchors restoreHistoricalRuntimeState()'s transcription against the real
+    // 0065 migration body in CONTROL_API_MIGRATIONS (captured through a
+    // recording DbClient; 0065's apply issues exactly one query and never
+    // branches on results). If 0065 ever changes, this fails loudly instead of
+    // letting the suite keep exercising a stale "historical" contract.
+    const sql0065 = await capture0065MigrationSql()
+    const validatorMatch = sql0065.match(
+      /CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata[\s\S]*?\$\$;/
+    )
+    expect(
+      validatorMatch,
+      'migration 0065 no longer defines governed_trace_safe_agent_run_metadata'
+    ).not.toBeNull()
+    expect(normalizeSqlWhitespace(HISTORICAL_0065_VALIDATOR_SQL)).toBe(
+      normalizeSqlWhitespace(validatorMatch![0])
+    )
+  })
+
+  it('repairs the historical runtime contracts, finalizes usage, and dedups re-runs', async () => {
     await restoreHistoricalRuntimeState()
 
     const historicalState = await dbPool.query<{
@@ -534,6 +641,40 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       ambiguousInvocationId,
     ])
 
+    // Rows the fencing must PRESERVE, seeded in the SAME run as the successful
+    // migration below. If the fencing UPDATE's WHERE ever loses
+    // `status = 'in_progress'`, the terminal v2 row gets rewritten and the
+    // preservation assertion after initDb fails; if it loses
+    // `lease_expires_at IS NULL`, the live-lease v2 row gets rewritten and the
+    // assertion fails too.
+    await dbPool.query(
+      `INSERT INTO plugin_workload_sdk_invocations
+         (id, recipe_namespace, recipe_name, caller_ref, method, detail,
+          idempotency_key_hash, payload_hash, status, authorization_decision,
+          contract_version, attempt_generation, lease_expires_at)
+       VALUES
+         ($1, 'sandbox-recipes', 'preserved-v2-terminal', 'integration-test',
+          'promptBridge', '{}', $3, $4, 'complete', 'authorized', 2, 1, NULL),
+         ($2, 'sandbox-recipes', 'preserved-v2-leased', 'integration-test',
+          'promptBridge', '{}', $5, $6, 'in_progress', 'authorized', 2, 1,
+          now() + interval '30 minutes')`,
+      [
+        preservedTerminalInvocationId,
+        preservedLeasedInvocationId,
+        randomBytes(32).toString('hex'),
+        randomBytes(32).toString('hex'),
+        randomBytes(32).toString('hex'),
+        randomBytes(32).toString('hex'),
+      ]
+    )
+    const preservedBefore = await fetchPreservedInvocations()
+    expect(preservedBefore).toMatchObject([
+      { recipe_name: 'preserved-v2-leased', contract_version: 2, status: 'in_progress' },
+      { recipe_name: 'preserved-v2-terminal', contract_version: 2, status: 'complete' },
+    ])
+    expect(preservedBefore[0]?.lease_expires_at).not.toBeNull()
+    expect(preservedBefore[1]?.lease_expires_at).toBeNull()
+
     const legacyClient = await dbPool.connect()
     const legacyInvocationId = randomUUID()
     const legacyProviderAttemptId = randomUUID()
@@ -595,6 +736,13 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
     )
     expect(repairedProviderAttempt.rows[0]?.status).toBe('failed')
     expect(repairedProviderAttempt.rows[0]?.completed_at).not.toBeNull()
+
+    // "preserves terminal v2" / "reconciles only ... without a lease": the
+    // fencing rewrote ONLY the legacy v2-no-lease invocation above. The
+    // terminal v2 row and the live-lease in-progress v2 row kept their
+    // original contract_version, status, AND lease_expires_at byte-for-byte.
+    const preservedAfter = await fetchPreservedInvocations()
+    expect(preservedAfter).toEqual(preservedBefore)
 
     const accepted = await dbPool.query<{ accepted: boolean }>(
       `SELECT governed_trace_safe_agent_run_metadata('token_usage', $1::jsonb) AS accepted`,
@@ -812,16 +960,120 @@ describeRealPostgres('Plugin Workload SDK runtime-contract upgrade on real Postg
       workflow_metadata: false,
     })
 
-    const beforeSecondRun = await dbPool.query<{ count: string }>(
+    // Runner dedup ONLY -- this is NOT a body-idempotency proof: 0090 is
+    // already registered in schema_migrations, so this second initDb takes the
+    // `appliedVersions.has(version)` shortcut in applyPendingMigrations and
+    // never re-executes the migration body. What it proves is that a re-run
+    // does not double-register the version. True body re-application over its
+    // own output is covered by the dedicated idempotency test below.
+    const beforeDedupRun = await dbPool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM schema_migrations
         WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation'`
     )
     await initDb({ connect: () => dbPool.connect() })
-    const afterSecondRun = await dbPool.query<{ count: string }>(
+    const afterDedupRun = await dbPool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM schema_migrations
         WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation'`
     )
-    expect(beforeSecondRun.rows[0]?.count).toBe('1')
-    expect(afterSecondRun.rows[0]?.count).toBe('1')
+    expect(beforeDedupRun.rows[0]?.count).toBe('1')
+    expect(afterDedupRun.rows[0]?.count).toBe('1')
+  })
+
+  it('re-applies the 0090 migration body idempotently over its own output', async () => {
+    // Precondition (fail loud, not skip): the main test above must have left
+    // the database fully migrated with 0090 registered exactly once.
+    const registered = await dbPool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM schema_migrations
+        WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation'`
+    )
+    expect(registered.rows[0]?.count).toBe('1')
+
+    type ContractState = {
+      trace_check: string
+      trace_check_validated: boolean
+      lease_check: string
+      attempt_check: string
+      default_value: string | null
+      validator_config: string[] | null
+      metadata_config: string[] | null
+      control_validator: boolean
+      trace_validator: boolean
+      workflow_validator: boolean
+    }
+    async function captureContractState(): Promise<ContractState> {
+      const result = await dbPool.query<ContractState>(
+        `SELECT
+            (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conname = 'agent_run_events_check') AS trace_check,
+            (SELECT convalidated FROM pg_constraint
+              WHERE conname = 'agent_run_events_check') AS trace_check_validated,
+            (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conname = 'plugin_workload_sdk_invocations_v2_lease_check') AS lease_check,
+            (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conname = 'plugin_workload_sdk_provider_attempts_status_check') AS attempt_check,
+            (SELECT column_default FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'plugin_workload_sdk_invocations'
+                AND column_name = 'contract_version') AS default_value,
+            (SELECT proconfig FROM pg_proc
+              WHERE proname = 'governed_trace_safe_agent_run_metadata'
+                AND proargtypes::text = '25 3802') AS validator_config,
+            (SELECT proconfig FROM pg_proc
+              WHERE proname = 'governed_trace_safe_metadata'
+                AND proargtypes::text = '3802') AS metadata_config,
+            has_function_privilege('control_api_runtime', 'public.governed_trace_safe_agent_run_metadata(text,jsonb)', 'EXECUTE') AS control_validator,
+            has_function_privilege('trace_maintenance_runtime', 'public.governed_trace_safe_agent_run_metadata(text,jsonb)', 'EXECUTE') AS trace_validator,
+            has_function_privilege('workflow_recipes_runtime', 'public.governed_trace_safe_agent_run_metadata(text,jsonb)', 'EXECUTE') AS workflow_validator`
+      )
+      const row = result.rows[0]
+      if (!row) throw new Error('contract-state capture query returned no row')
+      return row
+    }
+
+    const stateBefore = await captureContractState()
+    const preservedBefore = await fetchPreservedInvocations()
+
+    // Same deregistration trick restoreHistoricalRuntimeState uses: with the
+    // schema_migrations row gone, applyPendingMigrations MUST execute the 0090
+    // body a second time -- this time over the body's OWN output (validators,
+    // constraints, and fencing already applied). This is the re-application
+    // the deploy Job's backoffLimit-2 retry relies on being safe, and the
+    // property the migration's own "the body is idempotent" comment claims.
+    await dbPool.query(
+      `DELETE FROM schema_migrations
+        WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation'`
+    )
+
+    // The second body execution must NOT throw...
+    await initDb({ connect: () => dbPool.connect() })
+
+    // ...must leave the runtime contract byte-for-byte identical (constraint
+    // still validated, functions still pinned to search_path, grants and
+    // defaults unchanged)...
+    const stateAfter = await captureContractState()
+    expect(stateAfter).toEqual(stateBefore)
+    // Guard against before/after drifting together: pin the load-bearing bits.
+    expect(stateAfter.trace_check_validated).toBe(true)
+    expect(stateAfter.trace_check).toContain('IS TRUE')
+    expect(stateAfter.lease_check).toContain('lease_expires_at IS NOT NULL')
+    expect(stateAfter.attempt_check).toContain("'skipped'")
+    expect(stateAfter.default_value).toBe('1')
+    expect(stateAfter.validator_config).toContain('search_path=pg_catalog, public')
+    expect(stateAfter.metadata_config).toContain('search_path=pg_catalog, public')
+    expect(stateAfter).toMatchObject({
+      control_validator: true,
+      trace_validator: false,
+      workflow_validator: false,
+    })
+
+    // ...must not have re-fenced the preserved invocations...
+    expect(await fetchPreservedInvocations()).toEqual(preservedBefore)
+
+    // ...and must have re-registered the version exactly once.
+    const reRegistered = await dbPool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM schema_migrations
+        WHERE version = '0090_plugin_workload_sdk_runtime_contract_reconciliation'`
+    )
+    expect(reRegistered.rows[0]?.count).toBe('1')
   })
 })
