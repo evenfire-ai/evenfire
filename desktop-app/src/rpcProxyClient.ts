@@ -1,5 +1,6 @@
 import { config } from './config.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
   ContextBreakdownResult,
@@ -9,12 +10,16 @@ import {
   HostModelsResult,
   HostRuntimeHealth,
   HostRuntimeStatus,
+  MessageToolStep,
   PendingApprovalLite,
   RpcAllowedServersResult,
   SandboxUiApp,
   SessionLifecycleState,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
 } from './types.js'
 
@@ -28,6 +33,304 @@ export type { SandboxUiApp } from './types.js'
  * convention used by {@link RpcProxyClient.loadSessionMessages}.
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
+
+function wireObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value as Record<string, unknown>
+}
+
+function wireString(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`Invalid ${label}`)
+  return value
+}
+
+function optionalWireString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return wireString(value, label)
+}
+
+function wireSafeInteger(
+  value: unknown,
+  label: string,
+  minimum: number,
+  optional = false
+): number | undefined {
+  if (optional && (value === undefined || value === null)) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+function optionalWireBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'boolean') throw new Error(`Invalid ${label}`)
+  return value
+}
+
+function parseSessionState(value: unknown, label: string): SessionLifecycleState | undefined {
+  if (value === undefined || value === null) return undefined
+  if (value === 'idle' || value === 'processing' || value === 'awaiting_approval') return value
+  if (typeof value === 'string') return undefined
+  throw new Error(`Invalid ${label}`)
+}
+
+function parsePendingApproval(value: unknown, label: string): PendingApprovalLite | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = wireObject(value, label)
+  return {
+    requestId: wireString(record.requestId, `${label}.requestId`),
+    displayName: wireString(record.displayName, `${label}.displayName`),
+  }
+}
+
+function parseTokens(value: unknown, label: string): SessionTokensLite | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = wireObject(value, label)
+  return {
+    input: wireSafeInteger(record.input, `${label}.input`, 0)!,
+    output: wireSafeInteger(record.output, `${label}.output`, 0)!,
+    ...(record.cacheRead !== undefined
+      ? { cacheRead: wireSafeInteger(record.cacheRead, `${label}.cacheRead`, 0)! }
+      : {}),
+    ...(record.cacheWrite !== undefined
+      ? { cacheWrite: wireSafeInteger(record.cacheWrite, `${label}.cacheWrite`, 0)! }
+      : {}),
+  }
+}
+
+function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
+  if (!Array.isArray(value)) throw new Error(`Invalid ${label}`)
+  return value.map((step, index) => {
+    const stepLabel = `${label}[${index}]`
+    const record = wireObject(step, stepLabel)
+    const state = record.state
+    if (state !== 'completed' && state !== 'error') {
+      throw new Error(`Invalid ${stepLabel}.state`)
+    }
+    return {
+      toolName: wireString(record.toolName, `${stepLabel}.toolName`),
+      displayName: wireString(record.displayName, `${stepLabel}.displayName`),
+      state,
+      ...(record.durationMs !== undefined
+        ? { durationMs: wireSafeInteger(record.durationMs, `${stepLabel}.durationMs`, 0)! }
+        : {}),
+      ...(record.errorSummary !== undefined
+        ? { errorSummary: wireString(record.errorSummary, `${stepLabel}.errorSummary`) }
+        : {}),
+    }
+  })
+}
+
+function parseSessionsListResult(value: unknown): SessionsListResult {
+  const record = wireObject(value, 'sessions response')
+  if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
+  let firstItemError: unknown
+  let droppedItemCount = 0
+  const items = record.items.flatMap((item, index): SessionsListResult['items'] => {
+    try {
+      const entry = wireObject(item, `sessions response.items[${index}]`)
+      const state = parseSessionState(entry.state, `sessions response.items[${index}].state`)
+      return [
+        {
+          agent: wireString(entry.agent, `sessions response.items[${index}].agent`),
+          chatId: wireString(entry.chatId, `sessions response.items[${index}].chatId`),
+          turnCount: wireSafeInteger(
+            entry.turnCount,
+            `sessions response.items[${index}].turnCount`,
+            0
+          )!,
+          ...(entry.messageCount != null
+            ? {
+                messageCount: wireSafeInteger(
+                  entry.messageCount,
+                  `sessions response.items[${index}].messageCount`,
+                  0
+                )!,
+              }
+            : {}),
+          lastActivityAt: wireString(
+            entry.lastActivityAt,
+            `sessions response.items[${index}].lastActivityAt`
+          ),
+          ...(state !== undefined ? { state } : {}),
+          ...(entry.activeTaskId != null
+            ? {
+                activeTaskId: optionalWireString(
+                  entry.activeTaskId,
+                  `sessions response.items[${index}].activeTaskId`
+                ),
+              }
+            : {}),
+          ...(entry.pendingApproval != null
+            ? {
+                pendingApproval: parsePendingApproval(
+                  entry.pendingApproval,
+                  `sessions response.items[${index}].pendingApproval`
+                ),
+              }
+            : {}),
+          ...(entry.tokens != null
+            ? { tokens: parseTokens(entry.tokens, `sessions response.items[${index}].tokens`) }
+            : {}),
+        },
+      ]
+    } catch (error) {
+      firstItemError ??= error
+      droppedItemCount += 1
+      // R1-H1: a tolerant partial parse must not lose a session silently. A single
+      // corrupt entry should not blank the whole sidebar (we still return the valid
+      // items), but the drop has to leave a trace — otherwise a user's chat vanishes
+      // from "Latest sessions" with no signal. Log the index + item error so the loss
+      // is traceable in main-process logs, and count it into `droppedItemCount` below
+      // so the renderer can observe that `items` is shorter than the server sent.
+      console.warn(
+        `[RpcProxyClient] Dropped malformed session catalog item at index ${index}:`,
+        error
+      )
+      return []
+    }
+  })
+  if (record.items.length > 0 && items.length === 0 && firstItemError) throw firstItemError
+  return {
+    items,
+    ...(droppedItemCount > 0 ? { droppedItemCount } : {}),
+    ...(record.nextCursor != null
+      ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
+      : {}),
+  }
+}
+
+function parseSessionMessagesResult(
+  value: unknown,
+  expectedAgent: string,
+  expectedChatId: string
+): SessionMessagesResult {
+  const record = wireObject(value, 'session messages response')
+  const agent = wireString(record.agent, 'session messages response.agent')
+  const chatId = wireString(record.chatId, 'session messages response.chatId')
+  if (agent !== expectedAgent || chatId !== expectedChatId) {
+    throw new Error('Invalid session messages response identity')
+  }
+  if (!Array.isArray(record.turns)) throw new Error('Invalid session messages response.turns')
+  const state = parseSessionState(record.state, 'session messages response.state')
+  return {
+    agent,
+    chatId,
+    ...(record.totalTurns != null
+      ? {
+          totalTurns: wireSafeInteger(
+            record.totalTurns,
+            'session messages response.totalTurns',
+            0
+          )!,
+        }
+      : {}),
+    ...(record.oldestTurnNumber != null
+      ? {
+          oldestTurnNumber: wireSafeInteger(
+            record.oldestTurnNumber,
+            'session messages response.oldestTurnNumber',
+            0
+          )!,
+        }
+      : {}),
+    ...(record.latestTurnNumber != null
+      ? {
+          latestTurnNumber: wireSafeInteger(
+            record.latestTurnNumber,
+            'session messages response.latestTurnNumber',
+            0
+          )!,
+        }
+      : {}),
+    ...(record.hasMoreBefore != null
+      ? {
+          hasMoreBefore: optionalWireBoolean(
+            record.hasMoreBefore,
+            'session messages response.hasMoreBefore'
+          ),
+        }
+      : {}),
+    ...(record.hasMoreAfter != null
+      ? {
+          hasMoreAfter: optionalWireBoolean(
+            record.hasMoreAfter,
+            'session messages response.hasMoreAfter'
+          ),
+        }
+      : {}),
+    ...(state !== undefined ? { state } : {}),
+    ...(record.activeTaskId != null
+      ? {
+          activeTaskId: optionalWireString(
+            record.activeTaskId,
+            'session messages response.activeTaskId'
+          ),
+        }
+      : {}),
+    ...(record.pendingApproval != null
+      ? {
+          pendingApproval: parsePendingApproval(
+            record.pendingApproval,
+            'session messages response.pendingApproval'
+          ),
+        }
+      : {}),
+    ...(record.tokens != null
+      ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
+      : {}),
+    turns: record.turns.map((turn, index) => {
+      const entry = wireObject(turn, `session messages response.turns[${index}]`)
+      return {
+        number: wireSafeInteger(
+          entry.number,
+          `session messages response.turns[${index}].number`,
+          0
+        )!,
+        user_input: wireString(
+          entry.user_input,
+          `session messages response.turns[${index}].user_input`
+        ),
+        ...(entry.response != null
+          ? {
+              response: optionalWireString(
+                entry.response,
+                `session messages response.turns[${index}].response`
+              ),
+            }
+          : {}),
+        started_at: wireString(
+          entry.started_at,
+          `session messages response.turns[${index}].started_at`
+        ),
+        ...(entry.completed_at != null
+          ? {
+              completed_at: optionalWireString(
+                entry.completed_at,
+                `session messages response.turns[${index}].completed_at`
+              ),
+            }
+          : {}),
+        ...(entry.tokens != null
+          ? {
+              tokens: parseTokens(entry.tokens, `session messages response.turns[${index}].tokens`),
+            }
+          : {}),
+        ...(entry.tool_steps != null
+          ? {
+              tool_steps: parseToolSteps(
+                entry.tool_steps,
+                `session messages response.turns[${index}].tool_steps`
+              ),
+            }
+          : {}),
+      }
+    }),
+  }
+}
 
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
@@ -536,23 +839,15 @@ export class RpcProxyClient {
 
   async listSessions(
     rpcToken: string,
-    hostRef: string
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      // V5: the wire already carries these per-session recovery fields
-      // (mcp-host `main.ts` `...sessionStateView(conversation)`); only the TS
-      // return type used to omit them, hiding the batch badge seeding source.
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
-    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`), {
+    hostRef: string,
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
+    assertSafeRouteSegment('hostRef', hostRef)
+    const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
+    if (query.agent) requestUrl.searchParams.set('agent', query.agent)
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
+    const response = await fetch(requestUrl, {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -564,32 +859,35 @@ export class RpcProxyClient {
         body
       )
     }
-    return response.json() as Promise<{
-      items: Array<{
-        agent: string
-        chatId: string
-        turnCount: number
-        lastActivityAt: string
-        state?: SessionLifecycleState
-        activeTaskId?: string
-        pendingApproval?: PendingApprovalLite
-        tokens?: SessionTokensLite
-      }>
-    }>
+    return parseSessionsListResult(await response.json())
   }
 
   async loadSessionMessages(
     rpcToken: string,
     hostRef: string,
     agent: string,
-    chatId: string
+    chatId: string,
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
-    const response = await fetch(
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
+    const requestUrl = new URL(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
-      ),
-      { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
+      )
     )
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.beforeTurn !== undefined) {
+      requestUrl.searchParams.set('beforeTurn', String(query.beforeTurn))
+    }
+    if (query.afterTurn !== undefined) {
+      requestUrl.searchParams.set('afterTurn', String(query.afterTurn))
+    }
+    const response = await fetch(requestUrl, {
+      headers: { authorization: `Bearer ${rpcToken}` },
+      signal: withTimeout(),
+    })
     if (response.status === 404) {
       // Keep the '404' token in the message: the renderer's `isHttp404` matches on
       // it to evict a stale local chat.
@@ -606,7 +904,7 @@ export class RpcProxyClient {
     // F5: cast to the full wire shape — the server returns `state`/`activeTaskId`/
     // `pendingApproval` + per-turn `tool_steps`, and the renderer's recovery path
     // reads them. The previous cast dropped them, silently weakening the contract.
-    return response.json() as Promise<SessionMessagesResult>
+    return parseSessionMessagesResult(await response.json(), agent, chatId)
   }
 
   /**
@@ -624,6 +922,9 @@ export class RpcProxyClient {
     agent: string,
     chatId: string
   ): Promise<ContextBreakdownResult> {
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
     const response = await fetch(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`

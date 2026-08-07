@@ -1,5 +1,12 @@
 import type { ReapedSession } from '../../db/worker/protocol'
-import type { Conversation, PendingApproval, TurnToolCall } from '../types'
+import {
+  type Conversation,
+  ConversationState,
+  type PendingApproval,
+  type Turn,
+  type TurnToolCall,
+} from '../types'
+import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
  * Token usage from a SINGLE LLM call, accumulated additively into the durable
@@ -51,6 +58,129 @@ export interface PersistedSessionListing {
 
 export type EvictCallback = (sessionKey: string, conversation: Conversation) => void
 
+export interface SessionListCursor {
+  updatedAt: Date
+  key: string
+}
+
+export interface SessionListQuery {
+  limit?: number
+  cursor?: SessionListCursor
+  /**
+   * Explicit scoped agent for prefixes shaped as `${user}:rpc:${agent}:`.
+   * This avoids re-inferring scoped intent from ambiguous keys such as
+   * `${user}:rpc:rpc:`.
+   */
+  agent?: string
+}
+
+export interface SessionMessagesQuery {
+  limit?: number
+  beforeTurn?: number
+  afterTurn?: number
+}
+
+export interface ConversationSessionSummary {
+  key: string
+  agent: string
+  chatId: string
+  state: ConversationState
+  activeTaskId?: string
+  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name'>
+  turnCount: number
+  messageCount: number
+  lastActivityAt: Date
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  cacheTokensReported?: boolean
+}
+
+export interface ConversationSessionMessages extends Omit<
+  ConversationSessionSummary,
+  'lastActivityAt' | 'turnCount' | 'messageCount'
+> {
+  turns: Turn[]
+  totalTurns: number
+  firstTurnNumber?: number
+  lastTurnNumber?: number
+}
+
+function compareSessionSummaries(
+  left: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>,
+  right: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>
+): number {
+  const byUpdated = right.lastActivityAt.getTime() - left.lastActivityAt.getTime()
+  if (byUpdated) return byUpdated
+  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0
+}
+
+function afterSessionCursor(
+  summary: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>,
+  cursor: SessionListCursor | undefined
+): boolean {
+  if (!cursor) return true
+  const updatedAt = summary.lastActivityAt.getTime()
+  const cursorUpdatedAt = cursor.updatedAt.getTime()
+  return updatedAt < cursorUpdatedAt || (updatedAt === cursorUpdatedAt && summary.key > cursor.key)
+}
+
+export function boundedTurns(turns: Turn[], query: SessionMessagesQuery = {}): Turn[] {
+  const limit =
+    query.limit === undefined
+      ? undefined
+      : Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : 0
+  const eligibleTurns =
+    query.afterTurn !== undefined
+      ? turns.filter(turn => turn.number > query.afterTurn!)
+      : query.beforeTurn !== undefined
+        ? turns.filter(turn => turn.number < query.beforeTurn!)
+        : turns
+  return limit === undefined
+    ? eligibleTurns
+    : query.afterTurn !== undefined
+      ? eligibleTurns.slice(0, limit)
+      : limit === 0
+        ? []
+        : eligibleTurns.slice(-limit)
+}
+
+function sessionMessagesFromConversation(
+  key: string,
+  prefix: string,
+  conversation: Conversation,
+  query: SessionMessagesQuery = {}
+): ConversationSessionMessages | undefined {
+  const parts = sessionPartsFromPrefixedKey(key, prefix)
+  if (!parts) return undefined
+  const turns = boundedTurns(conversation.turns, query)
+  return {
+    key,
+    agent: parts.agent,
+    chatId: parts.chatId,
+    state: conversation.state,
+    activeTaskId: conversation.activeTaskId,
+    pendingApproval: conversation.pending_approval
+      ? {
+          request_id: conversation.pending_approval.request_id,
+          tool_name: conversation.pending_approval.tool_name,
+        }
+      : undefined,
+    turns,
+    totalTurns: conversation.turns.length,
+    firstTurnNumber: conversation.turns[0]?.number,
+    lastTurnNumber: conversation.turns.at(-1)?.number,
+    input_tokens: conversation.input_tokens,
+    output_tokens: conversation.output_tokens,
+    cache_read_tokens: conversation.cache_read_tokens,
+    cache_write_tokens: conversation.cache_write_tokens,
+    cacheTokensReported: conversation.cacheTokensReported,
+  }
+}
+
 /**
  * Storage-level abstraction for the session-keyed conversation map.
  *
@@ -101,6 +231,25 @@ export interface ConversationStore {
   /** Prefetch every session whose sessionKey starts with `prefix`. Used by
    *  list endpoints. Idempotent per prefix. */
   prefetchUserSessions(prefix: string): Promise<void>
+
+  /**
+   * Return bounded session summaries without hydrating complete transcripts.
+   * Full turns are intentionally reserved for `getOrLoad` / message endpoints.
+   */
+  listSessionSummariesByPrefix(
+    prefix: string,
+    query?: SessionListQuery
+  ): Promise<ConversationSessionSummary[]>
+
+  /**
+   * Return a bounded transcript window for one exact session key.
+   * Durable stores should fetch only the requested turn window.
+   */
+  getSessionMessagesByKey(
+    key: string,
+    prefix: string,
+    query?: SessionMessagesQuery
+  ): Promise<ConversationSessionMessages | undefined>
 
   /** Cold-start sweep: load every session with a pending_approval row,
    *  pin them in cache, and return enough metadata for the
@@ -229,6 +378,66 @@ export class InMemoryConversationStore implements ConversationStore {
 
   async prefetchUserSessions(_prefix: string): Promise<void> {
     /* nothing to prefetch — everything that exists is already in RAM */
+  }
+
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    const userId = userIdFromRpcPrefix(prefix, query.agent)
+    if (!userId) return []
+    const summaries: ConversationSessionSummary[] = []
+    for (const { key, conversation } of this.listByPrefix(prefix)) {
+      if (conversation.user_id !== userId) continue
+      const parts = sessionPartsFromPrefixedKey(key, prefix, query.agent)
+      if (!parts) continue
+      summaries.push({
+        key,
+        agent: parts.agent,
+        chatId: parts.chatId,
+        state: conversation.state,
+        activeTaskId: conversation.activeTaskId,
+        pendingApproval: conversation.pending_approval
+          ? {
+              request_id: conversation.pending_approval.request_id,
+              tool_name: conversation.pending_approval.tool_name,
+            }
+          : undefined,
+        turnCount: conversation.turns.length,
+        messageCount: conversation.turns.reduce(
+          (total, turn) => total + 1 + (turn.response === undefined ? 0 : 1),
+          0
+        ),
+        lastActivityAt: conversation.updated_at,
+        input_tokens: conversation.input_tokens,
+        output_tokens: conversation.output_tokens,
+        cache_read_tokens: conversation.cache_read_tokens,
+        cache_write_tokens: conversation.cache_write_tokens,
+        cacheTokensReported: conversation.cacheTokensReported,
+      })
+    }
+
+    const filtered = summaries
+      .filter(summary => afterSessionCursor(summary, query.cursor))
+      .sort(compareSessionSummaries)
+    const limit =
+      query.limit === undefined
+        ? undefined
+        : Number.isInteger(query.limit) && query.limit > 0
+          ? query.limit
+          : 0
+    return limit === undefined ? filtered : filtered.slice(0, limit)
+  }
+
+  async getSessionMessagesByKey(
+    key: string,
+    prefix: string,
+    query: SessionMessagesQuery = {}
+  ): Promise<ConversationSessionMessages | undefined> {
+    const conversation = this.map.get(key)
+    const userId = userIdFromRpcPrefix(prefix)
+    if (!conversation || !userId || conversation.user_id !== userId) return undefined
+    return sessionMessagesFromConversation(key, prefix, conversation, query)
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

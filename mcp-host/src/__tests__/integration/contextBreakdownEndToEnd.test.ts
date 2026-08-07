@@ -126,7 +126,7 @@ describe('F1 — context breakdown end-to-end (factory → port → sink → pro
 
     const handleContextBreakdown = async (userSub: string, agent: string, chatId: string) => {
       const key = `${userSub}:rpc:${agent}:${chatId}`
-      const conv = await manager.getSessionByKeyAsync(key)
+      const conv = await manager.getSessionByKeyForUserAsync(key, userSub)
       if (!conv) return null
       return { breakdown: projectContextBreakdown(conv) ?? null }
     }

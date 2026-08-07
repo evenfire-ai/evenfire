@@ -21,15 +21,17 @@ export function useAgentsDataController() {
   })
 
   const refreshWithCatalog = useCallback(
-    async (catalogInput: AccessCatalog | Promise<AccessCatalog>) => {
+    async (catalogInput: AccessCatalog | Promise<AccessCatalog>): Promise<boolean> => {
       try {
         await queryClient.fetchQuery({
           queryKey: desktopQueryKeys.accessCatalog,
           queryFn: () => Promise.resolve(catalogInput),
           staleTime: 0,
         })
+        return true
       } catch {
         // Query state already records the error for consumers.
+        return false
       }
     },
     [queryClient]

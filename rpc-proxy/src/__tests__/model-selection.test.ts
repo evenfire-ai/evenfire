@@ -81,6 +81,26 @@ describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
   })
 
+  it('bounds the upstream read with a timeout signal like its session-read siblings', async () => {
+    // Regression (R2-M1): the models route omitted the AbortSignal.timeout that
+    // list/messages/context-breakdown carry, so a half-open upstream hung the
+    // request forever instead of aborting to a 504.
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({ provider: 'claude', hostDefault: 'x', models: [] }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/models')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
+  })
+
   it('passes the chatId query through to mcp-host', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       status: 200,
