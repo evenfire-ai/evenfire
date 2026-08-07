@@ -263,4 +263,58 @@ describe('control-ui control-api proxy route', () => {
       expect(Buffer.from(init.body as ArrayBuffer).toString('utf8')).toBe(payload)
     })
   })
+
+  describe('header handling', () => {
+    afterEach(() => vi.restoreAllMocks())
+
+    it('strips the Expect header before forwarding upstream (RC4)', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/gfs/proxy/x', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Expect: '100-continue',
+          Authorization: 'Bearer t',
+        },
+        body: JSON.stringify({ a: 1 }),
+      })
+
+      await POST(req, { params: { path: ['api', 'v1', 'gfs', 'proxy', 'x'] } })
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit & { headers: Headers }]
+
+      // undici's fetch throws NotSupportedError if `expect` reaches it — the proxy
+      // must never forward it (RC4). Authorization still passes through.
+      expect(init.headers.has('expect')).toBe(false)
+      expect(init.headers.get('authorization')).toBe('Bearer t')
+    })
+
+    it('preserves each Set-Cookie separately and forwards Content-Length on responses', async () => {
+      const upstream = new Response('body-bytes', {
+        status: 200,
+        headers: { 'content-length': '10', 'content-type': 'application/octet-stream' },
+      })
+      upstream.headers.append('set-cookie', 'a=1; Path=/')
+      upstream.headers.append('set-cookie', 'b=2; Path=/; Expires=Wed, 21 Oct 2099 00:00:00 GMT')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstream)
+
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/gfs/tree', {
+        method: 'GET',
+        headers: { Authorization: 'Bearer t' },
+      })
+
+      const res = await GET(req, { params: { path: ['api', 'v1', 'gfs', 'tree'] } })
+
+      // forEach would collapse these into one unsplittable value (the Expires comma);
+      // getSetCookie() keeps them separate.
+      expect(res.headers.getSetCookie()).toEqual([
+        'a=1; Path=/',
+        'b=2; Path=/; Expires=Wed, 21 Oct 2099 00:00:00 GMT',
+      ])
+      // content-length must survive on the response direction (browser download progress).
+      expect(res.headers.get('content-length')).toBe('10')
+    })
+  })
 })

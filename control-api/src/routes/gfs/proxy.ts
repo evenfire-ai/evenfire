@@ -60,6 +60,14 @@ export function registerGfsProxyRoute(router: Router): void {
       }
 
       let upstreamRes: Response
+      // Header-only deadline: guard the wait for gfsc to START responding, but do
+      // NOT bound the streamed response body. A GET download can legitimately
+      // stream longer than the mutation budget, and a total-deadline abort would
+      // truncate it into a 200 with a short body (control-ui exempts GET for the
+      // same reason). Cleared the moment headers arrive, so an upload still fails
+      // loud (504) when gfsc never answers.
+      const deadline = new AbortController()
+      const deadlineTimer = setTimeout(() => deadline.abort(), config.gfscProxyTimeoutMs)
       try {
         upstreamRes = await fetch(target, {
           method: req.method,
@@ -68,14 +76,12 @@ export function registerGfsProxyRoute(router: Router): void {
             req.method === 'GET' || req.method === 'HEAD'
               ? undefined
               : JSON.stringify(req.body ?? {}),
-          // Homologous with the browser client and control-ui proxy (all 300s by
-          // default). Without this the fetch had NO timeout: a slow/large upload or
-          // a hung gfsc would pin the connection indefinitely.
-          signal: AbortSignal.timeout(config.gfscProxyTimeoutMs),
+          signal: deadline.signal,
         })
       } catch (err) {
         // Never silent: a failed or timed-out gfsc fetch is logged with the target.
-        const timedOut = err instanceof Error && err.name === 'TimeoutError'
+        const timedOut =
+          deadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError')
         rootLogger.error(
           { err, target, method: req.method, timeoutMs: config.gfscProxyTimeoutMs },
           timedOut
@@ -86,6 +92,8 @@ export function registerGfsProxyRoute(router: Router): void {
           .status(timedOut ? 504 : 502)
           .json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
         return
+      } finally {
+        clearTimeout(deadlineTimer)
       }
 
       if (upstreamRes.status >= 400) {

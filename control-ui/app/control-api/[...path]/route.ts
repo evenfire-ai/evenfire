@@ -123,13 +123,28 @@ function copyRequestHeaders(req: NextRequest): Headers {
   return headers
 }
 
+// Response direction: unlike the request, KEEP `content-length` so the browser
+// can show GFS download progress (the body streams through unchanged), and
+// preserve EACH `set-cookie` separately — Headers.forEach collapses multiple
+// set-cookie values into one, which corrupts any response that sets more than
+// one cookie (e.g. admin login the day a second cookie is added to a response).
+const RESPONSE_HOP_BY_HOP_HEADERS = new Set(
+  [...HOP_BY_HOP_HEADERS].filter(header => header !== 'content-length')
+)
+
 function copyResponseHeaders(source: Headers): Headers {
   const headers = new Headers()
   source.forEach((value, key) => {
-    if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+    const lower = key.toLowerCase()
+    // set-cookie is re-added below via getSetCookie(); forEach would join them.
+    if (lower === 'set-cookie') return
+    if (!RESPONSE_HOP_BY_HOP_HEADERS.has(lower)) {
       headers.set(key, value)
     }
   })
+  for (const cookie of source.getSetCookie()) {
+    headers.append('set-cookie', cookie)
+  }
   return headers
 }
 
@@ -194,11 +209,11 @@ async function proxyControlApi(
       url: stripCrlf(upstreamUrl),
       method: req.method,
       status,
-      message,
+      message: stripCrlf(message),
       name: err instanceof Error ? err.name : undefined,
       cause:
         err instanceof Error && 'cause' in err
-          ? String((err as { cause?: unknown }).cause)
+          ? stripCrlf(String((err as { cause?: unknown }).cause))
           : undefined,
     })
     return NextResponse.json({ error: message }, { status })

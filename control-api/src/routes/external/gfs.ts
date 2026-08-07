@@ -528,14 +528,20 @@ async function proxyReadToGfsc(
   })
   const target = `${config.gfscBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   let upstream: Response
+  // Header-only deadline: bound the wait for gfsc to START responding, but never
+  // the streamed download body — a large/slow read must not be truncated
+  // mid-stream by the mutation budget. Cleared once headers arrive.
+  const readDeadline = new AbortController()
+  const readTimer = setTimeout(() => readDeadline.abort(), config.gfscProxyTimeoutMs)
   try {
     upstream = await fetch(target, {
       method: 'GET',
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(config.gfscProxyTimeoutMs),
+      signal: readDeadline.signal,
     })
   } catch (err) {
-    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    const timedOut =
+      readDeadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError')
     rootLogger.error(
       { err, gfscPath, timeoutMs: config.gfscProxyTimeoutMs },
       timedOut
@@ -544,6 +550,8 @@ async function proxyReadToGfsc(
     )
     res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
     return
+  } finally {
+    clearTimeout(readTimer)
   }
   if (upstream.status >= 400) {
     // Error envelopes are small JSON: buffer, LOG, forward verbatim (a gfsc 5xx on a
