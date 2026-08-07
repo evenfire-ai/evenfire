@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../src/config.js'
 import {
   GfsClient,
   type GfsTransport,
@@ -420,13 +421,22 @@ describe('GfsClient resource mutations', () => {
       1,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'docs', kind: 'directory' } }
+      {
+        token: 'tok',
+        body: { name: 'docs', kind: 'directory' },
+        // Uploads use the generous GFS upload deadline, not the 60s app default.
+        timeoutMs: config.gfsUploadTimeoutMs,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' } }
+      {
+        token: 'tok',
+        body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' },
+        timeoutMs: config.gfsUploadTimeoutMs,
+      }
     )
   })
 
@@ -443,7 +453,11 @@ describe('GfsClient resource mutations', () => {
       1,
       'PUT',
       `https://api.example/api/v1/me/gfs/resources/${RID}/content?drive=main`,
-      { token: 'tok', body: { contentBase64: 'aGVsbG8=', ifMatch: 1 } }
+      {
+        token: 'tok',
+        body: { contentBase64: 'aGVsbG8=', ifMatch: 1 },
+        timeoutMs: config.gfsUploadTimeoutMs,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,

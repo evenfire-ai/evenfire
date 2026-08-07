@@ -31,6 +31,14 @@ data:
       # the authoritative size gate downstream.
       client_max_body_size 25165824;
 
+      # Homologate the funnel's idle timers with the 300s deadline the rest of the
+      # me-path uses (nginx defaults each to 60s). Without these the funnel is the
+      # one hop that 504s a large upload/download that every downstream hop would
+      # still wait 300s for.
+      proxy_read_timeout 300s;
+      proxy_send_timeout 300s;
+      client_body_timeout 300s;
+
       server {
         listen 8080;
 
