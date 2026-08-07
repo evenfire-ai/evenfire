@@ -53,10 +53,14 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
   const state = mapState(stateString)
 
   const startedAt = new Date(persisted.session.started_at * 1000)
-  const lastTimestamp =
-    persisted.messages.length > 0
-      ? new Date(persisted.messages[persisted.messages.length - 1].timestamp * 1000)
-      : startedAt
+  const lastActivityEpoch = persisted.messages.reduce(
+    (latest, message) => Math.max(latest, message.timestamp),
+    Math.max(
+      persisted.session.started_at,
+      persisted.session.last_activity_at ?? persisted.session.started_at
+    )
+  )
+  const lastActivityAt = new Date(lastActivityEpoch * 1000)
 
   const conversation: Conversation = {
     id: persisted.session.id,
@@ -67,7 +71,7 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     pending_approval: pending,
     auto_approved_tools: new Set(),
     created_at: startedAt,
-    updated_at: lastTimestamp,
+    updated_at: lastActivityAt,
     // D.1 — repopulate the in-flight task from the durable column. After a pod
     // restart this may point at a task whose reporter is gone (ghost); the D.2
     // processing reaper reconciles that at boot.
@@ -143,7 +147,7 @@ function mapState(raw: string): ConversationState {
   }
 }
 
-function groupMessagesIntoTurns(messages: MessageRow[]): Turn[] {
+export function groupMessagesIntoTurns(messages: MessageRow[]): Turn[] {
   const byTurn = new Map<number, Turn>()
   for (const m of messages) {
     const turnNum = m.turn_number ?? 0

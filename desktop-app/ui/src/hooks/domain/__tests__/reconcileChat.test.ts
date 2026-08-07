@@ -162,12 +162,101 @@ describe('reconcileChat — single-flight', () => {
     const p = reconcile(chatKey, { reason: 'stream_lost' })
     expect(reconcile.isInFlight(chatKey)).toBe(true)
     reconcile.reset() // logout / team-switch mid-fetch
+    deps.fsm.reset()
     expect(reconcile.isInFlight(chatKey)).toBe(false) // coalescing map cleared
     resolveLoad(liveResp()) // fetch resolves AFTER the reset
     await p
     // The run bailed at the post-fetch relevance check → no attach/settle ran.
     expect(deps.attachLiveTask).not.toHaveBeenCalled()
     expect(deps.settleIdle).not.toHaveBeenCalled()
+    expect(deps.fsm.getState(chatKey)).toBeUndefined()
+  })
+
+  it('an old post-reset completion does not clear a newer reconcile for the same chat', async () => {
+    let resolveOld: (value: SessionMessagesResult) => void = () => {}
+    let resolveNew: (value: SessionMessagesResult) => void = () => {}
+    const load = vi
+      .fn<() => Promise<SessionMessagesResult>>()
+      .mockImplementationOnce(
+        () => new Promise<SessionMessagesResult>(resolve => (resolveOld = resolve))
+      )
+      .mockImplementationOnce(
+        () => new Promise<SessionMessagesResult>(resolve => (resolveNew = resolve))
+      )
+    const deps = buildDeps({
+      loadSessionMessages: load as unknown as ReconcileChatDeps['loadSessionMessages'],
+    })
+    const reconcile = createReconcileChat(deps)
+    const oldRun = reconcile(chatKey, { reason: 'old-session' })
+    reconcile.reset()
+    deps.fsm.reset()
+    const newRun = reconcile(chatKey, { reason: 'new-session' })
+
+    resolveOld(idleResp())
+    await oldRun
+    expect(reconcile.isInFlight(chatKey)).toBe(true)
+
+    resolveNew(idleResp())
+    await newRun
+    expect(reconcile.isInFlight(chatKey)).toBe(false)
+  })
+
+  it('supersedes an old same-chat run and permits a fresh authoritative fetch', async () => {
+    let resolveOld: (value: SessionMessagesResult) => void = () => {}
+    const load = vi
+      .fn<() => Promise<SessionMessagesResult>>()
+      .mockImplementationOnce(
+        () => new Promise<SessionMessagesResult>(resolve => (resolveOld = resolve))
+      )
+      .mockResolvedValueOnce(idleResp({ totalTurns: 2 }))
+    const deps = buildDeps({
+      loadSessionMessages: load as unknown as ReconcileChatDeps['loadSessionMessages'],
+    })
+    const reconcile = createReconcileChat(deps)
+
+    const oldRun = reconcile(chatKey, { reason: 'first-open' })
+    expect(deps.fsm.getState(chatKey)?.syncing).toBe(true)
+    reconcile.supersede(chatKey)
+    expect(deps.fsm.getState(chatKey)?.syncing).toBe(false)
+    const freshRun = reconcile(chatKey, { reason: 'second-open' })
+
+    await freshRun
+    resolveOld(idleResp({ totalTurns: 1 }))
+    await expect(oldRun).resolves.toBe('stale_drop')
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(deps.settleIdle).toHaveBeenCalledTimes(1)
+    expect(deps.settleIdle).toHaveBeenCalledWith(
+      chatKey,
+      expect.objectContaining({ totalTurns: 2 }),
+      expect.any(Number),
+      undefined,
+      expect.any(Function)
+    )
+  })
+
+  it('drops a late 404 after reset instead of evicting the next session cache', async () => {
+    let rejectLoad: (reason: unknown) => void = () => {}
+    const load = vi.fn(
+      (_agentRef: string, _chatId: string, _query: unknown, stillRelevant?: () => boolean) => {
+        expect(stillRelevant).toEqual(expect.any(Function))
+        return new Promise<SessionMessagesResult>((_resolve, reject) => {
+          rejectLoad = reject
+        })
+      }
+    )
+    const deps = buildDeps({
+      loadSessionMessages: load as ReconcileChatDeps['loadSessionMessages'],
+    })
+    const reconcile = createReconcileChat(deps)
+    const pending = reconcile(chatKey, { reason: 'old-session' })
+
+    reconcile.reset()
+    deps.fsm.reset()
+    rejectLoad(new NotFound('late response'))
+
+    await expect(pending).resolves.toBe('noop')
+    expect(deps.evictChat).not.toHaveBeenCalled()
+    expect(deps.fsm.getState(chatKey)).toBeUndefined()
   })
 
   it('a coalesced caller donates its taskIdHint to a hint-less in-flight run (M6)', async () => {

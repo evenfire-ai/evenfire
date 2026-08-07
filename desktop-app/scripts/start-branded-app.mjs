@@ -70,7 +70,7 @@ async function main() {
     throw new Error(`The branded ${APP_NAME} executable was not created at ${executable}.`)
   }
 
-  const appProcess = spawn(executable, [], {
+  const appProcess = spawn(executable, ['--evenfire-desktop-dev-package'], {
     cwd: projectDirectory,
     env: process.env,
     stdio: 'inherit',

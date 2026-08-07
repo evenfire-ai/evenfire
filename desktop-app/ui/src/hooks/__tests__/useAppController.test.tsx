@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import {
   loadWorkflowRunsWithArtifactsForApprovalRefresh,
   loadWorkflowRunsWithArtifactsForWorkflowTarget,
+  scheduleAfterFirstPaintForSession,
 } from '../useAppController'
 
 function installWorkflowHarness(runsResult: unknown) {
@@ -117,5 +119,81 @@ describe('loadWorkflowRunsWithArtifactsForWorkflowTarget', () => {
       id: 'completed-run',
       artifacts: [{ filename: 'result.json', url: '/download/result.json' }],
     })
+  })
+})
+
+describe('scheduleAfterFirstPaint', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('waits for two animation frames before running deferred startup work', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaint(task)
+    expect(task).not.toHaveBeenCalled()
+
+    frames.shift()?.(1)
+    expect(task).not.toHaveBeenCalled()
+
+    frames.shift()?.(2)
+    expect(task).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to a timeout when animation frames are throttled', async () => {
+    vi.useFakeTimers()
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaint(task)
+    expect(task).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(frames).toHaveLength(1)
+    expect(task).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs session-bound deferred startup work when identity is unchanged', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const identityRef: { current: string | null } = { current: 'user-1:team-1' }
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)
+    frames.shift()?.(1)
+    frames.shift()?.(2)
+
+    expect(task).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips session-bound deferred startup work after logout or identity change', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const identityRef: { current: string | null } = { current: 'user-1:team-1' }
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)
+    identityRef.current = null
+    frames.shift()?.(1)
+    frames.shift()?.(2)
+
+    expect(task).not.toHaveBeenCalled()
   })
 })

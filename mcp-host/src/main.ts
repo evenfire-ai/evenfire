@@ -47,7 +47,7 @@ import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
 import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
-import type { Attachment, Conversation } from './core/types'
+import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
 import { HostWatcher, getHost } from './k8sClient'
@@ -107,12 +107,8 @@ import {
   WorkflowApprovalNotificationClaim,
   WorkflowApprovalNotificationTerminal,
 } from './server'
-import {
-  projectContextBreakdown,
-  projectSessionTokens,
-  projectTurnTokens,
-  projectTurnToolSteps,
-} from './server/wireProjections'
+import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
 import { approxDecodedBytes } from './shared/encoding'
@@ -2110,33 +2106,11 @@ async function startRPCServer(): Promise<void> {
   // LRU — or, under sqlite/dual, any session after a pod restart — still
   // surface from SQLite. The sync RAM-only accessors would 404 persisted
   // sessions, defeating the persistence feature. The route already awaits.
-  // D.1 — view of session liveness shared by /sessions and /messages.
-  // `state` lets the desktop paint sidebar badges; `activeTaskId` tells it
-  // which task to re-subscribe to; `pendingApproval` lets it render the
-  // approve button without waiting for the SSE. `displayName` is derived
-  // server-side (the `tool_name` itself is NOT leaked over the wire — security
-  // patch P1-1).
-  const sessionStateView = (conversation: Conversation) => {
-    const state =
-      conversation.state === ConversationState.Processing
-        ? ('processing' as const)
-        : conversation.state === ConversationState.AwaitingApproval
-          ? ('awaiting_approval' as const)
-          : ('idle' as const)
-    const activeTaskId = state === 'idle' ? undefined : conversation.activeTaskId
-    const pendingApproval =
-      conversation.state === ConversationState.AwaitingApproval && conversation.pending_approval
-        ? {
-            requestId: conversation.pending_approval.request_id,
-            displayName: getDisplayName(conversation.pending_approval.tool_name),
-          }
-        : undefined
-    // Lifetime token totals — projected to the wire shape (omitted until the
-    // session has had an LLM call; cache breakdown included only when the model
-    // reports it). See `projectSessionTokens`.
-    const tokens = projectSessionTokens(conversation)
-    return { state, activeTaskId, pendingApproval, tokens }
-  }
+  // D.1 — the shared session-liveness projection (`sessionStateView`) and the
+  // two session-read handlers now live in `createSessionRouteHandlers`
+  // (src/server/sessionRouteHandlers.ts) so they can be unit-tested against a
+  // real ConversationManager. `redactToolError` stays here (it closes over the
+  // operator secret list) and is injected into the factory below.
 
   // #582: redact a persisted tool error before it reaches the `/messages` wire,
   // mirroring the live SSE path exactly: `sanitizeOutput` scrubs secret values
@@ -2147,49 +2121,17 @@ async function startRPCServer(): Promise<void> {
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
 
-  const handleSessionsList = async (userSub: string) => {
-    const convManager = agent!.getConversationManager()
-    const entries = await convManager.listSessionsForUserAsync(`${userSub}:rpc:`)
-    return {
-      items: entries.map(({ conversation, agent: agentName, chatId }) => ({
-        agent: agentName,
-        chatId,
-        turnCount: conversation.turns.length,
-        lastActivityAt: conversation.updated_at.toISOString(),
-        ...sessionStateView(conversation),
-      })),
-    }
-  }
-
-  const handleSessionMessages = async (userSub: string, agentName: string, chatId: string) => {
-    const convManager = agent!.getConversationManager()
-    // Direct O(1) key lookup — spec §2: `conversations.get(`${auth.sub}:rpc:${agent}:${chatId}`)`.
-    const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
-    if (!conversation) return null
-    return {
-      agent: agentName,
-      chatId,
-      ...sessionStateView(conversation),
-      turns: conversation.turns.map(t => ({
-        number: t.number,
-        user_input: t.user_input,
-        response: t.response,
-        started_at: t.started_at.toISOString(),
-        completed_at: t.completed_at ? t.completed_at.toISOString() : undefined,
-        tokens: projectTurnTokens(t),
-        tool_steps: projectTurnToolSteps(t, redactToolError),
-      })),
-    }
-  }
+  const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+    getConversationManager: () => agent!.getConversationManager(),
+    redactToolError,
+  })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
     const convManager = agent!.getConversationManager()
-    // Same O(1) key lookup + anti-enumeration semantics as handleSessionMessages:
-    // the userSub comes from the verified rpc edge caller (routes.ts), never a
-    // client param, so a caller cannot read another user's session.
+    // Same O(1) key lookup + ownership check as handleSessionMessages: userSub
+    // comes from the verified edge caller and must match persisted ownership.
     const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
+    const conversation = await convManager.getSessionByKeyForUserAsync(key, userSub)
     if (!conversation) return null
     // `breakdown: null` when the session exists but has no snapshot yet (cold-load
     // before the first turn) — distinct from the 404 the route returns for a
@@ -2225,7 +2167,9 @@ async function startRPCServer(): Promise<void> {
         channelId: hostRef,
         threadId: chatId,
       })
-      const conversation = await agent!.getConversationManager().getSessionByKeyAsync(key)
+      const conversation = await agent!
+        .getConversationManager()
+        .getSessionByKeyForUserAsync(key, userSub)
       const saved = conversation?.modelSelections?.[provider]
       if (saved) {
         const resolution = resolveSessionModel(

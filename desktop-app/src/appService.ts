@@ -7,6 +7,7 @@ import {
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
+  getActiveLegacyEnvKeys,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -51,9 +52,12 @@ import {
   RpcScope,
   SessionLifecycleState,
   SessionMe,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -257,6 +261,7 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 // post-`waiting` connection is still caught here (and by the renderer's 30s
 // watchdog).
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
+const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -284,6 +289,11 @@ export class AppService {
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private savedSessionRestoreAttemptedEnvKey: string | null = null
+  private savedSessionRestoreAttemptedAtMs = 0
+  private logoutInProgress = false
+  private sessionGeneration = 0
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -345,6 +355,13 @@ export class AppService {
     )
   }
 
+  private static isRejectedStoredSessionError(error: unknown): boolean {
+    return (
+      error instanceof ApiError &&
+      (error.status === 401 || error.status === 403 || error.status === 410)
+    )
+  }
+
   /**
    * Maps rpc-proxy's structured host-availability 503s ({code:'host_waking'}
    * from the wake-and-hold subsystem, {code:'host_draining'} from the mcp-host
@@ -388,11 +405,18 @@ export class AppService {
     }
   }
 
+  private async bindCurrentChatStore(userId: string): Promise<void> {
+    await bindChatStoreForUser(userId, getActiveEnvKey(), {
+      legacyEnvKeys: getActiveLegacyEnvKeys(),
+    })
+  }
+
   private async commitSessionToken(
     token: string,
     options: { refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    if (tokenChanged) this.sessionGeneration += 1
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
@@ -407,7 +431,7 @@ export class AppService {
         unbindChatStore()
         throw error
       }
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      await this.bindCurrentChatStore(this.me.id)
       this.updateCachedCurrentTeam(this.me.teamId)
     }
   }
@@ -415,7 +439,7 @@ export class AppService {
   private async getCurrentSessionTeamId(token: string): Promise<string> {
     if (this.me?.teamId) return this.me.teamId
     this.me = await this.authClient.getMe(token)
-    await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(this.me.id)
     this.updateCachedCurrentTeam(this.me.teamId)
     return this.me.teamId || ''
   }
@@ -538,15 +562,80 @@ export class AppService {
     )
   }
 
-  async initialize(): Promise<SessionState> {
+  private clearAuthenticatedSessionState(): void {
+    this.sessionGeneration += 1
+    this.stopAllStreams()
+    this.sessionToken = null
+    this.me = null
+    this.profileUiBaseUrlCache = null
+    this.accessCatalog = null
+    this.teamDirectoryCache = null
+    this.workflowApprovalTeamById.clear()
+    this.workflowTeamByKey.clear()
+    this.rpcTokenManager.clear()
+    unbindChatStore()
+  }
+
+  private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.restoreSavedSessionInFlight) {
+      return await this.restoreSavedSessionInFlight
+    }
+    const restore = this.restoreSavedSessionOnce(options)
+    this.restoreSavedSessionInFlight = restore
+    try {
+      return await restore
+    } finally {
+      // No newer restore can start while this promise is installed, so the
+      // single-flight slot can be cleared unconditionally after it settles.
+      this.restoreSavedSessionInFlight = null
+    }
+  }
+
+  private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
-    this.sessionToken = await this.tokenStore.getSessionToken(getActiveEnvKey())
-    if (!this.sessionToken) {
+    const envKey = getActiveEnvKey()
+    const legacyEnvKeys = getActiveLegacyEnvKeys()
+    this.savedSessionRestoreAttemptedEnvKey = envKey
+    this.savedSessionRestoreAttemptedAtMs = Date.now()
+    let token: string | null
+    try {
+      token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
+    } catch (error) {
+      console.warn('[AppService] Failed to read the saved session token:', error)
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
       return { authenticated: false, me: null }
     }
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    if (!token) {
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
+      return { authenticated: false, me: null }
+    }
+
+    if (this.sessionGeneration !== restoreGeneration) {
+      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+    }
+    this.sessionToken = token
     try {
-      this.me = await this.authClient.getMe(this.sessionToken)
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      const restoredMe = await this.authClient.getMe(token)
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        if (this.me) {
+          await this.bindCurrentChatStore(this.me.id)
+        } else {
+          unbindChatStore()
+        }
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.me = restoredMe
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -554,12 +643,26 @@ export class AppService {
       // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
       // here must not block the user from logging in. Any network or fs
       // error is logged inside the module.
-      void this.runSandboxUiPartitionGcSafely()
+      if (options.runLaunchMaintenance) {
+        void this.runSandboxUiPartitionGcSafely()
+      }
       return { authenticated: true, me: this.me }
-    } catch {
-      await this.logout()
+    } catch (error) {
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.clearAuthenticatedSessionState()
+      if (AppService.isRejectedStoredSessionError(error)) {
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      } else {
+        console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
+      }
       return { authenticated: false, me: null }
     }
+  }
+
+  async initialize(): Promise<SessionState> {
+    return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
@@ -584,9 +687,11 @@ export class AppService {
 
   private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
     const result = await this.authClient.passwordLogin(email, password)
+    this.logoutInProgress = false
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -653,9 +758,11 @@ export class AppService {
 
   async googleLogin(idToken: string): Promise<SessionState> {
     const result = await this.authClient.googleLogin(idToken)
+    this.logoutInProgress = false
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -870,17 +977,15 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
-    this.stopAllStreams()
-    this.sessionToken = null
-    this.me = null
-    this.profileUiBaseUrlCache = null
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    unbindChatStore()
+    this.logoutInProgress = true
+    try {
+      const envKey = getActiveEnvKey()
+      const legacyEnvKeys = getActiveLegacyEnvKeys()
+      this.clearAuthenticatedSessionState()
+      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+    } finally {
+      this.logoutInProgress = false
+    }
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -1023,7 +1128,20 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (!this.sessionToken || !this.me) return { authenticated: false, me: null }
+    if (!this.sessionToken || !this.me) {
+      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      // createWindow() already performs the saved-token restore before showing
+      // the renderer. Do not immediately repeat a failed 60-second network
+      // attempt from the renderer bootstrap; a new app launch or environment
+      // selection gets a fresh attempt because its service/env key is new.
+      if (
+        this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
+        Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
+      ) {
+        return { authenticated: false, me: null }
+      }
+      return this.restoreSavedSession()
+    }
     return { authenticated: true, me: this.me }
   }
 
@@ -1462,7 +1580,7 @@ export class AppService {
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
-    await bindChatStoreForUser(me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(me.id)
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([
@@ -2579,25 +2697,15 @@ export class AppService {
 
   async listSessions(
     hostRef: string,
-    hostRefs?: string[]
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
+    hostRefs?: string[],
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.listSessions(rpc.token, targetHostRef)
+      return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
@@ -2614,7 +2722,8 @@ export class AppService {
     hostRef: string,
     agent: string,
     chatId: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef || !agent || !chatId) {
@@ -2623,14 +2732,27 @@ export class AppService {
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.loadSessionMessages(rpc.token, targetHostRef, agent, chatId)
+      return await this.rpcClient.loadSessionMessages(
+        rpc.token,
+        targetHostRef,
+        agent,
+        chatId,
+        query
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
         console.warn(
           '[AppService] Session messages unavailable because the runtime rejected the session token.'
         )
-        return { agent, chatId, turns: [] }
+        return {
+          agent,
+          chatId,
+          turns: [],
+          totalTurns: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        }
       }
       throw error
     }
