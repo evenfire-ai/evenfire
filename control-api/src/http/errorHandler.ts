@@ -93,6 +93,29 @@ function clientErrorMessage(err: unknown, status: number): string {
 }
 
 /**
+ * Log-safe rendering of an error's message. A raw @kubernetes/client-node
+ * ApiException `.message` embeds the metav1.Status body AND every apiserver
+ * response header (Audit-Id, x-kubernetes-pf-*) — writing it to a log puts
+ * infrastructure PID/PII into internal logs (S1). Collapse K8s exceptions to the
+ * same sanitized text the client sees (metav1.Status `body.message` or the
+ * status text, never headers); non-K8s errors keep their author-controlled
+ * detail. Used for EVERY branch that logs an error message, not just the 4xx one.
+ */
+function safeErrorLogMessage(err: unknown): string {
+  if (isK8sApiException(err)) return clientErrorMessage(err, extractErrorStatus(err) ?? 500)
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Log-safe stack: a K8s ApiException's `.stack` begins with its `.message`, so it
+ * leaks the same headers — drop it for K8s exceptions and keep it otherwise.
+ */
+function safeErrorLogStack(err: unknown): string | undefined {
+  if (isK8sApiException(err)) return undefined
+  return err instanceof Error ? err.stack : undefined
+}
+
+/**
  * Global Express error handler for control-api.
  *
  * Exported (rather than an inline closure in createApp) so it can be unit-tested
@@ -123,7 +146,7 @@ export function clerumErrorHandler(
       {
         event: memberRegistration.error,
         correlationId,
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'member registration unavailable'
     )
@@ -145,7 +168,7 @@ export function clerumErrorHandler(
         event: 'forwarded_client_error',
         correlationId,
         status: errStatus,
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'forwarded client error from upstream'
     )
@@ -174,7 +197,7 @@ export function clerumErrorHandler(
         correlationId,
         status: integrationStatus,
         code: integrationCode,
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'forwarded registry integration error'
     )
@@ -190,8 +213,8 @@ export function clerumErrorHandler(
     {
       event: 'unhandled_error',
       correlationId,
-      err: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      err: safeErrorLogMessage(err),
+      stack: safeErrorLogStack(err),
     },
     'unhandled error'
   )

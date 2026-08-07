@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import type { Request } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
@@ -17,6 +18,22 @@ function appThrowing(err: unknown) {
   app.get('/boom', (_req, _res, next) => next(err))
   app.use(clerumErrorHandler)
   return app
+}
+
+/**
+ * Like `appThrowing` but injects a spy logger on `req.log` so a test can assert
+ * on what the handler writes to the INTERNAL log (not just the client body).
+ */
+function appThrowingWithLogSpy(err: unknown) {
+  const warn = vi.fn()
+  const spyLogger = { warn, error: vi.fn(), info: vi.fn(), debug: vi.fn() }
+  const app = express()
+  app.get('/boom', (req: Request, _res, next) => {
+    ;(req as unknown as { log: unknown }).log = spyLogger
+    next(err)
+  })
+  app.use(clerumErrorHandler)
+  return { app, warn }
 }
 
 describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
@@ -94,5 +111,45 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
     expect(serialized).not.toContain(err.message)
     // The safe metav1.Status body.message may surface as the client-facing text.
     expect(res.body.error).toBe('hosts.clerum.io "product-agent" already exists')
+  })
+
+  /**
+   * S1 follow-up (info disclosure to INTERNAL logs): the 4xx branch already
+   * sanitizes the CLIENT body, but the internal `log.warn` still logged the raw
+   * `err.message` of a K8s ApiException — which embeds the metav1.Status body AND
+   * every apiserver header (Audit-Id, x-kubernetes-pf-*). That is PID/PII of
+   * infrastructure in internal logs. The logged message must be sanitized the
+   * same way the client body is: status + a safe message, never the headers or
+   * the raw `.message`.
+   */
+  it('does NOT log the raw ApiException message (headers/audit-id) for a forwarded 4xx', async () => {
+    const body = {
+      kind: 'Status',
+      apiVersion: 'v1',
+      status: 'Failure',
+      message: 'hosts.clerum.io "product-agent" already exists',
+      reason: 'AlreadyExists',
+      code: 409,
+    }
+    const headers = {
+      'audit-id': 'a1b2c3-secret-audit-uuid',
+      'x-kubernetes-pf-flowschema-uid': 'internal-flowschema-uid',
+      'content-type': 'application/json',
+    }
+    const err = new ApiException(409, 'Conflict', body, headers)
+
+    // Sanity: the real producer really does embed the leak in `.message`.
+    expect(err.message).toContain('Headers:')
+    expect(err.message).toContain('audit-id')
+
+    const { app, warn } = appThrowingWithLogSpy(err)
+    await request(app).get('/boom').expect(409)
+
+    expect(warn).toHaveBeenCalled()
+    const logged = JSON.stringify(warn.mock.calls)
+    expect(logged).not.toContain('Headers:')
+    expect(logged).not.toContain('audit-id')
+    expect(logged).not.toContain('x-kubernetes-pf')
+    expect(logged).not.toContain(err.message)
   })
 })
