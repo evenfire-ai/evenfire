@@ -29,7 +29,7 @@ docker build -t web-search-mcp:latest .
 
 Multi-stage `node:24-alpine` build: compiles TypeScript, then runs `node dist/index.js`.
 
-- `scripts/minikube/build-images.sh` builds it into minikube as `clerum/web-search-mcp:v1`.
+- Minikube setup neither builds nor pulls it. The evenfire registry distributes this connector and installs it on demand, writing the catalog entry's image reference straight into the `McpServer` resource, so no locally loaded `clerum/*` alias is involved. It is `deployed_to_minikube: false` in `deploy/images.json`.
 - `.github/workflows/build-publish.yml` publishes it to `ghcr.io/evenfire-ai/web-search-mcp` on changes under `mcp-servers/web-search/`.
 
 ## Deployment
@@ -40,4 +40,4 @@ This directory has no `mcpserver.yaml` or NetworkPolicy — unlike `airtable/` a
 
 ## Status
 
-Available; buildable and published to the container registry. No test suite yet (unlike `airtable/` and `mongodb/`). Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and built by `scripts/minikube/build-images.sh` and `scripts/build-preflight.sh`.
+Available; buildable and published to the container registry. No test suite yet (unlike `airtable/` and `mongodb/`). Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image; the registry installs it on demand.

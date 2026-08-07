@@ -12,6 +12,9 @@ export interface ChatThreadStateContextValue {
   activeMessages: AgentChatMessage[]
   groupedMessages: Array<{ role: 'user' | 'assistant' | 'system'; items: AgentChatMessage[] }>
   chatMessagesLoading: boolean
+  hasOlderMessages: boolean
+  olderMessagesLoading: boolean
+  handleLoadOlderMessages: () => Promise<void>
   activityByMessageId: Record<string, AgentMessageActivity>
   progressByMessageId: Record<string, TaskProgress>
 }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -38,6 +38,84 @@ describe('chatStoreBinding', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
+  it('does not follow symlinked quarantine roots during retention cleanup', async () => {
+    const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-external-quarantine-'))
+    const sentinel = path.join(externalDir, 'corrupt-old')
+    await fs.mkdir(sentinel)
+    const old = new Date('2000-01-01T00:00:00.000Z')
+    await fs.utimes(sentinel, old, old)
+    const corruptRoot = path.join(tmpBase, ENV_A, 'user-a', 'agent-x', '.corrupt')
+    await fs.mkdir(path.dirname(corruptRoot), { recursive: true })
+    await fs.symlink(externalDir, corruptRoot, process.platform === 'win32' ? 'junction' : 'dir')
+
+    try {
+      await bindChatStoreForUser('user-a', ENV_A)
+      expect(await exists(sentinel)).toBe(true)
+    } finally {
+      await fs.rm(externalDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not publish a stale store when logout interrupts an in-flight bind', async () => {
+    await bindChatStoreForUser('seed-user', ENV_A)
+    unbindChatStore()
+
+    const originalReadDir = fs.readdir.bind(fs)
+    let releaseRead: (() => void) | undefined
+    const readBlocked = new Promise<void>(resolve => {
+      releaseRead = resolve
+    })
+    let readStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      readStarted = resolve
+    })
+    vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith(path.join(ENV_A, 'user-b'))) {
+        readStarted?.()
+        await readBlocked
+      }
+      return originalReadDir(...(args as Parameters<typeof fs.readdir>))
+    })
+
+    const binding = bindChatStoreForUser('user-b', ENV_A)
+    await started
+    unbindChatStore()
+    releaseRead?.()
+    await binding
+
+    expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  it('allows an immediate rebind after logout invalidates an in-flight bind', async () => {
+    let releaseFirstRead: (() => void) | undefined
+    const firstReadBlocked = new Promise<void>(resolve => {
+      releaseFirstRead = resolve
+    })
+    let firstReadStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      firstReadStarted = resolve
+    })
+    const originalReadDir = fs.readdir.bind(fs)
+    let blocked = false
+    vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+      if (!blocked && String(args[0]).endsWith(path.join(ENV_A, 'user-b'))) {
+        blocked = true
+        firstReadStarted?.()
+        await firstReadBlocked
+      }
+      return originalReadDir(...(args as Parameters<typeof fs.readdir>))
+    })
+
+    const staleBind = bindChatStoreForUser('user-b', ENV_A)
+    await started
+    unbindChatStore()
+    const freshBind = bindChatStoreForUser('user-b', ENV_A)
+    releaseFirstRead?.()
+    await Promise.all([staleBind, freshBind])
+
+    expect(requireChatStore()).toBeDefined()
+  })
+
   it('roots the store under <base>/<envKey>/<userId> (spec §5.2)', async () => {
     await bindChatStoreForUser('user-a', ENV_A)
     const store = requireChatStore()
@@ -61,6 +139,20 @@ describe('chatStoreBinding', () => {
     expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-in-a'])
     await bindChatStoreForUser('user-a', ENV_B)
     expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-in-b'])
+  })
+
+  it('migrates a legacy env-scoped user cache into the active env key when empty', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
+    await requireChatStore().createChat('agent-x', 'chat-from-legacy-env')
+    unbindChatStore()
+
+    await bindChatStoreForUser('user-a', ENV_B, { legacyEnvKeys: [ENV_A] })
+
+    expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual([
+      'chat-from-legacy-env',
+    ])
+    expect(await exists(path.join(tmpBase, ENV_A, 'user-a'))).toBe(false)
+    expect(await exists(path.join(tmpBase, ENV_B, 'user-a', 'agent-x', 'index.json'))).toBe(true)
   })
 
   it('re-binds when the envKey changes for the same user', async () => {
@@ -103,11 +195,73 @@ describe('chatStoreBinding', () => {
   })
 
   it('rejects an unsafe userId or envKey before touching the filesystem (no wipe escape)', async () => {
-    for (const bad of ['', '.', '..', '../../etc', 'a/b', 'a\\b']) {
+    for (const bad of [
+      '',
+      '.',
+      '..',
+      '../../etc',
+      'a/b',
+      'a\\b',
+      'user:name',
+      'user.',
+      'NUL',
+      'line\nbreak',
+    ]) {
       await expect(bindChatStoreForUser(bad, ENV_A)).rejects.toThrow(/unsafe path segment/)
       await expect(bindChatStoreForUser('user-a', bad)).rejects.toThrow(/unsafe path segment/)
     }
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  it('backfills owner-only permissions on existing cache ancestry', async () => {
+    const envDir = path.join(tmpBase, ENV_A)
+    const userDir = path.join(envDir, 'user-permissions')
+    await fs.mkdir(userDir, { recursive: true })
+    await fs.chmod(tmpBase, 0o777)
+    await fs.chmod(envDir, 0o777)
+    await fs.chmod(userDir, 0o777)
+
+    await bindChatStoreForUser('user-permissions', ENV_A)
+
+    for (const directory of [tmpBase, envDir, userDir]) {
+      expect((await fs.stat(directory)).mode & 0o777).toBe(0o700)
+    }
+  })
+
+  it('sweeps expired corrupt transcript quarantines while retaining recent recovery data', async () => {
+    const agentDir = path.join(tmpBase, ENV_A, 'user-retention', 'agent-x')
+    const legacyCorruptDir = path.join(agentDir, '.corrupt')
+    const snapshotRoot = path.join(agentDir, 'chats', '.snapshots', 'encoded-chat')
+    const oldPagedCorrupt = path.join(snapshotRoot, 'corrupt-old')
+    const recentPagedCorrupt = path.join(snapshotRoot, 'corrupt-recent')
+    const oldLegacyCorrupt = path.join(legacyCorruptDir, 'old.json')
+    const recentLegacyCorrupt = path.join(legacyCorruptDir, 'recent.json')
+    await fs.mkdir(legacyCorruptDir, { recursive: true })
+    await fs.mkdir(oldPagedCorrupt, { recursive: true })
+    await fs.mkdir(recentPagedCorrupt, { recursive: true })
+    await fs.writeFile(
+      path.join(agentDir, 'index.json'),
+      JSON.stringify({
+        version: 2,
+        chats: [],
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+      })
+    )
+    await fs.writeFile(oldLegacyCorrupt, 'old legacy transcript')
+    await fs.writeFile(recentLegacyCorrupt, 'recent legacy transcript')
+    await fs.writeFile(path.join(oldPagedCorrupt, 'meta.json'), 'old paged transcript')
+    await fs.writeFile(path.join(recentPagedCorrupt, 'meta.json'), 'recent paged transcript')
+    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000)
+    await fs.utimes(oldLegacyCorrupt, expiredAt, expiredAt)
+    await fs.utimes(oldPagedCorrupt, expiredAt, expiredAt)
+
+    await bindChatStoreForUser('user-retention', ENV_A)
+
+    expect(await exists(oldLegacyCorrupt)).toBe(false)
+    expect(await exists(oldPagedCorrupt)).toBe(false)
+    expect(await exists(recentLegacyCorrupt)).toBe(true)
+    expect(await exists(recentPagedCorrupt)).toBe(true)
   })
 
   // §5.2 / §7.1 — bootstrap wipes any pre-v2 (legacy schema) per-agent cache dir
@@ -144,17 +298,19 @@ describe('chatStoreBinding', () => {
       expect(await requireChatStore().listChats('agent-x')).toEqual([])
     })
 
-    it('wipes an agent dir with a missing/unparseable index.json', async () => {
-      await seedAgentDir(ENV_A, 'user-broken', 'agent-x', 'not json{', { 'c.json': '{}' })
+    it('preserves agent dirs with missing or torn index.json files', async () => {
+      await seedAgentDir(ENV_A, 'user-broken', 'agent-x', '{"version":2,"chats":[', {
+        'c.json': '{}',
+      })
       await seedAgentDir(ENV_A, 'user-broken', 'agent-y', null, { 'c.json': '{}' })
 
       await bindChatStoreForUser('user-broken', ENV_A)
 
-      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-x'))).toBe(false)
-      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y'))).toBe(false)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-x', 'c.json'))).toBe(true)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y', 'c.json'))).toBe(true)
     })
 
-    it('preserves a v2 agent dir', async () => {
+    it('preserves the downgrade-compatible v2 agent index', async () => {
       const v2Index = JSON.stringify({
         version: 2,
         chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
@@ -171,6 +327,91 @@ describe('chatStoreBinding', () => {
       expect(
         (await requireChatStore().listChats('agent-x')).find(c => c.id === 'keep')
       ).toBeDefined()
+      const preserved = JSON.parse(
+        await fs.readFile(
+          path.join(tmpBase, ENV_A, 'user-current', 'agent-x', 'index.json'),
+          'utf-8'
+        )
+      ) as { version: number }
+      expect(preserved.version).toBe(2)
+    })
+
+    it('normalizes a v3 index through the store durable writer on ordinary RMW', async () => {
+      const v3Index = JSON.stringify({
+        version: 3,
+        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
+        lastActiveChatId: 'keep',
+        onboardingDismissed: false,
+      })
+      await seedAgentDir(ENV_A, 'user-v3', 'agent-x', v3Index, {
+        'keep.json': JSON.stringify({
+          version: 2,
+          chatId: 'keep',
+          messages: [{ id: 'm1', role: 'user', content: 'keep me', timestamp: 1 }],
+        }),
+      })
+      const indexPath = path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'index.json')
+      const originalOpen = fs.open.bind(fs)
+      const syncedPaths: string[] = []
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const filePath = String(args[0])
+        const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+        return {
+          sync: async () => {
+            syncedPaths.push(filePath)
+            await handle.sync()
+          },
+          close: () => handle.close(),
+        } as Awaited<ReturnType<typeof fs.open>>
+      })
+
+      await bindChatStoreForUser('user-v3', ENV_A)
+
+      expect(JSON.parse(await fs.readFile(indexPath, 'utf-8')).version).toBe(3)
+      await requireChatStore().renameChat('agent-x', 'keep', 'Changed')
+
+      const normalized = JSON.parse(await fs.readFile(indexPath, 'utf-8')) as {
+        version: number
+        chats: Array<{ id: string; title: string }>
+      }
+      expect(normalized.version).toBe(2)
+      expect(normalized.chats).toContainEqual({
+        id: 'keep',
+        title: 'Changed',
+        createdAt: 'x',
+        updatedAt: expect.any(String),
+        messageCount: 1,
+      })
+      expect(syncedPaths).toContain(`${indexPath}.tmp`)
+      expect(syncedPaths).toContain(path.dirname(indexPath))
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'keep.json'))).toBe(true)
+    })
+
+    it('does not delete a current cache after a transient index read failure', async () => {
+      const v2Index = JSON.stringify({
+        version: 2,
+        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
+        lastActiveChatId: 'keep',
+        onboardingDismissed: false,
+      })
+      await seedAgentDir(ENV_A, 'user-read-failure', 'agent-x', v2Index, {
+        'keep.json': '{"version":2,"chatId":"keep","messages":[]}',
+      })
+      const indexPath = path.join(tmpBase, ENV_A, 'user-read-failure', 'agent-x', 'index.json')
+      const originalReadFile = fs.readFile.bind(fs)
+      vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+        if (String(args[0]) === indexPath) {
+          const error = new Error('temporarily unreadable') as NodeJS.ErrnoException
+          error.code = 'EACCES'
+          throw error
+        }
+        return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+      })
+
+      await expect(bindChatStoreForUser('user-read-failure', ENV_A)).rejects.toThrow()
+      expect(
+        await exists(path.join(tmpBase, ENV_A, 'user-read-failure', 'agent-x', 'keep.json'))
+      ).toBe(true)
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {

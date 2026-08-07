@@ -18,21 +18,44 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionMessagePage,
+  PersistedSessionSummary,
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
 import { parseSessionKey } from '../../../session/types'
-import type { ChatMessage, Conversation, PendingApproval, TurnToolCall } from '../../types'
+import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
+  type ChatMessage,
+  type Conversation,
+  ConversationState,
+  type PendingApproval,
+  type TurnToolCall,
+} from '../../types'
+import {
+  type ConversationSessionMessages,
+  type ConversationSessionSummary,
   type ConversationStore,
   type EvictCallback,
   type GetOrCreateOptions,
   type PersistedSessionListing,
+  type SessionListQuery,
+  type SessionMessagesQuery,
   type SessionTokenUsage,
+  boundedTurns,
 } from '../conversationStore'
+import {
+  sessionPartsFromPrefixedKey,
+  userIdFromRpcPrefix,
+  userIdFromStructuredSessionKey,
+} from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
-import { reconstructConversation, reconstructPendingApproval } from './reconstruct'
+import {
+  groupMessagesIntoTurns,
+  reconstructConversation,
+  reconstructPendingApproval,
+} from './reconstruct'
 
 const cacheHitsCounter = (() => {
   try {
@@ -153,6 +176,14 @@ const DEFAULT_PENDING_APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000
 interface SessionOrdinalState {
   nextOrdinal: number
   nextTurnNumber: number
+}
+
+function conversationStateFromRow(state: string): ConversationState {
+  return state === ConversationState.Processing
+    ? ConversationState.Processing
+    : state === ConversationState.AwaitingApproval
+      ? ConversationState.AwaitingApproval
+      : ConversationState.Idle
 }
 
 export class SqliteConversationStore implements ConversationStore {
@@ -327,6 +358,135 @@ export class SqliteConversationStore implements ConversationStore {
     this.prefetchedPrefixes.add(prefix)
   }
 
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    const userId = userIdFromRpcPrefix(prefix, query.agent)
+    if (!userId) return []
+    await this.persistQueue.drainPrefix(prefix)
+    const rows = await this.persistQueue.enqueueSync<PersistedSessionSummary[]>({
+      kind: 'list_session_summaries_by_prefix',
+      sessionKeyPrefix: prefix,
+      userId,
+      limit: query.limit,
+      cursorUpdatedAt: query.cursor ? query.cursor.updatedAt.getTime() / 1000 : undefined,
+      cursorKey: query.cursor?.key,
+      agentScoped: query.agent !== undefined,
+    })
+
+    const out: ConversationSessionSummary[] = []
+    for (const row of rows) {
+      const key = row.session.session_key
+      const cached = this.cache.get(key)
+      const parts = sessionPartsFromPrefixedKey(key, prefix, query.agent)
+      if (!parts) continue
+      const state = cached ? cached.state : conversationStateFromRow(row.session.state)
+      out.push({
+        key,
+        agent: parts.agent,
+        chatId: parts.chatId,
+        state,
+        activeTaskId: cached ? cached.activeTaskId : (row.session.active_task_id ?? undefined),
+        pendingApproval: cached
+          ? cached.pending_approval
+            ? {
+                request_id: cached.pending_approval.request_id,
+                tool_name: cached.pending_approval.tool_name,
+              }
+            : undefined
+          : row.pending_approval
+            ? {
+                request_id: row.pending_approval.request_id,
+                tool_name: row.pending_approval.tool_name,
+              }
+            : undefined,
+        turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
+        messageCount: Math.max(0, Math.floor(row.session.message_count ?? 0)),
+        lastActivityAt: new Date(row.last_activity_at * 1000),
+        input_tokens: row.session.input_tokens,
+        output_tokens: row.session.output_tokens,
+        cache_read_tokens: row.session.cache_read_tokens,
+        cache_write_tokens: row.session.cache_write_tokens,
+        cacheTokensReported: row.session.cache_tokens_reported === 1,
+      })
+    }
+    return out
+  }
+
+  async getSessionMessagesByKey(
+    sessionKey: string,
+    prefix: string,
+    query: SessionMessagesQuery = {}
+  ): Promise<ConversationSessionMessages | undefined> {
+    const cached = this.cache.get(sessionKey)
+    const userId = userIdFromRpcPrefix(prefix)
+    if (!userId) return undefined
+    const parts = sessionPartsFromPrefixedKey(sessionKey, prefix)
+    if (!parts) return undefined
+    if (cached) {
+      if (cached.user_id !== userId) return undefined
+      const turns = boundedTurns(cached.turns, query)
+      return {
+        key: sessionKey,
+        agent: parts.agent,
+        chatId: parts.chatId,
+        state: cached.state,
+        activeTaskId: cached.activeTaskId,
+        pendingApproval: cached.pending_approval
+          ? {
+              request_id: cached.pending_approval.request_id,
+              tool_name: cached.pending_approval.tool_name,
+            }
+          : undefined,
+        turns,
+        totalTurns: cached.turns.length,
+        firstTurnNumber: cached.turns[0]?.number,
+        lastTurnNumber: cached.turns.at(-1)?.number,
+        input_tokens: cached.input_tokens,
+        output_tokens: cached.output_tokens,
+        cache_read_tokens: cached.cache_read_tokens,
+        cache_write_tokens: cached.cache_write_tokens,
+        cacheTokensReported: cached.cacheTokensReported,
+      }
+    }
+
+    const page = await this.persistQueue.enqueueSync<PersistedSessionMessagePage | null>(
+      {
+        kind: 'load_session_message_page',
+        sessionKey,
+        limit: query.limit,
+        beforeTurn: query.beforeTurn,
+        afterTurn: query.afterTurn,
+      },
+      sessionKey
+    )
+    if (!page || page.session.user_id !== userId) return undefined
+
+    return {
+      key: sessionKey,
+      agent: parts.agent,
+      chatId: parts.chatId,
+      state: conversationStateFromRow(page.session.state),
+      activeTaskId: page.session.active_task_id ?? undefined,
+      pendingApproval: page.pending_approval
+        ? {
+            request_id: page.pending_approval.request_id,
+            tool_name: page.pending_approval.tool_name,
+          }
+        : undefined,
+      turns: groupMessagesIntoTurns(page.messages),
+      totalTurns: Math.max(0, Math.floor(page.total_turns ?? 0)),
+      firstTurnNumber: page.first_turn_number ?? undefined,
+      lastTurnNumber: page.last_turn_number ?? undefined,
+      input_tokens: page.session.input_tokens,
+      output_tokens: page.session.output_tokens,
+      cache_read_tokens: page.session.cache_read_tokens,
+      cache_write_tokens: page.session.cache_write_tokens,
+      cacheTokensReported: page.session.cache_tokens_reported === 1,
+    }
+  }
+
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {
     const rows = await this.persistQueue.enqueueSync<LoadAllPendingApprovalsRow[]>({
       kind: 'load_all_pending_approvals',
@@ -334,6 +494,28 @@ export class SqliteConversationStore implements ConversationStore {
     const out: PersistedSessionListing[] = []
     for (const row of rows) {
       const sessionKey = row.session_key
+      const derivedOwner = userIdFromStructuredSessionKey({
+        sessionKey,
+        channelType: row.ownership.channel_type,
+        channelId: row.ownership.channel_id,
+        threadId: row.ownership.thread_id,
+      })
+      if (!derivedOwner || row.ownership.user_id !== derivedOwner) {
+        const error = new ConversationError(
+          'Pending approval session ownership could not be verified',
+          ConversationErrorCode.OwnershipMismatch
+        )
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'pending_approval_ownership_rejected',
+            code: error.code,
+            requestId: row.approval.request_id,
+            reason: derivedOwner ? 'owner_mismatch' : 'unverifiable_session_suffix',
+          })
+        )
+        continue
+      }
       let conv = this.cache.get(sessionKey)
       if (!conv) {
         // Chain after pending per-session writes (same rationale as getOrLoad).
@@ -561,6 +743,8 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
+    // Reserve before the durability await so an immediate follow-up turn cannot
+    // reuse this number while the completion boundary is still queued.
     state.nextTurnNumber += 1
     // Stamp the per-turn token total onto the final assistant message (the turn
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
@@ -605,6 +789,10 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
+    // cancelTurn() intentionally remains synchronous/fire-and-forget at the
+    // ConversationManager boundary. Reserve the next turn number before the
+    // first await so an immediate follow-up startTurn cannot reuse this
+    // cancelled turn's number while the durable boundary is still queued.
     state.nextTurnNumber += 1
     // Stamp the partial per-turn total accumulated before cancellation.
     const turn = conv.turns[conv.turns.length - 1]
@@ -658,6 +846,11 @@ export class SqliteConversationStore implements ConversationStore {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
+    const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
+    // Reserve before the durability await. If persistTurnComplete already
+    // reserved this completed turn, keep that reservation rather than skipping
+    // another number while failing the same in-RAM turn.
+    state.nextTurnNumber = Math.max(state.nextTurnNumber, conv.turns.length + 1)
     await this.persistQueue.enqueueSync(
       {
         kind: 'update_session_state',

@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
+import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
-import type { PersistedSession, ReapedSession, SessionRow } from '../protocol'
+import type { MessageRow, PersistedSession, ReapedSession, SessionRow } from '../protocol'
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -70,6 +71,88 @@ describe('dbWorker dispatcher', () => {
     expect(loaded.pending_approval).toBeNull()
   })
 
+  it('uses bounded turn-index ranges for transcript windows and bounds', () => {
+    const statements = prepareStatements(db)
+    const windowStatements = [
+      statements.selectMessagesBySessionNewestTurns,
+      statements.selectMessagesBySessionTurnsBefore,
+      statements.selectMessagesBySessionTurnsAfter,
+    ]
+
+    for (const statement of windowStatements) {
+      const plan = db
+        .prepare(`EXPLAIN QUERY PLAN ${statement.source}`)
+        .all({ session_id: 'conv-plan', limit: 20, before_turn: 100, after_turn: 0 }) as Array<{
+        detail: string
+      }>
+      expect(
+        plan.some(step =>
+          step.detail.includes(
+            'idx_messages_session_turn_ordinal (session_id=? AND turn_number>? AND turn_number<?)'
+          )
+        )
+      ).toBe(true)
+    }
+
+    const boundsPlan = db
+      .prepare(`EXPLAIN QUERY PLAN ${statements.selectSessionTurnBounds.source}`)
+      .all({ session_id: 'conv-plan' }) as Array<{ detail: string }>
+    expect(
+      boundsPlan.filter(step => step.detail.includes('idx_messages_session_turn_ordinal')).length
+    ).toBe(2)
+  })
+
+  it('returns exact transcript windows when turn numbers contain gaps', async () => {
+    const deps = createDispatcher(db)
+    const session = makeSession('conv-window', 'u-window:rpc:agent:chat-1')
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    let ordinal = 0
+    for (const turnNumber of [1, 3, 7, 8]) {
+      for (const role of ['user', 'assistant'] as const) {
+        await dispatch(
+          {
+            kind: 'insert_message',
+            payload: {
+              session_id: session.id,
+              ordinal: ordinal++,
+              role,
+              content: `${role}-${turnNumber}`,
+              content_parts: null,
+              tool_call_id: null,
+              tool_calls: null,
+              tool_name: null,
+              timestamp: turnNumber,
+              token_count: null,
+              finish_reason: role === 'assistant' ? 'stop' : null,
+              spillover_ref: null,
+              is_error: 0,
+              turn_number: turnNumber,
+            },
+          },
+          deps
+        )
+      }
+    }
+
+    const readTurns = async (query: {
+      limit?: number
+      beforeTurn?: number
+      afterTurn?: number
+    }) => {
+      const page = (await dispatch(
+        { kind: 'load_session_message_page', sessionKey: session.session_key, ...query },
+        deps
+      )) as { messages: MessageRow[] }
+      return page.messages.map(message => message.turn_number)
+    }
+
+    await expect(readTurns({})).resolves.toEqual([1, 1, 3, 3, 7, 7, 8, 8])
+    await expect(readTurns({ limit: 2 })).resolves.toEqual([7, 7, 8, 8])
+    await expect(readTurns({ limit: 2, beforeTurn: 7 })).resolves.toEqual([1, 1, 3, 3])
+    await expect(readTurns({ limit: 2, afterTurn: 1 })).resolves.toEqual([3, 3, 7, 7])
+  })
+
   it('insert_message updates session counters', async () => {
     const deps = createDispatcher(db)
     const sessionRow = makeSession('conv-2', 'u-2:rpc:agent:default')
@@ -102,7 +185,211 @@ describe('dbWorker dispatcher', () => {
     expect(row.message_count).toBe(1)
   })
 
-  it('insert_message does NOT touch token columns (no double-count)', async () => {
+  it('keeps incremental session summaries equal to a full recomputation', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-summary', 'u-summary:rpc:agent:default'),
+      started_at: 5,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    const messages: MessageRow[] = [
+      {
+        session_id: session.id,
+        ordinal: 0,
+        role: 'user',
+        content: 'question',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 10,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 1,
+        role: 'assistant',
+        content: null,
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: '[{"name":"search"}]',
+        tool_name: null,
+        timestamp: 11,
+        token_count: null,
+        finish_reason: 'tool_use',
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 2,
+        role: 'tool',
+        content: 'result',
+        content_parts: null,
+        tool_call_id: 'tool-call-1',
+        tool_calls: null,
+        tool_name: 'search',
+        timestamp: 12,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 3,
+        role: 'assistant',
+        content: 'answer',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 13,
+        token_count: null,
+        finish_reason: 'stop',
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 4,
+        role: 'user',
+        content: 'next question',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 20,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 2,
+      },
+      {
+        session_id: session.id,
+        ordinal: 5,
+        role: 'system',
+        content: 'legacy metadata',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 8,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: null,
+      },
+    ]
+    for (const message of messages) {
+      await dispatch({ kind: 'insert_message', payload: message }, deps)
+    }
+
+    const readSummary = () =>
+      db
+        .prepare(
+          `SELECT last_activity_at, turn_count, message_count
+             FROM sessions
+            WHERE id = ?`
+        )
+        .get(session.id)
+    const incrementalSummary = readSummary()
+    expect(incrementalSummary).toEqual({
+      last_activity_at: 20,
+      turn_count: 2,
+      message_count: 3,
+    })
+
+    deps.statements.recomputeSessionMessageSummary.run({ id: session.id })
+    expect(readSummary()).toEqual(incrementalSummary)
+  })
+
+  it('keeps session start as the activity floor when inserted messages are clock-skewed', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-summary-skew', 'u-summary:rpc:agent:skew'),
+      started_at: 100,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'user',
+          content: 'clock-skewed question',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 20,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: 1,
+        },
+      },
+      deps
+    )
+
+    expect(
+      db.prepare('SELECT last_activity_at FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ last_activity_at: 100 })
+  })
+
+  it('does not move session activity backward when replacing retained messages', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-replace-activity', 'u-replace:rpc:agent:default'),
+      started_at: 100,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    db.prepare('UPDATE sessions SET last_activity_at = ? WHERE id = ?').run(200, session.id)
+
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [
+          {
+            session_id: session.id,
+            ordinal: 0,
+            role: 'user',
+            content: 'retained summary',
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 150,
+            token_count: null,
+            finish_reason: null,
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: 1,
+          },
+        ],
+      },
+      deps
+    )
+
+    expect(
+      db.prepare('SELECT last_activity_at FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ last_activity_at: 200 })
+  })
+
+  it('separates tool-call storage rows from visible messages and token counters', async () => {
     const deps = createDispatcher(db)
     await dispatch(
       { kind: 'insert_session', payload: makeSession('conv-2t', 'u-2t:rpc:agent:default') },
@@ -135,7 +422,7 @@ describe('dbWorker dispatcher', () => {
         'SELECT message_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM sessions WHERE id = ?'
       )
       .get('conv-2t') as Record<string, number>
-    expect(row.message_count).toBe(1)
+    expect(row.message_count).toBe(0)
     expect(row.tool_call_count).toBe(1)
     // tokens stay at DEFAULT 0 — only update_session_counters writes them
     expect(row.input_tokens).toBe(0)
@@ -355,6 +642,50 @@ describe('dbWorker dispatcher', () => {
     expect(rows[0].session_key).toBe('u-3:rpc:agent:default')
   })
 
+  it('selects the earliest pending approval consistently for one session', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-approval-order', 'u-3:rpc:agent:ordered'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-1',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    for (const [requestId, registeredAt] of [
+      ['req-later', 20],
+      ['req-earlier', 10],
+    ] as const) {
+      await dispatch(
+        {
+          kind: 'insert_pending_approval',
+          payload: {
+            request_id: requestId,
+            session_id: session.id,
+            task_id: 'task-1',
+            tool_name: 'shell_exec',
+            tool_call_id: `tc-${requestId}`,
+            parameters: '{}',
+            description: requestId,
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            registered_at: registeredAt,
+            expires_at: 100,
+            trace_context: null,
+          },
+        },
+        deps
+      )
+    }
+
+    const loaded = (await dispatch(
+      { kind: 'load_active_session', sessionKey: session.session_key },
+      deps
+    )) as PersistedSession
+    expect(loaded.pending_approval?.request_id).toBe('req-earlier')
+  })
+
   it('reaps only pending approvals whose session cannot rehydrate the same task', async () => {
     const deps = createDispatcher(db)
     const now = Date.now()
@@ -423,6 +754,107 @@ describe('dbWorker dispatcher', () => {
       .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
       .get('conv-mismatch') as { state: string; active_task_id: string | null }
     expect(mismatch).toEqual({ state: 'idle', active_task_id: null })
+  })
+
+  it('R1-M1 — processing reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-reap-proc', 'u-reap:rpc:agent:proc'),
+      state: 'processing',
+      active_task_id: 'task-proc',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    // A pre-existing message that never carried a turn number (e.g. a legacy
+    // system row). MAX(turn_number) over it is SQL NULL — the reaper must not
+    // coalesce that to a real turn 0.
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'system',
+          content: 'legacy untracked message',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 5,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: null,
+        },
+      },
+      deps
+    )
+
+    await dispatch({ kind: 'reap_processing_sessions', nowEpoch: Date.now() }, deps)
+
+    const page = (await dispatch(
+      { kind: 'load_session_message_page', sessionKey: session.session_key },
+      deps
+    )) as {
+      total_turns: number
+      first_turn_number: number | null
+      last_turn_number: number | null
+    }
+    expect(page.total_turns).toBe(0)
+    expect(page.first_turn_number).toBeNull()
+    expect(page.last_turn_number).toBeNull()
+  })
+
+  it('R1-M1 — awaiting-approval reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
+    const deps = createDispatcher(db)
+    // Orphan awaiting_approval session (no live approval row) with only an
+    // untracked-turn message — the same MAX(turn_number) IS NULL path.
+    const session = {
+      ...makeSession('conv-reap-appr', 'u-reap:rpc:agent:appr'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-appr',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'system',
+          content: 'legacy untracked message',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 5,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: null,
+        },
+      },
+      deps
+    )
+
+    const reaped = (await dispatch(
+      { kind: 'reap_awaiting_approval_sessions', nowEpoch: Date.now() },
+      deps
+    )) as ReapedSession[]
+    expect(reaped.map(row => row.sessionId)).toEqual(['conv-reap-appr'])
+
+    const page = (await dispatch(
+      { kind: 'load_session_message_page', sessionKey: session.session_key },
+      deps
+    )) as {
+      total_turns: number
+      first_turn_number: number | null
+      last_turn_number: number | null
+    }
+    expect(page.total_turns).toBe(0)
+    expect(page.first_turn_number).toBeNull()
+    expect(page.last_turn_number).toBeNull()
   })
 
   it('integrity_check returns ok', async () => {

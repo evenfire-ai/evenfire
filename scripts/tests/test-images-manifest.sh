@@ -202,17 +202,19 @@ JSON
   rm -rf "$d"
 }
 
-assert_unpublished_images_are_exactly_the_known_three() {
+assert_unpublished_images_are_exactly_the_known_two() {
   local got
   got="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m =>
       console.log(m.IMAGES.filter(i=>!i.published).map(i=>i.name).sort().join(",")))' 2>/dev/null)"
-  # Verified by anonymous ghcr probe: these three return `denied`. playwright-server
+  # Verified by anonymous ghcr probe: these two return `denied`. playwright-server
   # IS published (an earlier draft wrongly listed it as a gap; the probe that said
-  # otherwise was missing its Accept header).
-  local want="doc-generator-mcp,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
+  # otherwise was missing its Accept header). doc-generator-mcp used to be the
+  # third; it has no manifest row at all now (see
+  # assert_doc_generator_mcp_has_been_removed_from_the_image_system).
+  local want="workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
   if [ "$got" = "$want" ]; then
-    pass "the unpublished set is exactly the known three"
+    pass "the unpublished set is exactly the known two"
   else
     fail "unpublished set is '$got', expected '$want'"
   fi
@@ -536,6 +538,369 @@ assert_all_three_image_lists_agree() {
 # fed `while read` nothing, `missing` stayed empty, and this case could never
 # fail -- verified by commenting out an invocation and seeing it still print
 # PASS while under-reporting its own invoked count.
+# NOTE: the case that used to sit here grepped build-images.sh for the strings
+# IMAGE_SOURCE, pullInGhcrMode and VERIFY_IMAGES. It died the moment the
+# derivation moved into minikubeVerifyRefs() -- while `if (false && ...)` around
+# the same derivation would have left it green. Its intent, "--verify-only
+# checks the ref the CLUSTER runs", is now covered by execution instead: the
+# derivation by the minikubeVerifyRefs cases below, and the end-to-end
+# behaviour (including which mode is chosen) by
+# scripts/tests/test-minikube-verify-images.sh, which runs the real script
+# against a stubbed daemon holding one mode's refs only.
+
+# The rule has to hold in BOTH modes, not just ghcr: the published:false images
+# have no ghcr counterpart at all, so whenever they are verified they are
+# verified under their local clerum/* ref, IMAGE_SOURCE notwithstanding.
+# (WHETHER each one is verified in ghcr mode is a separate question, settled by
+# e2e_only in the cases below: the two sdk-e2e fixtures are acquired only by
+# `make minikube-setup-e2e`.)
+assert_the_verify_set_splits_on_published_not_on_mode() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const ghcrNames = new Set(m.pullInGhcrMode().map(i => i.name))
+      const bad = []
+      for (const i of m.IMAGES) {
+        if (!i.deployed_to_minikube) continue
+        const inGhcrSet = ghcrNames.has(i.name)
+        if (i.published !== inGhcrSet) {
+          bad.push(`${i.name}: published=${i.published} but pull_in_ghcr_mode=${inGhcrSet}`)
+        }
+      }
+      console.log(bad.join(","))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "for every minikube-deployed image, ghcr-vs-local verification splits on published"
+  else
+    fail "$output"
+  fi
+}
+
+# `make minikube-setup` (default ghcr, SEED_PROFILE=minimal) builds nothing at
+# all now. The two sdk-e2e fixtures are built by `make minikube-setup-e2e` alone
+# and no pull can supply them (published:false), so demanding them on the
+# default path fails a healthy cluster with a remedy that can never work.
+#
+# doc-generator-mcp used to be the one exception -- unpublished but built on
+# both paths. It has no manifest row at all now (never published, so no cluster
+# could ever acquire it), so it is not in the verify set in any mode.
+#
+# The expected refs are spelled out rather than re-derived from the manifest:
+# a test that recomputes minikubeVerifyRefs()'s own rule proves nothing.
+assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const refs = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST" })
+      const problems = []
+      const deployed = m.IMAGES.filter(i => i.deployed_to_minikube).length
+      for (const gone of ["workflow-custom-sdk-e2e", "workflow-plugin-sdk-e2e"]) {
+        if (refs.some(r => r.includes(gone))) problems.push(`${gone} is still demanded in ghcr mode`)
+      }
+      if (!refs.includes("ghcr.io/evenfire-ai/control-api:vTEST")) {
+        problems.push("a published image is not verified at its ghcr ref")
+      }
+      if (refs.length !== deployed - 2) {
+        problems.push(`expected ${deployed - 2} refs, got ${refs.length}`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "the default ghcr verify set drops the two E2E fixtures and nothing else"
+  else
+    fail "$output"
+  fi
+}
+
+# THE REGRESSION GUARD for this change. MCP servers are distributed through the
+# evenfire registry and installed on demand: a registry install copies the
+# catalog entry's fully-qualified imageRef straight into McpServer.spec.image
+# (control-api/src/routes/admin/registry.ts:1088) and the kubelet pulls it, so
+# no locally loaded clerum/* alias is involved and minikube setup must neither
+# build nor pull these images.
+#
+# Named explicitly, and asserted at every derived consumer at once, because the
+# single manifest flag fans out to four different answers. Re-deriving any of
+# them from deployed_to_minikube would make this pass no matter what the flag
+# says.
+#
+# `published` is deliberately NOT asserted false: the registry serves these
+# images from ghcr, so publishing must continue. That is exactly the pair this
+# case exists to hold apart -- published:true, deployed_to_minikube:false.
+assert_registry_distributed_mcp_servers_are_out_of_the_minikube_set() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const registryServed = ["airtable-mcp-server", "web-search-mcp"]
+      const problems = []
+      const byName = new Map(m.IMAGES.map(i => [i.name, i]))
+      const ghcrNames = new Set(m.pullInGhcrMode().map(i => i.name))
+      const ghcrRefs = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST" })
+      const localRefs = m.minikubeVerifyRefs({ mode: "local" })
+      const e2eRefs = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST", includeE2eFixtures: true })
+      for (const name of registryServed) {
+        const image = byName.get(name)
+        if (!image) {
+          problems.push(`${name} has no manifest row at all`)
+          continue
+        }
+        if (image.deployed_to_minikube) problems.push(`${name} is still deployed_to_minikube`)
+        // The pull half: pullInGhcrMode() is what pull-images.sh iterates.
+        if (ghcrNames.has(name)) problems.push(`${name} is still pulled in ghcr mode`)
+        // The verify half, in all three modes -- a ref demanded here would fail
+        // a healthy cluster that correctly never acquired the image.
+        for (const [label, refs] of [["ghcr", ghcrRefs], ["local", localRefs], ["ghcr+e2e", e2eRefs]]) {
+          if (refs.some(r => r.includes(name))) problems.push(`${name} is still verified in ${label} mode`)
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "registry-distributed derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "the registry-distributed MCP servers are neither deployed, pulled, nor verified"
+  else
+    fail "$output"
+  fi
+}
+
+# The other half of the pair above, and the reason it cannot simply assert
+# "these two are absent from deploy/images.json". Dropping the rows would stop
+# publishing them, and the registry serves these images from ghcr -- so the rows
+# must stay, with published untouched.
+#
+# doc-generator-mcp was the third name here, pinned as published:false. That
+# combination was unserveable -- the registry cannot install an image no one
+# pushes -- so the image was removed from the system outright instead of being
+# published; assert_doc_generator_mcp_has_been_removed_from_the_image_system
+# holds that.
+assert_registry_distributed_mcp_servers_keep_their_published_flag() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const expected = new Map([
+        ["airtable-mcp-server", true],
+        ["web-search-mcp", true],
+      ])
+      const problems = []
+      const byName = new Map(m.IMAGES.map(i => [i.name, i]))
+      const publishedNames = new Set(m.publishedImages().map(i => i.name))
+      for (const [name, want] of expected) {
+        const image = byName.get(name)
+        if (!image) {
+          problems.push(`${name} has no manifest row at all`)
+          continue
+        }
+        if (image.published !== want) {
+          problems.push(`${name}.published is ${image.published}, expected ${want}`)
+        }
+        if (publishedNames.has(name) !== want) {
+          problems.push(`${name} publishedImages() membership is ${publishedNames.has(name)}, expected ${want}`)
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "published-flag derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "the registry-distributed MCP servers keep publishing"
+  else
+    fail "$output"
+  fi
+}
+
+# THE REGRESSION GUARD for the removal. doc-generator-mcp was published:false
+# AND deployed_to_minikube:false: nothing built it, nothing pulled it, and
+# ghcr.io/evenfire-ai/doc-generator-mcp answers 403 because it was never
+# pushed. An image obtainable nowhere is not a gap to publish, it is a row to
+# delete -- so the row is gone, and every set derived from it must stay empty
+# of the name.
+#
+# Asserted against the derived sets by NAME rather than by re-deriving the
+# absence rule, and across every consumer at once: the missing row fans out to
+# the build matrix, the puller, the ghcr overlay component, and all three
+# verify modes, and a check on IMAGES alone would not notice a name
+# reintroduced further down the chain.
+#
+# The source directory mcp-servers/doc-generator deliberately survives: it is
+# an npm workspace package (@clerum/doc-generator-mcp) that scripts/build-
+# preflight.sh type-checks and scripts/prettier/paths.mjs formats. This case is
+# about the IMAGE, so it must not grow an assertion about the tree.
+assert_doc_generator_mcp_has_been_removed_from_the_image_system() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const gone = "doc-generator-mcp"
+      const problems = []
+      if (m.IMAGES.some(i => i.name === gone)) problems.push("still has a row in deploy/images.json")
+      if (m.publishedImages().some(i => i.name === gone)) problems.push("still in publishedImages()")
+      if (m.pullInGhcrMode().some(i => i.name === gone)) problems.push("still in pullInGhcrMode()")
+      const modes = [
+        ["ghcr", m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST" })],
+        ["local", m.minikubeVerifyRefs({ mode: "local" })],
+        ["ghcr+e2e", m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST", includeE2eFixtures: true })],
+      ]
+      for (const [label, refs] of modes) {
+        if (refs.some(r => r.includes(gone))) problems.push(`still verified in ${label} mode`)
+      }
+      // The two hand-written lists the manifest does not generate. Read rather
+      // than derived, because a stale entry in either is exactly what a
+      // manifest-only check cannot see.
+      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
+      if (wf.includes(gone)) problems.push("still named in the build-publish.yml matrix")
+      const sh = fs.readFileSync("'"$REPO_ROOT"'/scripts/minikube/build-images.sh", "utf8")
+      const block = sh.match(/ALL_IMAGES=\(([\s\S]*?)\n\)/)
+      if (!block) {
+        console.log("PARSE_ERROR: could not find the ALL_IMAGES=(...) array in build-images.sh")
+        process.exit(1)
+      }
+      const refs = [
+        ...[...block[1].matchAll(/"([^"]+)"/g)].map(x => x[1]),
+        ...[...sh.matchAll(/ALL_IMAGES\+=\("([^"]+)"\)/g)].map(x => x[1]),
+      ]
+      if (refs.some(r => r.includes(gone))) problems.push("still built by build-images.sh")
+      const overlay = fs.readFileSync("'"$REPO_ROOT"'/deploy/overlays/minikube/kustomization.yaml", "utf8")
+      if (overlay.includes(gone)) problems.push("still named in the minikube overlay")
+      const component = fs.readFileSync("'"$REPO_ROOT"'/deploy/components/ghcr-images/kustomization.yaml", "utf8")
+      if (component.includes(gone)) problems.push("still named in the ghcr-images component")
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "doc-generator-mcp removal check failed: $output"
+  elif [ -z "$output" ]; then
+    pass "doc-generator-mcp is gone from the manifest and every derived set"
+  else
+    fail "doc-generator-mcp: $output"
+  fi
+}
+
+# The exclusion is an opt-out, not a deletion. `make minikube-setup-e2e` builds
+# both fixtures, and a full LOCAL build builds every fixture unconditionally --
+# origin/dev verified them, and dropping them there would lose real coverage.
+assert_the_e2e_opt_in_and_local_mode_both_keep_the_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const problems = []
+      const wanted = ["clerum/workflow-custom-sdk-e2e:test", "clerum/workflow-plugin-sdk-e2e:test"]
+      const optedIn = m.minikubeVerifyRefs({ mode: "ghcr", tag: "vTEST", includeE2eFixtures: true })
+      for (const ref of wanted) {
+        if (!optedIn.includes(ref)) problems.push(`ghcr+opt-in is missing ${ref}`)
+      }
+      const local = m.minikubeVerifyRefs({ mode: "local" })
+      for (const ref of wanted) {
+        if (!local.includes(ref)) problems.push(`local mode is missing ${ref}`)
+      }
+      if (local.some(r => r.startsWith("ghcr.io/"))) problems.push("local mode emitted a ghcr ref")
+      if (local.length !== m.IMAGES.filter(i => i.deployed_to_minikube).length) {
+        problems.push(`local mode dropped an image: ${local.length} refs`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "both the e2e opt-in and local mode keep the E2E fixtures in the verify set"
+  else
+    fail "$output"
+  fi
+}
+
+# A mode this function cannot serve must throw, not fall through to some
+# default: a silent fallback would emit `...:undefined` refs, and every one of
+# them would then be reported MISSING against a healthy cluster.
+assert_verify_refs_refuses_a_mode_or_tag_it_cannot_serve() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const problems = []
+      const mustThrow = (label, fn) => {
+        try {
+          const refs = fn()
+          problems.push(`${label} returned ${refs.length} refs instead of throwing`)
+        } catch {
+          /* expected */
+        }
+      }
+      mustThrow("an unknown mode", () => m.minikubeVerifyRefs({ mode: "gcr", tag: "vTEST" }))
+      mustThrow("a missing mode", () => m.minikubeVerifyRefs({}))
+      mustThrow("ghcr with no tag", () => m.minikubeVerifyRefs({ mode: "ghcr" }))
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "verify-set derivation failed: $output"
+  elif [ -z "$output" ]; then
+    pass "an unknown mode and a tagless ghcr call both throw"
+  else
+    fail "$output"
+  fi
+}
+
+# e2e_only removes a ref from the default verify set, so a published image must
+# never carry it -- that would silently stop verifying an image every cluster
+# pulls.
+assert_e2e_only_images_are_unpublished_minikube_fixtures() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m => {
+      const flagged = m.IMAGES.filter(i => i.e2e_only)
+      const problems = []
+      const names = flagged.map(i => i.name).sort().join(",")
+      if (names !== "workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e") {
+        problems.push(`unexpected e2e_only set: ${names || "<none>"}`)
+      }
+      for (const i of flagged) {
+        if (i.published) problems.push(`${i.name} is published AND e2e_only`)
+        if (!i.deployed_to_minikube) problems.push(`${i.name} is e2e_only but not deployed_to_minikube`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "e2e_only read failed: $output"
+  elif [ -z "$output" ]; then
+    pass "e2e_only marks exactly the two unpublished minikube E2E fixtures"
+  else
+    fail "$output"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-images-manifest.sh"
@@ -555,11 +920,19 @@ assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_a_published_image_with_no_source_paths_is_rejected
 assert_an_invalid_image_name_is_rejected
-assert_unpublished_images_are_exactly_the_known_three
+assert_unpublished_images_are_exactly_the_known_two
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_all_three_image_lists_agree
+assert_the_verify_set_splits_on_published_not_on_mode
+assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures
+assert_registry_distributed_mcp_servers_are_out_of_the_minikube_set
+assert_registry_distributed_mcp_servers_keep_their_published_flag
+assert_doc_generator_mcp_has_been_removed_from_the_image_system
+assert_the_e2e_opt_in_and_local_mode_both_keep_the_fixtures
+assert_verify_refs_refuses_a_mode_or_tag_it_cannot_serve
+assert_e2e_only_images_are_unpublished_minikube_fixtures
 assert_every_defined_case_is_invoked
 
 exit $FAIL

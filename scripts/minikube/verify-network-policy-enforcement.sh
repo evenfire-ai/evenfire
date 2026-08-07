@@ -14,6 +14,56 @@ set -euo pipefail
 
 CONTEXT="${CONTEXT:-${KUBECONTEXT:-clerum-test}}"
 PROBE_IMAGE="${PROBE_IMAGE:-clerum/workflow-custom-sdk-e2e:test}"
+# The kubectl context and the minikube profile are the same name throughout this
+# repo (Makefile passes CONTEXT=$(MINIKUBE_PROFILE)); the split lets a caller
+# fix it up if they ever diverge.
+MINIKUBE_PROFILE="${MINIKUBE_PROFILE:-$CONTEXT}"
+
+# The probe image is an E2E-ONLY FIXTURE: deploy/images.json marks it
+# published:false + e2e_only:true, so the default `make minikube-setup`
+# (IMAGE_SOURCE=ghcr, SEED_PROFILE=minimal) neither pulls nor builds it -- only
+# `make minikube-setup-e2e` and `make minikube-build-custom-coordinator-fixture`
+# do. Before pulling was the default, every setup built this ref, so this target
+# worked on any cluster; it no longer does.
+#
+# Without this check all three probe pods sit in ErrImageNeverPull /
+# ImagePullBackOff until the 90s Ready wait expires, and the run reports
+# "waiting for server pod" plus a describe dump -- which reads as broken
+# NetworkPolicy enforcement when the truth is that the image was never built.
+#
+# This target deliberately does NOT build it: a verification script that
+# silently acquires images makes the thing it verifies depend on the act of
+# verifying it. Say what is missing and which target supplies it, before
+# anything is applied to the cluster.
+require_probe_image() {
+  local listing
+  if ! command -v minikube >/dev/null 2>&1; then
+    printf '[np-preflight] ERROR: minikube is not on PATH, so the probe image %s cannot be confirmed present in profile %s.\n' \
+      "$PROBE_IMAGE" "$MINIKUBE_PROFILE" >&2
+    exit 1
+  fi
+  # Not `|| true` and not 2>/dev/null: a daemon that cannot be listed is an
+  # unknown, and an unknown here is a failure, never a pass.
+  if ! listing="$(minikube -p "$MINIKUBE_PROFILE" image ls)"; then
+    printf '[np-preflight] ERROR: could not list the images in minikube profile %s; cannot confirm %s is loaded.\n' \
+      "$MINIKUBE_PROFILE" "$PROBE_IMAGE" >&2
+    exit 1
+  fi
+  # minikube prints the docker.io-normalised spelling for a bare clerum/* ref;
+  # accept both so a caller-supplied PROBE_IMAGE matches either way.
+  if printf '%s\n' "$listing" | grep -Fxq "$PROBE_IMAGE" \
+    || printf '%s\n' "$listing" | grep -Fxq "docker.io/${PROBE_IMAGE}"; then
+    return 0
+  fi
+  printf '[np-preflight] ERROR: probe image %s is not loaded in minikube profile %s.\n' \
+    "$PROBE_IMAGE" "$MINIKUBE_PROFILE" >&2
+  printf '[np-preflight] It is an E2E-only fixture (published:false in deploy/images.json), so the default\n' >&2
+  printf '[np-preflight] `make minikube-setup` never acquires it and every probe pod would fail to start.\n' >&2
+  printf '[np-preflight] Build it first:  make minikube-build-custom-coordinator-fixture\n' >&2
+  printf '[np-preflight] (`make minikube-setup-e2e` builds it too, and PROBE_IMAGE=<ref> selects an image this cluster already has.)\n' >&2
+  exit 1
+}
+require_probe_image
 
 if [ -z "${CLERUM_NP_SINGLE_NAMESPACE:-}" ]; then
   if [ -n "${NS:-}" ]; then
