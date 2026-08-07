@@ -113,6 +113,28 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.body).toEqual({ error: 'escalation_rejected' })
   })
 
+  it('propagates control-api gfsc 5xx codes (504/502) verbatim, not a generic 500', async () => {
+    // control-api emits 504 gfsc_timeout / 502 gfsc_unreachable on the me-path;
+    // without them in PROPAGATED, forwardControlApiError fell through to the global
+    // handler which collapses every 5xx to 500 — the documented codes became
+    // unobservable at the desktop (a wedged gfsc looked like an internal bug).
+    for (const [status, error] of [
+      [504, 'gfsc_timeout'],
+      [502, 'gfsc_unreachable'],
+    ] as const) {
+      clientMock.controlApiRequest.mockReset()
+      clientMock.controlApiRequest.mockRejectedValue(
+        new ControlApiError('gfsc failure', status, { error })
+      )
+      const res = await request(buildApp())
+        .put('/me/gfs/resources/abc/content?drive=main')
+        .set('authorization', 'Bearer sess-xyz')
+        .send({ contentBase64: 'AAAA' })
+      expect(res.status).toBe(status)
+      expect(res.body).toEqual({ error })
+    }
+  })
+
   it('streams a content download (binary) from the proxy', async () => {
     clientMock.controlApiStreamRequest.mockResolvedValue(
       new Response('hello', {

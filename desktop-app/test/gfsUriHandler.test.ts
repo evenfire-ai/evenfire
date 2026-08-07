@@ -420,13 +420,24 @@ describe('GfsClient resource mutations', () => {
       1,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'docs', kind: 'directory' } }
+      {
+        token: 'tok',
+        body: { name: 'docs', kind: 'directory' },
+        // Assert the concrete 300000, not config.gfsUploadTimeoutMs: vitest treats
+        // {timeoutMs: undefined} as equal to a call without the key, so referencing
+        // config would make this pass vacuously if the field were ever dropped.
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' } }
+      {
+        token: 'tok',
+        body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' },
+        timeoutMs: 300000,
+      }
     )
   })
 
@@ -443,7 +454,11 @@ describe('GfsClient resource mutations', () => {
       1,
       'PUT',
       `https://api.example/api/v1/me/gfs/resources/${RID}/content?drive=main`,
-      { token: 'tok', body: { contentBase64: 'aGVsbG8=', ifMatch: 1 } }
+      {
+        token: 'tok',
+        body: { contentBase64: 'aGVsbG8=', ifMatch: 1 },
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
