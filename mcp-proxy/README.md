@@ -31,18 +31,18 @@ MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 
 ## Environment Variables
 
-| Variable                      | Default                                             | Description                                         |
-| ----------------------------- | --------------------------------------------------- | --------------------------------------------------- |
-| `MCP_PROXY_PORT`              | `8083`                                              | HTTP listen port                                    |
-| `HCC_API_URL`                 | `http://host-context-controller.control-plane:8081` | HCC API base URL                                    |
-| `HCC_POLL_INTERVAL`           | `30000`                                             | Server discovery poll interval (ms)                 |
-| `HCC_CACHE_TTL`               | `120000`                                            | Cache staleness threshold (ms) -- health warns      |
-| `HCC_CACHE_EXPIRY`            | `300000`                                            | Cache expiry threshold (ms) -- readiness fails      |
-| `MCP_PROXY_REQUEST_TIMEOUT`   | `30000`                                             | Per-request forwarding timeout (ms)                 |
-| `MCP_PROXY_MAX_RESPONSE_SIZE` | `10485760`                                          | Max response body size (10 MB)                      |
-| `CLERUM_DEV_MODE`             | `false`                                             | Dev mode: skip HCC polling, use static server list  |
-| `MCP_PROXY_SERVERS`           | `[]`                                                | JSON array of `ServerRoute` objects (dev mode only) |
-| `LOG_LEVEL`                   | `info`                                              | Log verbosity                                       |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_PROXY_PORT` | `8083` | HTTP listen port |
+| `HCC_API_URL` | `http://host-context-controller.control-plane:8081` | HCC API base URL |
+| `HCC_POLL_INTERVAL` | `30000` | Server discovery poll interval (ms) |
+| `HCC_CACHE_TTL` | `120000` | Cache staleness threshold (ms) -- health warns |
+| `HCC_CACHE_EXPIRY` | `300000` | Cache expiry threshold (ms) -- readiness fails |
+| `MCP_PROXY_REQUEST_TIMEOUT` | `30000` | Per-request forwarding timeout (ms) |
+| `MCP_PROXY_MAX_RESPONSE_SIZE` | `10485760` | Max response body size (10 MB) |
+| `CLERUM_DEV_MODE` | `false` | Dev mode: skip HCC polling, use static server list |
+| `MCP_PROXY_SERVERS` | `[]` | JSON array of `ServerRoute` objects (dev mode only) |
+| `LOG_LEVEL` | `info` | Log verbosity |
 
 ## Local Development
 

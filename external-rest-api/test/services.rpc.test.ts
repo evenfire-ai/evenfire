@@ -50,8 +50,6 @@ describe('rpcService.issueRpcAccessToken', () => {
       })
     )
 
-    await expect(
-      issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])
-    ).rejects.toThrow()
+    await expect(issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])).rejects.toThrow()
   })
 })

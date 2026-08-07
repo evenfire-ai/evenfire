@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import { createHmac } from 'node:crypto'
+import { describe, expect, it } from 'vitest'
 import { signOAuthState, verifyOAuthState, verifyOAuthStateSignature } from '../src/oauth/state.js'
 
 const SECRET = 'unit-test-state-hmac-secret-32-bytes-pad'
@@ -181,8 +181,6 @@ describe('verifyOAuthStateSignature (signature-only, for the path-less callback)
       })
     ).toString('base64url')
     const sig = createHmac('sha256', SECRET).update(`${version}.${expired}`).digest('base64url')
-    expect(verifyOAuthStateSignature(SECRET, [version, expired, sig].join('.')).kind).toBe(
-      'expired'
-    )
+    expect(verifyOAuthStateSignature(SECRET, [version, expired, sig].join('.')).kind).toBe('expired')
   })
 })

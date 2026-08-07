@@ -4,7 +4,7 @@
  * Verifies that calling setLifecycle more than once (same lifecycle or a different one)
  * does not accumulate listeners on 'transition' or 'record:evicted'.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../messageQueue'
 

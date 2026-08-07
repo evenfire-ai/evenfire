@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { WorkflowRecipeResource } from '../../lib/api'
-import { RecipeIntegrationsPanel } from '../RecipeIntegrationsPanel'
 import { ToastProvider } from '../Toast'
 
 // ── Mock declarations ────────────────────────────────────────────────────────
@@ -51,6 +50,8 @@ vi.mock('../icons', () => ({
   IconRefresh: () => <span data-testid="icon-refresh" />,
 }))
 
+import { RecipeIntegrationsPanel } from '../RecipeIntegrationsPanel'
+
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const recipe: WorkflowRecipeResource = {
@@ -70,7 +71,7 @@ function renderPanel() {
     ...render(
       <ToastProvider>
         <RecipeIntegrationsPanel recipe={recipe} />
-      </ToastProvider>
+      </ToastProvider>,
     ),
     user,
   }

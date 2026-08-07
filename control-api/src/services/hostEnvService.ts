@@ -139,14 +139,19 @@ export class HostEnvService {
    * List names + metadata of all per-Host env vars. Never returns values.
    */
   async list(hostRef: string): Promise<HostEnvEntry[]> {
-    const [cm, secret] = await Promise.all([this.readCm(hostRef), this.readSecret(hostRef)])
+    const [cm, secret] = await Promise.all([
+      this.readCm(hostRef),
+      this.readSecret(hostRef),
+    ])
     const entries: HostEnvEntry[] = []
     const cmTimestamp =
       cm?.metadata?.annotations?.['clerum.io/last-updated'] ||
       (cm?.metadata?.creationTimestamp ? String(cm.metadata.creationTimestamp) : undefined)
     const secretTimestamp =
       secret?.metadata?.annotations?.['clerum.io/last-updated'] ||
-      (secret?.metadata?.creationTimestamp ? String(secret.metadata.creationTimestamp) : undefined)
+      (secret?.metadata?.creationTimestamp
+        ? String(secret.metadata.creationTimestamp)
+        : undefined)
     for (const k of Object.keys(cm?.data ?? {})) {
       entries.push({ key: k, secret: false, updatedAt: cmTimestamp })
     }

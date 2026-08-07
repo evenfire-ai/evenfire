@@ -1,4 +1,4 @@
-import type { NextFunction, Request, RequestHandler, Response } from 'express'
+import type { Request, Response, NextFunction, RequestHandler } from "express";
 
 /**
  * Audit and silently strip any namespace injection attempt from a request.
@@ -12,41 +12,42 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express'
  * @param req - Express request to inspect
  * @param configNs - The server-side canonical namespace for this resource
  */
-export function auditNamespaceAttempt(req: Request, configNs: string): void {
-  const body = req.body as { metadata?: { namespace?: unknown }; namespace?: unknown } | undefined
+export function auditNamespaceAttempt(
+  req: Request,
+  configNs: string,
+): void {
+  const body = req.body as
+    | { metadata?: { namespace?: unknown }; namespace?: unknown }
+    | undefined;
 
-  const source = req.ip ?? req.socket?.remoteAddress ?? 'unknown'
+  const source = req.ip ?? req.socket?.remoteAddress ?? "unknown";
 
   // Detect namespace injection from three vectors
-  const vectors: Array<{ vector: string; field?: string; value: unknown }> = []
+  const vectors: Array<{ vector: string; field?: string; value: unknown }> = [];
 
   if (req.query.namespace !== undefined) {
-    vectors.push({ vector: 'query-param', value: req.query.namespace })
+    vectors.push({ vector: "query-param", value: req.query.namespace });
   }
   if (body?.metadata?.namespace !== undefined) {
-    vectors.push({
-      vector: 'body-field',
-      field: 'metadata.namespace',
-      value: body.metadata.namespace,
-    })
+    vectors.push({ vector: "body-field", field: "metadata.namespace", value: body.metadata.namespace });
   }
   if (body?.namespace !== undefined) {
-    vectors.push({ vector: 'body-field', field: 'namespace', value: body.namespace })
+    vectors.push({ vector: "body-field", field: "namespace", value: body.namespace });
   }
 
   for (const { vector, field, value } of vectors) {
     console.warn(
       JSON.stringify({
-        alert: 'SECURITY',
-        event: 'namespace_injection',
+        alert: "SECURITY",
+        event: "namespace_injection",
         vector,
         ...(field && { field }),
         path: req.path,
         attempted_ns: value,
         expected_ns: configNs,
         source_ip: source,
-      })
-    )
+      }),
+    );
   }
 }
 
@@ -58,16 +59,20 @@ export function auditNamespaceAttempt(req: Request, configNs: string): void {
  * expected namespace; this function logs the actual namespace used when it
  * differs from the enforced one, for observability completeness.
  */
-export function auditNamespaceFallback(path: string, enforcedNs: string, actualNs: string): void {
+export function auditNamespaceFallback(
+  path: string,
+  enforcedNs: string,
+  actualNs: string,
+): void {
   console.info(
     JSON.stringify({
-      alert: 'OBSERVABILITY',
-      event: 'namespace_fallback',
+      alert: "OBSERVABILITY",
+      event: "namespace_fallback",
       path,
       enforced_ns: enforcedNs,
       actual_ns: actualNs,
-    })
-  )
+    }),
+  );
 }
 
 /**
@@ -107,33 +112,35 @@ export function auditNamespaceFallback(path: string, enforcedNs: string, actualN
  */
 export function enforceNamespace(configNs: string): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
-    const body = req.body as { metadata?: { namespace?: unknown }; namespace?: unknown } | undefined
+    const body = req.body as
+      | { metadata?: { namespace?: unknown }; namespace?: unknown }
+      | undefined;
 
     // Check metadata.namespace mismatch — absent and matching are both ok.
     // This is the CRD body format; a non-empty mismatching value is rejected
     // with 400 so callers learn they must omit the field.
-    const metaNs = body?.metadata?.namespace
-    if (metaNs !== undefined && metaNs !== '' && metaNs !== configNs) {
-      auditNamespaceAttempt(req, configNs)
+    const metaNs = body?.metadata?.namespace;
+    if (metaNs !== undefined && metaNs !== "" && metaNs !== configNs) {
+      auditNamespaceAttempt(req, configNs);
       res.status(400).json({
         error:
-          'namespace is server-determined; omit metadata.namespace from the request body, ' +
+          "namespace is server-determined; omit metadata.namespace from the request body, " +
           `or use the correct value ("${configNs}").`,
-      })
-      return
+      });
+      return;
     }
 
     // Audit any injection vectors (query-param, body fields) and strip namespace
     // fields so downstream handlers always use the config value.
     // Top-level body.namespace is silently stripped (non-CRD routes — e.g.
     // Secret upsert — explicitly overwrite it anyway, so stripping here is safe).
-    auditNamespaceAttempt(req, configNs)
-    if (req.body && typeof req.body === 'object') {
-      if (req.body.metadata && typeof req.body.metadata === 'object') {
-        delete req.body.metadata.namespace
+    auditNamespaceAttempt(req, configNs);
+    if (req.body && typeof req.body === "object") {
+      if (req.body.metadata && typeof req.body.metadata === "object") {
+        delete req.body.metadata.namespace;
       }
-      delete req.body.namespace
+      delete req.body.namespace;
     }
-    next()
-  }
+    next();
+  };
 }

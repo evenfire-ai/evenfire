@@ -12,38 +12,39 @@
  * - Error handling
  * - Read-only mode enforcement
  */
-import { beforeEach, describe, expect, it } from 'vitest'
-import { createMockMongoClient, setupMockMongoData } from './mongodb.connection.test'
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createMockMongoClient, setupMockMongoData } from './mongodb.connection.test';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 interface McpTool {
-  name: string
-  description: string
+  name: string;
+  description: string;
   inputSchema: {
-    type: 'object'
-    properties: Record<string, any>
-    required?: string[]
-  }
+    type: 'object';
+    properties: Record<string, any>;
+    required?: string[];
+  };
 }
 
 interface McpToolsListResponse {
-  tools: McpTool[]
+  tools: McpTool[];
 }
 
 interface McpToolCallRequest {
-  name: string
-  arguments?: Record<string, any>
+  name: string;
+  arguments?: Record<string, any>;
 }
 
 interface McpToolCallResponse {
   content: Array<{
-    type: string
-    text?: string
-  }>
-  isError?: boolean
+    type: string;
+    text?: string;
+  }>;
+  isError?: boolean;
 }
 
 // =============================================================================
@@ -51,25 +52,25 @@ interface McpToolCallResponse {
 // =============================================================================
 
 class MockMongoMcpServer {
-  private mongoClient: ReturnType<typeof createMockMongoClient>
-  private readOnlyMode: boolean = true
+  private mongoClient: ReturnType<typeof createMockMongoClient>;
+  private readOnlyMode: boolean = true;
 
   constructor() {
-    this.mongoClient = createMockMongoClient()
+    this.mongoClient = createMockMongoClient();
   }
 
   /**
    * Initialize connection
    */
   async initialize(connectionString: string): Promise<void> {
-    await this.mongoClient.connect(connectionString)
+    await this.mongoClient.connect(connectionString);
   }
 
   /**
    * Set read-only mode
    */
   setReadOnlyMode(readOnly: boolean): void {
-    this.readOnlyMode = readOnly
+    this.readOnlyMode = readOnly;
   }
 
   /**
@@ -219,7 +220,7 @@ class MockMongoMcpServer {
           },
         },
       ],
-    }
+    };
   }
 
   /**
@@ -227,36 +228,36 @@ class MockMongoMcpServer {
    * Execute a MongoDB MCP tool
    */
   async toolsCall(request: McpToolCallRequest): Promise<McpToolCallResponse> {
-    const { name, arguments: args } = request
+    const { name, arguments: args } = request;
 
     try {
       switch (name) {
         case 'mongodb_find':
-          return await this.find(args!)
+          return await this.find(args!);
 
         case 'mongodb_aggregate':
-          return await this.aggregate(args!)
+          return await this.aggregate(args!);
 
         case 'mongodb_count':
-          return await this.count(args!)
+          return await this.count(args!);
 
         case 'mongodb_distinct':
-          return await this.distinct(args!)
+          return await this.distinct(args!);
 
         case 'mongodb_insert_one':
-          return await this.insertOne(args!)
+          return await this.insertOne(args!);
 
         case 'mongodb_update_one':
-          return await this.updateOne(args!)
+          return await this.updateOne(args!);
 
         case 'mongodb_delete_one':
-          return await this.deleteOne(args!)
+          return await this.deleteOne(args!);
 
         case 'mongodb_list_collections':
-          return await this.listCollections(args!)
+          return await this.listCollections(args!);
 
         case 'mongodb_list_databases':
-          return await this.listDatabases()
+          return await this.listDatabases();
 
         default:
           return {
@@ -267,7 +268,7 @@ class MockMongoMcpServer {
               },
             ],
             isError: true,
-          }
+          };
       }
     } catch (error: any) {
       return {
@@ -278,7 +279,7 @@ class MockMongoMcpServer {
           },
         ],
         isError: true,
-      }
+      };
     }
   }
 
@@ -287,7 +288,7 @@ class MockMongoMcpServer {
   // =============================================================================
 
   private async find(args: any): Promise<McpToolCallResponse> {
-    const { database, collection, filter = {}, projection, limit, sort } = args
+    const { database, collection, filter = {}, projection, limit, sort } = args;
 
     // Validate required parameters
     if (!database || !collection) {
@@ -299,7 +300,7 @@ class MockMongoMcpServer {
           },
         ],
         isError: true,
-      }
+      };
     }
 
     const documents = await this.mongoClient.find(collection, {
@@ -307,7 +308,7 @@ class MockMongoMcpServer {
       projection,
       limit,
       sort,
-    })
+    });
 
     return {
       content: [
@@ -316,11 +317,11 @@ class MockMongoMcpServer {
           text: JSON.stringify(documents, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async aggregate(args: any): Promise<McpToolCallResponse> {
-    const { database, collection, pipeline } = args
+    const { database, collection, pipeline } = args;
 
     // Validate required parameters
     if (!database || !collection || !pipeline) {
@@ -332,10 +333,10 @@ class MockMongoMcpServer {
           },
         ],
         isError: true,
-      }
+      };
     }
 
-    const documents = await this.mongoClient.aggregate(collection, pipeline)
+    const documents = await this.mongoClient.aggregate(collection, pipeline);
 
     return {
       content: [
@@ -344,13 +345,13 @@ class MockMongoMcpServer {
           text: JSON.stringify(documents, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async count(args: any): Promise<McpToolCallResponse> {
-    const { database, collection, filter = {} } = args
+    const { database, collection, filter = {} } = args;
 
-    const count = await this.mongoClient.count(collection, filter)
+    const count = await this.mongoClient.count(collection, filter);
 
     return {
       content: [
@@ -359,15 +360,17 @@ class MockMongoMcpServer {
           text: JSON.stringify({ count }, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async distinct(args: any): Promise<McpToolCallResponse> {
-    const { database, collection, field, filter = {} } = args
+    const { database, collection, field, filter = {} } = args;
 
     // Simplified distinct implementation
-    const documents = await this.mongoClient.find(collection, { filter })
-    const distinctValues = Array.from(new Set(documents.map(doc => doc[field])))
+    const documents = await this.mongoClient.find(collection, { filter });
+    const distinctValues = Array.from(
+      new Set(documents.map(doc => doc[field]))
+    );
 
     return {
       content: [
@@ -376,15 +379,15 @@ class MockMongoMcpServer {
           text: JSON.stringify(distinctValues, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async insertOne(args: any): Promise<McpToolCallResponse> {
-    this.enforceReadOnly('insert_one')
+    this.enforceReadOnly('insert_one');
 
-    const { database, collection, document } = args
+    const { database, collection, document } = args;
 
-    const result = await this.mongoClient.insertOne(collection, document)
+    const result = await this.mongoClient.insertOne(collection, document);
 
     return {
       content: [
@@ -393,15 +396,15 @@ class MockMongoMcpServer {
           text: JSON.stringify(result, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async updateOne(args: any): Promise<McpToolCallResponse> {
-    this.enforceReadOnly('update_one')
+    this.enforceReadOnly('update_one');
 
-    const { database, collection, filter, update } = args
+    const { database, collection, filter, update } = args;
 
-    const result = await this.mongoClient.updateOne(collection, filter, update)
+    const result = await this.mongoClient.updateOne(collection, filter, update);
 
     return {
       content: [
@@ -410,15 +413,15 @@ class MockMongoMcpServer {
           text: JSON.stringify(result, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async deleteOne(args: any): Promise<McpToolCallResponse> {
-    this.enforceReadOnly('delete_one')
+    this.enforceReadOnly('delete_one');
 
-    const { database, collection, filter } = args
+    const { database, collection, filter } = args;
 
-    const result = await this.mongoClient.deleteOne(collection, filter)
+    const result = await this.mongoClient.deleteOne(collection, filter);
 
     return {
       content: [
@@ -427,14 +430,14 @@ class MockMongoMcpServer {
           text: JSON.stringify(result, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async listCollections(args: any): Promise<McpToolCallResponse> {
-    const { database } = args
+    const { database } = args;
 
     // Mock response
-    const collections = ['users', 'products', 'orders']
+    const collections = ['users', 'products', 'orders'];
 
     return {
       content: [
@@ -443,12 +446,12 @@ class MockMongoMcpServer {
           text: JSON.stringify(collections, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async listDatabases(): Promise<McpToolCallResponse> {
     // Mock response
-    const databases = ['admin', 'config', 'test']
+    const databases = ['admin', 'config', 'test'];
 
     return {
       content: [
@@ -457,7 +460,7 @@ class MockMongoMcpServer {
           text: JSON.stringify(databases, null, 2),
         },
       ],
-    }
+    };
   }
 
   // =============================================================================
@@ -466,7 +469,9 @@ class MockMongoMcpServer {
 
   private enforceReadOnly(operation: string): void {
     if (this.readOnlyMode) {
-      throw new Error(`Write operation '${operation}' blocked in read-only mode`)
+      throw new Error(
+        `Write operation '${operation}' blocked in read-only mode`
+      );
     }
   }
 
@@ -475,7 +480,7 @@ class MockMongoMcpServer {
   // =============================================================================
 
   setupMockData() {
-    setupMockMongoData(this.mongoClient, 'multiple')
+    setupMockMongoData(this.mongoClient, 'multiple');
 
     // Override for MongoDB specific tests
     const documents = [
@@ -483,9 +488,9 @@ class MockMongoMcpServer {
       { _id: '2', name: 'Bob', age: 25, department: 'Sales' },
       { _id: '3', name: 'Charlie', age: 35, department: 'Engineering' },
       { _id: '4', name: 'Diana', age: 28, department: 'Marketing' },
-    ]
+    ];
 
-    ;(this.mongoClient as any).setCollectionData('users', documents)
+    (this.mongoClient as any).setCollectionData('users', documents);
   }
 }
 
@@ -494,56 +499,58 @@ class MockMongoMcpServer {
 // =============================================================================
 
 describe('MongoDB MCP Server - MCP Operations', () => {
-  let server: MockMongoMcpServer
+  let server: MockMongoMcpServer;
 
   beforeEach(async () => {
-    server = new MockMongoMcpServer()
-    await server.initialize('mongodb://localhost:27017/test')
-    server.setupMockData()
-  })
+    server = new MockMongoMcpServer();
+    await server.initialize('mongodb://localhost:27017/test');
+    server.setupMockData();
+  });
 
   describe('tools/list', () => {
     it('should return all available MongoDB tools', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      expect(response.tools).toBeDefined()
-      expect(response.tools.length).toBeGreaterThan(0)
-    })
+      expect(response.tools).toBeDefined();
+      expect(response.tools.length).toBeGreaterThan(0);
+    });
 
     it('should include mongodb_find tool', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const findTool = response.tools.find(t => t.name === 'mongodb_find')
-      expect(findTool).toBeDefined()
-      expect(findTool?.description).toContain('Find')
-    })
+      const findTool = response.tools.find(t => t.name === 'mongodb_find');
+      expect(findTool).toBeDefined();
+      expect(findTool?.description).toContain('Find');
+    });
 
     it('should include mongodb_aggregate tool', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const aggregateTool = response.tools.find(t => t.name === 'mongodb_aggregate')
-      expect(aggregateTool).toBeDefined()
-    })
+      const aggregateTool = response.tools.find(
+        t => t.name === 'mongodb_aggregate'
+      );
+      expect(aggregateTool).toBeDefined();
+    });
 
     it('should include write operation tools', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const toolNames = response.tools.map(t => t.name)
+      const toolNames = response.tools.map(t => t.name);
 
-      expect(toolNames).toContain('mongodb_insert_one')
-      expect(toolNames).toContain('mongodb_update_one')
-      expect(toolNames).toContain('mongodb_delete_one')
-    })
+      expect(toolNames).toContain('mongodb_insert_one');
+      expect(toolNames).toContain('mongodb_update_one');
+      expect(toolNames).toContain('mongodb_delete_one');
+    });
 
     it('should have database and collection as required for find', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const findTool = response.tools.find(t => t.name === 'mongodb_find')
+      const findTool = response.tools.find(t => t.name === 'mongodb_find');
 
-      expect(findTool?.inputSchema.required).toContain('database')
-      expect(findTool?.inputSchema.required).toContain('collection')
-    })
-  })
+      expect(findTool?.inputSchema.required).toContain('database');
+      expect(findTool?.inputSchema.required).toContain('collection');
+    });
+  });
 
   describe('tools/call - mongodb_find', () => {
     it('should find documents successfully', async () => {
@@ -554,14 +561,14 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           filter: { department: 'Engineering' },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const documents = JSON.parse(response.content[0].text!)
-      expect(documents).toHaveLength(2)
-      expect(documents[0].department).toBe('Engineering')
-    })
+      const documents = JSON.parse(response.content[0].text!);
+      expect(documents).toHaveLength(2);
+      expect(documents[0].department).toBe('Engineering');
+    });
 
     it('should support limit parameter', async () => {
       const response = await server.toolsCall({
@@ -571,11 +578,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           limit: 2,
         },
-      })
+      });
 
-      const documents = JSON.parse(response.content[0].text!)
-      expect(documents).toHaveLength(2)
-    })
+      const documents = JSON.parse(response.content[0].text!);
+      expect(documents).toHaveLength(2);
+    });
 
     it('should support sort parameter', async () => {
       const response = await server.toolsCall({
@@ -585,12 +592,12 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           sort: { age: 1 },
         },
-      })
+      });
 
-      const documents = JSON.parse(response.content[0].text!)
-      expect(documents[0].age).toBe(25) // Bob (youngest)
-      expect(documents[3].age).toBe(35) // Charlie (oldest)
-    })
+      const documents = JSON.parse(response.content[0].text!);
+      expect(documents[0].age).toBe(25); // Bob (youngest)
+      expect(documents[3].age).toBe(35); // Charlie (oldest)
+    });
 
     it('should return error for missing database', async () => {
       const response = await server.toolsCall({
@@ -598,11 +605,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
         arguments: {
           collection: 'users',
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-    })
-  })
+      expect(response.isError).toBe(true);
+    });
+  });
 
   describe('tools/call - mongodb_aggregate', () => {
     it('should execute aggregation pipeline', async () => {
@@ -613,13 +620,13 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           pipeline: [{ $match: { department: 'Engineering' } }],
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const documents = JSON.parse(response.content[0].text!)
-      expect(documents.length).toBeGreaterThan(0)
-    })
+      const documents = JSON.parse(response.content[0].text!);
+      expect(documents.length).toBeGreaterThan(0);
+    });
 
     it('should support multiple pipeline stages', async () => {
       const response = await server.toolsCall({
@@ -627,14 +634,18 @@ describe('MongoDB MCP Server - MCP Operations', () => {
         arguments: {
           database: 'test',
           collection: 'users',
-          pipeline: [{ $match: { age: { $gte: 30 } } }, { $sort: { age: -1 } }, { $limit: 2 }],
+          pipeline: [
+            { $match: { age: { $gte: 30 } } },
+            { $sort: { age: -1 } },
+            { $limit: 2 },
+          ],
         },
-      })
+      });
 
-      const documents = JSON.parse(response.content[0].text!)
-      expect(documents).toHaveLength(2)
-    })
-  })
+      const documents = JSON.parse(response.content[0].text!);
+      expect(documents).toHaveLength(2);
+    });
+  });
 
   describe('tools/call - mongodb_count', () => {
     it('should count documents', async () => {
@@ -644,13 +655,13 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           database: 'test',
           collection: 'users',
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.count).toBe(4)
-    })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.count).toBe(4);
+    });
 
     it('should count with filter', async () => {
       const response = await server.toolsCall({
@@ -660,17 +671,17 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           filter: { department: 'Engineering' },
         },
-      })
+      });
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.count).toBe(2)
-    })
-  })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.count).toBe(2);
+    });
+  });
 
   describe('Read-Only Mode Enforcement', () => {
     beforeEach(() => {
-      server.setReadOnlyMode(true)
-    })
+      server.setReadOnlyMode(true);
+    });
 
     it('should block insert operations in read-only mode', async () => {
       const response = await server.toolsCall({
@@ -680,11 +691,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           document: { name: 'Test', age: 25 },
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('read-only mode')
-    })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('read-only mode');
+    });
 
     it('should block update operations in read-only mode', async () => {
       const response = await server.toolsCall({
@@ -695,11 +706,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           filter: { name: 'Alice' },
           update: { $set: { age: 31 } },
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('read-only mode')
-    })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('read-only mode');
+    });
 
     it('should block delete operations in read-only mode', async () => {
       const response = await server.toolsCall({
@@ -709,11 +720,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           filter: { name: 'Alice' },
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('read-only mode')
-    })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('read-only mode');
+    });
 
     it('should allow find operations in read-only mode', async () => {
       const response = await server.toolsCall({
@@ -722,10 +733,10 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           database: 'test',
           collection: 'users',
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
-    })
+      expect(response.isError).toBeUndefined();
+    });
 
     it('should allow aggregate operations in read-only mode', async () => {
       const response = await server.toolsCall({
@@ -735,16 +746,16 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           pipeline: [],
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
-    })
-  })
+      expect(response.isError).toBeUndefined();
+    });
+  });
 
   describe('Write Operations (when read-only disabled)', () => {
     beforeEach(() => {
-      server.setReadOnlyMode(false)
-    })
+      server.setReadOnlyMode(false);
+    });
 
     it('should insert a document', async () => {
       const response = await server.toolsCall({
@@ -754,13 +765,13 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           document: { name: 'Eve', age: 27, department: 'Sales' },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.insertedId).toBeDefined()
-    })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.insertedId).toBeDefined();
+    });
 
     it('should update a document', async () => {
       const response = await server.toolsCall({
@@ -771,13 +782,13 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           filter: { name: 'Alice' },
           update: { $set: { age: 31 } },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.matchedCount).toBe(1)
-    })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.matchedCount).toBe(1);
+    });
 
     it('should delete a document', async () => {
       const response = await server.toolsCall({
@@ -787,14 +798,14 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           collection: 'users',
           filter: { name: 'Alice' },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.deletedCount).toBe(1)
-    })
-  })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.deletedCount).toBe(1);
+    });
+  });
 
   describe('Response Format', () => {
     it('should return content array', async () => {
@@ -804,10 +815,10 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           database: 'test',
           collection: 'users',
         },
-      })
+      });
 
-      expect(Array.isArray(response.content)).toBe(true)
-    })
+      expect(Array.isArray(response.content)).toBe(true);
+    });
 
     it('should include text type in content', async () => {
       const response = await server.toolsCall({
@@ -816,11 +827,11 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           database: 'test',
           collection: 'users',
         },
-      })
+      });
 
-      expect(response.content[0].type).toBe('text')
-      expect(response.content[0].text).toBeDefined()
-    })
+      expect(response.content[0].type).toBe('text');
+      expect(response.content[0].text).toBeDefined();
+    });
 
     it('should return valid JSON in text field', async () => {
       const response = await server.toolsCall({
@@ -829,22 +840,22 @@ describe('MongoDB MCP Server - MCP Operations', () => {
           database: 'test',
           collection: 'users',
         },
-      })
+      });
 
-      expect(() => JSON.parse(response.content[0].text!)).not.toThrow()
-    })
-  })
+      expect(() => JSON.parse(response.content[0].text!)).not.toThrow();
+    });
+  });
 
   describe('Error Handling', () => {
     it('should return error for unknown tool', async () => {
       const response = await server.toolsCall({
         name: 'unknown_tool',
         arguments: {},
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('Unknown tool')
-    })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('Unknown tool');
+    });
 
     it('should handle missing required parameters', async () => {
       const response = await server.toolsCall({
@@ -852,9 +863,9 @@ describe('MongoDB MCP Server - MCP Operations', () => {
         arguments: {
           // Missing required 'database' and 'collection'
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-    })
-  })
-})
+      expect(response.isError).toBe(true);
+    });
+  });
+});

@@ -52,7 +52,9 @@ function createDeferred<T>(): Deferred<T> {
 }
 
 function createSessionState(authenticated: boolean, me = HARNESS_ME) {
-  return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
+  return authenticated
+    ? { authenticated: true, me }
+    : { authenticated: false, me: null }
 }
 
 function createCatalog(agentNames: string[]) {

@@ -9,9 +9,7 @@ export interface OauthGrantSummary {
   updatedAt: string
 }
 
-export async function listOauthGrants(
-  sessionToken: string
-): Promise<{ grants: OauthGrantSummary[] }> {
+export async function listOauthGrants(sessionToken: string): Promise<{ grants: OauthGrantSummary[] }> {
   return controlApiRequest('GET', '/external/oauth/grants', { userSessionToken: sessionToken })
 }
 

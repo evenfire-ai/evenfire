@@ -3,7 +3,10 @@ import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { K8sGateway } from '../../k8s.js'
-import { HostEnvServiceError, HostEnvWriteEntry } from '../../services/hostEnvService.js'
+import {
+  HostEnvServiceError,
+  HostEnvWriteEntry,
+} from '../../services/hostEnvService.js'
 
 /**
  * Admin endpoints for per-Host operator-managed env vars.

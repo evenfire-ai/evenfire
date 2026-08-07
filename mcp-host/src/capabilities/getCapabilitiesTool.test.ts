@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { CAPABILITY_MAP } from './capabilityMap'
-import { buildGetCapabilitiesResponse, createGetCapabilitiesTool } from './getCapabilitiesTool'
+import {
+  buildGetCapabilitiesResponse,
+  createGetCapabilitiesTool,
+} from './getCapabilitiesTool'
 
 function envFrom(map: Record<string, string>): (key: string) => string | undefined {
   return key => map[key]
