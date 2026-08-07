@@ -100,7 +100,11 @@ function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjec
   for (const agent of agents) {
     // Only agents with a canonical host gfsSubject are grantable targets.
     if (agent.gfsSubject?.type !== 'host' || !agent.gfsSubject.id) continue
-    options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
+    options.set(agent.gfsSubject.id, {
+      id: agent.gfsSubject.id,
+      name: agent.name,
+      displayName: agent.displayName,
+    })
   }
   return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
 }

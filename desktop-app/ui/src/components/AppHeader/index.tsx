@@ -85,7 +85,7 @@ export const AppHeader = React.memo(function AppHeader({
   onShellOverlayOpenChange,
 }: AppHeaderProps) {
   const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
-  const { contextIds } = useContextsDataController()
+  const { contextIds, contextDisplayById } = useContextsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
@@ -307,11 +307,17 @@ export const AppHeader = React.memo(function AppHeader({
       }
     }
 
+    // Visible name = agent `spec.host` (catalog `agentDisplayByName`, total over
+    // catalog agents at the producer). The `?? value` covers cross-team agents
+    // added from the team directory (no catalog display source), not a defensive
+    // guard on catalog agents — see spec Decision #6.
+    const agentDisplayByName = accessCatalog?.agentDisplayByName
     return [...byName.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([value, details]) => ({
         key: value,
         value,
+        display: agentDisplayByName?.[value] ?? value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: details.fromUserScope,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
@@ -359,6 +365,7 @@ export const AppHeader = React.memo(function AppHeader({
         ? aggregatedAgents.filter(
             agent =>
               agent.value.toLowerCase().includes(normalizedSearch) ||
+              agent.display.toLowerCase().includes(normalizedSearch) ||
               agent.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
           )
         : [],
@@ -396,17 +403,21 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, details]) => ({
         key: value,
         value,
+        // Visible name = context `spec.displayName`; single sanctioned fallback
+        // to the id (spec Decision #6). Empty today until the source lands (§8).
+        display: contextDisplayById[value] ?? value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: false,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
       }))
-  }, [contextIds, teamDirectory, teams])
+  }, [contextDisplayById, contextIds, teamDirectory, teams])
   const filteredContexts = useMemo(
     () =>
       hasSearch
         ? aggregatedContexts.filter(
             context =>
               context.value.toLowerCase().includes(normalizedSearch) ||
+              context.display.toLowerCase().includes(normalizedSearch) ||
               context.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
           )
         : [],
@@ -438,6 +449,8 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, agentNames]) => ({
         key: value,
         value,
+        // Connectors have no separate display name; the server name is the label.
+        display: value,
         fromSelectedScope: true,
         fromUserScope: false,
         teamNames: [...agentNames].sort((a, b) => a.localeCompare(b)),
@@ -592,7 +605,7 @@ export const AppHeader = React.memo(function AppHeader({
                           size="sm"
                         >
                           <div className="search-result-main">
-                            <strong>{context.value}</strong>
+                            <strong>{context.display}</strong>
                             <span className="search-result-subline">
                               {context.teamNames.length
                                 ? `Teams: ${context.teamNames.join(', ')}`
@@ -652,7 +665,7 @@ export const AppHeader = React.memo(function AppHeader({
                           size="sm"
                         >
                           <div className="search-result-main">
-                            <strong>{agent.value}</strong>
+                            <strong>{agent.display}</strong>
                             <span className="search-result-subline">
                               {agent.teamNames.length
                                 ? `Teams: ${agent.teamNames.join(', ')}`

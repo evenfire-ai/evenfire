@@ -1613,6 +1613,14 @@ export class AppService {
     const contextMcpServers: Record<string, Array<{ name: string }>> = {}
     const agentContextByName: Record<string, string | null> = {}
     const agentProviderByName: Record<string, string | null> = {}
+    // Visible agent name (Agent CRD `spec.host`, arriving as the wire
+    // `displayName`) keyed by `metadata.name`. This is the single producer
+    // boundary for the desktop catalog: the `|| name` guard lives here only
+    // (mirroring control-api's accessReconciliation `configuredDisplayName ||
+    // name`), so renderer consumers read `agentDisplayByName[name]` directly
+    // without sprinkling `|| name` (spec Decision #6). Filled total over
+    // `agentNames` below so a lookup is never undefined.
+    const agentDisplayByName: Record<string, string> = {}
     const upsertScopedServers = (
       target: Record<string, Array<{ name: string }>>,
       key: string,
@@ -1628,6 +1636,7 @@ export class AppService {
     const collectAgents = (
       agents?: Array<{
         name: string
+        displayName?: string | null
         contextRef?: string | null
         provider?: string | null
         model?: { provider?: string | null } | null
@@ -1638,6 +1647,13 @@ export class AppService {
       for (const a of agents) {
         const agentName = String(a?.name || '').trim()
         if (!agentName) continue
+        const displayNameCandidate = typeof a?.displayName === 'string' ? a.displayName.trim() : ''
+        if (
+          displayNameCandidate &&
+          !Object.prototype.hasOwnProperty.call(agentDisplayByName, agentName)
+        ) {
+          agentDisplayByName[agentName] = displayNameCandidate
+        }
         const contextRef =
           typeof a?.contextRef === 'string' && a.contextRef.trim().length > 0
             ? a.contextRef.trim()
@@ -1677,6 +1693,7 @@ export class AppService {
     const filterAgentDetails = (
       agents?: Array<{
         name: string
+        displayName?: string | null
         contextRef?: string | null
         provider?: string | null
         model?: { provider?: string | null } | null
@@ -1695,6 +1712,12 @@ export class AppService {
       }
       if (!Object.prototype.hasOwnProperty.call(agentProviderByName, agentName)) {
         agentProviderByName[agentName] = null
+      }
+      // Producer-side `|| name` guard (the only one — see Decision #6): an agent
+      // whose wire entry carried no `displayName` (pre-display API build) falls
+      // back to its identifier here so consumers never render an empty label.
+      if (!Object.prototype.hasOwnProperty.call(agentDisplayByName, agentName)) {
+        agentDisplayByName[agentName] = agentName
       }
     }
 
@@ -1715,6 +1738,7 @@ export class AppService {
       ...(hasContextScopedMcp ? { contextMcpServers } : {}),
       agentContextByName,
       agentProviderByName,
+      agentDisplayByName,
     }
     return this.accessCatalog
   }

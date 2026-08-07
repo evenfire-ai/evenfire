@@ -29,7 +29,10 @@ export interface GfsDelegationPanelProps {
  */
 export interface GfsAgentSubjectOption {
   id: string
+  /** Agent identifier (`metadata.name`) — used for keys and stable sorting. */
   name: string
+  /** Visible name (Agent CRD `spec.host`); rendered to the user when present. */
+  displayName?: string
 }
 
 /**

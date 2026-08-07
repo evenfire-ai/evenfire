@@ -80,7 +80,9 @@ export function GfsAgentAccessSection({
                 selected={selectedIds.includes(agent.id)}
                 size="sm"
               >
-                {agent.name}
+                {/* Visible agent name (spec.host); the id-based `name` is the
+                    last-resort label for entries without a display source. */}
+                {agent.displayName ?? agent.name}
               </SelectableOption>
             ))}
           </div>

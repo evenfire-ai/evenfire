@@ -69,7 +69,12 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     handleOpenContextDetails,
   } = useNavigationContext()
   const { agentNames } = useAgentsDataController()
-  const { contextIds, loading: contextsLoading, error: contextsError } = useContextsDataController()
+  const {
+    contextIds,
+    contextDisplayById,
+    loading: contextsLoading,
+    error: contextsError,
+  } = useContextsDataController()
   const { agentContextByName, selectedAgentMcpServers } = useMcpServersDataController({
     selectedAgent,
   })
@@ -375,7 +380,9 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                             title={contextId}
                             aria-label={`Open context ${contextId}`}
                           >
-                            {contextId}
+                            {/* Visible context name (spec.displayName); single
+                                fallback to the id (Decision #6). */}
+                            {contextDisplayById[contextId] ?? contextId}
                           </ReferenceTag>
                         </td>
                         <td className="da-table__cell">
