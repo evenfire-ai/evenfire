@@ -1717,7 +1717,7 @@ export class ChatStore {
       const existing =
         (await this.readOrMigratePagedChatUnlocked(agentRef, chatId)) ??
         (await this.writePagedChatUnlocked(agentRef, chatId, []))
-      const meta = await this.appendPagedMessagesUnlocked(agentRef, chatId, existing, newMessages)
+      await this.appendPagedMessagesUnlocked(agentRef, chatId, existing, newMessages)
 
       await this.serializeIndex(agentRef, async () => {
         const index = await this.getIndex(agentRef)
