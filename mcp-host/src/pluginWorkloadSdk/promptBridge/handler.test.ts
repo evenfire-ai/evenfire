@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PluginWorkloadError } from '../domain/errors'
+import type { PromptBridgeTarget } from '../domain/types'
 import type { PluginWorkloadSdkControlApiClient } from './controlApiClient'
-import { PromptBridgeHandler } from './handler'
+import { PromptBridgeHandler, type PromptBridgeHandlerDeps } from './handler'
 import type { LlmBridge } from './llmBridge'
 
 const validBody = {
@@ -9,74 +10,99 @@ const validBody = {
   idempotencyKey: 'key-1',
   messages: [{ role: 'user', content: 'summarize this' }],
 }
+const primary: PromptBridgeTarget = {
+  targetRef: 'primary-zai',
+  provider: 'zai',
+  model: 'glm-4.7',
+  credentialSlot: 'zai-api-key',
+}
+const fallback: PromptBridgeTarget = {
+  targetRef: 'fallback-openai',
+  provider: 'openai',
+  model: 'gpt-5.4-mini',
+  credentialSlot: 'openai-api-key',
+}
+
+type FinalizePromptBridge = NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>
+
+function authorization(overrides: Record<string, unknown> = {}) {
+  return {
+    contractVersion: 2,
+    invocationId: 'inv-1',
+    replay: false,
+    providerCallRequired: true,
+    status: 'in_progress',
+    model: primary.model,
+    modelPolicy: null,
+    selectedTarget: primary,
+    authorizedTargets: [primary, fallback],
+    attemptGeneration: 1,
+    policyRevision: 7,
+    policyHash: 'a'.repeat(64),
+    maxOutputTokens: 2048,
+    ...overrides,
+  }
+}
 
 function makeDeps(
   overrides: {
+    ensure?: ReturnType<typeof vi.fn>
     authorize?: ReturnType<typeof vi.fn>
     complete?: ReturnType<typeof vi.fn>
     report?: ReturnType<typeof vi.fn>
-    defaultModel?: string | null
-    onUsage?: (usage: {
-      model: string
-      inputTokens: number
-      outputTokens: number
-      callerRef: string
-    }) => void
+    bootstrap?: () => { provider: string; model: string } | null
+    onUsage?: (usage: any) => void
+    finalize?: FinalizePromptBridge
   } = {}
 ) {
-  const authorize =
-    overrides.authorize ??
-    vi.fn().mockResolvedValue({
-      invocationId: 'inv-1',
-      replay: false,
-      status: 'in_progress',
-      model: 'glm-4.7',
-      modelPolicy: null,
-      maxOutputTokens: 2048,
-    })
+  const authorize = overrides.authorize ?? vi.fn().mockResolvedValue(authorization())
   const report = overrides.report ?? vi.fn().mockResolvedValue(undefined)
   const complete =
     overrides.complete ??
     vi.fn().mockResolvedValue({
-      model: 'glm-4.7',
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
       content: 'summary text',
       usage: { inputTokens: 10, outputTokens: 5 },
       finishReason: 'complete',
     })
-  const controlApiClient = {
-    authorizePromptBridge: authorize,
-    reportInvocationStatus: report,
-  } as unknown as PluginWorkloadSdkControlApiClient
-  const llmBridge = { complete } as unknown as LlmBridge
   const handler = new PromptBridgeHandler({
-    controlApiClient,
-    llmBridge,
+    controlApiClient: {
+      ensurePromptBridgeCapabilities: overrides.ensure ?? vi.fn().mockResolvedValue(undefined),
+      authorizePromptBridge: authorize,
+      reissuePromptBridgeCredentialTicket: vi.fn(),
+      reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
+      reportInvocationStatus: report,
+    } as unknown as PluginWorkloadSdkControlApiClient,
+    llmBridge: { complete } as unknown as LlmBridge,
     recipeNamespace: 'sandbox-recipes',
     recipeName: 'r1',
     promptTimeoutMs: 120_000,
-    resolveDefaultModel: () => overrides.defaultModel ?? 'glm-4.7',
+    ...(overrides.bootstrap ? { getBootstrapTarget: overrides.bootstrap } : {}),
+    ...(overrides.finalize ? { finalizePromptBridge: overrides.finalize } : {}),
     onUsage: overrides.onUsage,
   })
   return { handler, authorize, complete, report }
 }
 
 describe('PromptBridgeHandler', () => {
-  it('rejects an invalid purpose before authorizing', async () => {
+  it('rejects invalid input before authorizing', async () => {
     const { handler, authorize } = makeDeps()
     await expect(
       handler.handle({ ...validBody, purpose: 'jailbreak' }, 'api')
+    ).rejects.toMatchObject({
+      code: 'invalid_request',
+    })
+    await expect(
+      handler.handle({ ...validBody, idempotencyKey: 'has spaces!' }, 'api')
     ).rejects.toMatchObject({ code: 'invalid_request' })
     expect(authorize).not.toHaveBeenCalled()
   })
 
-  it('rejects a malformed idempotency key', async () => {
-    const { handler } = makeDeps()
-    await expect(
-      handler.handle({ ...validBody, idempotencyKey: 'has spaces!' }, 'api')
-    ).rejects.toMatchObject({ code: 'invalid_request' })
-  })
-
-  it('rejects oversized message content with payload_too_large', async () => {
+  it('rejects oversized content before authorizing', async () => {
     const { handler, authorize } = makeDeps()
     await expect(
       handler.handle(
@@ -87,87 +113,374 @@ describe('PromptBridgeHandler', () => {
     expect(authorize).not.toHaveBeenCalled()
   })
 
-  it('returns the spec §10 result shape and reports completion', async () => {
-    const onUsage = vi.fn()
-    const { handler, complete, report } = makeDeps({ onUsage })
-    const result = await handler.handle(validBody, 'api')
-    expect(result).toMatchObject({
-      invocationId: 'inv-1',
-      model: 'glm-4.7',
-      content: 'summary text',
-      usage: { inputTokens: 10, outputTokens: 5 },
-      finishReason: 'complete',
-    })
-    expect(result.correlationId).toBeTruthy()
-    expect(result.createdAt).toBeTruthy()
-    // maxOutputTokens from the grant clamps the request
-    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 2048 }))
-    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete')
-    expect(onUsage).toHaveBeenCalledWith({
-      model: 'glm-4.7',
-      inputTokens: 10,
-      outputTokens: 5,
-      callerRef: 'api',
-    })
-  })
-
-  it('clamps requested maxTokens to the grant cap', async () => {
-    const { handler, complete } = makeDeps()
-    await handler.handle({ ...validBody, maxTokens: 9999 }, 'api')
-    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 2048 }))
-  })
-
-  it('authorizes the mcp-host default model when the request omits model', async () => {
-    const { handler, authorize } = makeDeps({ defaultModel: 'glm-5.1' })
+  it('lets the operator default resolve omission and forwards selectors unchanged', async () => {
+    const { handler, authorize } = makeDeps()
     await handler.handle(validBody, 'api')
-    expect(authorize).toHaveBeenCalledWith(expect.objectContaining({ model: 'glm-5.1' }))
-  })
-
-  it('keeps modelPolicyRef authoritative instead of replacing it with the default model', async () => {
-    const { handler, authorize } = makeDeps({ defaultModel: 'glm-5.1' })
-    await handler.handle({ ...validBody, modelPolicyRef: 'policy-a' }, 'api')
     expect(authorize).toHaveBeenCalledWith(
-      expect.objectContaining({ model: undefined, modelPolicyRef: 'policy-a' })
+      expect.objectContaining({ model: undefined, provider: undefined, targetRef: undefined })
+    )
+
+    await handler.handle(
+      { ...validBody, idempotencyKey: 'key-2', provider: 'openai', model: 'gpt-5.4-mini' },
+      'api'
+    )
+    expect(authorize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ provider: 'openai', model: 'gpt-5.4-mini' })
     )
   })
 
-  it('keeps an explicit request model over the mcp-host default model', async () => {
-    const { handler, authorize } = makeDeps({ defaultModel: 'glm-5.1' })
-    await handler.handle({ ...validBody, model: 'glm-4.7' }, 'api')
-    expect(authorize).toHaveBeenCalledWith(expect.objectContaining({ model: 'glm-4.7' }))
+  it('forwards the live spec.agent binding to authorization', async () => {
+    const { handler, authorize } = makeDeps({
+      bootstrap: () => ({ provider: 'zai', model: 'glm-4.7' }),
+    })
+    await handler.handle(validBody, 'api')
+    expect(authorize).toHaveBeenCalledWith(
+      expect.objectContaining({ bootstrapProvider: 'zai', bootstrapModel: 'glm-4.7' })
+    )
+  })
+
+  it('fails before authorization while the host bootstrap binding is not ready', async () => {
+    const { handler, authorize } = makeDeps({ bootstrap: () => null })
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: true,
+    })
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('reports missing operator policy as a policy denial before creating an invocation', async () => {
+    const ensure = vi
+      .fn()
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_policy_denied',
+          'an active operator grant is required',
+          false
+        )
+      )
+    const { handler, authorize, complete, report } = makeDeps({ ensure })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_policy_denied',
+      retryable: false,
+    })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('passes exactly the signed authorized suffix and returns the served target', async () => {
+    const onUsage = vi.fn()
+    const { handler, complete, report } = makeDeps({ onUsage })
+    const result = await handler.handle(validBody, 'api')
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        maxTokens: 2048,
+        targets: [{ target: primary }, { target: fallback }],
+      })
+    )
+    expect(result).toMatchObject({
+      invocationId: 'inv-1',
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      policyRevision: 7,
+      content: 'summary text',
+    })
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete', 1)
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'openai',
+        model: fallback.model,
+        servedTarget: fallback,
+        fallbackUsed: true,
+        llmSecretName: 'provider-secret',
+        attemptCount: 2,
+      })
+    )
+  })
+
+  it('preserves metering when the logical terminal acknowledgement is unavailable', async () => {
+    const report = vi.fn().mockRejectedValue(new Error('control-api unavailable'))
+    const onUsage = vi.fn()
+    const { handler, complete } = makeDeps({ report, onUsage })
+
+    const result = await handler.handle(validBody, 'api')
+
+    expect(result).toMatchObject({ invocationId: 'inv-1', content: 'summary text' })
+    expect(complete).toHaveBeenCalledOnce()
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'complete', 1)
+    // The provider-attempt receipt is authoritative for usage binding, so a
+    // lost logical ACK must not silently discard the billable usage event.
+    expect(onUsage).toHaveBeenCalledOnce()
+  })
+
+  it('closes the invocation as provider_unavailable when the physical receipt is unknown', async () => {
+    const report = vi.fn().mockResolvedValue(undefined)
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+      providerAttemptAcknowledgement: 'failed',
+    })
+    const onUsage = vi.fn()
+    const { handler } = makeDeps({ complete, report, onUsage })
+
+    const result = await handler.handle(validBody, 'api')
+
+    expect(result).toMatchObject({ invocationId: 'inv-1', content: 'summary text' })
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
+    expect(onUsage).not.toHaveBeenCalled()
+  })
+
+  it('does not repeat a provider charge for an existing non-failed replay', async () => {
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(
+        authorization({ replay: true, providerCallRequired: false, status: 'complete' })
+      )
+    const { handler, complete } = makeDeps({ authorize })
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+      retryable: false,
+    })
+    expect(complete).not.toHaveBeenCalled()
   })
 
   it('propagates authorization errors without calling the LLM', async () => {
     const authorize = vi
       .fn()
-      .mockRejectedValue(new PluginWorkloadError('quota_exceeded', 'limit', false))
+      .mockRejectedValue(new PluginWorkloadError('ambiguous_model', 'ambiguous', false))
     const { handler, complete } = makeDeps({ authorize })
     await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
-      code: 'quota_exceeded',
+      code: 'ambiguous_model',
     })
     expect(complete).not.toHaveBeenCalled()
   })
 
-  it('reports provider_unavailable status when the LLM call times out', async () => {
+  it('reports pre-provider credential/configuration failures as revivable failed invocations', async () => {
     const complete = vi
       .fn()
-      .mockRejectedValue(new PluginWorkloadError('provider_unavailable', 'timeout', true))
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'credentials unavailable',
+          false,
+          'credential_unavailable',
+          false
+        )
+      )
     const { handler, report } = makeDeps({ complete })
     await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
       code: 'provider_unavailable',
-      retryable: true,
+      retryable: false,
     })
-    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable')
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'failed', 1)
   })
 
-  it('reports failed status for non-provider errors', async () => {
+  it('atomically finalizes the physical attempt as not_executed in SDK-only mode', async () => {
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'failed',
+      outcome: 'not_executed',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const complete = vi.fn().mockRejectedValue(
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'credentials unavailable',
+        false,
+        'credential_unavailable',
+        false,
+        {
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          target: primary,
+          attemptCount: 1,
+          fallbackUsed: false,
+        }
+      )
+    )
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'credential_unavailable',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'failed',
+        reason: 'credential_unavailable',
+        target: primary,
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('keeps an ambiguous/post-provider failure terminal even when the public code is the same', async () => {
     const complete = vi
       .fn()
-      .mockRejectedValue(new PluginWorkloadError('payload_too_large', 'response too big'))
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'provider outcome unknown',
+          false,
+          'outcome_unknown',
+          true
+        )
+      )
     const { handler, report } = makeDeps({ complete })
     await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
-      code: 'payload_too_large',
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
     })
-    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'failed')
+    expect(report).toHaveBeenCalledWith('inv-1', 'sandbox-recipes', 'r1', 'provider_unavailable', 1)
+  })
+
+  it('preserves the original provider error when the failure audit acknowledgement fails', async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValue(new PluginWorkloadError('provider_unavailable', 'provider failed', false))
+    const report = vi.fn().mockRejectedValue(new Error('control-api unavailable'))
+    const { handler } = makeDeps({ complete, report })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      message: 'provider failed',
+    })
+  })
+
+  it('uses the SDK-only finalizer instead of separate status and usage reporting', async () => {
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'complete',
+      outcome: 'exact',
+      idempotent: false,
+      usageAccepted: true,
+    })
+    const onUsage = vi.fn()
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler, report } = makeDeps({ complete, finalize, onUsage })
+
+    await expect(handler.handle(validBody, 'api')).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      content: 'summary text',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 2,
+        status: 'complete',
+        target: fallback,
+        usage: expect.objectContaining({ inputTokens: 10, outputTokens: 5 }),
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+    expect(onUsage).not.toHaveBeenCalled()
+  })
+
+  it('records an unknown spend receipt before returning an ambiguous provider error', async () => {
+    const finalize = vi.fn<FinalizePromptBridge>().mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: 'attempt-1',
+      status: 'provider_unavailable',
+      outcome: 'unknown',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const complete = vi.fn().mockRejectedValue(
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'provider outcome unknown',
+        false,
+        'outcome_unknown',
+        true,
+        {
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          target: primary,
+          attemptCount: 1,
+          fallbackUsed: false,
+          llmSecretName: 'provider-secret',
+        }
+      )
+    )
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+    })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'provider_unavailable',
+        reason: 'outcome_unknown',
+        target: primary,
+      })
+    )
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('reconciles an exact-finalization failure into a durable unknown receipt', async () => {
+    const finalize = vi
+      .fn<FinalizePromptBridge>()
+      .mockRejectedValueOnce(new Error('finalization transaction lost'))
+      .mockResolvedValueOnce({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'provider_unavailable',
+        outcome: 'unknown',
+        idempotent: false,
+        usageAccepted: false,
+      })
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+    })
+    expect(finalize).toHaveBeenCalledTimes(2)
+    expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
+    expect(finalize).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ status: 'provider_unavailable', reason: 'outcome_unknown' })
+    )
+    expect(report).not.toHaveBeenCalled()
   })
 })

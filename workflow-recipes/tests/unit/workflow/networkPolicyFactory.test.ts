@@ -29,7 +29,6 @@ function hasPublicHttpEgressRule(policy: {
       const ports = new Set(rule.ports?.map(port => port.port))
       return (
         ports.has(443) &&
-        ports.has(80) &&
         rule.to?.some(target => {
           const block = target.ipBlock
           const requiredExcludes = [
@@ -75,7 +74,7 @@ function publicHttpEgressCidrs(policy: {
     policy.spec?.egress
       ?.filter(rule => {
         const ports = new Set(rule.ports?.map(port => port.port))
-        return ports.has(443) && ports.has(80)
+        return ports.has(443)
       })
       .flatMap(rule => rule.to?.map(target => target.ipBlock?.cidr).filter(Boolean) ?? []) ?? []
   )
@@ -298,6 +297,34 @@ describe('NetworkPolicy Factory', () => {
     }
   })
 
+  it('removes coordinator lanes by semantic labels even when generated names are hashed', () => {
+    const longRecipe = 'e2e-layer3a-coordinator-lane-with-a-name-longer-than-rfc1123-prefix'
+    const policies = buildWorkflowNetworkPolicies(
+      {
+        ...npConfig,
+        recipeName: longRecipe,
+        includeCoordinator: false,
+        coordinatorWorkloadEgress: [{ resourceName: `${longRecipe}-scanner`, port: 8080 }],
+      },
+      []
+    )
+
+    expect(
+      policies.some(
+        policy =>
+          policy.spec?.podSelector?.matchLabels?.['clerum.io/component'] ===
+            'workflow-coordinator' ||
+          policy.spec?.ingress?.some(rule =>
+            rule._from?.some(
+              peer =>
+                peer.podSelector?.matchLabels?.['clerum.io/component'] === 'workflow-coordinator'
+            )
+          )
+      )
+    ).toBe(false)
+    expect(policies.some(policy => policy.metadata?.name?.includes('coordinator-to'))).toBe(false)
+  })
+
   it('grants public HTTP egress to snippet runner only when declared', () => {
     const snippetPolicies = buildWorkflowNetworkPolicies(
       {
@@ -458,7 +485,7 @@ describe('NetworkPolicy Factory', () => {
     expect(policy!.spec!.egress![0].to?.[0]?.ipBlock?.except).toEqual(
       expect.arrayContaining(['10.0.0.0/8', '169.254.0.0/16', '192.168.0.0/16'])
     )
-    expect(policy!.spec!.egress![0].ports!.map(port => port.port)).toEqual([443, 80])
+    expect(policy!.spec!.egress![0].ports!.map(port => port.port)).toEqual([443])
   })
 
   it('does not grant recipe MCP servers implicit public HTTP egress', () => {

@@ -179,7 +179,7 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText('private-search')).not.toBeInTheDocument()
   })
 
-  it('shows the top-level Connectors tab, no public Plugins tab', async () => {
+  it('provides canonical tabs for connectors and plugins', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
@@ -188,7 +188,10 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
+      'href',
+      '/marketplace/plugins'
+    )
   })
 
   it('places Marketplace navigation below the panel header', async () => {

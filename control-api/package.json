@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.415",
+  "version": "0.1.424",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
@@ -24,6 +24,7 @@
     "bcryptjs": "^3.0.3",
     "cron-parser": "^5.5.0",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.5.1",
     "google-auth-library": "^10.6.1",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.1",

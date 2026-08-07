@@ -92,7 +92,7 @@ export interface TokenUsage {
  * vary per task (source_kind, user_id, etc.) come from the call site.
  */
 export interface UsageContext {
-  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+  source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown' | 'plugin_workload_sdk'
   /** Immutable ingress trace identity. It is carried to usage ingestion, not treated as DB authority. */
   traceContext?: TraceContextV1 | null
   team_id?: string | null
@@ -126,6 +126,8 @@ export interface CompletionRequest {
 export interface CompletionResponse {
   content: string
   usage: TokenUsage
+  /** True only when the provider response carried authoritative token counters. */
+  usage_reported?: boolean
   finish_reason: FinishReason
 }
 
@@ -150,6 +152,8 @@ export interface ToolCompletionResponse {
   content: string | null
   tool_calls: ToolCall[] | null
   usage: TokenUsage
+  /** True only when the provider response carried authoritative token counters. */
+  usage_reported?: boolean
   finish_reason: FinishReason
 }
 

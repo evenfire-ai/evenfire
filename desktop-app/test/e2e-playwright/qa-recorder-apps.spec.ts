@@ -24,8 +24,8 @@ import {
 // specific app name, because none is guaranteed by the fixture set.
 //
 test('optional QA recorder: Desktop apps journey', async ({}, testInfo) => {
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   let app: ElectronApplication | undefined

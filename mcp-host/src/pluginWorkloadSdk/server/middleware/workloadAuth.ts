@@ -14,9 +14,11 @@ import { PluginWorkloadError } from '../../domain/errors'
  * authorizes every call against the recipe grant regardless.
  */
 
-declare module 'express-serve-static-core' {
-  interface Request {
-    pluginWorkloadCallerRef?: string
+declare global {
+  namespace Express {
+    interface Request {
+      pluginWorkloadCallerRef?: string
+    }
   }
 }
 

@@ -8,6 +8,7 @@ import { createRpcHostActivityStreamRouter } from './routes/rpcHostActivityStrea
 import { createRpcHostProgressStreamRouter } from './routes/rpcHostProgressStream.js'
 import { createRpcHostStatusStreamRouter } from './routes/rpcHostStatusStream.js'
 import { createSandboxUiSessionRouter } from './routes/sandboxUi.js'
+import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
 export function createApp() {
   const app = express()
@@ -46,8 +47,7 @@ export function createApp() {
   })
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const isAbort = err instanceof Error && err.name === 'AbortError'
-    if (isAbort) {
+    if (isUpstreamTimeoutError(err)) {
       res.status(504).json({ error: 'Gateway Timeout' })
       return
     }

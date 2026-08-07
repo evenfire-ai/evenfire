@@ -237,7 +237,7 @@ describe('db.initDb', () => {
 
     expect(sqls).toContainEqual(
       expect.stringContaining(
-        "CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown')"
+        "CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown','plugin_workload_sdk')"
       )
     )
     expect(sqls).toContainEqual(expect.stringContaining('CREATE TABLE IF NOT EXISTS usage_events'))

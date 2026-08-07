@@ -1,0 +1,12 @@
+# The --skip-uis minikube overlay, rendered against published ghcr images.
+# Selected by scripts/minikube/full-setup.sh when IMAGE_SOURCE=ghcr and
+# SKIP_UIS=true. Thin for the same reason as ../minikube-ghcr: the only
+# difference from ../minikube-no-uis is the image coordinate.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../minikube-no-uis
+
+components:
+  - ../../components/ghcr-images

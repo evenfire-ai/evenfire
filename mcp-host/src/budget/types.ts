@@ -8,7 +8,13 @@
  */
 
 /** Source dimension reported to control-api. Same union as `UsageContext.source_kind`. */
-export type BudgetSourceKind = 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+export type BudgetSourceKind =
+  | 'channel'
+  | 'desktop'
+  | 'workflow'
+  | 'cron'
+  | 'unknown'
+  | 'plugin_workload_sdk'
 
 /**
  * Request body for `POST /api/v1/internal/budgets/check`. Identity fields that

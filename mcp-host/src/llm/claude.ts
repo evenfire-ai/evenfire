@@ -99,13 +99,21 @@ export class ClaudeProvider implements SingleTurnProvider {
       .map(b => b.text)
       .join('')
 
+    const usage = response.usage
+    const usageReported =
+      usage != null &&
+      Number.isInteger(usage.input_tokens) &&
+      usage.input_tokens >= 0 &&
+      Number.isInteger(usage.output_tokens) &&
+      usage.output_tokens >= 0
     return {
       content: textContent,
       usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+        input_tokens: usage?.input_tokens ?? 0,
+        output_tokens: usage?.output_tokens ?? 0,
+        total_tokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
       },
+      usage_reported: usageReported,
       finish_reason: this.mapStopReason(response.stop_reason),
     }
   }

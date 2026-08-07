@@ -112,6 +112,13 @@ rules:
   - apiGroups: [""]
     resources: ["services", "persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "create", "update", "delete"]
+  # Endpoint objects are created by the Service controller. WRC only reads
+  # the recipe-scoped endpoint during SDK-host teardown to prove that the
+  # headless Service has actually disappeared; it never creates or mutates
+  # endpoint data.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get"]
   # Secrets — full lifecycle, plus list+watch for the envSecret optional-key
   # watcher (§4.1.1 in the recipe guide). The watcher diffs key-sets on
   # ADDED/MODIFIED/DELETED and fans reconciles out to recipes that reference

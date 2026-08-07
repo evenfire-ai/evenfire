@@ -323,10 +323,18 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:listArtifacts', { hostRef, hostRefs }),
     downloadArtifact: (hostRef: string, filename: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:downloadArtifact', { hostRef, filename, hostRefs }),
-    listSessions: (hostRef: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs }),
-    loadSessionMessages: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs }),
+    listSessions: (
+      hostRef: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionsListQuery
+    ) => ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs, query }),
+    loadSessionMessages: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionMessagesQuery
+    ) => ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs, query }),
     getContextBreakdown: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
     getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>
@@ -358,9 +366,11 @@ const clerum = Object.freeze({
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
-    onVisibilityChange: (callback: (state: { visible: boolean }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, state: { visible: boolean }) =>
-        callback(state)
+    onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { visible: boolean; focused: boolean }
+      ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
     },
@@ -397,8 +407,14 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
-    replaceMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
-      ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages }),
+    replaceMessages: (
+      agentRef: string,
+      chatId: string,
+      messages: unknown[],
+      options?: import('./types.js').ReplaceChatMessagesOptions
+    ) => ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages, options }),
+    backfillCounters: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:backfillCounters', { agentRef, chatId, messages }),
     markUnreadTerminal: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:markUnreadTerminal', { agentRef, chatId }),
     clearUnreadTerminal: (agentRef: string, chatId: string) =>

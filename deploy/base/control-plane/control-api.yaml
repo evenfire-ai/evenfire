@@ -13,6 +13,11 @@ metadata:
     app: control-api
 spec:
   replicas: 1
+  # Control API writes the SDK policy/attempt ledger. Recreate prevents an old
+  # and a new writer from serving concurrently during an image or config
+  # rollout; schema-first pre-gate sync also fences replicas before migrations.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: control-api

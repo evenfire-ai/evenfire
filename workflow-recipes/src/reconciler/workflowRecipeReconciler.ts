@@ -42,6 +42,8 @@ import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
+import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
+import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloadSdkRevocationClient'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
@@ -80,6 +82,8 @@ import {
 import { issueOAuthBrokerToken } from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -236,7 +240,11 @@ function mergeSecretOwnershipConditions(
   return mergeOwnedConditions(existing, fresh, SECRET_OWNERSHIP_CONDITION_TYPES)
 }
 
-const PLUGIN_WORKLOAD_SDK_CONDITION_TYPES = new Set([PLUGIN_WORKLOAD_SDK_CONDITION_TYPE])
+const PLUGIN_WORKLOAD_SDK_CONDITION_TYPES = new Set([
+  PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+  PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+])
 
 function mergePluginWorkloadSdkConditions(
   existing: StatusCondition[] | undefined,
@@ -486,6 +494,13 @@ export interface ReconcileResult {
    * UI/API-consumable reasons that should not be inferred from free-form messages.
    */
   workloadConditions?: StatusCondition[]
+  /** SDK-only eager-host provider health, kept separate from workflow phase. */
+  pluginWorkloadSdkProviderUnavailable?: boolean
+  /** SDK host identity is ready, but an operator prompt policy is not active yet. */
+  pluginWorkloadSdkPolicyPending?: boolean
+  /** Cleanup completed successfully while the SDK feature flag was off. */
+  pluginWorkloadSdkTeardownConfirmed?: boolean
+  pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -741,6 +756,7 @@ export class WorkflowRecipeReconciler {
         new K8sSecretReaderImpl(this.coreApi),
         new HttpMcpHostClient()
       ),
+      pluginWorkloadSdkRevocationClient: new HttpPluginWorkloadSdkRevocationClient(),
     }
     this.workflowReconciler = new WorkflowReconciler(deps)
     console.log('[WR-Reconciler] Workflow subsystem initialized')
@@ -748,6 +764,22 @@ export class WorkflowRecipeReconciler {
 
   private get delegationDeps(): DelegationDeps {
     return { customApi: this.customApi, coreApi: this.coreApi }
+  }
+
+  /**
+   * SDK revocation is fail-closed: an uninitialised workflow subsystem is not
+   * equivalent to a successful cleanup. Refusing to report the capability as
+   * disabled keeps a stale host/token reachable only behind an explicit
+   * requeue, until the cleanup dependency is available and converges.
+   */
+  private async cleanupPluginWorkloadSdkOrThrow(
+    recipeName: string,
+    options: { preserveWorkflowRuntime?: boolean } = {}
+  ): Promise<void> {
+    if (!this.workflowReconciler) {
+      throw new Error('workflow subsystem is not initialized; SDK cleanup cannot be confirmed')
+    }
+    await this.workflowReconciler.cleanupPluginWorkloadSdk(recipeName, options)
   }
 
   private async waitForTransportNetworkReadiness(
@@ -1201,6 +1233,7 @@ export class WorkflowRecipeReconciler {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
+    let sdkOnlyProviderUnavailable = false
 
     // Defense-in-depth: the VAP + admin-API already enforce this invariant,
     // but a manually-applied CRD in another namespace must not be reconciled.
@@ -1226,10 +1259,57 @@ export class WorkflowRecipeReconciler {
     }
 
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
+    // The feature flag is a kill switch for SDK-only runtimes. Reconcile this
+    // before the non-deployable phase guard so a previously-created host cannot
+    // remain reachable merely because the recipe was already latched failed.
+    // Workflow recipes keep their normal mcp-host lifecycle; this cleanup is
+    // intentionally restricted to the stepless adapter.
+    if (!isWorkflow && recipe.spec.pluginWorkloadSdk && !this.config.pluginWorkloadSdkEnabled) {
+      try {
+        await this.cleanupPluginWorkloadSdkOrThrow(name, {
+          preserveWorkflowRuntime: isWorkflow,
+        })
+      } catch (error) {
+        return {
+          phase: 'failed' as RecipePhase,
+          message: `Plugin Workload SDK teardown failed while the feature flag is disabled: ${String(error)}`,
+          workloadStatuses: [],
+          skipStatusPatch: true,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        }
+      }
+      return {
+        phase: currentPhase,
+        message: 'Plugin Workload SDK disabled after confirmed teardown',
+        workloadStatuses: [],
+        pluginWorkloadSdkTeardownConfirmed: true,
+      }
+    }
     if (isWorkflow) {
       // Revocation must precede spec/policy validation: an invalid edit that also
       // removes publishTargets must still close the previously opened lane.
       await this.revokeCoordinatorGfsNetworkPolicyIfDisabled(recipe)
+    }
+
+    // Capability removal is independent from workflow phase. Do this before
+    // terminal-phase short-circuiting so a failed/deprecated/rollback-failed
+    // recipe cannot retain SDK authority after the operator removes the block.
+    // The durable status marker is cleared by the following status projection
+    // only after this fail-closed cleanup succeeds.
+    if (!recipe.spec.pluginWorkloadSdk && recipe.status?.pluginWorkloadSdk) {
+      try {
+        await this.cleanupPluginWorkloadSdkOrThrow(name, {
+          preserveWorkflowRuntime: isWorkflow,
+        })
+      } catch (error) {
+        return {
+          phase: 'failed' as RecipePhase,
+          message: `Plugin Workload SDK teardown failed after capability removal: ${String(error)}`,
+          workloadStatuses: [],
+          skipStatusPatch: true,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        }
+      }
     }
 
     const limitError = validateWorkflowRecipeLimits(recipe.spec, this.config)
@@ -1706,6 +1786,8 @@ export class WorkflowRecipeReconciler {
         clearWorkflowExecution: result.clearWorkflowExecution,
         workflowConditions: result.workflowConditions,
         workloadConditions: workflowWorkloadConditions,
+        pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+        pluginWorkloadSdkPolicyPending: result.pluginWorkloadSdkPolicyPending,
         // Thread the inner reconciler's transient-skip up so the watcher leaves
         // status untouched and requeues instead of patching a false failure.
         skipStatusPatch: result.skipStatusPatch,
@@ -1729,10 +1811,12 @@ export class WorkflowRecipeReconciler {
         // requeueFixedInterval doc).
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
-          : result.phase === 'deploying'
+          : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
             : undefined,
-        requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
+        requeueFixedInterval:
+          !result.skipStatusPatch &&
+          (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
         internalDependencyConditions: workflowInternalDependencyConditions,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
       }
@@ -2282,9 +2366,53 @@ export class WorkflowRecipeReconciler {
       const webhookOutcome = await this.reconcileWebhookGateway(recipe)
       const webhookHealthy = webhookOutcome.handled === false || webhookOutcome.ready
 
-      const allReady = workloadStatuses.every(ws => ws.ready) && webhookHealthy
+      // SDK-only recipes are capability runtimes. Provision the eager host only
+      // after workloads and their resources exist, and never route this case
+      // through WorkflowReconciler.reconcile() (which owns coordinator/run
+      // lifecycle). The adapter owns the same host/token/network/configure
+      // semantics as the existing workflow eager path.
+      const isSdkOnly =
+        !isWorkflow &&
+        this.config.pluginWorkloadSdkEnabled &&
+        recipe.spec.pluginWorkloadSdk !== undefined
+      const sdkOnlyRuntime = isSdkOnly
+        ? await this.reconcilePluginWorkloadSdkOnly(recipe)
+        : undefined
+      sdkOnlyProviderUnavailable = sdkOnlyRuntime?.phase === 'provider_unavailable'
+      const sdkOnlyPolicyPending = sdkOnlyRuntime?.phase === 'awaiting_policy'
+      // Defense in depth: an active promptBridge recipe is impossible without
+      // a fresh v2 proof tied to the eager Pod. Keep the recipe in a progress
+      // phase if an adapter regression ever omits it; never publish
+      // active+BootstrapNotReady as a settled state.
+      const sdkOnlyBootstrapPending =
+        sdkOnlyRuntime?.phase === 'active' &&
+        recipe.spec.pluginWorkloadSdk !== undefined &&
+        sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
+      if (sdkOnlyRuntime?.phase === 'failed') {
+        return {
+          phase: 'failed',
+          message: sdkOnlyRuntime.message,
+          workloadStatuses,
+          webhookConditions: webhookOutcome.conditions,
+          internalDependencyConditions,
+          secretOwnershipConditions: secretOwnership.conditions,
+          workloadConditions,
+        }
+      }
+
+      const allReady =
+        workloadStatuses.every(ws => ws.ready) &&
+        webhookHealthy &&
+        sdkOnlyRuntime?.phase !== 'deploying' &&
+        sdkOnlyRuntime?.phase !== 'provider_unavailable' &&
+        !sdkOnlyBootstrapPending
       let finalPhase: RecipePhase
-      if (allReady) {
+      if (sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending) {
+        // A level-triggered SDK host must stay in a progress phase until it is
+        // Ready so the watcher requeues provider configuration. `degraded`
+        // would incorrectly describe a normal first boot as workload failure.
+        finalPhase = 'deploying'
+      } else if (allReady) {
         // Advance through valid state machine transitions to reach "active".
         // deploying → test-pass → testing → success → active
         // degraded  → recover  → active
@@ -2298,13 +2426,21 @@ export class WorkflowRecipeReconciler {
         finalPhase = 'degraded'
       }
       const message =
-        !allReady && !webhookHealthy
-          ? (webhookOutcome.message ?? 'Webhook gateway not ready')
-          : allReady
-            ? 'All workloads deployed'
-            : workloadStatuses.some(ws => ws.phase === 'failed')
-              ? 'Some workloads failed'
-              : 'Some workloads not ready'
+        sdkOnlyRuntime?.phase === 'provider_unavailable'
+          ? sdkOnlyRuntime.message
+          : sdkOnlyPolicyPending
+            ? sdkOnlyRuntime.message
+            : sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending
+              ? sdkOnlyBootstrapPending
+                ? 'Plugin Workload SDK bootstrap identity proof pending'
+                : sdkOnlyRuntime.message
+              : !allReady && !webhookHealthy
+                ? (webhookOutcome.message ?? 'Webhook gateway not ready')
+                : allReady
+                  ? 'All workloads deployed'
+                  : workloadStatuses.some(ws => ws.phase === 'failed')
+                    ? 'Some workloads failed'
+                    : 'Some workloads not ready'
       return {
         phase: finalPhase,
         message,
@@ -2313,10 +2449,22 @@ export class WorkflowRecipeReconciler {
         internalDependencyConditions,
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
+        pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
+        pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
+        pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
         requeueAfterMs:
-          legacyRawCleanupPending || deniedTeardownFailed ? TRANSIENT_REQUEUE_BASE_MS : undefined,
+          legacyRawCleanupPending ||
+          deniedTeardownFailed ||
+          sdkOnlyRuntime?.phase === 'deploying' ||
+          sdkOnlyRuntime?.phase === 'provider_unavailable' ||
+          sdkOnlyPolicyPending ||
+          sdkOnlyBootstrapPending
+            ? TRANSIENT_REQUEUE_BASE_MS
+            : undefined,
+        requeueFixedInterval:
+          sdkOnlyPolicyPending || sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending,
       }
     } catch (error) {
       // Transient failures must not brick a healthy recipe at the terminal,
@@ -2380,6 +2528,25 @@ export class WorkflowRecipeReconciler {
         workloadStatuses: [],
       }
     }
+  }
+
+  private async reconcilePluginWorkloadSdkOnly(recipe: WorkflowRecipeCRD): Promise<{
+    phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
+    message: string
+    pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  }> {
+    if (!this.workflowReconciler) {
+      return {
+        phase: 'failed',
+        message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
+      }
+    }
+    return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
+      recipe.metadata.name,
+      recipe.metadata.uid ?? '',
+      recipe.metadata.namespace,
+      recipe.spec
+    )
   }
 
   // ─── Webhook Gateway Reconcile ─────────────────────────────────────
@@ -3032,10 +3199,23 @@ export class WorkflowRecipeReconciler {
     // ─── Workflow Delete (Stage 1) ────────────────────────────────────
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
     if (isWorkflow && this.workflowReconciler) {
+      // Fence the SDK capability before the workflow deletion pipeline removes
+      // the shared mcp-host/token resources. Hybrid recipes must not bypass
+      // broker revocation merely because they also have coordinator state.
+      if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
+        await this.cleanupPluginWorkloadSdkOrThrow(name, { preserveWorkflowRuntime: true })
+      }
       await this.workflowReconciler.reconcileDelete(name, recipe.metadata.namespace, recipe.spec)
       await this.cleanupDelegationIfNeeded(recipe)
       await this.cleanupDeclaredRuntimeResources(recipe)
       return
+    }
+
+    // Use the durable validated status marker as well as the current spec:
+    // a capability may have been removed in an update before Kubernetes emits
+    // the final delete event, and cleanup must still revoke its host tokens.
+    if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
+      await this.cleanupPluginWorkloadSdkOrThrow(name)
     }
 
     await this.cleanupDelegationIfNeeded(recipe)
@@ -5653,15 +5833,25 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here (not threaded through
-    // ReconcileResult) so every status patch carries a consistent projection
-    // of spec.pluginWorkloadSdk + feature flag, regardless of which reconcile
-    // return path produced the result.
+    // Plugin Workload SDK conditions are derived here so every status patch
+    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
+    // while the SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message.
     const pluginSdkProjection = buildPluginWorkloadSdkStatus({
       spec: recipe.spec,
       existingConditions: recipe.status?.conditions,
       phase: result.phase,
       featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
+      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
+      policyPending: result.pluginWorkloadSdkPolicyPending === true,
+      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
       now,
     })
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(

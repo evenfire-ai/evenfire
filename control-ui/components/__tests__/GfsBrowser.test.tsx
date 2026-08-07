@@ -69,6 +69,12 @@ function selectPermission(label: string) {
   fireEvent.click(screen.getByRole('menuitemcheckbox', { name: label }))
 }
 
+async function confirmGrantAccess() {
+  const dialog = await screen.findByRole('alertdialog', { name: 'Grant access?' })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Grant access' }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+}
+
 async function openResourceMenu(resourceName: string) {
   fireEvent.click(await screen.findByRole('button', { name: `Actions for ${resourceName}` }))
 }
@@ -714,7 +720,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
@@ -760,6 +766,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
@@ -786,6 +793,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Research' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
@@ -799,6 +807,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Operator' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenLastCalledWith(
@@ -823,6 +832,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Write')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await confirmGrantAccess()
 
     expect((await screen.findByText('escalation_rejected')).getAttribute('role')).toBe('alert')
   })

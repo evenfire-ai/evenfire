@@ -24,8 +24,8 @@ test('optional QA recorder: Desktop chat composer, thread, and task progress jou
     'QA_RECORDER_CONFIRM_CHAT',
     'This journey sends a real chat message and may incur model cost.'
   )
-  assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
-  assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
   const credentials = desktopCredentials()
   const hostRef = configuredHostRef()

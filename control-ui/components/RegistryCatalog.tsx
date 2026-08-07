@@ -9,6 +9,7 @@ import { type RowAction, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
+import { TabBar } from '@components/TabBar'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -401,6 +402,23 @@ export default function RegistryCatalog() {
         />
         <MarketplaceTabs active="connectors" />
 
+        <TabBar<MarketplaceTab>
+          ariaLabel="Marketplace entry types"
+          activeValue={activeTab}
+          className="cu-tabs--flush-top"
+          options={[
+            {
+              value: 'connectors',
+              href: CONTROL_ROUTES.marketplace.connectors,
+              label: 'Connectors',
+            },
+            {
+              value: 'plugins',
+              href: CONTROL_ROUTES.marketplace.plugins,
+              label: 'Plugins',
+            },
+          ]}
+        />
         <div className="cu-table-wrap cu-marketplace-table-wrap">
           <table className="cu-table cu-table--header-band cu-expandable-table cu-marketplace-table">
             <thead>

@@ -42,6 +42,27 @@ describe('readMcpHostPodDriftStateIfExists', () => {
     })
   })
 
+  it('reads the runtime contract hash used for same-image migrations', async () => {
+    const coreApi = {
+      readNamespacedPod: vi.fn().mockResolvedValue({
+        metadata: {
+          annotations: {
+            'clerum.io/plugin-workload-sdk-runtime-contract-hash': 'hash-v2',
+          },
+        },
+        spec: { containers: [{ name: 'mcp-host', image: 'registry.example/mcp-host:current' }] },
+      }),
+    }
+
+    await expect(
+      readMcpHostPodDriftStateIfExists(coreApi as never, POD_NAME, NAMESPACE)
+    ).resolves.toEqual({
+      image: 'registry.example/mcp-host:current',
+      runtimeContractHash: 'hash-v2',
+      deleting: false,
+    })
+  })
+
   it('returns undefined when the pod disappeared before the drift read', async () => {
     const coreApi = {
       readNamespacedPod: vi.fn().mockRejectedValue({ code: 404 }),
