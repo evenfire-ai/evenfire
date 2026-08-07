@@ -1,4 +1,10 @@
 import type { McpServerCondition } from '@lib/api'
+import {
+  PRODUCER_CONDITION_TYPE,
+  PRODUCER_FAILURE_STATUS,
+  PRODUCER_SUCCESS,
+  producerFailure,
+} from './producerContract'
 
 /**
  * The ONE place `SecretResolved` test fixtures are built (mini-spec §3).
@@ -10,34 +16,36 @@ import type { McpServerCondition } from '@lib/api'
  * `reason: 'SecretResolved'` (the condition TYPE reused as a reason, a value the
  * producer never emits) survived in the resolver fixtures for two rounds.
  *
- * THESE BUILDERS ARE NOT TRUSTED ON THEIR OWN (R1-H2).
+ * THESE BUILDERS RESTATE NOTHING (R1-H2).
  *
- * A handwritten mirror of the producer is exactly as stale as the author who
- * wrote it, and a UI suite cannot tell the difference: if HCC changed a status,
- * reason or message, both the mocked producer output and the assertion would
- * keep encoding the old triple and stay green.
+ * An earlier revision of this file mirrored the producer BY HAND and relied on
+ * `../secretResolvedProducerContract.test.ts` to notice when the mirror went
+ * stale. That detected drift in one file but did not PROPAGATE it: renaming a
+ * reason in the reconciler turned the contract suite red and left the page, the
+ * resolver and the invariants suites green, still asserting the old behaviour
+ * against fixtures that no controller would ever produce.
  *
- * So the mirror is checked, executably, by
- * `../secretResolvedProducerContract.test.ts`. That suite reads
- * `host-context-controller/src/reconciler.ts` off disk, extracts the real
- * `SecretResolved` condition writes and `validateSecret` failure results, and
- * asserts every builder below reproduces exactly those triples — messages
- * included, placeholder by placeholder. A producer contract change turns it
- * red, and a producer site it can no longer find throws rather than passing on
- * an empty match set.
+ * So the type, the status, the reason and the message SHAPE all come from
+ * `./producerContract`, which extracts them from
+ * `host-context-controller/src/reconciler.ts` at import time and throws loudly
+ * rather than yield a partial contract. A producer change now travels through
+ * `getMcpServer` → page → resolver → component, and every suite whose
+ * expectation no longer holds goes red on its own terms.
  *
- * The builders are:
+ * The builders name a producer failure by its BRANCH, not by its reason string,
+ * so a rename moves the value the fixture carries instead of making the fixture
+ * unbuildable:
  *
- * | builder              | status  | reason               |
- * |----------------------|---------|----------------------|
- * | `secretFound`        | 'True'  | 'SecretFound'        |
- * | `secretNotFound`     | 'False' | 'SecretNotFound'     |
- * | `secretMissingKey`   | 'False' | 'SecretMissingKey'   |
- * | `secretAccessDenied` | 'False' | 'SecretAccessDenied' |
+ * | builder              | producer branch                        |
+ * |----------------------|----------------------------------------|
+ * | `secretFound`        | the success write (both sites)          |
+ * | `secretNotFound`     | `absent` — the k8s 404 read             |
+ * | `secretMissingKey`   | `missingKey` — the declared-key check    |
+ * | `secretAccessDenied` | `accessDenied` — the k8s 401/403 read   |
  *
- * `ReadError` — the producer's fourth failure reason — has no builder on
- * purpose; the contract suite covers it by extraction and fails if a FIFTH
- * reason ever appears unmodelled.
+ * The producer's fourth failure branch, `readError`, has no builder on purpose;
+ * `./producerContract` still extracts and accounts for it, and both it and the
+ * contract suite fail if a FIFTH branch ever appears unmodelled.
  *
  * Anything the producer CANNOT emit — a `SecretResolved` at status `Unknown`, a
  * reason carried by the wrong condition type, a malformed or absent
@@ -46,9 +54,10 @@ import type { McpServerCondition } from '@lib/api'
  * never mistaken for producer shape.
  */
 
-/** The condition type this module builds. Exported so a test can assert against
- *  the same constant instead of re-typing the string. */
-export const SECRET_RESOLVED = 'SecretResolved'
+/** The condition type this module builds — the producer's own, derived from the
+ *  writes that forward a `validateSecret` failure. Exported so a test can use
+ *  the same value instead of re-typing the string. */
+export const SECRET_RESOLVED: string = PRODUCER_CONDITION_TYPE
 
 const DEFAULT_SECRET_NAME = 'linear-credentials'
 const DEFAULT_NAMESPACE = 'mcp-server'
@@ -60,21 +69,21 @@ const DEFAULT_ENV_VAR = 'LINEAR_WORKSPACE'
  *  evidence, so a fixture that leaves it implicit hides the thing under test. */
 type Stamped = { at: string }
 
-/** `SecretResolved=True` — the Secret exists and every declared key is present.
- *  Both producer success sites — managed and WRC-owned — write this triple. */
+/** The producer's success write — the Secret exists and every declared key is
+ *  present. Both success sites, managed and WRC-owned, write one triple; the
+ *  extraction fails if they ever stop agreeing. */
 export function secretFound({ at }: Stamped): McpServerCondition {
   return {
     type: SECRET_RESOLVED,
-    status: 'True',
-    reason: 'SecretFound',
-    message: 'Secret resolved and validated',
+    status: PRODUCER_SUCCESS.status,
+    reason: PRODUCER_SUCCESS.reason,
+    message: PRODUCER_SUCCESS.message,
     lastTransitionTime: at,
   }
 }
 
-/** `SecretResolved=False/SecretNotFound` — the Secret does not exist. This is
- *  the ONLY condition that may send a managed connector to the create form.
- *  Message from validateSecret's k8s-404 branch. */
+/** The producer's k8s-404 branch: the Secret does not exist. This is the ONLY
+ *  condition that may send a managed connector to the create form. */
 export function secretNotFound({
   at,
   secretName = DEFAULT_SECRET_NAME,
@@ -82,16 +91,14 @@ export function secretNotFound({
 }: Stamped & { secretName?: string; namespace?: string }): McpServerCondition {
   return {
     type: SECRET_RESOLVED,
-    status: 'False',
-    reason: 'SecretNotFound',
-    message: `Secret "${secretName}" not found in namespace "${namespace}"`,
+    status: PRODUCER_FAILURE_STATUS,
+    ...producerFailure('absent', { secretName, namespace }),
     lastTransitionTime: at,
   }
 }
 
-/** `SecretResolved=False/SecretMissingKey` — the Secret EXISTS but lacks a
- *  declared key. The rotate merge-patch adds it, so this must never reach the
- *  create form. Message from validateSecret's missing-key branch. */
+/** The producer's declared-key branch: the Secret EXISTS but lacks a key. The
+ *  rotate merge-patch adds it, so this must never reach the create form. */
 export function secretMissingKey({
   at,
   secretName = DEFAULT_SECRET_NAME,
@@ -104,17 +111,14 @@ export function secretMissingKey({
 }): McpServerCondition {
   return {
     type: SECRET_RESOLVED,
-    status: 'False',
-    reason: 'SecretMissingKey',
-    message:
-      `Secret "${secretName}" is missing required key "${secretKey}" ` +
-      `(needed for env var ${envVar})`,
+    status: PRODUCER_FAILURE_STATUS,
+    ...producerFailure('missingKey', { secretName, secretKey, envVar }),
     lastTransitionTime: at,
   }
 }
 
-/** `SecretResolved=False/SecretAccessDenied` — the Secret may well exist; HCC
- *  could not read it (k8s 401/403). Message from validateSecret's 401/403 branch. */
+/** The producer's k8s-401/403 branch: the Secret may well exist; HCC could not
+ *  read it. No evidence of absence, so this must never reach the create form. */
 export function secretAccessDenied({
   at,
   secretName = DEFAULT_SECRET_NAME,
@@ -123,14 +127,23 @@ export function secretAccessDenied({
 }: Stamped & { secretName?: string; namespace?: string; code?: number }): McpServerCondition {
   return {
     type: SECRET_RESOLVED,
-    status: 'False',
-    reason: 'SecretAccessDenied',
-    message:
-      `Access denied reading Secret "${secretName}" in namespace "${namespace}" ` +
-      `(K8s API ${code})`,
+    status: PRODUCER_FAILURE_STATUS,
+    ...producerFailure('accessDenied', { secretName, namespace, code }),
     lastTransitionTime: at,
   }
 }
+
+// ─── SYNTHETIC ADVERSARIES — deliberately outside the producer contract ────
+//
+// Everything above is producer-derived and nothing below is. These two helpers
+// build shapes the host-context-controller CANNOT write, and that separation is
+// load-bearing: a fixture that is impossible by construction must never be
+// mistaken for evidence about what the controller does.
+//
+// The overrides they take are always hand-written — that is the point of them —
+// and `../secretResolvedProducerContract.test.ts` proves, from its own reading
+// of the producer, that the shapes they produce are ones the producer never
+// writes.
 
 /**
  * SYNTHETIC ADVERSARY — deliberately NOT producer output.
@@ -141,8 +154,9 @@ export function secretAccessDenied({
  * condition type, a malformed `lastTransitionTime`. Every call site must say in
  * a comment WHY the impossible value is the point of the test.
  *
- * Defaults to the `SecretNotFound` triple so a call only has to state the one
- * field it is adversarial about.
+ * The BASE is the real absence condition, so an adversary that misplaces the
+ * absence reason misplaces the producer's actual one rather than a plausible
+ * invention; the OVERRIDES on top of it are what make the result impossible.
  */
 export function syntheticCondition(
   overrides: Partial<McpServerCondition> & { lastTransitionTime: string }
