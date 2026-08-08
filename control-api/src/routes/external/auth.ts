@@ -192,17 +192,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       const claims = verifyExternalSessionToken(sessionToken)
       if (!claims) return res.status(401).json({ error: 'Unauthorized' })
-      let currentRole = claims.role
-      if (claims.teamId) {
-        const teamAuthorization = await authorizeLiveTeamMembership(claims.userId, claims.teamId)
-        if (teamAuthorization.status === 'unavailable') {
-          return res.status(503).json({ error: teamAuthorization.code })
-        }
-        if (teamAuthorization.status === 'denied') {
-          return res.status(403).json({ error: teamAuthorization.code })
-        }
-        currentRole = teamAuthorization.membership.role
-      }
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {
@@ -222,16 +211,52 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (includesSandboxUiHostRef && agentHostRefs.length > 0) {
         return res.status(403).json({ error: 'sandbox_ui_host_ref_exclusive' })
       }
+
+      const directGrantedHostRefs = new Set<string>()
+      let directAgentAccess = true
       if (agentHostRefs.length > 0) {
         const userAgents = await getUserAgents(claims.userId)
-        const grantedHostRefs = new Set(userAgents.agentNames)
-        if (claims.teamId) {
-          const teamAgents = await getTeamAgents(claims.teamId)
-          for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
+        for (const agentName of userAgents.agentNames) directGrantedHostRefs.add(agentName)
+        directAgentAccess = agentHostRefs.every(hostRef => directGrantedHostRefs.has(hostRef))
+      }
+
+      let currentRole = claims.role
+      let effectiveTeamId = claims.teamId
+      let directSandboxUiAccess: boolean | null = null
+      if (claims.teamId) {
+        const teamAuthorization = await authorizeLiveTeamMembership(claims.userId, claims.teamId)
+        if (teamAuthorization.status !== 'active') {
+          if (requestsSandboxUiScope) {
+            directSandboxUiAccess = await userHasUiBearingRecipeAccess(
+              claims.userId,
+              gateway,
+              pool,
+              null
+            )
+          }
+          const directOnlyRequest =
+            directAgentAccess && (!requestsSandboxUiScope || directSandboxUiAccess === true)
+          if (!directOnlyRequest) {
+            const status = teamAuthorization.status === 'unavailable' ? 503 : 403
+            return res.status(status).json({ error: teamAuthorization.code })
+          }
+          effectiveTeamId = null
+          currentRole = 'member'
+        } else {
+          currentRole = teamAuthorization.membership.role
         }
-        if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
+      }
+
+      if (agentHostRefs.length > 0 && !directAgentAccess) {
+        if (effectiveTeamId) {
+          const teamAgents = await getTeamAgents(effectiveTeamId)
+          const grantedHostRefs = new Set([...directGrantedHostRefs, ...teamAgents.agentNames])
+          if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
+            return res.status(403).json({ error: 'host_access_denied' })
+          }
+        } else {
           return res.status(403).json({
-            error: claims.teamId ? 'host_access_denied' : 'direct_host_access_required',
+            error: 'direct_host_access_required',
           })
         }
       }
@@ -242,11 +267,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       // paying the sandbox UI recipe lookup cost or receiving unused grants.
       if (
         requestsSandboxUiScope &&
-        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, claims.teamId))
+        (directSandboxUiAccess ??
+          (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, effectiveTeamId)))
       ) {
         extraScopes.push('sandbox:ui:view')
       }
-      const auth = { userId: claims.userId, teamId: claims.teamId, role: currentRole }
+      const auth = { userId: claims.userId, teamId: effectiveTeamId, role: currentRole }
       const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
       if (!result) {
         // Distinguish "you need a team for this" from a generic scope failure so
