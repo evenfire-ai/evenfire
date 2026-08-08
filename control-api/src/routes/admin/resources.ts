@@ -151,6 +151,72 @@ async function rollbackPrunedCommunicationChannelUpdate(
 }
 
 /**
+ * Deploy-order guard for the additive context `spec.displayName` field (PR #304).
+ *
+ * `spec.displayName` is a new, optional, additive field on the context CRD. If a
+ * create/update carries a non-empty `spec.displayName` but the CRD applied to
+ * the cluster does NOT yet declare the field (deploy-order skew: control-ui
+ * writes the field before the CRD update lands), the apiserver PRUNES the
+ * unknown field SILENTLY and returns success — the display name is lost with no
+ * error surfaced to the operator.
+ *
+ * This is a pure read-after-write check: it compares the value the caller sent
+ * against the object the apiserver actually persisted. A create/replace returns
+ * the persisted object AFTER pruning, so this reuses that response with NO extra
+ * apiserver read (preserving the N1 single-read-per-PUT optimization).
+ *
+ * STRICTLY SCOPED to `contexts` + `spec.displayName` — the only additive field
+ * at pruning risk in this PR. Do NOT generalize to other fields or resources:
+ * that would be a decision module (which fields, precedence) requiring its own
+ * mini-spec, not a one-field hardening net.
+ */
+function contextDisplayNameNotPersisted(
+  requestedSpec: Record<string, unknown>,
+  persisted: unknown
+): boolean {
+  const requested = requestedSpec.displayName
+  // Only fire when the caller actually asked for a non-empty display name.
+  if (typeof requested !== 'string' || requested.trim() === '') return false
+  const persistedSpec = recordValue((persisted as { spec?: unknown } | null)?.spec) || {}
+  // Missing (pruned) OR differs from what was sent — either way it did not
+  // round-trip. displayName is stored verbatim (free text, no server-side
+  // normalization), so a mismatch here means loss, not transformation.
+  return persistedSpec.displayName !== requested
+}
+
+function sendPrunedDisplayNameError(res: Response): void {
+  console.warn('[Admin] Context spec.displayName was pruned by the apiserver (CRD outdated)')
+  res.status(409).json({
+    code: 'context_crd_outdated',
+    error:
+      'Context spec.displayName was not persisted by Kubernetes; the context CRD does not ' +
+      'support spec.displayName. Apply the latest clerum-crds (which add spec.displayName) ' +
+      'before setting a display name.',
+  })
+}
+
+/**
+ * Best-effort rollback of a context whose create silently dropped
+ * `spec.displayName`. Unlike the update path, a POST is NOT idempotent: leaving
+ * the pruned context in place would make the operator's retry (after applying
+ * the CRD) collide with a 409 AlreadyExists. Deleting it restores a clean retry
+ * path. Mirrors rollbackPrunedCommunicationChannelCreate.
+ */
+async function rollbackPrunedContextCreate(
+  gateway: K8sGateway,
+  name: string,
+  namespace: string
+): Promise<void> {
+  try {
+    await gateway.deleteResource('contexts', name, namespace)
+  } catch (err) {
+    console.warn(
+      `[Admin] context pruned-displayName rollback failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
  * Return true if the CC spec has at least one non-empty provider array
  * (telegram, slack, teams, or email). These are the providers that require a
  * credentials Secret to function; a CC without any provider is valid
@@ -458,6 +524,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           return
         }
       }
+      if (
+        plural === 'contexts' &&
+        body.spec &&
+        contextDisplayNameNotPersisted(body.spec, created)
+      ) {
+        await rollbackPrunedContextCreate(gateway, body.metadata.name, ns)
+        sendPrunedDisplayNameError(res)
+        return
+      }
       res.status(201).json(created)
     })
   )
@@ -593,6 +668,20 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             sendPrunedProviderSettingError(res, missingField)
             return
           }
+        }
+        if (
+          plural === 'contexts' &&
+          body.spec &&
+          contextDisplayNameNotPersisted(body.spec, updated)
+        ) {
+          // Deliberately NO spec restore (unlike the CC update rollback): the
+          // context's other spec fields persisted legitimately, and a PUT is
+          // idempotent — once the operator applies the CRD and replays the same
+          // request, spec.displayName round-trips and the whole spec converges.
+          // Restoring the prior spec would instead discard those legitimate
+          // edits. The loud 409 is the recovery signal.
+          sendPrunedDisplayNameError(res)
+          return
         }
         res.status(200).json(updated)
       } catch (err) {
