@@ -16,6 +16,7 @@
 import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
+import { STATE_ANNOTATION, classifyDnsError } from '@clerum/network-policy-core'
 import { config } from './config'
 import {
   EXTERNAL_EGRESS_POLICY_TYPE,
@@ -25,6 +26,7 @@ import {
   MCPSERVER_LABEL,
   POLICY_TYPE_LABEL,
 } from './constants'
+import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
 import {
   ContextCRD,
   EgressBinding,
@@ -108,6 +110,29 @@ function isAllowedExternalEgressCidr(cidr: string): boolean {
   return !PUBLIC_EGRESS_EXCEPT_CIDRS.some(blocked => cidrOverlaps(cidr, blocked))
 }
 
+/**
+ * A representation-independent signature of a policy's egress: the sorted set of
+ * (cidr | except | port/protocol) allow-tuples. Used to decide whether a write is
+ * needed WITHOUT the key-ordering fragility of JSON.stringify (audit R2-1): the
+ * apiserver/client deserializes rule objects with keys in a different order than
+ * the builders emit them, so a raw string compare is always unequal on a live
+ * cluster and would defeat the no-churn gate. Comparing this semantic signature
+ * is order- and shape-insensitive. Mirrors WRC's `egressSignature`.
+ */
+function egressSignature(policy: k8s.V1NetworkPolicy): string {
+  const tuples: string[] = []
+  for (const rule of policy.spec?.egress ?? []) {
+    const ports = (rule.ports ?? []).map(p => `${p.protocol ?? 'TCP'}:${p.port ?? '*'}`).sort()
+    const portList = ports.length > 0 ? ports : ['*']
+    for (const to of rule.to ?? []) {
+      const cidr = to.ipBlock?.cidr ?? ''
+      const except = (to.ipBlock?.except ?? []).slice().sort().join('+')
+      for (const port of portList) tuples.push(`${cidr}|${except}|${port}`)
+    }
+  }
+  return tuples.sort().join(',')
+}
+
 function isPublicDnsHostname(host: string): boolean {
   if (host !== host.trim()) return false
   if (host !== host.toLowerCase()) return false
@@ -163,10 +188,47 @@ export class NetworkPolicyReconciler {
   /** Reference to the MCP server cache so we can look up ports. */
   private serverCache: Map<string, McpServerCRD>
 
+  // H2 (issue #299): smallest DNS TTL (ms) observed across external-egress
+  // resolutions. The resync loop advances to <= this/2 so a rotating low-TTL host
+  // is sampled every rotation. Ratchets down and never recovers until restart —
+  // over-resyncing is cheap (writes are no-ops via the F2 gate) and the safe
+  // direction; under-resyncing would reopen #299.
+  private externalEgressMinObservedTtlMs = Infinity
+
   constructor(kc: k8s.KubeConfig, serverCache: Map<string, McpServerCRD>) {
     this.networkingApi = kc.makeApiClient(k8s.NetworkingV1Api)
     this.customApi = kc.makeApiClient(k8s.CustomObjectsApi)
     this.serverCache = serverCache
+  }
+
+  /**
+   * The smallest DNS TTL (ms) observed so far across external-egress
+   * resolutions, or Infinity if none. The resync loop reads this to advance to
+   * <= TTL/2 (H2, issue #299).
+   */
+  get externalEgressRefreshMinTtlMs(): number {
+    return this.externalEgressMinObservedTtlMs
+  }
+
+  /**
+   * Whether an external-egress policy actually needs a write (audit F2/L1):
+   * write when it is new, when the ENFORCED spec.egress differs from the live
+   * policy (covers ip-set changes AND out-of-band drift self-heal), or once to
+   * migrate a legacy policy to the new-format state annotation. A pure
+   * timestamp-only refresh (spec identical, annotation already present) is a
+   * no-op — no apiserver/CNI churn. The DNS branch additionally forces a write
+   * on renewalDue (audit M1), handled at the call site.
+   */
+  private externalEgressWriteNeeded(
+    existing: k8s.V1NetworkPolicy | null,
+    desired: k8s.V1NetworkPolicy
+  ): boolean {
+    if (!existing) return true
+    if (egressSignature(existing) !== egressSignature(desired)) {
+      return true
+    }
+    const desiredState = desired.metadata?.annotations?.[STATE_ANNOTATION]
+    return Boolean(desiredState) && !existing.metadata?.annotations?.[STATE_ANNOTATION]
   }
 
   private externalEgressPolicyName(serverName: string, binding: EgressBinding): string | null {
@@ -788,11 +850,23 @@ export class NetworkPolicyReconciler {
       }
 
       let cidrs: string[]
+      // Sliding-window state annotations to persist on the policy (issue #299).
+      // Only the DNS branch sets this; CIDR/public-web bindings leave it undefined.
+      let stateAnnotations: Record<string, string> | undefined
+      // The DNS branch sets this when the accumulator's persisted window is aging
+      // (audit M1): we must re-persist even if the ip-set is unchanged so a
+      // stable-then-rotated IP keeps its overlap grace.
+      let egressRenewalDue = false
       const name = this.externalEgressPolicyName(server.name, binding)
       if (!name) {
         failures.push('exact-host external egress bindings must declare dns or cidr')
         continue
       }
+      // Look up the live policy once: used to rehydrate the window (DNS branch)
+      // AND to decide whether a write is actually needed (audit F2/L1) — the
+      // write is gated on the ENFORCED spec.egress, so identical static policies
+      // never churn and out-of-band drift self-heals, for every egress class.
+      const existingPolicy = existingPolicies.find(p => p.metadata?.name === name) ?? null
 
       if (egressClass === 'public-web') {
         if (
@@ -846,7 +920,11 @@ export class NetworkPolicyReconciler {
           },
         }
 
-        await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+        // public-web is a static policy — write only when new/changed/drifted so
+        // the TTL-accelerated resync does not rewrite it every tick (audit F2).
+        if (this.externalEgressWriteNeeded(existingPolicy, policy)) {
+          await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+        }
         continue
       }
 
@@ -878,9 +956,23 @@ export class NetworkPolicyReconciler {
           )
           continue
         }
+        // Sliding-window accumulation (issue #299): a single-generation snapshot
+        // pins one rotating IP of a provider that serves 1 A record/response, so
+        // the pod's next resolution lands on an un-pinned IP and egress drops.
+        // We fold each snapshot into the set persisted on THIS policy's
+        // annotations and render the union of recently-live IPs. On a transient
+        // resolver failure we fail-static: keep serving the accumulated set
+        // rather than deleting the policy (the pre-#299 catch dropped egress on
+        // any DNS hiccup).
+        const previousAnnotations = existingPolicy?.metadata?.annotations
+        const now = Date.parse(resolvedAt)
+        const coreConfig = {
+          overlapMs: config.externalEgressOverlapSec * 1000,
+          maxEntries: config.externalEgressMaxEntries,
+        }
         try {
-          const ips = await dns.resolve4(binding.dns)
-          const uniqueIps = [...new Set(ips)].sort()
+          const records = await dns.resolve4(binding.dns, { ttl: true })
+          const uniqueIps = [...new Set(records.map(r => r.address))].sort()
           if (uniqueIps.length === 0) {
             failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
             continue
@@ -892,19 +984,77 @@ export class NetworkPolicyReconciler {
             )
             continue
           }
-          cidrs = uniqueIps.map(ip => `${ip}/32`)
-          const disallowedCidrs = cidrs.filter(cidr => !isAllowedExternalEgressCidr(cidr))
+          const freshCidrs = uniqueIps.map(ip => `${ip}/32`)
+          const disallowedCidrs = freshCidrs.filter(cidr => !isAllowedExternalEgressCidr(cidr))
           if (disallowedCidrs.length > 0) {
             failures.push(
               `hostname "${binding.dns}" resolved disallowed address(es): ${disallowedCidrs.join(', ')}`
             )
             continue
           }
-          resolvedEgressIPs.push({ dns: binding.dns, ips: uniqueIps, resolvedAt })
+          // Security gates above ran on the FRESH snapshot; only validated IPs
+          // enter the accumulator, so the union can never contain a blocked IP.
+          const ttlSeconds = records.length > 0 ? Math.min(...records.map(r => r.ttl)) : 0
+          if (ttlSeconds > 0) {
+            this.externalEgressMinObservedTtlMs = Math.min(
+              this.externalEgressMinObservedTtlMs,
+              ttlSeconds * 1000
+            )
+          }
+          const accumulated = accumulateHostExactHostEgress({
+            fqdn: binding.dns,
+            port: binding.port,
+            protocol,
+            resolution: { kind: 'ok', ips: uniqueIps, ttlSeconds },
+            previousAnnotations,
+            now,
+            config: coreConfig,
+          })
+          cidrs = accumulated.cidrs
+          stateAnnotations = accumulated.annotations
+          egressRenewalDue = accumulated.renewalDue
+          resolvedEgressIPs.push({
+            dns: binding.dns,
+            ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
+            resolvedAt,
+          })
+          if (accumulated.overCap) {
+            console.warn(
+              `[NetPol] "${binding.dns}" egress set hit the cap (${config.externalEgressMaxEntries}); evicted ${accumulated.evicted} least-recently-observed IP(s)`
+            )
+          }
           console.log(`[NetPol] Resolved ${binding.dns} → [${cidrs.join(', ')}]`)
         } catch (err) {
-          failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
-          continue
+          // Fail-static (H1): freeze the accumulated set on a transient resolver
+          // failure; fail loud when there is nothing to serve (bootstrap, or a
+          // permanent no-records answer).
+          const kind = classifyDnsError(err)
+          const accumulated = accumulateHostExactHostEgress({
+            fqdn: binding.dns,
+            port: binding.port,
+            protocol,
+            resolution: { kind },
+            previousAnnotations,
+            now,
+            config: coreConfig,
+          })
+          if (accumulated.cidrs.length === 0) {
+            failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
+            continue
+          }
+          cidrs = accumulated.cidrs
+          stateAnnotations = accumulated.annotations
+          // A freeze keeps the SAME set as the live policy → changed=false → no
+          // write (no churn while DNS is failing); a genuine change still writes.
+          egressRenewalDue = accumulated.renewalDue
+          resolvedEgressIPs.push({
+            dns: binding.dns,
+            ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
+            resolvedAt,
+          })
+          console.warn(
+            `[NetPol] ${kind} DNS failure for "${binding.dns}"; serving ${cidrs.length} accumulated IP(s) (fail-static, issue #299): ${this.errorMessage(err)}`
+          )
         }
       } else {
         continue
@@ -924,6 +1074,9 @@ export class NetworkPolicyReconciler {
             [MCPSERVER_LABEL]: server.name,
             [EGRESS_CLASS_LABEL]: egressClass,
           },
+          // Persist the sliding-window state so the next reconcile rehydrates the
+          // accumulated set instead of collapsing to a single snapshot (#299).
+          ...(stateAnnotations ? { annotations: stateAnnotations } : {}),
         },
         spec: {
           podSelector: {
@@ -937,7 +1090,14 @@ export class NetworkPolicyReconciler {
         },
       }
 
-      await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+      // Write only when the enforced rules changed / the policy is new / drifted
+      // (audit F2 no-churn + L1 self-heal), OR when the DNS window is aging and
+      // must be re-persisted (audit M1). A pure timestamp refresh is a no-op.
+      if (this.externalEgressWriteNeeded(existingPolicy, policy) || egressRenewalDue) {
+        await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+      } else {
+        console.log(`[NetPol] External egress "${name}" unchanged — no-op (issue #299 no-churn)`)
+      }
     }
 
     try {

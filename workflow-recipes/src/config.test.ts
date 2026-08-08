@@ -252,6 +252,59 @@ describe('loadConfig', () => {
     const config = loadConfig()
     expect(config.devMode).toBe(false)
   })
+
+  // ─── issue #299: external egress sliding-window accumulator knobs ─────────
+  it('defaults the external egress accumulator knobs (overlap/floor/interval/max)', () => {
+    delete process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES
+    const config = loadConfig()
+    expect(config.externalEgressOverlapSeconds).toBe(300)
+    expect(config.externalEgressRefreshFloorSeconds).toBe(5)
+    expect(config.externalEgressRefreshIntervalSeconds).toBe(60)
+    expect(config.externalEgressMaxEntries).toBe(128)
+  })
+
+  it('reads external egress accumulator overrides', () => {
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '600'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '7'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
+    process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES = '256'
+    const config = loadConfig()
+    expect(config.externalEgressOverlapSeconds).toBe(600)
+    expect(config.externalEgressRefreshFloorSeconds).toBe(7)
+    expect(config.externalEgressRefreshIntervalSeconds).toBe(30)
+    expect(config.externalEgressMaxEntries).toBe(256)
+  })
+
+  it.each([
+    ['WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS', '29'],
+    ['WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS', 'not-a-number'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS', '0'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS', '1.5'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS', '0'],
+    ['WRC_EXTERNAL_EGRESS_MAX_ENTRIES', '7'],
+    ['WRC_EXTERNAL_EGRESS_MAX_ENTRIES', 'lots'],
+  ])('rejects invalid external egress knob %s=%s', (key, value) => {
+    process.env[key] = value
+    expect(() => loadConfig()).toThrow(new RegExp(key))
+  })
+
+  it('enforces the floor <= interval < overlap invariant (fail loud)', () => {
+    // floor > interval
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '40'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
+
+  it('rejects an interval that is not strictly below the overlap', () => {
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '5'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '300'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
 })
 
 // An unset/unparseable CLERUM_REGISTRY_URL makes isPlatformRegistryImage() return false

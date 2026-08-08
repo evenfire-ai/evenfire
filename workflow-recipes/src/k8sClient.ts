@@ -31,7 +31,10 @@ import {
 } from './reconciler/dbRunProcessor'
 import { getErrorCode } from './reconciler/k8sErrors'
 import { RecipeEventQueue } from './reconciler/recipeEventQueue'
-import { recipeHasBackgroundAccessClient } from './reconciler/resourceBuilder'
+import {
+  parseClusterLocalFqdn,
+  recipeHasBackgroundAccessClient,
+} from './reconciler/resourceBuilder'
 import { SecretReverseIndex } from './reconciler/secretReverseIndex'
 import { SecretWatcher } from './reconciler/secretWatcher'
 import {
@@ -52,6 +55,11 @@ const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
 const MAX_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 30_000
 const WORKLOAD_STATUS_REFRESH_INTERVAL_MS = 30_000
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
+// Bound the fan-out of the periodic external-egress requeue: the per-recipe
+// eventQueue already serializes each recipe, but without a global cap a refresh
+// pass over N recipes would enqueue N reconciles at once. This caps the number of
+// reconciles started concurrently per pass; the rest queue and drain in order.
+const EXTERNAL_EGRESS_REFRESH_MAX_CONCURRENCY = 8
 
 export interface WorkflowRecipeWatchObject {
   metadata: {
@@ -372,6 +380,90 @@ export function workflowNeedsOwnershipBackstop(recipe: WorkflowRecipeCRD): boole
   return recipeReferencesNamedSecrets(recipe)
 }
 
+/**
+ * issue #299 §3.2/§5 — does this recipe declare at least one exact-host EXTERNAL
+ * egress target that the WRC accumulator folds into a sliding-window policy?
+ *
+ * Two accumulator-driven sources qualify:
+ *  - `spec.ui.egress.external[]` — sandbox-ui external FQDNs (always exact-host).
+ *  - a NON-transport workload's `egressBindings[]` whose `dns` is an external FQDN
+ *    (i.e. NOT `<svc>.<ns>.svc.cluster.local`). Validation guarantees non-transport
+ *    workloads use exact-host egress, so any external-FQDN binding here is
+ *    exact-host. The UI workload's own bindings are skipped (its egress is declared
+ *    via `spec.ui.egress`, and the reconciler's workload loop skips it too).
+ *
+ * Transport-workload egress is intentionally EXCLUDED: it is delegated to HCC via
+ * the McpServer CRD, not folded by this accumulator, so re-enqueueing on its
+ * account would do no accumulator work.
+ *
+ * The predicate is pure and cheap (no DNS, no apiserver) so the refresh timer can
+ * filter the cached recipe set synchronously each tick.
+ */
+export function recipeHasExternalExactHostEgress(recipe: WorkflowRecipeCRD): boolean {
+  if (recipe.metadata.deletionTimestamp) return false
+  if ((recipe.spec.ui?.egress?.external ?? []).length > 0) return true
+
+  const uiWorkloadId = recipe.spec.ui?.workloadRef
+  return (recipe.spec.workloads ?? []).some(workload => {
+    if (workload.transport) return false
+    if (uiWorkloadId && workload.id === uiWorkloadId) return false
+    return (workload.egressBindings ?? []).some(
+      binding =>
+        Boolean(binding.dns) &&
+        binding.port != null &&
+        parseClusterLocalFqdn(binding.dns as string) === null
+    )
+  })
+}
+
+/**
+ * issue #299 §3.2/§5 — the external-egress refresh cadence in ms.
+ *
+ * `clamp(refreshInterval, floor)`: never tick faster than the floor. `loadConfig`
+ * already enforces `floor <= interval < overlap`, but clamping here keeps the
+ * timer correct even if a caller passes an unvalidated config (tests, future
+ * callers), so a sub-floor interval can never turn the timer into a busy loop.
+ */
+export function externalEgressRefreshIntervalMs(
+  config: {
+    externalEgressRefreshIntervalSeconds: number
+    externalEgressRefreshFloorSeconds: number
+  },
+  minObservedTtlMs = Infinity
+): number {
+  const floorMs = config.externalEgressRefreshFloorSeconds * 1000
+  const configuredMs = config.externalEgressRefreshIntervalSeconds * 1000
+  // H2 (issue #299): advance the refresh to <= observed TTL/2 so a rotating
+  // low-TTL host is sampled every rotation. A finite observed TTL can only make
+  // the refresh FASTER than the configured interval, never slower; the floor is
+  // the hard lower bound to avoid a hot-loop.
+  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
+    ? Math.min(configuredMs, minObservedTtlMs / 2)
+    : configuredMs
+  return Math.max(ttlAwareMs, floorMs)
+}
+
+/**
+ * Run `worker` over `items` with at most `limit` promises in flight at once.
+ * Deterministic worker-pool: `limit` runners pull from a shared cursor until the
+ * list drains. Used to bound the external-egress refresh fan-out.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0
+  const runnerCount = Math.min(Math.max(limit, 1), items.length)
+  const runners = Array.from({ length: runnerCount }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++]
+      await worker(item)
+    }
+  })
+  await Promise.all(runners)
+}
+
 export interface WorkflowRecipeProvider {
   getAllRecipes(): WorkflowRecipeCRD[]
   start(): Promise<void>
@@ -423,6 +515,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private runtimeCredentialRefreshRunning = false
   private workloadStatusRefreshTimer: ReturnType<typeof setInterval> | null = null
   private workloadStatusRefreshRunning = false
+  // issue #299 — periodic external-egress requeue. GitHub (and other single-A-record
+  // rotators) change their resolved IP without bumping the CRD generation, so the
+  // accumulator's sliding window only converges if we re-reconcile on a timer.
+  private externalEgressRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private externalEgressRefreshRunning = false
   private eventQueue = new RecipeEventQueue((key, error) => {
     console.error(`[WR-K8s] Unhandled event failure for "${key}":`, error)
   })
@@ -537,6 +634,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.startBrokerTokenRotationLoop()
     this.startRuntimeCredentialRefreshLoop()
     this.startWorkloadStatusRefreshLoop()
+    this.startExternalEgressRefreshLoop()
 
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.start()
@@ -917,6 +1015,82 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.workloadStatusRefreshTimer.unref?.()
   }
 
+  /**
+   * issue #299 §3.2/§5 — start the periodic external-egress requeue.
+   *
+   * A recipe's exact-host external egress (`spec.ui.egress.external` or a
+   * non-transport workload's external `egressBindings`) resolves to IPs that a
+   * single-A-record provider (GitHub: api.github.com, ~15s TTL over
+   * 140.82.112.0/20) rotates WITHOUT bumping the CRD generation. Generation-only
+   * reconcile triggers therefore never re-run the accumulator, and the
+   * sliding-window egress set on the NetworkPolicy stops covering the pod's next
+   * resolution. This timer re-enqueues a FULL reconcile (forceReconcile — a plain
+   * MODIFIED would short-circuit as status-only) for every cached recipe with such
+   * egress, so the accumulator folds each fresh DNS snapshot into the window.
+   *
+   * Overlapping passes are impossible by construction: the next delay is armed in
+   * the pass's `.finally`, so a slow pass simply pushes the next tick out rather
+   * than stacking. `externalEgressRefreshRunning` is an in-flight indicator (read
+   * by tests); per-recipe coalescing is handled by the eventQueue.
+   */
+  private startExternalEgressRefreshLoop(): void {
+    if (this.externalEgressRefreshTimer) return
+
+    // Self-rescheduling (not a fixed setInterval) so the delay can advance to
+    // <= observed TTL/2 (H2, issue #299) as low-TTL hosts are seen. Rescheduling
+    // AFTER each pass completes also guarantees no overlapping refreshes.
+    const scheduleNext = (): void => {
+      if (this.stopped) return
+      const delayMs = externalEgressRefreshIntervalMs(
+        this.config,
+        this.reconciler.externalEgressRefreshMinTtlMs
+      )
+      this.externalEgressRefreshTimer = setTimeout(() => {
+        this.externalEgressRefreshRunning = true
+        void this.refreshExternalEgressForActiveRecipes().finally(() => {
+          this.externalEgressRefreshRunning = false
+          scheduleNext()
+        })
+      }, delayMs)
+      this.externalEgressRefreshTimer.unref?.()
+    }
+    scheduleNext()
+  }
+
+  private async refreshExternalEgressForActiveRecipes(): Promise<void> {
+    if (this.stopped) return
+
+    const started = Date.now()
+    const selected = [...this.recipes.keys()].filter(name => {
+      const recipe = this.recipes.get(name)
+      return recipe ? recipeHasExternalExactHostEgress(recipe) : false
+    })
+    if (selected.length === 0) return
+
+    let enqueued = 0
+    await runWithConcurrency(selected, EXTERNAL_EGRESS_REFRESH_MAX_CONCURRENCY, async name => {
+      if (this.stopped) return
+      const latest = this.recipes.get(name)
+      if (!latest) return
+      try {
+        await this.eventQueue.enqueue(name, () =>
+          // Generation is unchanged for a DNS-rotation refresh, so force the full
+          // reconcile; otherwise handleRecipeEvent classifies this synthetic
+          // MODIFIED as status-only and returns before the accumulator runs.
+          this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
+        )
+        enqueued++
+      } catch (error) {
+        console.error(`[WR-K8s] External egress refresh failed for "${name}":`, error)
+      }
+    })
+
+    // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
+    console.log(
+      `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
+    )
+  }
+
   private async refreshWorkloadStatusesForSteadyRecipes(): Promise<void> {
     if (this.stopped) return
 
@@ -1014,6 +1188,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     if (this.workloadStatusRefreshTimer) {
       clearInterval(this.workloadStatusRefreshTimer)
       this.workloadStatusRefreshTimer = null
+    }
+    if (this.externalEgressRefreshTimer) {
+      clearTimeout(this.externalEgressRefreshTimer)
+      this.externalEgressRefreshTimer = null
     }
     if (this.watchRequest) {
       console.log('[WR-K8s] Stopping watch')

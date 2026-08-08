@@ -193,8 +193,24 @@ export interface Config {
 
   // Periodic external-egress DNS resync interval (seconds). Re-resolves
   // McpServer.spec.egressBindings so DNS changes and failures converge without
-  // requiring a watch event. 0 disables.
+  // requiring a watch event. 0 disables. Must sit below externalEgressOverlapSec
+  // so accumulated IPs never expire between refreshes (issue #299).
   externalEgressResyncIntervalSec: number
+
+  // Grace kept after a DNS TTL before an accumulated /32 may expire (seconds).
+  // The sliding window that fixes #299: entries live for TTL + overlap, so a
+  // provider that rotates a single A record still resolves through the union of
+  // recently-live IPs. Set via HCC_EXTERNAL_EGRESS_OVERLAP_SEC.
+  externalEgressOverlapSec: number
+
+  // Minimum sane refresh interval (seconds); guards against a hot-loop resync.
+  // Set via HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC.
+  externalEgressRefreshFloorSec: number
+
+  // Per-FQDN accumulated-entry cap. On overflow the core evicts the
+  // least-recently-observed IP (never rejects the policy). Set via
+  // HCC_EXTERNAL_EGRESS_MAX_ENTRIES.
+  externalEgressMaxEntries: number
 
   // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
   // local-mode McpServer images. Audit mode (default) logs would-be denials
@@ -365,6 +381,61 @@ const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 validateRemovedStatelessCommunicationChannelPolicy(
   getEnv('CLERUM_STATELESS_COMMUNICATION_CHANNEL_POLICY')
 )
+
+/**
+ * Enforce the external-egress sliding-window invariant (issue #299):
+ *   refreshFloor >= 1, overlap > 0, maxEntries >= 1, and when the periodic
+ *   resync is enabled (interval > 0): floor <= interval < overlap.
+ * The interval MUST stay below the overlap so an accumulated /32 is refreshed
+ * before it can expire; otherwise a gap reopens and the pod loses egress on the
+ * next rotation. Fails loud at startup rather than degrading silently.
+ */
+export function validateExternalEgressResyncInvariant(cfg: {
+  externalEgressResyncIntervalSec: number
+  externalEgressOverlapSec: number
+  externalEgressRefreshFloorSec: number
+  externalEgressMaxEntries: number
+}): void {
+  const interval = cfg.externalEgressResyncIntervalSec
+  const overlap = cfg.externalEgressOverlapSec
+  const floor = cfg.externalEgressRefreshFloorSec
+  const max = cfg.externalEgressMaxEntries
+
+  if (!Number.isInteger(overlap) || overlap <= 0) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_OVERLAP_SEC must be a positive integer (seconds), got '${overlap}'`
+    )
+  }
+  if (!Number.isInteger(floor) || floor < 1) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC must be an integer >= 1 (seconds), got '${floor}'`
+    )
+  }
+  if (!Number.isInteger(max) || max < 1) {
+    throw new Error(`HCC_EXTERNAL_EGRESS_MAX_ENTRIES must be an integer >= 1, got '${max}'`)
+  }
+  // A negative interval is a typo, not "disabled" — reject it loudly so it can't
+  // silently reinstate the #299 drift bug (audit F4). 0 = explicitly disabled.
+  if (!Number.isInteger(interval) || interval < 0) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_RESYNC_SEC must be an integer >= 0 (0 disables), got '${interval}'`
+    )
+  }
+  // interval 0 disables periodic resync; only enforce ordering when enabled.
+  if (interval > 0) {
+    if (interval < floor) {
+      throw new Error(
+        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be >= the refresh floor (${floor})`
+      )
+    }
+    if (interval >= overlap) {
+      throw new Error(
+        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be below the overlap window ` +
+          `(${overlap}) so accumulated egress IPs never expire between refreshes (issue #299)`
+      )
+    }
+  }
+}
 
 export const config: Config = {
   devMode,
@@ -594,8 +665,14 @@ export const config: Config = {
   // the ClerumConfig interface above.
   runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
-  // Periodic external-egress DNS resync (default 5 min). 0 disables.
-  externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
+  // Periodic external-egress DNS resync. Lowered from the legacy 5 min to 60s so
+  // it sits below the 300s overlap window: accumulated IPs are refreshed before
+  // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
+  // stale-snapshot risk; only for operators who explicitly opt out).
+  externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
+  externalEgressOverlapSec: getEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressRefreshFloorSec: getEnvInt('HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC', 5),
+  externalEgressMaxEntries: getEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
   // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
@@ -615,3 +692,7 @@ export const config: Config = {
   statelessMaxUptimeHours: getEnvInt('CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS', 72),
   heartbeatPollMs: parseHeartbeatPollMs(getEnv('CONTEXT_MAPPER_HEARTBEAT_POLL_MS')),
 }
+
+// Fail loud at import time if the external-egress sliding-window knobs are
+// inconsistent (issue #299) — a silent misconfig would reopen the rotation gap.
+validateExternalEgressResyncInvariant(config)

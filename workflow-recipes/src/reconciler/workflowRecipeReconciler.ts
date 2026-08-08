@@ -14,6 +14,7 @@
  * 11. Handle delete (reverse dependency order, skip PVCs)
  */
 import * as k8s from '@kubernetes/client-node'
+import { STATE_ANNOTATION } from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import {
@@ -54,6 +55,7 @@ import {
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
+import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
 import { type FqdnLookup, defaultFqdnLookup, resolveExternalEgress } from './fqdnResolver'
 import { filterByIncludeWhen } from './includeWhenFilter'
 import { resolve as resolveInputs } from './inputResolver'
@@ -627,6 +629,28 @@ export class RuntimeScopeResolutionPendingError extends Error {
   }
 }
 
+/**
+ * A representation-independent signature of a policy's egress: the sorted set of
+ * (cidr | except | port/protocol) allow-tuples. Decides whether a write is needed
+ * WITHOUT the key-ordering fragility of JSON.stringify (audit R2-1): the
+ * apiserver/client deserializes rule objects with keys ordered differently than
+ * the builder emits them, so a raw string compare is always unequal on a live
+ * cluster and would defeat the no-churn gate. Mirrors HCC's `egressSignature`.
+ */
+function egressSignature(policy: k8s.V1NetworkPolicy): string {
+  const tuples: string[] = []
+  for (const rule of policy.spec?.egress ?? []) {
+    const ports = (rule.ports ?? []).map(p => `${p.protocol ?? 'TCP'}:${p.port ?? '*'}`).sort()
+    const portList = ports.length > 0 ? ports : ['*']
+    for (const to of rule.to ?? []) {
+      const cidr = to.ipBlock?.cidr ?? ''
+      const except = (to.ipBlock?.except ?? []).slice().sort().join('+')
+      for (const port of portList) tuples.push(`${cidr}|${except}|${port}`)
+    }
+  }
+  return tuples.sort().join(',')
+}
+
 export class WorkflowRecipeReconciler {
   private appsApi: k8s.AppsV1Api
   private batchApi: k8s.BatchV1Api
@@ -637,6 +661,12 @@ export class WorkflowRecipeReconciler {
   private workflowReconciler: WorkflowReconciler | null = null
   private _tokenFactory: JwtTokenFactory | null = null
   private fqdnLookup: FqdnLookup
+  // H2 (issue #299): the smallest DNS TTL (ms) observed across external-egress
+  // resolutions. The refresh loop advances to <= this/2 so a rotating low-TTL
+  // host is sampled every rotation. Ratchets down and never recovers until
+  // restart — deliberately: over-refreshing is cheap (writes are no-ops via the
+  // F2 gate) and the safe direction; under-refreshing would reopen #299.
+  private externalEgressMinObservedTtlMs = Infinity
   private secretReverseIndex: SecretReverseIndex | null
   private verifyWorkflowRunProvenance: NonNullable<
     WorkflowRecipeReconcilerDeps['verifyWorkflowRunProvenance']
@@ -3905,25 +3935,78 @@ export class WorkflowRecipeReconciler {
 
     const externals = recipe.spec.ui?.egress?.external ?? []
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
-    if (failures.length > 0) {
+    this.recordExternalEgressTtl(resolved)
+
+    // Permanent failures (no-records / blocked range) never author a partial
+    // policy — fail exactly as the single-snapshot resolver did.
+    const permanentFailures = failures.filter(f => !f.retryable)
+    if (permanentFailures.length > 0) {
       throw egressResolutionError(
         `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-        failures
+        permanentFailures
       )
     }
+
+    let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
+    let stateAnnotations: Record<string, string> | undefined
+    let existing: k8s.V1NetworkPolicy | null = null
+    let egressRenewalDue = false
     if (externals.length > 0) {
+      // issue #299: fold this DNS snapshot into the accumulated sliding-window
+      // set persisted on the live policy's annotations (rehydrate H5).
+      existing = await this.readNetworkPolicyOrNull(policyName, ns)
+      const acc = accumulateExternalEgress({
+        externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
+        resolveResult: { resolved, failures },
+        previousAnnotations: existing?.metadata?.annotations,
+        now: Date.now(),
+        config: {
+          overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+          maxEntries: this.config.externalEgressMaxEntries,
+        },
+      })
+      // Bootstrap fail-closed: a transient resolver failure with NOTHING to
+      // freeze (no rehydratable prior set) must not author an empty policy.
+      if (acc.entries.length === 0 && failures.length > 0) {
+        throw egressResolutionError(
+          `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
+          failures
+        )
+      }
+      this.warnEgressAccumulator(policyName, acc)
+      effectiveResolved = acc.resolved
+      stateAnnotations = acc.annotations
+      egressRenewalDue = acc.renewalDue
+
       this.assertClusterEnforcesExternalEgress(
         recipe,
         'WRC sandbox-ui external egress policy is ready to apply'
       )
     }
 
-    const policy = rb.buildUiEgressNetworkPolicy(recipe, ns, this.config.sandboxNamespace, resolved)
+    const policy = rb.buildUiEgressNetworkPolicy(
+      recipe,
+      ns,
+      this.config.sandboxNamespace,
+      effectiveResolved,
+      stateAnnotations
+    )
 
     if (!policy) {
       await this.safeDelete(
         () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
         `NetworkPolicy "${policyName}" in ${ns}`
+      )
+      return
+    }
+
+    // issue #299: NO-OP when the accumulated egress set and rules are already
+    // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
+    // write when the persisted window is aging (renewalDue, audit M1), even if
+    // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
+    if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue) {
+      console.log(
+        `[WR-Reconciler] NetworkPolicy "${policyName}" in ${ns} egress set unchanged — no-op`
       )
       return
     }
@@ -4290,22 +4373,70 @@ export class WorkflowRecipeReconciler {
         externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
         this.fqdnLookup
       )
-      if (failures.length > 0) {
+      this.recordExternalEgressTtl(resolvedExternal)
+
+      // Permanent failures never author a partial policy — fail as before.
+      const permanentFailures = failures.filter(f => !f.retryable)
+      if (permanentFailures.length > 0) {
         throw egressResolutionError(
           `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-          failures
+          permanentFailures
         )
       }
+
+      let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
+      let wlStateAnnotations: Record<string, string> | undefined
+      let existingWlPolicy: k8s.V1NetworkPolicy | null = null
+      let wlEgressRenewalDue = false
+      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
       if (externalDeclared.length > 0) {
+        // issue #299: accumulate the sliding-window egress set (rehydrate H5).
+        existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
+        const acc = accumulateExternalEgress({
+          externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
+          resolveResult: { resolved: resolvedExternal, failures },
+          previousAnnotations: existingWlPolicy?.metadata?.annotations,
+          now: Date.now(),
+          config: {
+            overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+            maxEntries: this.config.externalEgressMaxEntries,
+          },
+        })
+        // Bootstrap fail-closed: transient failure with nothing to freeze.
+        if (acc.entries.length === 0 && failures.length > 0) {
+          throw egressResolutionError(
+            `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
+            failures
+          )
+        }
+        this.warnEgressAccumulator(wlPolicyName, acc)
+        effectiveExternal = acc.resolved
+        wlStateAnnotations = acc.annotations
+        wlEgressRenewalDue = acc.renewalDue
+
         this.assertClusterEnforcesExternalEgress(
           recipe,
           `WRC workload "${w.id}" external egress policy is ready to apply`
         )
       }
 
-      const policy = rb.buildWorkloadEgressNetworkPolicy(w, recipe, wlNs, resolvedExternal)
+      const policy = rb.buildWorkloadEgressNetworkPolicy(
+        w,
+        recipe,
+        wlNs,
+        effectiveExternal,
+        wlStateAnnotations
+      )
       if (!policy) {
         await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
+        continue
+      }
+      // issue #299: NO-OP when the accumulated set and rules are already live —
+      // but still write when the persisted window is aging (renewalDue, M1).
+      if (!this.egressWriteNeeded(existingWlPolicy, policy) && !wlEgressRenewalDue) {
+        console.log(
+          `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
+        )
         continue
       }
       await this.applyNetworkPolicy(policy, wlNs)
@@ -4350,6 +4481,99 @@ export class WorkflowRecipeReconciler {
     if (!ownsSameLane) {
       throw new NetworkPolicyOwnershipConflictError(
         `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the WRC internal-dependency policy for WorkflowRecipe "${desiredRecipe}"`
+      )
+    }
+  }
+
+  /**
+   * Read a NetworkPolicy for rehydration/no-op, returning null when it does not
+   * yet exist. Fails LOUD on any non-404 read error (issue #299): a rehydration
+   * we cannot perform must not silently blank the accumulated egress state.
+   */
+  private async readNetworkPolicyOrNull(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    try {
+      return await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+  }
+
+  /**
+   * True when the live policy differs from the desired one and must be written
+   * (issue #299 NO-OP gate). Compares the accumulated-state fingerprint AND the
+   * enforced egress rules, so a change to either the external IP set OR the
+   * internal (sibling) rules still triggers a write — only a byte-for-byte match
+   * is a no-op.
+   */
+  /**
+   * The smallest DNS TTL (ms) observed so far across external-egress
+   * resolutions, or Infinity if none. The k8s refresh loop reads this to advance
+   * to <= TTL/2 (H2, issue #299).
+   */
+  get externalEgressRefreshMinTtlMs(): number {
+    return this.externalEgressMinObservedTtlMs
+  }
+
+  /**
+   * Ratchet the observed-min-TTL down from this round's resolved entries. Only
+   * positive TTLs count (an empty/A-less answer yields ttlSeconds 0, which is not
+   * a real refresh cadence).
+   */
+  private recordExternalEgressTtl(resolved: Array<{ ttlSeconds: number }>): void {
+    for (const r of resolved) {
+      if (r.ttlSeconds > 0) {
+        this.externalEgressMinObservedTtlMs = Math.min(
+          this.externalEgressMinObservedTtlMs,
+          r.ttlSeconds * 1000
+        )
+      }
+    }
+  }
+
+  private egressWriteNeeded(
+    existing: k8s.V1NetworkPolicy | null,
+    desired: k8s.V1NetworkPolicy
+  ): boolean {
+    if (!existing) return true
+    // Decide the write off the ENFORCED rules (the ipBlock set + ports), NOT the
+    // raw state annotation: serializeState embeds expiresAt/lastObservedAt, which
+    // renew on every OK tick, so comparing the annotation string would rewrite
+    // the policy every refresh even when the IP set is identical — an apiserver /
+    // dataplane write-storm (issue #299 audit F2). H4: a timestamp-only refresh
+    // must be a no-op.
+    if (egressSignature(existing) !== egressSignature(desired)) {
+      return true
+    }
+    // Rules are identical. Persist the new-format state annotation exactly once to
+    // migrate a policy that predates it, so a controller restart can rehydrate
+    // the accumulated window; thereafter (annotation present, egress unchanged)
+    // it is a no-op.
+    return !existing.metadata?.annotations?.[STATE_ANNOTATION]
+  }
+
+  /**
+   * Surface the accumulator's staleness/pressure alarms (issue #299): a frozen
+   * FQDN means the resolver is transiently failing and we are serving last-known
+   * IPs (fail-static, H1); an over-cap eviction means the pool exceeded the
+   * alarm cap and least-recently-observed entries were dropped (H3).
+   */
+  private warnEgressAccumulator(policyName: string, acc: AccumulateOutput): void {
+    if (acc.frozenFqdns.length > 0) {
+      console.warn(
+        `[WR-Reconciler] ${policyName}: egress set FROZEN (fail-static) for ${acc.frozenFqdns.join(
+          ', '
+        )} — DNS resolution is transiently failing; serving last-known IPs, not pruning.`
+      )
+    }
+    if (acc.overCap) {
+      console.warn(
+        `[WR-Reconciler] ${policyName}: egress set hit the maxEntries cap — evicted ${acc.evicted.length} least-recently-observed entr${
+          acc.evicted.length === 1 ? 'y' : 'ies'
+        } (never rejecting the policy).`
       )
     }
   }

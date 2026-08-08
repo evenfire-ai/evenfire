@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
-import { McpServerWatcher, listAllCommunicationChannels, listAllHosts } from './k8sClient'
+import {
+  McpServerWatcher,
+  externalEgressResyncDelayMs,
+  listAllCommunicationChannels,
+  listAllHosts,
+} from './k8sClient'
 import type { HostCRD } from './types'
 
 function deferred<T = void>(): {
@@ -3841,5 +3846,28 @@ describe('McpServerWatcher.startCommunicationChannelWatch — channel-reader rev
     expect(errorSpy).toHaveBeenCalled()
 
     errorSpy.mockRestore()
+  })
+})
+
+describe('externalEgressResyncDelayMs (issue #299 H2)', () => {
+  it('returns the configured interval (ms) when no TTL has been observed', () => {
+    expect(externalEgressResyncDelayMs(60, 5)).toBe(60_000)
+    expect(externalEgressResyncDelayMs(60, 5, Infinity)).toBe(60_000)
+  })
+
+  it('advances to TTL/2 when the observed TTL is faster than the interval', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 15_000)).toBe(7_500)
+  })
+
+  it('never drops below the floor even for a tiny TTL', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 6_000)).toBe(5_000)
+  })
+
+  it('keeps the configured interval when the observed TTL is large', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 600_000)).toBe(60_000)
+  })
+
+  it('clamps a below-floor configured interval up to the floor', () => {
+    expect(externalEgressResyncDelayMs(3, 5)).toBe(5_000)
   })
 })

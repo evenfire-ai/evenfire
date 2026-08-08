@@ -2316,7 +2316,7 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
     const reconcilerWithLookup = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
-      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] }),
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
     })
 
     const result = await reconcilerWithLookup.reconcile(recipe)
@@ -2355,7 +2355,12 @@ describe('WorkflowRecipeReconciler', () => {
         networkPolicyEnforcementConfirmed: false,
       },
       {
-        fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] }),
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
       }
     )
 
@@ -2389,7 +2394,12 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
     const reconcilerWithLookup = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
-      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['169.254.169.254'], ipv6: [] }),
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['169.254.169.254'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
     })
 
     const result = await reconcilerWithLookup.reconcile(recipe)
@@ -3818,7 +3828,7 @@ describe('WorkflowRecipeReconciler', () => {
     })
     const kc = new k8s.KubeConfig()
     const reconcilerWithLookup = new WorkflowRecipeReconciler(kc, undefined, {
-      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] }),
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
     })
     await reconcilerWithLookup.reconcile(recipe)
     expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
@@ -3852,7 +3862,12 @@ describe('WorkflowRecipeReconciler', () => {
         networkPolicyEnforcementConfirmed: false,
       },
       {
-        fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] }),
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
       }
     )
 
@@ -3885,7 +3900,12 @@ describe('WorkflowRecipeReconciler', () => {
     })
     const kc = new k8s.KubeConfig()
     const reconcilerWithLookup = new WorkflowRecipeReconciler(kc, undefined, {
-      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['169.254.169.254'], ipv6: [] }),
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['169.254.169.254'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
     })
 
     const result = await reconcilerWithLookup.reconcile(recipe)
@@ -3911,7 +3931,12 @@ describe('WorkflowRecipeReconciler', () => {
     })
     const kc = new k8s.KubeConfig()
     const reconcilerWithLookup = new WorkflowRecipeReconciler(kc, undefined, {
-      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['169.254.169.254'], ipv6: [] }),
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['169.254.169.254'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
     })
     const workflowReconcile = vi.fn().mockResolvedValue({
       phase: 'deploying',
@@ -9637,7 +9662,12 @@ describe('WorkflowRecipeReconciler', () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {})
       const kc = new k8s.KubeConfig()
       const r = new WorkflowRecipeReconciler(kc, undefined, {
-        fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.34'], ipv6: [] }),
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.34'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
       })
       mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(
         Object.assign(
