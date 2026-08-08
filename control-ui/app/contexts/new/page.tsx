@@ -71,12 +71,15 @@ export default function CreateContextPage() {
     void loadServers()
   }, [])
 
-  const canSubmit = useMemo(() => contextName.trim().length > 0 && !busy, [busy, contextName])
-  const canContinue = step === 0 ? contextName.trim().length > 0 : true
+  // Gate on the DERIVED slug, not the raw text: a name with no ASCII
+  // alphanumerics ("!!!", "日本語", "---", whitespace) trims to a non-empty
+  // string but toKebabCase()s to "", which would send metadata.name/contextId: "".
+  const canSubmit = useMemo(() => toKebabCase(contextName).length > 0 && !busy, [busy, contextName])
+  const canContinue = step === 0 ? toKebabCase(contextName).length > 0 : true
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    return contextName.trim().length > 0
+    return toKebabCase(contextName).length > 0
   }
 
   async function handleCreateContext() {
@@ -143,6 +146,10 @@ export default function CreateContextPage() {
                   {toKebabCase(contextName) ? (
                     <span className="cu-field__hint">
                       Identifier: <code>{toKebabCase(contextName)}</code>
+                    </span>
+                  ) : contextName.trim() ? (
+                    <span className="cu-field__error">
+                      Context name must contain letters or numbers.
                     </span>
                   ) : null}
                 </Field>
