@@ -41,18 +41,22 @@ describe('external session live team authorization', () => {
     dbMocks.query.mockReset()
   })
 
-  it.each(['pending', 'rejected', 'expired', 'inactive', 'removed'])(
-    'denies a %s team state instead of trusting the unexpired token',
-    async () => {
-      dbMocks.query.mockResolvedValue({ rows: [], rowCount: 0 })
+  it('denies a deleted membership through the repository active-state predicate', async () => {
+    dbMocks.query.mockImplementation(async text =>
+      String(text).includes("tm.status = 'active'")
+        ? { rows: [], rowCount: 0 }
+        : {
+            rows: [{ team_id: 'team-1', role: 'admin', team_name: 'Team One' }],
+            rowCount: 1,
+          }
+    )
 
-      await request(buildApp())
-        .get('/teams/team-1')
-        .set('x-user-session-token', sessionToken())
-        .expect(403)
-        .expect({ error: 'team_membership_inactive' })
-    }
-  )
+    await request(buildApp())
+      .get('/teams/team-1')
+      .set('x-user-session-token', sessionToken())
+      .expect(403)
+      .expect({ error: 'team_membership_inactive' })
+  })
 
   it('enforces the current demoted role instead of the token role', async () => {
     dbMocks.query.mockResolvedValue({

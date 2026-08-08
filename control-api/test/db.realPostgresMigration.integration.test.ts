@@ -1,10 +1,16 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { pool as runtimePool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
+import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
+import { createExternalAuthRouter } from '../src/routes/external/auth.js'
+import { createExternalDirectoryRouter } from '../src/routes/external/directory.js'
+import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
+import { createExternalUsersRouter } from '../src/routes/external/users.js'
 import {
   type GfsSubject,
   auditMutation,
@@ -12,7 +18,12 @@ import {
 } from '../src/routes/gfs/grants.js'
 import { writeGfsShareBatchInTransaction } from '../src/routes/gfs/shares.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
-import { getCurrentTeam, getTeamAgents, getUserAgents } from '../src/services/directory/index.js'
+import {
+  getCurrentTeam,
+  getTeamAgents,
+  getUserAgents,
+  googleLoginData,
+} from '../src/services/directory/index.js'
 import { runWithAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
 import { PostgresAdministrativeIntentLookup } from '../src/services/tracing/adminOperationService.js'
 import { AdministrativeEventService } from '../src/services/tracing/administrativeEvents.js'
@@ -29,7 +40,8 @@ import { PostgresGovernedEventReadRepository } from '../src/services/tracing/pos
 import { PostgresGovernedSessionReplayRepository } from '../src/services/tracing/postgresGovernedSessionReplayRepository.js'
 import { projectAcceptedUsageEvents } from '../src/services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../src/services/usageEvents.js'
-import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import { signRpcAccessToken, verifyRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 type PrivilegeExpectation = Record<string, Set<string>>
 
@@ -1495,6 +1507,163 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         }),
       ])
     )
+  }, 60_000)
+
+  it('enforces live membership states through real external routes and repository queries', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+
+    const runtimeConnect = vi
+      .spyOn(runtimePool, 'connect')
+      .mockImplementation(() => dbPool.connect() as ReturnType<typeof runtimePool.connect>)
+    const runtimeQuery = vi
+      .spyOn(runtimePool, 'query')
+      .mockImplementation((text: never, values?: never) => dbPool.query(text, values) as never)
+
+    try {
+      const userId = randomUUID()
+      const teamId = randomUUID()
+      const directAgent = `direct-${randomUUID()}`
+      const directContext = `context-${randomUUID()}`
+      const email = `live-auth-${userId}@example.test`
+      await dbPool.query(
+        `INSERT INTO users (id, email, name) VALUES ($1, $2, 'Live Authorization User')`,
+        [userId, email]
+      )
+      await dbPool.query(`INSERT INTO teams (id, name) VALUES ($1, 'Live Authorization Team')`, [
+        teamId,
+      ])
+      await dbPool.query(
+        `INSERT INTO team_members (team_id, user_id, role, status)
+         VALUES ($1, $2, 'admin', 'active')`,
+        [teamId, userId]
+      )
+      await dbPool.query(`INSERT INTO user_agents (user_id, agent_name) VALUES ($1, $2)`, [
+        userId,
+        directAgent,
+      ])
+      await dbPool.query(`INSERT INTO user_contexts (user_id, context_id) VALUES ($1, $2)`, [
+        userId,
+        directContext,
+      ])
+
+      const sessionToken = signExternalSessionToken({
+        userId,
+        email,
+        teamId,
+        role: 'admin',
+      })
+      const gateway = {
+        listResource: async (plural: string) =>
+          plural === 'contexts'
+            ? [{ metadata: { name: directContext }, spec: { contextId: directContext } }]
+            : [],
+        getResource: async (plural: string, name: string) => {
+          if (plural === 'hosts' && name === directAgent) {
+            return { metadata: { name, namespace: config.hostsNamespace }, spec: { enabled: true } }
+          }
+          throw Object.assign(new Error('not found'), { statusCode: 404 })
+        },
+      } as unknown as K8sGateway
+      const app = express()
+      app.use(express.json())
+      app.use(requireInternalToken)
+      app.use(createExternalAuthRouter(gateway))
+      app.use(createExternalUsersRouter(gateway))
+      app.use(createExternalTeamsRouter(gateway))
+      app.use(createExternalDirectoryRouter())
+      const authorized = (req: request.Test) =>
+        req
+          .set('authorization', 'Bearer dev-external-rest-api-token')
+          .set('x-service-token', 'external-rest-api')
+          .set('x-user-session-token', sessionToken)
+
+      await authorized(
+        request(app).get(`/external/teams/${teamId}/users/${userId}/current`)
+      ).expect(200)
+      await authorized(request(app).put(`/external/teams/${teamId}/name`))
+        .send({ userId, name: 'Admin Rename' })
+        .expect(200)
+
+      await dbPool.query(
+        `UPDATE team_members SET role = 'member' WHERE team_id = $1 AND user_id = $2`,
+        [teamId, userId]
+      )
+      await authorized(request(app).put(`/external/teams/${teamId}/name`))
+        .send({ userId, name: 'Stale Admin Rename' })
+        .expect(403)
+        .expect({ error: 'team_role_insufficient' })
+      const unchanged = await dbPool.query<{ name: string }>(
+        `SELECT name FROM teams WHERE id = $1`,
+        [teamId]
+      )
+      expect(unchanged.rows[0]?.name).toBe('Admin Rename')
+
+      await dbPool.query(
+        `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
+        [teamId, userId]
+      )
+      await authorized(request(app).get(`/external/teams/${teamId}/members`))
+        .expect(403)
+        .expect({ error: 'team_membership_inactive' })
+      await authorized(request(app).get(`/external/directory/search?teamId=${teamId}&q=user`))
+        .expect(403)
+        .expect({ error: 'team_membership_inactive' })
+
+      await authorized(request(app).get(`/external/users/${userId}/agents`)).expect(200)
+      await authorized(request(app).get(`/external/users/${userId}/contexts`)).expect(200)
+      const rpcResponse = await authorized(request(app).post('/external/rpc/token'))
+        .send({
+          sessionToken,
+          scopes: ['host:message:invoke'],
+          hostRefs: [directAgent],
+        })
+        .expect(200)
+      expect(verifyRpcAccessToken(rpcResponse.body.token)).toMatchObject({
+        sub: userId,
+        accessScope: 'user',
+        teamId: null,
+        hostRefs: [directAgent],
+      })
+
+      const invitationCases = [
+        { label: 'pending', status: 'pending', expires: '48 hours' },
+        { label: 'rejected', status: 'revoked', expires: '48 hours' },
+        { label: 'expired', status: 'pending', expires: '-1 hour' },
+      ] as const
+      for (const invitationCase of invitationCases) {
+        const invitationTeamId = randomUUID()
+        const invitationEmail = `${invitationCase.label}-${randomUUID()}@example.test`
+        await dbPool.query(`INSERT INTO teams (id, name) VALUES ($1, $2)`, [
+          invitationTeamId,
+          `${invitationCase.label} invitation team`,
+        ])
+        await dbPool.query(
+          `INSERT INTO invitations (team_id, email, role, status, expires_at)
+           VALUES ($1, $2, 'admin', $3, NOW() + $4::interval)`,
+          [invitationTeamId, invitationEmail, invitationCase.status, invitationCase.expires]
+        )
+
+        const login = await googleLoginData({ email: invitationEmail, name: 'Invitee' })
+        expect(login.membership).toEqual({ team_id: null, role: 'member', team_name: null })
+        const teamlessToken = signExternalSessionToken({
+          userId: login.user.id,
+          email: invitationEmail,
+          teamId: null,
+          role: 'member',
+        })
+        await request(app)
+          .get(`/external/teams/${invitationTeamId}/members`)
+          .set('authorization', 'Bearer dev-external-rest-api-token')
+          .set('x-service-token', 'external-rest-api')
+          .set('x-user-session-token', teamlessToken)
+          .expect(403)
+          .expect({ error: 'team_context_mismatch' })
+      }
+    } finally {
+      runtimeQuery.mockRestore()
+      runtimeConnect.mockRestore()
+    }
   }, 60_000)
 
   it('executes the GFS audit append against the real migrated schema', async () => {
