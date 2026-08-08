@@ -37,7 +37,7 @@
 
 ## Quick start
 
-Stand up the whole platform on a local cluster with one command. It brings up
+Stand up the platform on a local cluster with one command. It brings up
 every service and a seeded agent named `chatllm`:
 
 ```bash
@@ -48,22 +48,7 @@ MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this ove
 make minikube-status                            # wait for every deployment READY
 ```
 
-**You do not build images.** `make minikube-setup` pulls them from
-`ghcr.io/evenfire-ai`, which publishes `linux/amd64` and `linux/arm64`, so an
-Apple Silicon Mac pulls a native image rather than compiling ~23 services.
-Expect roughly 15 minutes on a cold cache — almost all of it network transfer —
-and much less once the layers are local.
-
-Two things a first run trips over:
-
-- **`MINIKUBE_IMAGE_TAG=latest` is required today.** The cluster manifests pin
-  the next release tag, which is not cut yet, so without the override the pull
-  fails with a message naming this variable. Once that release is tagged and
-  promoted, plain `make minikube-setup` works and this override goes away.
-- **`MINIKUBE_MEMORY=9216`** if minikube fails to start. The default asks for
-  10240 MB, which exceeds a stock Docker Desktop memory ceiling.
-
-To build locally instead — the old behaviour — use `make minikube-setup-local`
+To build locally instead use `make minikube-setup-local`
 (or `IMAGE_SOURCE=local`). MCP servers are not part of either path: they are
 installed on demand from the evenfire registry.
 
