@@ -214,6 +214,113 @@ describe('routes/external/workflows', () => {
       const app = makeApp(gateway)
       await request(app).get('/external/workflows').expect(401)
     })
+
+    it('keeps direct workflow routes usable and hides team-only routes after team removal', async () => {
+      const directRecipe = {
+        ...VALID_RECIPE,
+        metadata: { ...VALID_RECIPE.metadata, name: 'direct-recipe', uid: 'uid-direct' },
+      }
+      const teamRecipe = {
+        ...VALID_RECIPE,
+        metadata: { ...VALID_RECIPE.metadata, name: 'team-recipe', uid: 'uid-team' },
+      }
+      await gateway.createResource('workflowrecipes', directRecipe as never, RECIPE_NS)
+      await gateway.createResource('workflowrecipes', teamRecipe as never, RECIPE_NS)
+      mockLiveMembershipQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ recipe_namespace: RECIPE_NS, recipe_name: 'direct-recipe' }],
+        rowCount: 1,
+      })
+      const app = makeApp(gateway)
+      const list = await request(app)
+        .get('/external/workflows')
+        .set('x-user-session-token', 'user-session-token')
+        .expect(200)
+      expect(
+        list.body.items.map((item: { metadata: { name: string } }) => item.metadata.name)
+      ).toEqual(['direct-recipe'])
+
+      mockPoolQuery.mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+      await request(app)
+        .get(`/external/workflows/${RECIPE_NS}/direct-recipe`)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(200)
+
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+      await request(app)
+        .get(`/external/workflows/${RECIPE_NS}/team-recipe`)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(403)
+      mockPoolQuery.mockReset()
+
+      const runRow = {
+        run_id: 'direct-run-id',
+        recipe_namespace: RECIPE_NS,
+        recipe_name: 'direct-recipe',
+        phase: 'Pending',
+        actor_type: 'user',
+        actor_id: USER_SESSION_CLAIMS.userId,
+        team_id: null,
+        usage_team_id: null,
+        idempotency_key: 'direct-after-removal',
+        trigger_source: 'onDemand',
+        inputs: {},
+        intermediate_parameters: null,
+        output_overrides: null,
+        child_recipe_name: null,
+        child_recipe_namespace: null,
+        owner_instance_id: null,
+        max_duration_seconds: null,
+        ttl_seconds_after_finished: null,
+        started_at: null,
+        completed_at: null,
+        last_reconciled_at: null,
+        created_at: '2026-08-07T00:00:00.000Z',
+        updated_at: '2026-08-07T00:00:00.000Z',
+      }
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [runRow], rowCount: 1 })
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/direct-recipe/trigger`)
+        .set('x-user-session-token', 'user-session-token')
+        .set('Idempotency-Key', 'direct-after-removal')
+        .send({ inputs: {} })
+        .expect(201)
+        .expect(({ body }) => {
+          expect(body.id).toBe('direct-run-id')
+        })
+
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/team-recipe/trigger`)
+        .set('x-user-session-token', 'user-session-token')
+        .set('Idempotency-Key', 'team-after-removal')
+        .send({ inputs: {} })
+        .expect(403)
+
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      await request(app)
+        .get(`/external/workflows/${RECIPE_NS}/direct-recipe/runs`)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(200)
+        .expect({ items: [], count: 0 })
+
+      mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      await request(app)
+        .get(`/external/workflows/${RECIPE_NS}/team-recipe/runs`)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(403)
+    })
   })
 
   describe('runtime token issuance isolation', () => {
