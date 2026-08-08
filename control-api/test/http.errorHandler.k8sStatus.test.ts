@@ -122,6 +122,57 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
    * same way the client body is: status + a safe message, never the headers or
    * the raw `.message`.
    */
+  /**
+   * S1 follow-up (R1-M2, info disclosure to CLIENT on the 500 branch): the
+   * non-production 500 branch returns a debug `message` to the client. It used to
+   * forward `err.message` verbatim — but a K8s ApiException 5xx (etcd/apiserver
+   * down) is an Error whose `.message` embeds the metav1.Status body AND every
+   * apiserver header (Audit-Id, x-kubernetes-pf-*). So in dev/test the client got
+   * those headers. The 500 branch must sanitize the message the same way the 4xx
+   * branch does. Fixture derived from the real @kubernetes/client-node producer
+   * (T1), not a hand-built shape.
+   */
+  it('does NOT leak headers/audit-id on the non-production 500 branch for a real K8s ApiException 5xx', async () => {
+    const prev = process.env.NODE_ENV
+    process.env.NODE_ENV = 'development'
+    try {
+      const body = {
+        kind: 'Status',
+        apiVersion: 'v1',
+        status: 'Failure',
+        message: 'etcdserver: request timed out',
+        reason: 'ServiceUnavailable',
+        code: 503,
+      }
+      const headers = {
+        'audit-id': 'a1b2c3-secret-audit-uuid',
+        'x-kubernetes-pf-flowschema-uid': 'internal-flowschema-uid',
+        'content-type': 'application/json',
+      }
+      const err = new ApiException(503, 'ServiceUnavailable', body, headers)
+
+      // Sanity: the real producer really does embed the leak in `.message`.
+      expect(err.message).toContain('Headers:')
+      expect(err.message).toContain('audit-id')
+
+      const res = await request(appThrowing(err)).get('/boom')
+      // 5xx never forwarded as the upstream status — collapses to 500.
+      expect(res.status).toBe(500)
+      expect(res.body.error).toBe('Internal Server Error')
+
+      const serialized = JSON.stringify(res.body)
+      expect(serialized).not.toContain('Headers:')
+      expect(serialized).not.toContain('audit-id')
+      expect(serialized).not.toContain('x-kubernetes-pf')
+      expect(serialized).not.toContain(err.message)
+      // A sanitized debug message still surfaces (the metav1.Status body.message,
+      // which carries no headers) so dev debuggability is preserved.
+      expect(res.body.message).toBe('etcdserver: request timed out')
+    } finally {
+      process.env.NODE_ENV = prev
+    }
+  })
+
   it('does NOT log the raw ApiException message (headers/audit-id) for a forwarded 4xx', async () => {
     const body = {
       kind: 'Status',

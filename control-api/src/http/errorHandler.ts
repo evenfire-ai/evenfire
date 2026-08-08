@@ -221,7 +221,12 @@ export function clerumErrorHandler(
   if (process.env.NODE_ENV !== 'production') {
     res.status(500).json({
       error: 'Internal Server Error',
-      message: err instanceof Error ? err.message : 'Unknown error',
+      // Sanitize the client-facing debug message the same way the 4xx branch
+      // does: a raw K8s ApiException `.message` embeds the metav1.Status body AND
+      // every apiserver header (Audit-Id, x-kubernetes-pf-*). A 5xx K8s error
+      // (etcd/apiserver down) is still an Error, so forwarding `err.message`
+      // verbatim here leaks those headers in dev/test.
+      message: clientErrorMessage(err, 500),
       correlationId,
     })
   } else {
