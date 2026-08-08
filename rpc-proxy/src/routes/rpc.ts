@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import type { NextFunction, Response as ExpressResponse } from 'express'
+import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
 import { config } from '../config.js'
 import {
@@ -27,13 +27,44 @@ import {
   resolveServerConnectionForUser,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
-import { isWakeEligibleHostError, respondWithWakeAndHold } from '../services/wakeAndHold.js'
+import {
+  isUpstreamTimeoutError,
+  isWakeEligibleHostError,
+  respondWithWakeAndHold,
+} from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
+// Edge caps on the client-supplied page size before forwarding upstream. The
+// host enforces its own identical caps independently; these are the proxy's
+// own copy (the two services share no package, so each names its own).
+const SESSIONS_LIMIT_CAP = 100
+const MESSAGES_LIMIT_CAP = 200
+
+function isSafeUpstreamPathSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    value.length <= 500 &&
+    !/[/\\\u0000-\u001f\u007f]/.test(value)
+  )
+}
+
+function isSafeUpstreamAgentSegment(value: string): boolean {
+  return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
+}
+
+function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
 /**
- * Pre-wake host error mapping: AbortError → 504, everything else → 502.
+ * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
  *
  * Guards `res.headersSent` (§11.5): this is the terminal responder that
  * route-level outer catches invoke after a held request may already have
@@ -49,7 +80,7 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
     )
     return
   }
-  if (error instanceof Error && error.name === 'AbortError') {
+  if (isUpstreamTimeoutError(error)) {
     res.status(504).json({ error: 'Gateway Timeout' })
     return
   }
@@ -242,8 +273,8 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
+        if (!isSafeUpstreamPathSegment(hostRef)) {
+          res.status(400).json({ error: 'Invalid hostRef' })
           return
         }
 
@@ -418,8 +449,8 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
+        if (!isSafeUpstreamPathSegment(hostRef)) {
+          res.status(400).json({ error: 'Invalid hostRef' })
           return
         }
 
@@ -630,8 +661,27 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
+        if (!isSafeUpstreamPathSegment(hostRef)) {
+          res.status(400).json({ error: 'Invalid hostRef' })
+          return
+        }
+        const rawSessionAgent = req.query.agent
+        const sessionAgent =
+          typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
+        const rawSessionCursor = req.query.cursor
+        const sessionCursor = typeof rawSessionCursor === 'string' ? rawSessionCursor : ''
+        const sessionLimit = parseUnsignedIntegerQuery(req.query.limit)
+        if (
+          (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
+          (rawSessionCursor !== undefined && typeof rawSessionCursor !== 'string') ||
+          (rawSessionAgent !== undefined &&
+            (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
+          (rawSessionCursor !== undefined && !sessionCursor) ||
+          sessionCursor.length > 2048 ||
+          sessionLimit === null ||
+          (sessionLimit !== undefined && sessionLimit < 1)
+        ) {
+          res.status(400).json({ error: 'Invalid session pagination query' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -642,15 +692,22 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
+        const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
+        if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
+        if (sessionLimit !== undefined) {
+          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, SESSIONS_LIMIT_CAP)))
+        }
+        if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:session:read; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
         const forwardSessionList = async () => {
-          const response = await fetch(`${baseUrl}/v1/runtime/sessions`, {
+          const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -698,8 +755,31 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (!hostRef || !agent || !chatId) {
-          res.status(400).json({ error: 'hostRef, agent, and chatId are required' })
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
+          return
+        }
+        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
+        const beforeTurn = parseUnsignedIntegerQuery(req.query.beforeTurn)
+        const afterTurn = parseUnsignedIntegerQuery(req.query.afterTurn)
+        const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
+          key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
+        )
+        if (
+          invalidQueryShape ||
+          rawLimit === null ||
+          (rawLimit !== undefined && rawLimit < 1) ||
+          beforeTurn === null ||
+          (beforeTurn !== undefined && beforeTurn < 1) ||
+          afterTurn === null ||
+          (afterTurn !== undefined && afterTurn < 0) ||
+          (beforeTurn !== undefined && afterTurn !== undefined)
+        ) {
+          res.status(400).json({ error: 'Invalid session messages pagination query' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -710,15 +790,26 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
+        const upstreamUrl = new URL(
+          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
+        )
+        if (rawLimit !== undefined) {
+          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, MESSAGES_LIMIT_CAP)))
+        }
+        if (beforeTurn !== undefined) {
+          upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
+        }
+        if (afterTurn !== undefined) upstreamUrl.searchParams.set('afterTurn', String(afterTurn))
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
         )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
         const forwardTranscript = async () => {
-          const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`,
-            { method: 'GET', headers: { ...host.headers } }
-          )
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+          })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
@@ -766,8 +857,12 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (!hostRef || !agent || !chatId) {
-          res.status(400).json({ error: 'hostRef, agent, and chatId are required' })
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -785,7 +880,11 @@ export function createRpcRouter(): Router {
         const attempt = async () => {
           const response = await fetch(
             `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
-            { method: 'GET', headers: { ...host.headers } }
+            {
+              method: 'GET',
+              headers: { ...host.headers },
+              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            }
           )
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -850,6 +949,7 @@ export function createRpcRouter(): Router {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)

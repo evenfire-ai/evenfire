@@ -57,6 +57,9 @@ afterEach(() => {
 })
 
 describe('stateless workspace layout migration', () => {
+  // This is the only case that launches the migration shell twice. Keep its
+  // runner budget above the generic 5s limit so CI process contention cannot
+  // turn a completed idempotency check into a harness timeout.
   it('moves legacy workspace and SQLite files once and is idempotent', () => {
     const root = makeRoot()
     writeFileSync(join(root, 'notes.md'), 'workspace-data')
@@ -67,10 +70,7 @@ describe('stateless workspace layout migration', () => {
 
     expect(readFileSync(join(root, 'workspace', 'notes.md'), 'utf8')).toBe('workspace-data')
     expect(readFileSync(join(root, 'state', 'state.db'), 'utf8')).toBe('durable-db')
-  }, // This is the only case that launches the migration shell twice. Keep its
-  // runner budget above the generic 5s limit so CI process contention cannot
-  // turn a completed idempotency check into a harness timeout.
-  15_000)
+  }, 15_000)
 
   it('finishes a partial migration whose SQLite source is already under workspace', () => {
     const root = makeRoot()

@@ -1,14 +1,17 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreatedRegistryApiKey,
   type RegistryApiKey,
   createRegistryApiKey,
+  getRegistryConnection,
   listRegistryApiKeys,
   revokeRegistryApiKey,
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { useToast } from '../Toast'
@@ -63,6 +66,14 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
   const [generating, setGenerating] = useState(false)
   const [formError, setFormError] = useState('')
   const [revealed, setRevealed] = useState<CreatedRegistryApiKey | null>(null)
+  // Same best-effort mode probe RegistryApiKeysPanel uses: the auth-disabled
+  // stated fact must lead somewhere, and the path differs by mode (self-hosted
+  // → connect; managed → an operator env-var). getRegistryConnection() 409s
+  // not_self_hosted in managed mode. Fail-open to 'self-hosted' on any other
+  // outcome so a transient probe error still offers the connect path.
+  const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
+    'unknown'
+  )
 
   const load = useCallback(async () => {
     setView({ kind: 'loading' })
@@ -83,9 +94,19 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
     }
   }, [])
 
+  const loadConnectionMode = useCallback(async () => {
+    try {
+      await getRegistryConnection()
+      setConnectionMode('self-hosted')
+    } catch (e) {
+      setConnectionMode((e as { code?: string }).code === 'not_self_hosted' ? 'managed' : 'unknown')
+    }
+  }, [])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadConnectionMode()
+  }, [load, loadConnectionMode])
 
   const isReady = view.kind === 'ready'
 
@@ -166,7 +187,9 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
         </>
       ) : null}
 
-      {view.kind === 'loading' ? <p>Loading…</p> : null}
+      {view.kind === 'loading' ? (
+        <SectionLoadingSkeleton label="Loading push credentials" rows={3} />
+      ) : null}
       {view.kind === 'not-owner' ? (
         <p className="cu-banner cu-banner--warn">
           You must be an org owner to manage push credentials
@@ -180,7 +203,20 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
         </p>
       ) : null}
       {view.kind === 'auth-disabled' ? (
-        <p className="cu-banner">Registry authentication is disabled in this environment.</p>
+        <p className="cu-banner cu-banner--info">
+          {connectionMode === 'managed' ? (
+            <>
+              Registry authentication for this deployment is controlled by{' '}
+              <code>CLERUM_REGISTRY_AUTH_ENABLED</code>. An operator must enable it and restart
+              control-api before push credentials can be created here.
+            </>
+          ) : (
+            <>
+              Push credentials become available once this deployment is connected to the registry.{' '}
+              <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+            </>
+          )}
+        </p>
       ) : null}
       {view.kind === 'unavailable' ? (
         <p className="cu-banner cu-banner--warn">

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { handlePatch } from '../src/routes/gfs/resources.js'
 
 const FILE = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const OTHER = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
@@ -64,12 +65,21 @@ const state = vi.hoisted(() => {
       }
       if (text.includes('FROM gfs_resources')) {
         const id = String(values?.[0])
-        return { rows: [id === source.resource_id ? source : id === other.resource_id ? other : file] }
+        return {
+          rows: [id === source.resource_id ? source : id === other.resource_id ? other : file],
+        }
       }
       return { rows: [] }
     }),
   }
-  return { events, db, failPaths: false, operator: true, auditDb: undefined as unknown, audits: [] as unknown[] }
+  return {
+    events,
+    db,
+    failPaths: false,
+    operator: true,
+    auditDb: undefined as unknown,
+    audits: [] as unknown[],
+  }
 })
 
 vi.mock('../src/db.js', () => ({
@@ -107,8 +117,6 @@ vi.mock('../src/routes/gfs/grants.js', () => ({
   }),
 }))
 
-import { handlePatch } from '../src/routes/gfs/resources.js'
-
 function response() {
   return {
     code: 0,
@@ -137,7 +145,12 @@ describe('gfs resource route transaction boundary', () => {
   it('commits mutation, path refresh, and audit through the same transaction client', async () => {
     const res = response()
     await handlePatch(
-      { params: { id: FILE }, body: { newName: 'b.md' }, query: { drive: 'main' }, ip: '127.0.0.1' } as never,
+      {
+        params: { id: FILE },
+        body: { newName: 'b.md' },
+        query: { drive: 'main' },
+        ip: '127.0.0.1',
+      } as never,
       res as never
     )
     expect(res.code).toBe(200)
@@ -157,7 +170,12 @@ describe('gfs resource route transaction boundary', () => {
     state.failPaths = true
     const res = response()
     await handlePatch(
-      { params: { id: FILE }, body: { newName: 'b.md' }, query: { drive: 'main' }, ip: '127.0.0.1' } as never,
+      {
+        params: { id: FILE },
+        body: { newName: 'b.md' },
+        query: { drive: 'main' },
+        ip: '127.0.0.1',
+      } as never,
       res as never
     )
     expect(res.code).toBe(412)
@@ -170,7 +188,12 @@ describe('gfs resource route transaction boundary', () => {
     state.operator = false
     const res = response()
     await handlePatch(
-      { params: { id: FILE }, body: { newName: 'b.md' }, query: { drive: 'main' }, ip: '127.0.0.1' } as never,
+      {
+        params: { id: FILE },
+        body: { newName: 'b.md' },
+        query: { drive: 'main' },
+        ip: '127.0.0.1',
+      } as never,
       res as never
     )
     expect(res.code).toBe(403)
@@ -182,7 +205,12 @@ describe('gfs resource route transaction boundary', () => {
   it('commits exactly one cross-boundary denial audit and no mutation', async () => {
     const res = response()
     await handlePatch(
-      { params: { id: FILE }, body: { newParentId: OTHER }, query: { drive: 'main' }, ip: '127.0.0.1' } as never,
+      {
+        params: { id: FILE },
+        body: { newParentId: OTHER },
+        query: { drive: 'main' },
+        ip: '127.0.0.1',
+      } as never,
       res as never
     )
     expect(res.code).toBe(403)

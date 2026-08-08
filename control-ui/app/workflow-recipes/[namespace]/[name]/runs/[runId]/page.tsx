@@ -4,9 +4,9 @@ import { Suspense } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { RecipeStatusContent } from '@components/RecipeStatusContent'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -16,7 +16,18 @@ export const dynamic = 'force-dynamic'
 
 export default function WorkflowRunDetailPage() {
   return (
-    <Suspense fallback={<LoadingScreen />}>
+    <Suspense
+      fallback={
+        <BodyLoadingSkeleton
+          backLabel="Back to plugin"
+          icon={<IconWorkflow />}
+          primaryActionLabel="Open governed trace replay"
+          sections={3}
+          subtitle="Plugin run status, outputs, artifacts, and access."
+          title="Plugin run"
+        />
+      }
+    >
       <WorkflowRunDetailContent />
     </Suspense>
   )

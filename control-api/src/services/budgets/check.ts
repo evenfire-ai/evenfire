@@ -57,7 +57,14 @@ export const budgetCheckRequestSchema = z
     provider: z.string().min(1, 'provider is required'),
     model: z.string().min(1, 'model is required'),
     llm_secret_name: nullableStr,
-    source_kind: z.enum(['channel', 'desktop', 'workflow', 'cron', 'unknown']),
+    source_kind: z.enum([
+      'channel',
+      'desktop',
+      'workflow',
+      'cron',
+      'unknown',
+      'plugin_workload_sdk',
+    ]),
     recipe_name: nullableStr,
     cron_job_id: nullableStr,
     // Correlation id for the anti-race danger-zone reservation (§5.4). mcp-host

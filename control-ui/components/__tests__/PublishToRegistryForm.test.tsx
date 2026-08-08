@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import { getPublishScope } from '../../lib/api'
+import { PublishScopeProvider, resetPublishScopeCache } from '../../lib/hooks/usePublishScope'
 import { PublishToRegistryForm } from '../PublishToRegistryForm'
 import { ToastProvider } from '../Toast'
 
@@ -21,7 +22,11 @@ vi.mock('../EgressEditor', () => ({
 }))
 
 function render(children: ReactNode) {
-  return rtlRender(<ToastProvider>{children}</ToastProvider>)
+  return rtlRender(
+    <ToastProvider>
+      <PublishScopeProvider cacheKey="admin-1">{children}</PublishScopeProvider>
+    </ToastProvider>
+  )
 }
 
 async function advanceToReviewStep() {
@@ -54,11 +59,13 @@ async function advanceToReviewStep() {
 describe('PublishToRegistryForm publish target', () => {
   beforeEach(() => {
     vi.mocked(getPublishScope).mockReset()
+    resetPublishScopeCache()
   })
 
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+    resetPublishScopeCache()
   })
 
   it('shows the org publish target when the caller is bound to an org', async () => {
@@ -78,6 +85,7 @@ describe('PublishToRegistryForm publish target', () => {
     // Exactly one @ — guards against the double-@ regression.
     expect(screen.getByText('@newtenantwf')).toBeInTheDocument()
     expect(screen.getByText(/@newtenantwf\/my-connector/)).toBeInTheDocument()
+    expect(getPublishScope).toHaveBeenCalledTimes(1)
   })
 
   it('shows the public catalog target when the caller is the curator', async () => {
@@ -94,5 +102,6 @@ describe('PublishToRegistryForm publish target', () => {
     await waitFor(() =>
       expect(screen.getByText(/Publishing to the public catalog \(@clerum\)/)).toBeInTheDocument()
     )
+    expect(getPublishScope).toHaveBeenCalledTimes(1)
   })
 })

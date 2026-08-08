@@ -10,7 +10,7 @@
  * Source of truth: PHASE-4-MCP-SERVER-INTERFACE.md §5.4
  */
 import * as k8s from '@kubernetes/client-node'
-import { OperatorConfig, loadConfig } from './config'
+import { OperatorConfig, loadConfig, registryUrlStartupWarning } from './config'
 import { WorkflowRecipeProvider, createWorkflowRecipeProvider } from './k8sClient'
 import { ClerumMcpServer } from './mcp/server'
 import { assertInternalControlJwtHmacSecret } from './utils/internalControlSigner'
@@ -87,9 +87,15 @@ async function main(): Promise<void> {
   console.log(`  Port: ${config.port}`)
   console.log(`  McpServer namespace: ${config.namespace}`)
   console.log(`  WorkflowRecipe namespace: ${config.sandboxNamespace}`)
+  console.log(`  Registry URL: ${config.registryUrl || '(unset)'}`)
   console.log(`  NetworkPolicy enforcement mode: ${config.networkPolicyEnforcementMode}`)
   console.log(`  NetworkPolicy enforcement confirmed: ${config.networkPolicyEnforcementConfirmed}`)
   console.log('─────────────────────────────────────────')
+
+  // A registry URL the platform-registry predicate cannot use disables pull-credential
+  // injection for every workload, silently. Say so once, loudly, at startup.
+  const registryWarning = registryUrlStartupWarning(config.registryUrl)
+  if (registryWarning) console.warn(registryWarning)
 
   // Initialize K8s client (shared for validation + MCP server)
   const kc = new k8s.KubeConfig()

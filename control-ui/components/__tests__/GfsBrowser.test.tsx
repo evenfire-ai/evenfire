@@ -69,6 +69,12 @@ function selectPermission(label: string) {
   fireEvent.click(screen.getByRole('menuitemcheckbox', { name: label }))
 }
 
+async function confirmGrantAccess() {
+  const dialog = await screen.findByRole('alertdialog', { name: 'Grant access?' })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Grant access' }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+}
+
 async function openResourceMenu(resourceName: string) {
   fireEvent.click(await screen.findByRole('button', { name: `Actions for ${resourceName}` }))
 }
@@ -687,11 +693,12 @@ describe('GfsBrowser', () => {
     const manageMenuTrigger = within(manageDialog).getByRole('button', {
       name: 'Actions for report.md',
     })
-    expect(within(manageDialog).getByRole('button', { name: 'Replace file' })).toBeTruthy()
+    expect(within(manageDialog).queryByRole('button', { name: 'Replace file' })).toBeNull()
     expect(within(manageDialog).queryByText('Quick actions')).toBeNull()
     fireEvent.click(manageMenuTrigger)
     const manageMenu = within(manageDialog).getByRole('menu')
     expect(within(manageMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(manageMenu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Copy GFS link' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
@@ -701,10 +708,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-
-    // Confirm in the dialog (its confirm button shares the "Grant" label).
-    const dialog = await screen.findByRole('alertdialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Grant' }))
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
@@ -750,9 +754,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    fireEvent.click(
-      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
-    )
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
@@ -779,9 +781,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Research' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    fireEvent.click(
-      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
-    )
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
@@ -795,9 +795,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Operator' }))
     selectPermission('Read')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    fireEvent.click(
-      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
-    )
+    await confirmGrantAccess()
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenLastCalledWith(
@@ -822,8 +820,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Write')
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    const dialog = await screen.findByRole('alertdialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Grant' }))
+    await confirmGrantAccess()
 
     expect((await screen.findByText('escalation_rejected')).getAttribute('role')).toBe('alert')
   })

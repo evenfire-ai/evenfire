@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  getGfsTreeAclShareRows,
+  seedIssue797SourceShare,
+} from './e2e-playwright/helpers/gfsAclShareFixtures'
 
 const runControlPostgresSqlMock = vi.hoisted(() => vi.fn())
 
@@ -7,11 +11,6 @@ vi.mock('../../tests/e2e/gfsUiFixtures', () => ({
   runControlPostgresSql: runControlPostgresSqlMock,
   sqlLiteral: (value: string) => `'${value.replace(/'/g, "''")}'`,
 }))
-
-import {
-  getGfsTreeAclShareRows,
-  seedIssue797SourceShare,
-} from './e2e-playwright/helpers/gfsAclShareFixtures'
 
 describe('issue #797 GFS ACL/share fixture evidence', () => {
   beforeEach(() => runControlPostgresSqlMock.mockReset())

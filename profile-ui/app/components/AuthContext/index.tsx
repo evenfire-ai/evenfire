@@ -1,6 +1,14 @@
 'use client'
 
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   clearToken,
   getMe,
@@ -9,6 +17,7 @@ import {
   logoutProfileUI,
   setGlobalAuthErrorHandler,
 } from '@lib/api'
+import { resetProfileAccessCache } from '@lib/profileAccess'
 import type { PasswordLoginResponse } from '@/app/types/api'
 import type { Me } from '@/app/types/profile'
 import type { AuthContextValue, AuthState } from './types'
@@ -65,6 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setGlobalAuthErrorHandler(() => {
       if (sessionExpiredHandledRef.current) return
       sessionExpiredHandledRef.current = true
+      resetProfileAccessCache()
       setAuthState({ isLoggedIn: false, isLoading: false, me: null })
     })
   }, [])
@@ -76,7 +86,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     try {
       const result = await loginWithPassword(email, password)
-      const current = await getMe().catch(error => {
+      resetProfileAccessCache()
+      const current = await getMe().catch(() => {
         return meFromPasswordLoginResponse(result.me)
       })
       sessionExpiredHandledRef.current = false
@@ -95,15 +106,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => {
     sessionExpiredHandledRef.current = false
+    resetProfileAccessCache(authState.me?.id)
     void logoutProfileUI()
     setAuthState({ isLoggedIn: false, isLoading: false, me: null })
-  }, [])
+  }, [authState.me?.id])
 
-  return (
-    <AuthContext.Provider value={{ authState, login, logout, checkAuth }}>
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({ authState, login, logout, checkAuth }),
+    [authState, checkAuth, login, logout]
   )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

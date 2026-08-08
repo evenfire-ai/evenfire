@@ -96,6 +96,7 @@ function AgentChatHarness() {
     currentTeamId: 'team-1',
     currentTeamName: 'Team One',
     isAuthenticated: true,
+    loadMenuData: true,
     navItem: 'chat',
     pushToast: vi.fn(),
     pushNotification: vi.fn(),

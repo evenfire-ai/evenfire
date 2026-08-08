@@ -67,8 +67,22 @@ export interface TaskState {
   startedAt: number
   /** epoch ms, updated on every SSE event; feeds the idle watchdog. */
   lastEventAt: number
-  /** epoch ms when the task suspended on an approval (D.5b nudge freeze). */
+  /**
+   * epoch ms when the task suspended on an approval (D.5b nudge freeze, §AC3).
+   * INVARIANT: `pausedAt !== undefined` ⟺ there is an OPEN pause segment — the
+   * task is parked on a gate and that wait has NOT been folded into `pausedMs`
+   * yet. The tracker opens the segment on the transition into `suspended` and
+   * closes it on resume/terminal; nothing else may write this field.
+   */
   pausedAt?: number
+  /**
+   * Total ms spent in already-CLOSED pause segments (approval waits that ended).
+   * `useTaskTier` subtracts it from the age so the D.5b tier measures the
+   * agent's ACTIVE time, not wall-clock: without it, approving after a 10min
+   * wait resumed the task straight into T4 ("still working… safe to close"),
+   * because the human's thinking time counted as agent work (§AC3).
+   */
+  pausedMs?: number
   steps: ProgressStep[]
   currentIteration: number
   llmElapsedMs?: number

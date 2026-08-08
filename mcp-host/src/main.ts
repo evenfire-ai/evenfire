@@ -47,7 +47,7 @@ import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
 import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
-import type { Attachment, Conversation } from './core/types'
+import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
 import { HostWatcher, getHost } from './k8sClient'
@@ -65,8 +65,21 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import {
+  AuthoritativeMcpFleetCoordinator,
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  pollAuthoritativeMcpSnapshotIfCurrent,
+  reconcileAuthoritativeMcpSnapshot,
+  replaceAuthoritativeMcpFleet,
+  runAuthoritativeMcpInitialization,
+} from './mcp/authoritativeFleet'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
+import {
+  configurePluginWorkloadSdkBootstrapIdentity,
+  resolvePluginWorkloadSdkBootstrapCapabilityFamily,
+} from './pluginWorkloadSdk/bootstrapIdentity'
+import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
 import { getDisplayName, sanitizeError } from './progress/intentExtraction'
@@ -75,6 +88,7 @@ import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
+import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
   HostActivityEvent,
   HostActivitySnapshotResponse,
@@ -93,12 +107,8 @@ import {
   WorkflowApprovalNotificationClaim,
   WorkflowApprovalNotificationTerminal,
 } from './server'
-import {
-  projectContextBreakdown,
-  projectSessionTokens,
-  projectTurnTokens,
-  projectTurnToolSteps,
-} from './server/wireProjections'
+import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
 import { approxDecodedBytes } from './shared/encoding'
@@ -154,6 +164,7 @@ let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
@@ -173,6 +184,7 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+let mcpInitializationGeneration = 0
 // Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
 let statelessHeartbeat: StatelessHeartbeat | null = null
 
@@ -182,6 +194,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
+let pluginWorkloadSdkBootstrapServer: PluginWorkloadSdkBootstrapServer | null = null
 let usageReporter: UsageReporter | null = null
 let governedRunReporter: GovernedRunReporter | null = null
 
@@ -739,56 +752,91 @@ async function initializeProvider(
   }
 }
 
+const mcpFleetCoordinator = new AuthoritativeMcpFleetCoordinator(
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
+  true
+)
+
 /**
- * Initialize MCP servers for the host's context using skill-mapper.
+ * Admit development MCP servers independently.
+ *
+ * McpManager.addServer propagates connection failures so production fleet
+ * reconciliation can leave a failed revision retryable. Development startup
+ * has no authoritative polling loop, so one unavailable optional server must
+ * not prevent the remaining servers or the host itself from starting.
  */
+export async function admitDevelopmentMcpServers(
+  servers: McpServerInfo[],
+  manager: Pick<McpManager, 'addServer'>
+): Promise<void> {
+  for (const server of servers) {
+    try {
+      await manager.addServer(server)
+    } catch (error) {
+      console.error(`[Main] Dev MCP server admission failed; continuing: ${server.name}`, error)
+    }
+  }
+}
+
 async function initializeMcpServers(contextRef: string): Promise<void> {
   console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
+  const initializationGeneration = ++mcpInitializationGeneration
+  const isInitializationCurrent = (): boolean =>
+    !isShuttingDown && mcpInitializationGeneration === initializationGeneration
 
-  // Clean up existing manager
-  if (mcpManager) {
-    await mcpManager.disconnectAll()
+  const replaceFleet = async (servers: McpServerInfo[]): Promise<void> => {
+    const previousManager = mcpManager
+    await replaceAuthoritativeMcpFleet({
+      servers,
+      previousManager,
+      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      getAuthToken: async serverName => {
+        if (!contextMapperClient) {
+          throw new Error('Context Mapper client is required to fetch MCP server auth')
+        }
+        return contextMapperClient.getAuthToken(serverName)
+      },
+      installFleet: (nextManager, nextServerState) => {
+        mcpManager = nextManager
+        lastServerState = nextServerState
+        agent?.setMcpManager(nextManager)
+      },
+      coordinator: mcpFleetCoordinator,
+      onColdStartPublished: () => ensureContextMapperPolling(contextRef),
+      isPreviousManagerCurrent: () => mcpManager === previousManager,
+      isFleetLifecycleCurrent: isInitializationCurrent,
+    })
   }
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
-  lastServerState.clear()
 
-  // In production mode, fetch from context-mapper
+  // In production mode, fetch an authoritative snapshot before replacing the
+  // current fleet. An unavailable Context Mapper leaves the prior state intact.
   if (!config.devMode) {
     if (!contextMapperClient) {
       contextMapperClient = getContextMapperClient()
     }
 
-    // Wait for context-mapper to be available
-    const maxRetries = 5
-    let retries = 0
-    while (retries < maxRetries) {
-      const healthy = await contextMapperClient.healthCheck()
-      if (healthy) {
-        console.log('[Main] Context Mapper is available')
-        break
-      }
-      retries++
-      console.log(`[Main] Waiting for Context Mapper... (${retries}/${maxRetries})`)
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-
-    const servers = await contextMapperClient.listServersByContext(contextRef)
-
-    for (const server of servers) {
-      let authToken: string | undefined
-
-      // Get auth token if configured
-      if (server.auth?.secretRef) {
-        authToken = await contextMapperClient.getAuthToken(server.name)
-      }
-
-      await mcpManager.addServer(server, authToken)
-      lastServerState.set(server.name, JSON.stringify(server))
-    }
+    await runAuthoritativeMcpInitialization({
+      contextRef,
+      client: contextMapperClient,
+      replaceFleet,
+      isCurrent: isInitializationCurrent,
+    })
+  } else {
+    await replaceFleet([])
   }
 
+  // Successful discovery always installs a manager, including an
+  // authoritative HTTP 200 empty snapshot.
+  if (!mcpManager) {
+    throw new Error('MCP manager was not installed after authoritative discovery')
+  }
   const connectedServers = mcpManager.getConnectedServers()
-  console.log(`[Main] Connected to ${connectedServers.length} MCP server(s)`)
+  console.log(
+    config.devMode
+      ? `[Main] Connected to ${connectedServers.length} MCP server(s)`
+      : `[Main] Published the initial MCP fleet manager with ${connectedServers.length} currently connected server(s); background reconciliation may still be in progress`
+  )
 
   if (connectedServers.length > 0) {
     const tools = mcpManager.getAllTools()
@@ -805,71 +853,115 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
  * Poll context-mapper for McpServer changes.
  */
 async function pollContextMapper(contextRef: string): Promise<void> {
-  if (!contextMapperClient || !mcpManager) return
+  if (!contextMapperClient) return
 
   try {
-    const { servers } = await contextMapperClient.pollServers(contextRef)
-    const currentNames = new Set(servers.map(s => s.name))
-    const previousNames = new Set(lastServerState.keys())
-
-    // Detect added or modified servers
-    for (const server of servers) {
-      const previousState = lastServerState.get(server.name)
-      const currentState = JSON.stringify(server)
-
-      if (!previousState) {
-        console.log(`[Main] MCP server added: ${server.name}`)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      } else if (previousState !== currentState) {
-        console.log(`[Main] MCP server modified: ${server.name}`)
-        await mcpManager.removeServer(server.name)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      }
+    // Cold-start discovery failures intentionally leave the manager unset.
+    // Retry the authoritative initialization instead of declaring an empty
+    // fleet or permanently no-oping every reconciliation tick.
+    if (!mcpManager) {
+      await initializeMcpServers(contextRef)
+      return
     }
 
-    // Detect deleted servers
-    for (const name of previousNames) {
-      if (!currentNames.has(name)) {
-        console.log(`[Main] MCP server deleted: ${name}`)
-        await mcpManager.removeServer(name)
-        lastServerState.delete(name)
-      }
-    }
+    const manager = mcpManager
+    await pollAuthoritativeMcpSnapshotIfCurrent({
+      poll: () => contextMapperClient!.pollServers(contextRef),
+      // A delayed fetch may resolve after shutdown or after a manager swap.
+      // Never publish that stale snapshot into a closed/retired manager.
+      isCurrent: () => !isShuttingDown && mcpManager === manager,
+      reconcile: servers =>
+        reconcileAuthoritativeMcpSnapshot({
+          servers,
+          manager,
+          serverState: lastServerState,
+          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
+          coordinator: mcpFleetCoordinator,
+        }),
+    })
   } catch (error) {
     console.error('[Main] Error polling skill-mapper:', error)
   }
 }
 
 /**
+ * Serialize periodic polling while coalescing any number of overlapping ticks
+ * into at most one trailing run. This keeps reconciliation bounded without
+ * losing the latest post-flight snapshot opportunity.
+ */
+export function createCoalescedPollRunner(poll: () => Promise<void>): {
+  trigger(): void
+  stop(): void
+} {
+  let inFlight = false
+  let trailing = false
+  let stopped = false
+
+  const trigger = (): void => {
+    if (stopped) return
+    if (inFlight) {
+      trailing = true
+      return
+    }
+
+    inFlight = true
+    void poll()
+      .catch(error => {
+        console.error('[Main] Context Mapper poll runner failed:', error)
+      })
+      .finally(() => {
+        inFlight = false
+        if (trailing && !stopped) {
+          trailing = false
+          trigger()
+        }
+      })
+  }
+
+  return {
+    trigger,
+    stop: () => {
+      stopped = true
+      trailing = false
+    },
+  }
+}
+
+/**
  * Start polling context-mapper for McpServer changes.
  */
-function startContextMapperPolling(contextRef: string): void {
+export function startContextMapperPolling(contextRef: string): void {
+  if (isShuttingDown) return
+  // Re-entry replaces the complete producer/runner pair. Stopping only the
+  // runner would leave the previous interval dispatching into the new runner.
+  stopContextMapperPolling()
+
   console.log(
     `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
   )
 
+  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper(contextRef))
   contextMapperPollTimer = setInterval(() => {
-    pollContextMapper(contextRef)
+    contextMapperPollRunner?.trigger()
   }, config.contextMapperPollInterval)
+}
+
+export function ensureContextMapperPolling(contextRef: string): void {
+  if (isShuttingDown || (contextMapperPollTimer && contextMapperPollRunner)) return
+  startContextMapperPolling(contextRef)
 }
 
 /**
  * Stop polling context-mapper.
  */
-function stopContextMapperPolling(): void {
+export function stopContextMapperPolling(): void {
   if (contextMapperPollTimer) {
     console.log('[Main] Stopping context-mapper polling')
     clearInterval(contextMapperPollTimer)
     contextMapperPollTimer = null
   }
+  contextMapperPollRunner?.stop()
+  contextMapperPollRunner = null
 }
 
 /**
@@ -2014,33 +2106,11 @@ async function startRPCServer(): Promise<void> {
   // LRU — or, under sqlite/dual, any session after a pod restart — still
   // surface from SQLite. The sync RAM-only accessors would 404 persisted
   // sessions, defeating the persistence feature. The route already awaits.
-  // D.1 — view of session liveness shared by /sessions and /messages.
-  // `state` lets the desktop paint sidebar badges; `activeTaskId` tells it
-  // which task to re-subscribe to; `pendingApproval` lets it render the
-  // approve button without waiting for the SSE. `displayName` is derived
-  // server-side (the `tool_name` itself is NOT leaked over the wire — security
-  // patch P1-1).
-  const sessionStateView = (conversation: Conversation) => {
-    const state =
-      conversation.state === ConversationState.Processing
-        ? ('processing' as const)
-        : conversation.state === ConversationState.AwaitingApproval
-          ? ('awaiting_approval' as const)
-          : ('idle' as const)
-    const activeTaskId = state === 'idle' ? undefined : conversation.activeTaskId
-    const pendingApproval =
-      conversation.state === ConversationState.AwaitingApproval && conversation.pending_approval
-        ? {
-            requestId: conversation.pending_approval.request_id,
-            displayName: getDisplayName(conversation.pending_approval.tool_name),
-          }
-        : undefined
-    // Lifetime token totals — projected to the wire shape (omitted until the
-    // session has had an LLM call; cache breakdown included only when the model
-    // reports it). See `projectSessionTokens`.
-    const tokens = projectSessionTokens(conversation)
-    return { state, activeTaskId, pendingApproval, tokens }
-  }
+  // D.1 — the shared session-liveness projection (`sessionStateView`) and the
+  // two session-read handlers now live in `createSessionRouteHandlers`
+  // (src/server/sessionRouteHandlers.ts) so they can be unit-tested against a
+  // real ConversationManager. `redactToolError` stays here (it closes over the
+  // operator secret list) and is injected into the factory below.
 
   // #582: redact a persisted tool error before it reaches the `/messages` wire,
   // mirroring the live SSE path exactly: `sanitizeOutput` scrubs secret values
@@ -2051,49 +2121,17 @@ async function startRPCServer(): Promise<void> {
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
 
-  const handleSessionsList = async (userSub: string) => {
-    const convManager = agent!.getConversationManager()
-    const entries = await convManager.listSessionsForUserAsync(`${userSub}:rpc:`)
-    return {
-      items: entries.map(({ conversation, agent: agentName, chatId }) => ({
-        agent: agentName,
-        chatId,
-        turnCount: conversation.turns.length,
-        lastActivityAt: conversation.updated_at.toISOString(),
-        ...sessionStateView(conversation),
-      })),
-    }
-  }
-
-  const handleSessionMessages = async (userSub: string, agentName: string, chatId: string) => {
-    const convManager = agent!.getConversationManager()
-    // Direct O(1) key lookup — spec §2: `conversations.get(`${auth.sub}:rpc:${agent}:${chatId}`)`.
-    const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
-    if (!conversation) return null
-    return {
-      agent: agentName,
-      chatId,
-      ...sessionStateView(conversation),
-      turns: conversation.turns.map(t => ({
-        number: t.number,
-        user_input: t.user_input,
-        response: t.response,
-        started_at: t.started_at.toISOString(),
-        completed_at: t.completed_at ? t.completed_at.toISOString() : undefined,
-        tokens: projectTurnTokens(t),
-        tool_steps: projectTurnToolSteps(t, redactToolError),
-      })),
-    }
-  }
+  const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+    getConversationManager: () => agent!.getConversationManager(),
+    redactToolError,
+  })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
     const convManager = agent!.getConversationManager()
-    // Same O(1) key lookup + anti-enumeration semantics as handleSessionMessages:
-    // the userSub comes from the verified rpc edge caller (routes.ts), never a
-    // client param, so a caller cannot read another user's session.
+    // Same O(1) key lookup + ownership check as handleSessionMessages: userSub
+    // comes from the verified edge caller and must match persisted ownership.
     const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
+    const conversation = await convManager.getSessionByKeyForUserAsync(key, userSub)
     if (!conversation) return null
     // `breakdown: null` when the session exists but has no snapshot yet (cold-load
     // before the first turn) — distinct from the 404 the route returns for a
@@ -2129,7 +2167,9 @@ async function startRPCServer(): Promise<void> {
         channelId: hostRef,
         threadId: chatId,
       })
-      const conversation = await agent!.getConversationManager().getSessionByKeyAsync(key)
+      const conversation = await agent!
+        .getConversationManager()
+        .getSessionByKeyForUserAsync(key, userSub)
       const saved = conversation?.modelSelections?.[provider]
       if (saved) {
         const resolution = resolveSessionModel(
@@ -2420,8 +2460,19 @@ async function shutdown(signal: string): Promise<void> {
     return
   }
   isShuttingDown = true
+  mcpInitializationGeneration += 1
 
   console.log(`[Main] Received ${signal}, shutting down`)
+
+  // Fence MCP authority and detach live tools before any awaited shutdown
+  // phase. Delayed polls and in-flight connects cannot reopen a closed manager.
+  const closingMcpManager = mcpManager
+  if (closingMcpManager) {
+    mcpFleetCoordinator.closeManager(closingMcpManager)
+  }
+  const mcpClosePromise = closingMcpManager?.close(cleanup =>
+    mcpFleetCoordinator.scheduleCleanup(cleanup)
+  )
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
@@ -2463,7 +2514,9 @@ async function shutdown(signal: string): Promise<void> {
 
   cronScheduler?.stop()
   spilloverStorage?.stopGc()
-  await mcpManager?.disconnectAll()
+  await mcpClosePromise
+  await mcpFleetCoordinator.drainForShutdown()
+  await pluginWorkloadSdkBootstrapServer?.stop()
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
@@ -2540,9 +2593,7 @@ async function startDevMode(): Promise<void> {
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
-    for (const server of config.devMcpServers) {
-      await mcpManager.addServer(server)
-    }
+    await admitDevelopmentMcpServers(config.devMcpServers, mcpManager)
 
     const tools = mcpManager.getAllTools()
     console.log(`[Main] Total tools available: ${tools.length}`)
@@ -2623,7 +2674,7 @@ async function startProductionMode(): Promise<void> {
   // reconciles the catalog (the platform tolerates the 'connecting' sweep).
   startMcpInitializationInBackground({
     initialize: () => initializeMcpServers(host.spec.contextRef),
-    afterInitialAttempt: () => startContextMapperPolling(host.spec.contextRef),
+    afterInitialAttempt: () => ensureContextMapperPolling(host.spec.contextRef),
   })
 
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
@@ -2631,6 +2682,91 @@ async function startProductionMode(): Promise<void> {
   console.log('[Main] Waiting for messages from channel-reader...\n')
 
   // Handle graceful shutdown
+  process.once('SIGTERM', () => shutdown('SIGTERM'))
+  process.once('SIGINT', () => shutdown('SIGINT'))
+}
+
+/**
+ * Start the dedicated stepless Plugin Workload SDK runtime. This is neither a
+ * WorkflowService nor a standalone Host: port 8080 exposes only health and the
+ * WRC-authenticated public bootstrap identity, while port 8099 serves the
+ * workload SDK. Prompt credentials remain behind the per-attempt WRC broker.
+ */
+async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
+  if (!config.pluginWorkloadSdkEnabled || config.pluginWorkloadSdkRuntimeMode !== 'sdk-only') {
+    throw new Error(
+      'sdk-only runtime requires PLUGIN_WORKLOAD_SDK_ENABLED=true and PLUGIN_WORKLOAD_SDK_RUNTIME_MODE=sdk-only'
+    )
+  }
+
+  console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
+
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) {
+    throw new Error(
+      'sdk-only runtime requires MCP_HOST_RUNTIME_ACCESS_TOKEN, MCP_HOST_RUNTIME_REFRESH_TOKEN and MCP_HOST_GATEWAY_URL'
+    )
+  }
+  startRuntimeAuthProactiveRefresh(runtimeAuth)
+
+  if (!usageReporter) {
+    const auth = runtimeAuth
+    usageReporter = new UsageReporter({
+      baseUrl: auth.baseUrl,
+      getAccessToken: () => auth.accessToken,
+      refreshOnUnauthorized: () => refreshWithRecovery(auth),
+    })
+  }
+
+  let bootstrapContext: { provider: LlmProvider; defaultModel: string } | null = null
+  pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
+    getLlmContext: () => bootstrapContext,
+    usageReporter,
+  })
+  if (!pluginWorkloadSdkServer) {
+    throw new Error('sdk-only runtime activation gate rejected the Plugin Workload SDK server')
+  }
+
+  await pluginWorkloadSdkServer.start()
+  pluginWorkloadSdkBootstrapServer = new PluginWorkloadSdkBootstrapServer({
+    port: config.serverPort,
+    configure: request =>
+      configurePluginWorkloadSdkBootstrapIdentity(request, {
+        capabilityFamily: resolvePluginWorkloadSdkBootstrapCapabilityFamily(
+          config.pluginWorkloadSdkCapabilities
+        ),
+        onConfigured: context => {
+          bootstrapContext = context
+        },
+        verify: async (provider, model) => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+          } catch {
+            return null
+          }
+        },
+        verifyClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
+          } catch {
+            return null
+          }
+        },
+      }),
+  })
+  try {
+    // Kubernetes readiness becomes reachable only after the SDK listener and
+    // the bootstrap surface are both bound, preventing a Ready-but-unusable Pod.
+    await pluginWorkloadSdkBootstrapServer.start()
+  } catch (err) {
+    await pluginWorkloadSdkServer.stop()
+    pluginWorkloadSdkServer = null
+    throw err
+  }
+
+  console.log('[Main] SDK-only mcp-host ready — waiting for WRC identity bootstrap')
   process.once('SIGTERM', () => shutdown('SIGTERM'))
   process.once('SIGINT', () => shutdown('SIGINT'))
 }
@@ -2652,9 +2788,13 @@ async function main(): Promise<void> {
     )
     process.exit(1)
   }
-  if (config.enableAuth && config.workflowEnabled && !config.wrcPublicKey) {
+  if (
+    config.enableAuth &&
+    (config.runtimeKind === 'workflow' || config.runtimeKind === 'sdk-only') &&
+    !config.wrcPublicKey
+  ) {
     console.error(
-      '[Main] FATAL: enableAuth=true in workflow mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start'
+      `[Main] FATAL: enableAuth=true in ${config.runtimeKind} mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start`
     )
     process.exit(1)
   }
@@ -2706,7 +2846,7 @@ async function main(): Promise<void> {
 
   // Workflow approval: if workflow mode is active, all three approval env vars must be set.
   // Without them, steps that require approval cannot request gating from control-api.
-  if (config.workflowEnabled) {
+  if (config.runtimeKind === 'workflow') {
     const missingApprovalVars: string[] = []
     if (!config.mcpHostRuntimeAccessToken) missingApprovalVars.push('MCP_HOST_RUNTIME_ACCESS_TOKEN')
     if (!config.mcpHostRuntimeRefreshToken)
@@ -2723,126 +2863,151 @@ async function main(): Promise<void> {
     }
   }
 
-  // M-11: Workflow mode — skip standalone initialization entirely.
-  // The WRC will configure this Pod via POST /configure (apiKey, soul, model).
-  if (config.workflowEnabled) {
-    console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
+  // M-11: Workflow mode — dispatch keeps the existing workflow startup
+  // contract isolated from the stepless SDK-only runtime.
+  await dispatchMcpHostRuntime(config.runtimeKind, {
+    sdkOnly: startPluginWorkloadSdkOnlyMode,
+    workflow: async () => {
+      console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
 
-    const { WorkflowService } = await import('./workflow/workflowService')
-    const { McpClient } = await import('./mcp/client')
+      const { WorkflowService } = await import('./workflow/workflowService')
+      const { McpClient } = await import('./mcp/client')
 
-    rpcServer = new RPCServer(config.serverPort)
+      rpcServer = new RPCServer(config.serverPort)
 
-    // Inject a real HTTP MCP client factory so steps that declare mcpServers can
-    // actually connect to them. Without this, WorkflowService uses a default factory
-    // that always throws "No MCP client factory configured" (bug fix).
-    const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
-      const info = {
-        name: server.name,
-        contextRef: '',
-        transport: { type: 'streamableHttp' as const, url: server.url },
-        enabled: true,
-        status: { deployed: true, ready: true },
-      } as McpServerInfo
-      const client = new McpClient(info, server.authToken)
-      return {
-        connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
-          client.connect(options),
-        listTools: async (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
-          (await client.listTools(options)).map(t => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          })),
-        callTool: async (
-          toolName: string,
-          args: Record<string, unknown>,
-          options?: { timeoutMs?: number; signal?: AbortSignal }
-        ) => {
-          const raw = await client.callTool(toolName, args, options)
-          return raw as { content: unknown; isError?: boolean }
-        },
-        disconnect: () => client.disconnect(),
+      // Inject a real HTTP MCP client factory so steps that declare mcpServers can
+      // actually connect to them. Without this, WorkflowService uses a default factory
+      // that always throws "No MCP client factory configured" (bug fix).
+      const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
+        const info = {
+          name: server.name,
+          contextRef: '',
+          transport: { type: 'streamableHttp' as const, url: server.url },
+          enabled: true,
+          status: { deployed: true, ready: true },
+        } as McpServerInfo
+        const client = new McpClient(info, server.authToken)
+        return {
+          connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+            client.connect(options),
+          listTools: async (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+            (await client.listTools(options)).map(t => ({
+              name: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+            })),
+          callTool: async (
+            toolName: string,
+            args: Record<string, unknown>,
+            options?: { timeoutMs?: number; signal?: AbortSignal }
+          ) => {
+            const raw = await client.callTool(toolName, args, options)
+            return raw as { content: unknown; isError?: boolean }
+          },
+          disconnect: () => client.disconnect(),
+        }
       }
-    }
 
-    // Build the shared runtime auth once so WorkflowService and any
-    // subsequent UsageReporter wiring share the refreshed access token.
-    if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
-    if (runtimeAuth) startRuntimeAuthProactiveRefresh(runtimeAuth)
+      // Build the shared runtime auth once so WorkflowService and any
+      // subsequent UsageReporter wiring share the refreshed access token.
+      if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+      if (runtimeAuth) startRuntimeAuthProactiveRefresh(runtimeAuth)
 
-    // Wire a UsageReporter for workflow mode so each LLM round-trip in
-    // executeStep ships an LlmUsageEvent (source_kind='workflow') to
-    // control-api. Without this the recipe's spend stays local to the
-    // step response and never lands in usage_events / the dashboard.
-    if (runtimeAuth && !usageReporter) {
-      const auth = runtimeAuth
-      usageReporter = new UsageReporter({
-        baseUrl: auth.baseUrl,
-        getAccessToken: () => auth.accessToken,
-        refreshOnUnauthorized: () => refreshWithRecovery(auth),
+      // Wire a UsageReporter for workflow mode so each LLM round-trip in
+      // executeStep ships an LlmUsageEvent (source_kind='workflow') to
+      // control-api. Without this the recipe's spend stays local to the
+      // step response and never lands in usage_events / the dashboard.
+      if (runtimeAuth && !usageReporter) {
+        const auth = runtimeAuth
+        usageReporter = new UsageReporter({
+          baseUrl: auth.baseUrl,
+          getAccessToken: () => auth.accessToken,
+          refreshOnUnauthorized: () => refreshWithRecovery(auth),
+        })
+      }
+
+      // Plugin Workload SDK LLM binding: a push-style holder updated by
+      // WorkflowService.configure() — never a public getter, so the apiKey
+      // stays unreachable through the service's public API surface.
+      let pluginSdkLlmContext: {
+        provider: LlmProvider
+        defaultModel: string
+      } | null = null
+
+      const workflowService = new WorkflowService(config.workflowRecipeName, {
+        mcpClientFactory,
+        runtimeAuth,
+        usageReporter,
+        onLlmConfigured: context => {
+          pluginSdkLlmContext = context
+        },
+        onPluginWorkloadSdkBootstrapConfigured: context => {
+          pluginSdkLlmContext = context
+        },
+        verifyPluginWorkloadSdkBootstrapV2: async (provider, model) => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyPromptBridgeBootstrapV2(provider, model)
+          } catch {
+            return null
+          }
+        },
+        verifyPluginWorkloadSdkClientNotifications: async () => {
+          if (!pluginWorkloadSdkServer) return null
+          try {
+            return await pluginWorkloadSdkServer.verifyClientNotificationsBootstrap()
+          } catch {
+            return null
+          }
+        },
       })
-    }
+      rpcServer.setWorkflowService(workflowService)
+      wireWorkflowApprovalRuntimeRoutes(rpcServer, {
+        providerMessageAuthorization: handleProviderMessageAuthorization,
+        providerWorkflowApprovalDecision: handleProviderWorkflowApprovalDecision,
+        providerWorkflowApprovalResolve: handleProviderWorkflowApprovalResolve,
+        workflowApprovalNotificationClaim: handleWorkflowApprovalNotificationClaim,
+        workflowApprovalNotificationTerminal: handleWorkflowApprovalNotificationTerminal,
+        workflowApprovalMediumEnrollment: handleWorkflowApprovalMediumEnrollment,
+        telegramWorkflowApprovalVerification: handleTelegramWorkflowApprovalVerification,
+      })
+      await rpcServer.start()
 
-    // Plugin Workload SDK LLM binding: a push-style holder updated by
-    // WorkflowService.configure() — never a public getter, so the apiKey
-    // stays unreachable through the service's public API surface.
-    let pluginSdkLlmContext: {
-      keys: ApiKeys
-      provider: LlmProvider
-      defaultModel: string
-    } | null = null
+      // Plugin Workload SDK: only recipe-bound mcp-hosts inside
+      // sandbox-recipes pass the triple activation gate; everyone else logs
+      // the structured reason and continues without the SDK. The LLM binding
+      // comes from WorkflowService (POST /configure delivers the API key).
+      pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
+        getLlmContext: () => pluginSdkLlmContext,
+        usageReporter,
+      })
+      if (pluginWorkloadSdkServer) {
+        await pluginWorkloadSdkServer.start()
+      }
 
-    const workflowService = new WorkflowService(config.workflowRecipeName, {
-      mcpClientFactory,
-      runtimeAuth,
-      usageReporter,
-      onLlmConfigured: context => {
-        pluginSdkLlmContext = context
-      },
-    })
-    rpcServer.setWorkflowService(workflowService)
-    wireWorkflowApprovalRuntimeRoutes(rpcServer, {
-      providerMessageAuthorization: handleProviderMessageAuthorization,
-      providerWorkflowApprovalDecision: handleProviderWorkflowApprovalDecision,
-      providerWorkflowApprovalResolve: handleProviderWorkflowApprovalResolve,
-      workflowApprovalNotificationClaim: handleWorkflowApprovalNotificationClaim,
-      workflowApprovalNotificationTerminal: handleWorkflowApprovalNotificationTerminal,
-      workflowApprovalMediumEnrollment: handleWorkflowApprovalMediumEnrollment,
-      telegramWorkflowApprovalVerification: handleTelegramWorkflowApprovalVerification,
-    })
-    await rpcServer.start()
-
-    // Plugin Workload SDK: only recipe-bound mcp-hosts inside
-    // sandbox-recipes pass the triple activation gate; everyone else logs
-    // the structured reason and continues without the SDK. The LLM binding
-    // comes from WorkflowService (POST /configure delivers the API key).
-    pluginWorkloadSdkServer = maybeCreatePluginWorkloadSdkServer(config, runtimeAuth, {
-      getLlmContext: () => pluginSdkLlmContext,
-      usageReporter,
-    })
-    if (pluginWorkloadSdkServer) {
-      await pluginWorkloadSdkServer.start()
-    }
-
-    console.log('[Main] Workflow mcp-host ready — waiting for /configure from WRC')
-    process.once('SIGTERM', () => shutdown('SIGTERM'))
-    process.once('SIGINT', () => shutdown('SIGINT'))
-    return
-  }
-
-  if (config.devMode) {
-    await startDevMode()
-  } else {
-    await startProductionMode()
-  }
+      console.log('[Main] Workflow mcp-host ready — waiting for /configure from WRC')
+      process.once('SIGTERM', () => shutdown('SIGTERM'))
+      process.once('SIGINT', () => shutdown('SIGINT'))
+    },
+    standalone: async () => {
+      if (config.devMode) {
+        await startDevMode()
+      } else {
+        await startProductionMode()
+      }
+    },
+  })
 }
 
-// Run main
-main().catch(error => {
-  console.error('[Main] Fatal error:', error)
-  process.exit(1)
-})
+// Run main only when this module is the executable entry point. Keeping imports
+// side-effect free allows the authoritative initialization contract to be
+// regression-tested without starting the service.
+if (require.main === module) {
+  main().catch(error => {
+    console.error('[Main] Fatal error:', error)
+    process.exit(1)
+  })
+}
 
 // Export for external access
 export { messageQueue, agent, cronScheduler }

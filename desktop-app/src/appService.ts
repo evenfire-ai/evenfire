@@ -7,6 +7,7 @@ import {
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
+  getActiveLegacyEnvKeys,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -51,9 +52,12 @@ import {
   RpcScope,
   SessionLifecycleState,
   SessionMe,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -73,6 +77,23 @@ import {
 // requested scopes against the caller's grants before issuance, so requesting
 // the wake scope never widens a caller who was not granted it.
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
+
+function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
+  const value = rawValue.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    return null
+  }
+  if (url.pathname !== '/' || url.search) return null
+  url.hash = ''
+  return url.toString().replace(/\/$/, '')
+}
 
 /**
  * Finite-operation scope matrix — the single source of truth for the exact
@@ -240,6 +261,7 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 // post-`waiting` connection is still caught here (and by the renderer's 30s
 // watchdog).
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
+const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -263,9 +285,16 @@ export class AppService {
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
+  private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private savedSessionRestoreAttemptedEnvKey: string | null = null
+  private savedSessionRestoreAttemptedAtMs = 0
+  private logoutInProgress = false
+  private sessionGeneration = 0
+  private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -326,6 +355,13 @@ export class AppService {
     )
   }
 
+  private static isRejectedStoredSessionError(error: unknown): boolean {
+    return (
+      error instanceof ApiError &&
+      (error.status === 401 || error.status === 403 || error.status === 410)
+    )
+  }
+
   /**
    * Maps rpc-proxy's structured host-availability 503s ({code:'host_waking'}
    * from the wake-and-hold subsystem, {code:'host_draining'} from the mcp-host
@@ -369,14 +405,22 @@ export class AppService {
     }
   }
 
+  private async bindCurrentChatStore(userId: string): Promise<void> {
+    await bindChatStoreForUser(userId, getActiveEnvKey(), {
+      legacyEnvKeys: getActiveLegacyEnvKeys(),
+    })
+  }
+
   private async commitSessionToken(
     token: string,
     options: { refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    if (tokenChanged) this.sessionGeneration += 1
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
+      this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
@@ -387,7 +431,7 @@ export class AppService {
         unbindChatStore()
         throw error
       }
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      await this.bindCurrentChatStore(this.me.id)
       this.updateCachedCurrentTeam(this.me.teamId)
     }
   }
@@ -395,7 +439,7 @@ export class AppService {
   private async getCurrentSessionTeamId(token: string): Promise<string> {
     if (this.me?.teamId) return this.me.teamId
     this.me = await this.authClient.getMe(token)
-    await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(this.me.id)
     this.updateCachedCurrentTeam(this.me.teamId)
     return this.me.teamId || ''
   }
@@ -497,6 +541,15 @@ export class AppService {
     return matchingEntry?.team.id ?? this.accessCatalog?.teamId ?? null
   }
 
+  private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sandboxUiLifecycleQueue.then(operation)
+    this.sandboxUiLifecycleQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
   private async issueRpcTokenForHostRefs(
     scopes: RpcScope[],
     hostRefs: string[],
@@ -509,15 +562,80 @@ export class AppService {
     )
   }
 
-  async initialize(): Promise<SessionState> {
+  private clearAuthenticatedSessionState(): void {
+    this.sessionGeneration += 1
+    this.stopAllStreams()
+    this.sessionToken = null
+    this.me = null
+    this.profileUiBaseUrlCache = null
+    this.accessCatalog = null
+    this.teamDirectoryCache = null
+    this.workflowApprovalTeamById.clear()
+    this.workflowTeamByKey.clear()
+    this.rpcTokenManager.clear()
+    unbindChatStore()
+  }
+
+  private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.restoreSavedSessionInFlight) {
+      return await this.restoreSavedSessionInFlight
+    }
+    const restore = this.restoreSavedSessionOnce(options)
+    this.restoreSavedSessionInFlight = restore
+    try {
+      return await restore
+    } finally {
+      // No newer restore can start while this promise is installed, so the
+      // single-flight slot can be cleared unconditionally after it settles.
+      this.restoreSavedSessionInFlight = null
+    }
+  }
+
+  private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
-    this.sessionToken = await this.tokenStore.getSessionToken(getActiveEnvKey())
-    if (!this.sessionToken) {
+    const envKey = getActiveEnvKey()
+    const legacyEnvKeys = getActiveLegacyEnvKeys()
+    this.savedSessionRestoreAttemptedEnvKey = envKey
+    this.savedSessionRestoreAttemptedAtMs = Date.now()
+    let token: string | null
+    try {
+      token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
+    } catch (error) {
+      console.warn('[AppService] Failed to read the saved session token:', error)
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
       return { authenticated: false, me: null }
     }
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    if (!token) {
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
+      return { authenticated: false, me: null }
+    }
+
+    if (this.sessionGeneration !== restoreGeneration) {
+      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+    }
+    this.sessionToken = token
     try {
-      this.me = await this.authClient.getMe(this.sessionToken)
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      const restoredMe = await this.authClient.getMe(token)
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        if (this.me) {
+          await this.bindCurrentChatStore(this.me.id)
+        } else {
+          unbindChatStore()
+        }
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.me = restoredMe
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -525,12 +643,26 @@ export class AppService {
       // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
       // here must not block the user from logging in. Any network or fs
       // error is logged inside the module.
-      void this.runSandboxUiPartitionGcSafely()
+      if (options.runLaunchMaintenance) {
+        void this.runSandboxUiPartitionGcSafely()
+      }
       return { authenticated: true, me: this.me }
-    } catch {
-      await this.logout()
+    } catch (error) {
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.clearAuthenticatedSessionState()
+      if (AppService.isRejectedStoredSessionError(error)) {
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      } else {
+        console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
+      }
       return { authenticated: false, me: null }
     }
+  }
+
+  async initialize(): Promise<SessionState> {
+    return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
@@ -555,9 +687,11 @@ export class AppService {
 
   private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
     const result = await this.authClient.passwordLogin(email, password)
+    this.logoutInProgress = false
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -624,9 +758,11 @@ export class AppService {
 
   async googleLogin(idToken: string): Promise<SessionState> {
     const result = await this.authClient.googleLogin(idToken)
+    this.logoutInProgress = false
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -693,16 +829,7 @@ export class AppService {
     options: ProfileSettingsOpenOptions = {}
   ): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    let profileUiBaseUrl = config.desktopProfileUiBaseUrl
-    if (normalizedEmail) {
-      try {
-        const activation =
-          await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-        profileUiBaseUrl = activation.profileUiBaseUrl
-      } catch {
-        profileUiBaseUrl = config.desktopProfileUiBaseUrl
-      }
-    }
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(normalizedEmail)
 
     const network = String(options.network || '')
       .trim()
@@ -716,6 +843,48 @@ export class AppService {
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
+  }
+
+  private async resolveProfileUiBaseUrl(
+    email?: string,
+    options: { fallbackOnLookupError?: boolean } = {}
+  ): Promise<string> {
+    const { fallbackOnLookupError = true } = options
+    if (config.desktopProfileUiBaseUrlExplicit) {
+      const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+      if (!explicitBaseUrl) {
+        throw new Error('Cannot resolve the configured Profile UI URL for this desktop session')
+      }
+      return explicitBaseUrl
+    }
+    const normalizedEmail = String(email || this.me?.email || '')
+      .trim()
+      .toLowerCase()
+    if (!normalizedEmail) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      throw new Error('Cannot resolve the Profile UI for this desktop session')
+    }
+    const cacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
+    if (this.profileUiBaseUrlCache?.key === cacheKey) {
+      return this.profileUiBaseUrlCache.value
+    }
+    try {
+      const activation =
+        await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
+      const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+      if (!profileUiBaseUrl) {
+        if (!fallbackOnLookupError) {
+          throw new Error('the invitation profile did not provide a Profile UI URL')
+        }
+        return config.desktopProfileUiBaseUrl
+      }
+      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
+      return profileUiBaseUrl
+    } catch (error) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Cannot resolve a shareable Profile UI link: ${message}`)
+    }
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
@@ -808,16 +977,15 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
-    this.stopAllStreams()
-    this.sessionToken = null
-    this.me = null
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    unbindChatStore()
+    this.logoutInProgress = true
+    try {
+      const envKey = getActiveEnvKey()
+      const legacyEnvKeys = getActiveLegacyEnvKeys()
+      this.clearAuthenticatedSessionState()
+      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+    } finally {
+      this.logoutInProgress = false
+    }
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -960,7 +1128,20 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (!this.sessionToken || !this.me) return { authenticated: false, me: null }
+    if (!this.sessionToken || !this.me) {
+      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      // createWindow() already performs the saved-token restore before showing
+      // the renderer. Do not immediately repeat a failed 60-second network
+      // attempt from the renderer bootstrap; a new app launch or environment
+      // selection gets a fresh attempt because its service/env key is new.
+      if (
+        this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
+        Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
+      ) {
+        return { authenticated: false, me: null }
+      }
+      return this.restoreSavedSession()
+    }
     return { authenticated: true, me: this.me }
   }
 
@@ -1399,7 +1580,7 @@ export class AppService {
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
-    await bindChatStoreForUser(me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(me.id)
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([
@@ -2516,25 +2697,15 @@ export class AppService {
 
   async listSessions(
     hostRef: string,
-    hostRefs?: string[]
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
+    hostRefs?: string[],
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.listSessions(rpc.token, targetHostRef)
+      return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
@@ -2551,7 +2722,8 @@ export class AppService {
     hostRef: string,
     agent: string,
     chatId: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef || !agent || !chatId) {
@@ -2560,14 +2732,27 @@ export class AppService {
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.loadSessionMessages(rpc.token, targetHostRef, agent, chatId)
+      return await this.rpcClient.loadSessionMessages(
+        rpc.token,
+        targetHostRef,
+        agent,
+        chatId,
+        query
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
         console.warn(
           '[AppService] Session messages unavailable because the runtime rejected the session token.'
         )
-        return { agent, chatId, turns: [] }
+        return {
+          agent,
+          chatId,
+          turns: [],
+          totalTurns: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        }
       }
       throw error
     }
@@ -2844,10 +3029,25 @@ export class AppService {
    * this). This keeps memory + GPU usage bounded and avoids accidental
    * cross-recipe focus / cookie-jar mixups.
    */
-  async openSandboxUi(args: {
+  openSandboxUi(args: {
     recipeNs: string
     recipeName: string
     defaultPath?: string
+    routePath?: string
+    bounds: import('./sandboxUiDriver.js').SandboxUiBounds
+    parentWindow: import('electron').BrowserWindow
+    onClosed?: () => void
+    onRefreshError?: (message: string) => void
+    onOauthError?: (message: string) => void
+  }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
+  }
+
+  private async openSandboxUiNow(args: {
+    recipeNs: string
+    recipeName: string
+    defaultPath?: string
+    routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
     onClosed?: () => void
@@ -2866,6 +3066,7 @@ export class AppService {
       setCookie,
       rpcProxyUrl: config.rpcProxyBaseUrl,
       defaultPath: args.defaultPath,
+      routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
       onClosed: () => {
@@ -2888,10 +3089,10 @@ export class AppService {
       },
     })
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView) {
-      // The mount step already threw if it failed; if we still get null
-      // here something racy happened (parent window closed during the
-      // mint).  Bail without arming refresh.
+    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
+      // A queued close or newer mount can invalidate this operation while an
+      // async cookie write is in flight. Do not cross-wire its refresh loop
+      // to whichever recipe is active now.
       return
     }
     refreshModule.startSandboxUiRefresh({
@@ -2907,11 +3108,29 @@ export class AppService {
     })
   }
 
-  async closeSandboxUi(): Promise<void> {
+  closeSandboxUi(): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      const refreshModule = await import('./sandboxUiSessionRefresh.js')
+      refreshModule.cancelSandboxUiRefresh()
+      await driver.unmountSandboxUiView()
+    })
+  }
+
+  async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
-    const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    await driver.unmountSandboxUiView()
+    const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) throw new Error('No app is currently open')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return {
+      url: buildSandboxUiWebLink(profileUiBaseUrl, {
+        ...location,
+        teamId: String(teamId || '').trim() || undefined,
+      }),
+    }
   }
 
   // In-place hard-reload of the active embed (user-initiated "Refresh"). The

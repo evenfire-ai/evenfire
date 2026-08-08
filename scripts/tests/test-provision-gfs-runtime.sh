@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# The HCC post-overlay wait, and the two facts that decide whether it can actually elapse.
+# Kept here so the script, the Deployment manifest and this test cannot drift apart.
+HCC_ROLLOUT_TIMEOUT_S=900
+# Observed head start from apply-inter-service-tokens.sh's `rollout restart` of HCC to this
+# script's wait: 160s on clerum-dev 2026-08-05. Rounded up for slower deploys.
+HCC_RESTART_HEAD_START_S=300
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/overlay/instances"
@@ -48,8 +56,35 @@ reconcile="$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   echo 'FAIL: post-overlay credential reconciliation did not run once per deploy' >&2
   exit 1
 }
-[ "$(grep -Fc 'rollout status deployment/host-context-controller --timeout=240s' "$CALL_LOG")" -eq 3 ] || {
-  echo 'FAIL: HCC was not awaited before every post-overlay reconciliation' >&2
+[ "$(grep -Fc "rollout status deployment/host-context-controller --timeout=${HCC_ROLLOUT_TIMEOUT_S}s" "$CALL_LOG")" -eq 3 ] || {
+  echo "FAIL: HCC post-overlay rollout did not use its dedicated ${HCC_ROLLOUT_TIMEOUT_S}s timeout" >&2
+  exit 1
+}
+
+# The timeout above is only ever the REAL budget if the Deployment's own
+# progressDeadlineSeconds outlasts it. `kubectl rollout status` aborts the moment the
+# Deployment controller sets Progressing=False/ProgressDeadlineExceeded, so a --timeout
+# larger than the remaining progress deadline is dead code.
+#
+# Two things make the margin bigger than it looks. The deadline clock starts when the new
+# ReplicaSet is created — that is apply-inter-service-tokens.sh's `rollout restart` of HCC,
+# several deploy steps EARLIER — not when this script starts waiting. And the deadline is
+# absolute, so the head start is subtracted from the budget this script thinks it has.
+#
+# On clerum-dev 2026-08-05 the head start was 160s: RS created 10:34:02, this wait began
+# 10:36:42, and with progressDeadlineSeconds unset (k8s default 600) the controller
+# aborted at 10:44:03 — 39s before the then-480s timeout would have fired. #202 raised
+# that timeout and nothing changed, because it could never bind.
+hcc_manifest="$ROOT/deploy/base/control-plane/host-context-controller.yaml"
+deadline="$(awk '/^  progressDeadlineSeconds:/ { print $2; exit }' "$hcc_manifest")"
+[ -n "$deadline" ] || {
+  echo "FAIL: $hcc_manifest does not declare progressDeadlineSeconds, so it defaults to 600s" >&2
+  echo '      and silently caps the rollout-status timeout above.' >&2
+  exit 1
+}
+[ "$deadline" -ge "$(( HCC_ROLLOUT_TIMEOUT_S + HCC_RESTART_HEAD_START_S ))" ] || {
+  echo "FAIL: progressDeadlineSeconds=${deadline}s cannot cover a ${HCC_ROLLOUT_TIMEOUT_S}s wait that" >&2
+  echo "      starts ${HCC_RESTART_HEAD_START_S}s after the restart — the deadline would abort first." >&2
   exit 1
 }
 for deployment in gfsc-writer gfsc-reader; do

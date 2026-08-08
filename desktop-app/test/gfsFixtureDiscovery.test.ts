@@ -1,15 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  discoverManagedGfsAgent,
+  discoverManagedGfsAgents,
+} from './e2e-playwright/helpers/gfsFixtures'
 
 const execFileSyncMock = vi.hoisted(() => vi.fn())
 
 vi.mock('node:child_process', () => ({
   execFileSync: execFileSyncMock,
 }))
-
-import {
-  discoverManagedGfsAgent,
-  discoverManagedGfsAgents,
-} from './e2e-playwright/helpers/gfsFixtures'
 
 describe('discoverManagedGfsAgents', () => {
   const context = 'clerum-codex-gfs-fixture-test'

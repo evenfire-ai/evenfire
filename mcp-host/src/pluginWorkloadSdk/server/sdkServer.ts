@@ -1,9 +1,14 @@
 import express, { type Express } from 'express'
 import type http from 'http'
+import type { PluginWorkloadSdkCapability } from '../../config'
 import { type RuntimeJwtBinding, getJwtRuntimeBinding } from '../../workflow/mcpHostRuntimeJwt'
 import type { ClientNotificationsHandler } from '../clientNotifications/handler'
+import type {
+  PluginWorkloadSdkBootstrapProof,
+  PluginWorkloadSdkClientNotificationsBootstrapProof,
+} from '../promptBridge/controlApiClient'
 import type { PromptBridgeHandler } from '../promptBridge/handler'
-import { registerSdkRoutes } from './routes'
+import { type PluginWorkloadSdkReadiness, registerSdkRoutes } from './routes'
 
 // ─── Namespace-bound activation gate (plan §3.5 / §6.3) ──────────────────
 // The SDK server starts if and only if ALL three conditions hold:
@@ -18,13 +23,48 @@ import { registerSdkRoutes } from './routes'
 
 export const PLUGIN_WORKLOAD_SDK_REQUIRED_NAMESPACE = 'sandbox-recipes'
 
+/** Validate the WRC credential-broker base URL before any SDK listener binds. */
+export function validatePluginWorkloadSdkCredentialBrokerUrl(value: string): string | null {
+  const raw = value.trim()
+  if (!raw) return 'CLERUM_WRC_URL is required when Plugin Workload SDK is enabled'
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'CLERUM_WRC_URL must be an absolute http(s) URL'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'CLERUM_WRC_URL must use http or https'
+  }
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    return 'CLERUM_WRC_URL must not contain credentials, query parameters, or fragments'
+  }
+  if (parsed.pathname !== '' && parsed.pathname !== '/') {
+    return 'CLERUM_WRC_URL must be a service base URL without a path'
+  }
+  return null
+}
+
 export function shouldStartPluginWorkloadSdk(config: {
   pluginWorkloadSdkEnabled: boolean
+  pluginWorkloadSdkCapabilities: readonly PluginWorkloadSdkCapability[]
   mcpHostRuntimeAccessToken: string
   podNamespace: string
+  pluginWorkloadSdkCredentialBrokerUrl?: string
 }): { start: boolean; reason: string } {
   if (!config.pluginWorkloadSdkEnabled) {
     return { start: false, reason: 'PLUGIN_WORKLOAD_SDK_ENABLED is not set' }
+  }
+
+  if (config.pluginWorkloadSdkCapabilities.length === 0) {
+    return { start: false, reason: 'PLUGIN_WORKLOAD_SDK_CAPABILITIES is empty' }
+  }
+
+  if (config.pluginWorkloadSdkCapabilities.includes('promptBridge')) {
+    const brokerUrlError = validatePluginWorkloadSdkCredentialBrokerUrl(
+      config.pluginWorkloadSdkCredentialBrokerUrl ?? ''
+    )
+    if (brokerUrlError) return { start: false, reason: brokerUrlError }
   }
 
   const runtimeBinding = getJwtRuntimeBinding(config.mcpHostRuntimeAccessToken)
@@ -51,9 +91,11 @@ export function shouldStartPluginWorkloadSdk(config: {
 export interface SdkServerOptions {
   port: number
   recipeName: string
+  capabilities: readonly PluginWorkloadSdkCapability[]
   workloadTokens: ReadonlyMap<string, string>
-  promptBridgeHandler: PromptBridgeHandler
-  clientNotificationsHandler: ClientNotificationsHandler
+  promptBridgeHandler?: PromptBridgeHandler
+  clientNotificationsHandler?: ClientNotificationsHandler
+  readiness: () => PluginWorkloadSdkReadiness
   maxConnections?: number
   maxRequestsPerMinutePerWorkload?: number
   maxConcurrentPerWorkload?: number
@@ -64,6 +106,7 @@ export interface SdkServerOptions {
    * required namespace. Fails closed with 503 on any drift.
    */
   getRuntimeBinding?: () => RuntimeJwtBinding | null
+  verifyClientNotificationsBootstrap?: () => Promise<PluginWorkloadSdkClientNotificationsBootstrapProof>
 }
 
 /**
@@ -94,7 +137,7 @@ export class PluginWorkloadSdkServer {
     this.app.use(express.json({ limit: '1mb' }))
     if (opts.getRuntimeBinding) {
       this.app.use((req, res, next) => {
-        if (req.path === '/healthz') return next()
+        if (req.path === '/health' || req.path === '/live' || req.path === '/healthz') return next()
         const reason = checkLiveRuntimeBinding(opts.getRuntimeBinding!(), opts.recipeName)
         if (reason) {
           console.error(`[PluginWorkloadSdk] request refused (binding drift): ${reason}`)
@@ -106,12 +149,31 @@ export class PluginWorkloadSdkServer {
       })
     }
     registerSdkRoutes(this.app, {
+      capabilities: opts.capabilities,
       workloadTokens: opts.workloadTokens,
       promptBridgeHandler: opts.promptBridgeHandler,
       clientNotificationsHandler: opts.clientNotificationsHandler,
+      readiness: opts.readiness,
       maxRequestsPerMinutePerWorkload: opts.maxRequestsPerMinutePerWorkload ?? 100,
       maxConcurrentPerWorkload: opts.maxConcurrentPerWorkload ?? 10,
     })
+  }
+
+  verifyPromptBridgeBootstrapV2(
+    expectedProvider: string,
+    expectedModel: string
+  ): Promise<PluginWorkloadSdkBootstrapProof> {
+    if (!this.opts.promptBridgeHandler) {
+      return Promise.reject(new Error('promptBridge bootstrap verifier is not configured'))
+    }
+    return this.opts.promptBridgeHandler.verifyBootstrapV2(expectedProvider, expectedModel)
+  }
+
+  verifyClientNotificationsBootstrap(): Promise<PluginWorkloadSdkClientNotificationsBootstrapProof> {
+    if (!this.opts.verifyClientNotificationsBootstrap) {
+      return Promise.reject(new Error('clientNotifications bootstrap verifier is not configured'))
+    }
+    return this.opts.verifyClientNotificationsBootstrap()
   }
 
   async start(): Promise<void> {

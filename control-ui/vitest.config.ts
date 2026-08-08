@@ -9,6 +9,11 @@ export default defineConfig({
       '@constants': path.resolve(__dirname, 'app/constants'),
       '@lib': path.resolve(__dirname, 'lib'),
       '@types': path.resolve(__dirname, 'app/types'),
+      next: path.resolve(__dirname, 'node_modules/next'),
+      react: path.resolve(__dirname, 'node_modules/react'),
+      'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
+      'react/jsx-dev-runtime': path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js'),
+      'react/jsx-runtime': path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
     },
   },
   test: {

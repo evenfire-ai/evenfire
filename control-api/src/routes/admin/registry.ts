@@ -5,12 +5,13 @@ import { isIP } from 'node:net'
 import { parse as parseYaml } from 'yaml'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { extractK8sError } from '../../http/k8sError.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { createKey, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
+import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import {
   RegistryProxyError,
   applyPublishScope,
@@ -33,6 +34,12 @@ import {
   updateVersionMetadata,
   uploadArtifacts,
 } from '../../services/registryClient.js'
+import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
+import {
+  ensureRegistryPullSecret,
+  ensureRegistryPullSecrets,
+  platformWorkloadNamespaces,
+} from '../../services/registryPullSecretService.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -43,6 +50,10 @@ import {
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
+import {
+  pullSecretErrorResponse,
+  recipeReferencesPlatformImage,
+} from './registryPullSecretProvisioning.js'
 
 /** Validate a Kubernetes resource name (RFC 1123 DNS subdomain). */
 function isValidK8sName(name: string): boolean {
@@ -543,34 +554,6 @@ function deriveRegistryEgressBindings(options: {
   return egressSummary.domains.flatMap(dns =>
     egressSummary.ports.map(port => ({ dns, port, protocol: 'TCP' as const }))
   )
-}
-
-/** Extract HTTP status + message from K8s client errors. */
-function extractK8sError(err: unknown): { status: number; message: string } | null {
-  if (err && typeof err === 'object') {
-    const e = err as {
-      code?: number
-      body?: string | { message?: string }
-      httpStatus?: number
-      statusCode?: number
-      message?: string
-    }
-    const status = e.code ?? e.statusCode ?? e.httpStatus
-    if (typeof status === 'number' && status >= 400 && status < 600) {
-      let msg = ''
-      if (typeof e.body === 'string') {
-        try {
-          msg = (JSON.parse(e.body) as { message?: string }).message ?? e.body
-        } catch {
-          msg = e.body
-        }
-      } else if (e.body && typeof e.body === 'object') {
-        msg = e.body.message ?? ''
-      }
-      return { status, message: msg || e.message || `K8s error ${status}` }
-    }
-  }
-  return null
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1110,16 +1093,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           transport: transportSpec,
         }
 
-        // Phase 2.4-delivery: local plugins whose image lives on the evenfire
-        // registry pull with the tenant's per-org pull secret (provisioned by
-        // MCC in the plugin namespace). Attach the reference; HCC propagates it.
-        if (
-          shouldAttachEvenfirePullSecret({
-            isLocal,
-            image: mcpServerSpec.image,
-            registryUrl: config.registryUrl,
-          })
-        ) {
+        // Local plugins whose image lives on the evenfire registry pull with the
+        // per-org `evenfire-registry-pull` secret. control-api self-provisions that
+        // secret in self-hosted mode (see ensureRegistryPullSecret below); it may
+        // also be pre-provisioned by an external operator. Attach the reference here;
+        // HCC propagates it to the pod.
+        const attachEvenfirePullSecret = shouldAttachEvenfirePullSecret({
+          isLocal,
+          image: mcpServerSpec.image,
+          registryUrl: config.registryUrl,
+        })
+        if (attachEvenfirePullSecret) {
           mcpServerSpec.imagePullSecrets = [{ name: EVENFIRE_REGISTRY_PULL_SECRET_NAME }]
         }
 
@@ -1210,6 +1194,22 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryName,
           body.registryEntryVersion
         )
+
+        // ── Ensure the shared registry pull secret (self-hosted) ───────────
+        // Must run when a private evenfire-hosted image is in play — independent of
+        // whether the plugin needs credentials (a credential-less plugin still needs
+        // to pull). Runs BEFORE the per-plugin credentials Secret so a failure leaves
+        // nothing to roll back, and BEFORE the McpServer CRD that references it.
+        // Namespace-shared, so it is NOT part of the per-plugin rollback below.
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, targetNs)
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
 
         // ── Step 3: Create K8s Secret if credentials provided ─────────────
         let secretCreated = false
@@ -1509,6 +1509,24 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         )
 
+        // Ensure the platform pull credential before the CRD that will need it.
+        //
+        // Recipe workloads do NOT all land in the plugin namespace — they split by kind
+        // (transport -> mcp-server, spec.ui.workloadRef -> sandbox-ui, rest ->
+        // sandbox-recipes) — and WRC injects the pull-secret reference at reconcile time
+        // for any workload whose image is ours. So provision the whole platform set: the
+        // credential is per-org and the mint is rotate-on-call, so one pass covers every
+        // namespace with a single mint (see registryPullSecretService).
+        if (recipeReferencesPlatformImage(recipeSpec)) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
         // Step 4: Apply WorkflowRecipe CRD
         try {
           await gateway.createResource('workflowrecipes', {
@@ -1799,18 +1817,16 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Phase 2.4-delivery: recompute imagePullSecrets on every upgrade. The
-        // spread of ...existingSpec above carries a prior ref forward, so we
-        // must set it when the new image is evenfire-hosted and DELETE it
-        // otherwise (host change evenfire→GCP-AR, or local→remote) to avoid a
-        // stale, unresolvable pull-secret reference.
-        if (
-          shouldAttachEvenfirePullSecret({
-            isLocal,
-            image: updatedSpec.image,
-            registryUrl: config.registryUrl,
-          })
-        ) {
+        // Recompute imagePullSecrets on every upgrade. The spread of ...existingSpec
+        // above carries a prior ref forward, so we must set it when the new image is
+        // evenfire-hosted and DELETE it otherwise (host change evenfire→GCP-AR, or
+        // local→remote) to avoid a stale, unresolvable pull-secret reference.
+        const attachEvenfirePullSecret = shouldAttachEvenfirePullSecret({
+          isLocal,
+          image: updatedSpec.image,
+          registryUrl: config.registryUrl,
+        })
+        if (attachEvenfirePullSecret) {
           updatedSpec.imagePullSecrets = [{ name: EVENFIRE_REGISTRY_PULL_SECRET_NAME }]
         } else {
           delete updatedSpec.imagePullSecrets
@@ -1823,6 +1839,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         if (preflightErrors.length > 0) {
           res.status(422).json({ errors: preflightErrors })
           return
+        }
+
+        // Ensure the shared pull secret exists before the CRD update references it
+        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud). Runs
+        // AFTER preflight — matching install — so a request that will 422 never mints a
+        // rotate-on-call credential.
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, namespace)
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
         }
 
         // 4. Update credentials if provided
@@ -2114,6 +2144,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         )
 
+        // Ensure the platform pull credential before the CRD that will reference it.
+        // Keyed on the INCOMING spec: an upgrade is exactly how a recipe moves from a
+        // public image to a private one, and without this the new CRD persists and then
+        // fails at pull time while the request returns 200.
+        if (recipeReferencesPlatformImage(recipeSpec)) {
+          try {
+            await ensureRegistryPullSecrets(gateway, platformWorkloadNamespaces())
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
         await updateResourceWithConflictRetry(
           gateway,
           'workflowrecipes',
@@ -2165,8 +2209,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ admin: AdminUserRecord; orgName: string } | null> {
-    if (!config.registryAuthEnabled) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
+      return null
+    }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const sub = (req as UiAuthedRequest).adminAuth?.sub
@@ -2212,6 +2267,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       const { keys } = await listKeys(ctx.admin, ctx.orgName)
       res.json({ org: ctx.orgName, keys })
+    } catch (err) {
+      handleKeysError(err, res, next, ctx.orgName)
+    }
+  })
+
+  // Org container images (+ tags) for the Marketplace images area. Same
+  // owner-gated org resolution + error mapping as the keys read.
+  router.get('/admin/registry/images', keysRateLimit, async (req, res, next) => {
+    const ctx = await prepareKeysRequest(req, res)
+    if (!ctx) return
+    try {
+      const { images } = await listImages(ctx.admin, ctx.orgName)
+      res.json({ org: ctx.orgName, images })
     } catch (err) {
       handleKeysError(err, res, next, ctx.orgName)
     }
@@ -2263,8 +2331,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ orgName: string; actingUserId: string } | null> {
-    if (!config.registryAuthEnabled) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
+      return null
+    }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const actingUserId = (req as UiAuthedRequest).adminAuth?.sub

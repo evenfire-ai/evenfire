@@ -1,9 +1,9 @@
-import { randomBytes } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
-import { assertDbReady, initDb } from '../src/db.js'
-import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
 import type { PoolClient } from 'pg'
+import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
+import { CONTROL_API_MIGRATIONS, assertDbReady, initDb } from '../src/db.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -19,6 +19,7 @@ function quoteIdent(value: string): string {
 }
 
 describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
+  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!.version
   const database = `gfs_readiness_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
@@ -73,10 +74,8 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query(
-        `DELETE FROM schema_migrations WHERE version='0074_gfs_runtime_role_exact_contract'`
-      )
-      await expect(assertDbReady(client)).rejects.toThrow(/0074_gfs_runtime_role_exact_contract/)
+      await client.query(`DELETE FROM schema_migrations WHERE version=$1`, [latestMigration])
+      await expect(assertDbReady(client)).rejects.toThrow(new RegExp(latestMigration))
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()

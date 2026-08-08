@@ -6,7 +6,11 @@
 # desktop-app/test/e2e/* and scripts/e2e/*.sh suites require. User/team and
 # access bindings use the admin API contract. Minikube additionally gets local
 # Desktop password-login credentials, plus optional Plugin Workload SDK demo
-# grants for the grant-driven sandbox-ui notification recipe.
+# grants for the grant-driven sandbox-ui notification recipe. When the recipe
+# is already installed, the same seed also gives the E2E users direct
+# WorkflowRecipe trigger access so the Desktop Apps picker can list its
+# `spec.ui` app. SDK capability grants and Sandbox UI trigger grants are
+# separate authorization contracts.
 #
 # Idempotent: safe to run on every deploy. Re-runs preserve existing state
 # (admin user/team lookup is create-if-missing, PUT /admin/users/:id/
@@ -39,6 +43,9 @@
 #   E2E_PLUGIN_SDK_DEMO_EVENT_TYPE  notification event type (default: fullstack.prompt.notify)
 #   E2E_PLUGIN_SDK_DEMO_CALLER_REF  allowed caller ref (default: backend)
 #   E2E_PLUGIN_SDK_DEMO_MODEL_NAME  promptBridge model grant (default: E2E/CLERUM model)
+#   E2E_PLUGIN_SDK_DEMO_PROVIDER     promptBridge provider (default: E2E/CLERUM provider)
+#   E2E_PLUGIN_SDK_DEMO_TARGET_REF   ordered policy target id (default: primary)
+#   E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT Secret data key owned by provider (derived when omitted)
 #   ADMIN_USERNAME       admin user     (default: admin)
 #   ADMIN_EMAIL          bootstrap email (default: admin@clerum.io)
 #   ADMIN_PASSWORD       admin pass     (REQUIRED — bootstrap or rotated)
@@ -46,6 +53,14 @@
 # ======================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 
 # ─── Config (all overridable) ──────────────────────────────────────────
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
@@ -84,7 +99,7 @@ CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@clerum.io}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" || true)"
 DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 SEED_DESKTOP_LOGIN="${E2E_SEED_DESKTOP_PASSWORDS:-}"
 SEED_PLUGIN_SDK_DEMO_GRANTS="${E2E_SEED_PLUGIN_SDK_DEMO_GRANTS:-}"
@@ -92,7 +107,23 @@ PLUGIN_SDK_DEMO_RECIPE_NS="${E2E_PLUGIN_SDK_DEMO_RECIPE_NS:-sandbox-recipes}"
 PLUGIN_SDK_DEMO_RECIPE_NAME="${E2E_PLUGIN_SDK_DEMO_RECIPE_NAME:-${E2E_SANDBOX_UI_RECIPE:-evenfire-prompt-notify-app}}"
 PLUGIN_SDK_DEMO_EVENT_TYPE="${E2E_PLUGIN_SDK_DEMO_EVENT_TYPE:-fullstack.prompt.notify}"
 PLUGIN_SDK_DEMO_CALLER_REF="${E2E_PLUGIN_SDK_DEMO_CALLER_REF:-backend}"
-PLUGIN_SDK_DEMO_MODEL_NAME="${E2E_PLUGIN_SDK_DEMO_MODEL_NAME:-${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-4.7}}}"
+PLUGIN_SDK_DEMO_PROVIDER="${E2E_PLUGIN_SDK_DEMO_PROVIDER:-}"
+if [ -z "$PLUGIN_SDK_DEMO_PROVIDER" ]; then
+  case "${CLERUM_MODEL_PROVIDER:-}" in
+    openai|claude) PLUGIN_SDK_DEMO_PROVIDER="$CLERUM_MODEL_PROVIDER" ;;
+    *) PLUGIN_SDK_DEMO_PROVIDER="openai" ;;
+  esac
+fi
+PLUGIN_SDK_DEMO_MODEL_NAME="${E2E_PLUGIN_SDK_DEMO_MODEL_NAME:-${E2E_WORKFLOW_MODEL_NAME:-}}"
+if [ -z "$PLUGIN_SDK_DEMO_MODEL_NAME" ]; then
+  case "$PLUGIN_SDK_DEMO_PROVIDER" in
+    openai) PLUGIN_SDK_DEMO_MODEL_NAME="gpt-5.4-mini" ;;
+    claude) PLUGIN_SDK_DEMO_MODEL_NAME="claude-sonnet-4-6" ;;
+    *) die "Plugin SDK demo provider '$PLUGIN_SDK_DEMO_PROVIDER' requires explicit E2E_PLUGIN_SDK_DEMO_MODEL_NAME" ;;
+  esac
+fi
+PLUGIN_SDK_DEMO_TARGET_REF="${E2E_PLUGIN_SDK_DEMO_TARGET_REF:-primary}"
+PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="${E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT:-}"
 PLUGIN_SDK_DEMO_PROMPT_MAX="${E2E_PLUGIN_SDK_DEMO_PROMPT_MAX_REQUESTS:-50}"
 PLUGIN_SDK_DEMO_NOTIFICATION_MAX="${E2E_PLUGIN_SDK_DEMO_MAX_NOTIFICATIONS:-25}"
 
@@ -107,6 +138,33 @@ log()  { echo -e "${CYAN}[seed]${NC} $*"; }
 ok()   { echo -e "  ${GREEN}OK${NC} — $*"; }
 warn() { echo -e "  ${YELLOW}WARN${NC} — $*"; }
 die()  { echo -e "  ${RED}ERROR${NC} — $*" >&2; exit 1; }
+
+if [ -z "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" ]; then
+  case "$PLUGIN_SDK_DEMO_PROVIDER" in
+    openai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="openai-api-key" ;;
+    claude) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="claude-api-key" ;;
+    zai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="zai-api-key" ;;
+    bailian) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="bailian-api-key" ;;
+    vertex) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="vertex-service-account-json" ;;
+    bedrock) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="aws-access-key-id" ;;
+    openrouter) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="openrouter-api-key" ;;
+    gemini) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="gemini-api-key" ;;
+    deepseek) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="deepseek-api-key" ;;
+    groq) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="groq-api-key" ;;
+    together) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="together-api-key" ;;
+    fireworks) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="fireworks-api-key" ;;
+    mistral) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="mistral-api-key" ;;
+    xai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="xai-api-key" ;;
+    cerebras) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="cerebras-api-key" ;;
+    deepinfra) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="deepinfra-api-key" ;;
+    perplexity) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="perplexity-api-key" ;;
+    moonshot) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="moonshot-api-key" ;;
+    nebius) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="nebius-api-key" ;;
+    novita) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="novita-api-key" ;;
+    azure) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="azure-openai-api-key" ;;
+    *) die "Cannot derive a credential slot for provider '$PLUGIN_SDK_DEMO_PROVIDER'; set E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT explicitly" ;;
+  esac
+fi
 
 is_branch_scoped_minikube_context() {
   case "$CONTEXT" in
@@ -239,9 +297,12 @@ seed_plugin_sdk_demo_grants_if_enabled() {
       --arg ns "$PLUGIN_SDK_DEMO_RECIPE_NS" \
       --arg n "$PLUGIN_SDK_DEMO_RECIPE_NAME" \
       --arg caller "$PLUGIN_SDK_DEMO_CALLER_REF" \
+      --arg provider "$PLUGIN_SDK_DEMO_PROVIDER" \
+      --arg target "$PLUGIN_SDK_DEMO_TARGET_REF" \
+      --arg credentialSlot "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" \
       --arg model "$PLUGIN_SDK_DEMO_MODEL_NAME" \
       --argjson max "$PLUGIN_SDK_DEMO_PROMPT_MAX" \
-      '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"promptBridge",allowedModels:[$model],allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:$max}}')" \
+      '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],promptTargets:[{targetRef:$target,provider:$provider,model:$model,credentialSlot:$credentialSlot}],defaultTargetRef:$target,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:$max}}')" \
     "POST /admin/plugin-workload-sdk/grants promptBridge"
 
   admin_post "$CAPI_BASE/admin/plugin-workload-sdk/grants" \
@@ -255,6 +316,18 @@ seed_plugin_sdk_demo_grants_if_enabled() {
       --argjson max "$PLUGIN_SDK_DEMO_NOTIFICATION_MAX" \
       '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"clientNotifications",allowedEventTypes:[$ev],allowedUserRefs:[$u1,$u2],allowedCallers:[$caller],quotaLimits:{maxNotificationsPerRun:$max}}')" \
     "POST /admin/plugin-workload-sdk/grants clientNotifications"
+
+  # Sandbox UI discovery is governed by WorkflowRecipe trigger grants, not by
+  # Plugin Workload SDK capability grants. Seed this only when the target
+  # recipe is already installed; full-stack setup invokes this script before
+  # optional application recipes are applied.
+  if $KC -n "$PLUGIN_SDK_DEMO_RECIPE_NS" get workflowrecipe "$PLUGIN_SDK_DEMO_RECIPE_NAME" >/dev/null 2>&1; then
+    admin_put "$CAPI_BASE/admin/workflows/${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME}/grants" \
+      "$(jq -cn --arg u1 "$USER_ID" --arg u2 "$USER_ID_2" '{userIds:[$u1,$u2]}')" \
+      "PUT /admin/workflows/${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME}/grants"
+  else
+    log "Skipping Sandbox UI trigger grant: ${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME} is not installed yet"
+  fi
 
   ok "Plugin Workload SDK demo grants seeded for $DEV_EMAIL and $DEV_EMAIL_2"
 }
@@ -442,6 +515,19 @@ admin_post() {
   fi
 }
 
+admin_put() {
+  local url="$1" body="$2" label="$3"
+  local resp code
+  resp="$(curl -sS -w '\n%{http_code}' -X PUT "${url}" "${AUTH_CURL[@]}" -d "${body}" || true)"
+  code="$(echo "${resp}" | tail -n1)"
+  if [[ "${code}" =~ ^2 ]]; then
+    ADMIN_PUT_BODY="$(echo "${resp}" | sed '$d')"
+    ok "${label} → ${code}"
+  else
+    die "${label} → ${code} body=$(echo "${resp}" | sed '$d')"
+  fi
+}
+
 put_json() {
   local url="$1" body="$2" label="$3"
   local resp code
@@ -452,6 +538,25 @@ put_json() {
   else
     die "$label → $code body=$(echo "$resp" | sed '$d')"
   fi
+}
+
+# CAS-aware agent-grant replace. The admin agents endpoints
+# (control-api routes/admin/agentGrants.ts) guard writes with a compare-and-swap:
+# the body must carry expectedCurrentAgentNames, or the server rejects it with
+# 428 agent_grant_precondition_required. We GET the current grant first and send
+# its full stored set (active + deleted history) as the precondition, which keeps
+# the seed idempotent across re-runs. (The parallel contexts endpoints have no
+# such guard, so those still use put_json directly.)
+put_agents() {
+  local url="$1" agent="$2" label="$3"
+  ADMIN_GET_BODY=""
+  admin_get "$url" "GET $label"
+  local expected
+  expected="$(echo "$ADMIN_GET_BODY" | jq -c '([.agentNames[]?] + [.deletedAgentNames[]?])')"
+  put_json "$url" \
+    "$(jq -cn --arg a "$agent" --argjson e "$expected" \
+        '{agentNames: [$a], expectedCurrentAgentNames: $e}')" \
+    "$label"
 }
 
 ensure_seed_user_and_team() {
@@ -498,8 +603,7 @@ TEAM_ID="$ENSURE_TEAM_ID"
 # ─── Step 3: Idempotent user↔agent and user↔context bindings ───────────
 
 log "Binding user $DEV_EMAIL ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-put_json "$CAPI_BASE/admin/users/$USER_ID/agents" \
-  "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+put_agents "$CAPI_BASE/admin/users/$USER_ID/agents" "$AGENT_NAME" \
   "PUT /admin/users/:userId/agents"
 
 put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
@@ -509,8 +613,7 @@ put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
 # ─── Step 4: Team-level bindings (if the user has a team) ──────────────
 if [ -n "$TEAM_ID" ]; then
   log "Binding team ${TEAM_ID:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/teams/$TEAM_ID/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/teams/$TEAM_ID/agents" "$AGENT_NAME" \
     "PUT /admin/teams/:teamId/agents"
   put_json "$CAPI_BASE/admin/teams/$TEAM_ID/contexts" \
     "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
@@ -527,8 +630,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
 
   # ─── Step 6: Idempotent user2↔agent and user2↔context bindings ───────
   log "Binding user $DEV_EMAIL_2 ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/users/$USER_ID_2/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/users/$USER_ID_2/agents" "$AGENT_NAME" \
     "PUT /admin/users/:userId2/agents"
 
   put_json "$CAPI_BASE/admin/users/$USER_ID_2/contexts" \
@@ -538,8 +640,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
   # ─── Step 7: Team-level bindings for second user (if the user has a team)
   if [ -n "$TEAM_ID_2" ]; then
     log "Binding team ${TEAM_ID_2:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-    put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" \
-      "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+    put_agents "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" "$AGENT_NAME" \
       "PUT /admin/teams/:teamId2/agents"
     put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/contexts" \
       "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \

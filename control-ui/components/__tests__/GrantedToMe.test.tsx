@@ -5,6 +5,13 @@ import { GrantedToMe } from '../PublisherView/GrantedToMe'
 afterEach(cleanup)
 
 describe('GrantedToMe (presentational)', () => {
+  it('renders a skeleton while inbound grants load', () => {
+    const view = render(<GrantedToMe status="loading" grants={[]} reload={vi.fn()} />)
+    expect(screen.getByRole('status', { name: /loading shared plugins/i })).toBeInTheDocument()
+    expect(screen.queryByText(/^Loading/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('renders inbound grants read-only (no revoke)', () => {
     render(
       <GrantedToMe

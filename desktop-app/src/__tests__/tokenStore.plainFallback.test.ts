@@ -29,6 +29,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await fs.rm(userDataDir, { recursive: true, force: true })
 })
 
@@ -45,6 +46,57 @@ describe('TokenStore plain-text fallback (no keytar, no safeStorage)', () => {
         .then(() => true)
         .catch(() => false)
     ).toBe(true)
+  })
+
+  it('preserves the legacy token when scoped persistence fails during migration', async () => {
+    const legacyFile = path.join(userDataDir, 'session-token.json')
+    const scopedFile = path.join(userDataDir, `session-token-${ENV_A}.json`)
+    await fs.writeFile(legacyFile, JSON.stringify({ token: 'legacy-token' }))
+    const originalRename = fs.rename.bind(fs)
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) === scopedFile) {
+        const error = new Error('disk full') as NodeJS.ErrnoException
+        error.code = 'ENOSPC'
+        throw error
+      }
+      return originalRename(from, to)
+    })
+
+    await expect(new TokenStore().getSessionToken(ENV_A)).resolves.toBeNull()
+
+    expect(JSON.parse(await fs.readFile(legacyFile, 'utf8'))).toEqual({
+      token: 'legacy-token',
+    })
+    await expect(fs.access(scopedFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await fs.readdir(userDataDir)).filter(name => name.endsWith('.tmp'))).toEqual([])
+  })
+
+  it('flushes the scoped token file and parent directory before acknowledging persistence', async () => {
+    const originalOpen = fs.open.bind(fs)
+    const syncedPaths: string[] = []
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+      return {
+        writeFile: (value: Parameters<typeof handle.writeFile>[0]) => handle.writeFile(value),
+        sync: async () => {
+          syncedPaths.push(filePath)
+          await handle.sync()
+        },
+        close: () => handle.close(),
+      } as Awaited<ReturnType<typeof fs.open>>
+    })
+
+    await new TokenStore().setSessionToken('tok-a', ENV_A)
+
+    expect(
+      syncedPaths.some(
+        filePath =>
+          filePath.startsWith(path.join(userDataDir, `session-token-${ENV_A}.json.`)) &&
+          filePath.endsWith('.tmp')
+      )
+    ).toBe(true)
+    expect(syncedPaths).toContain(userDataDir)
   })
 
   it('does not leak the plain-text token across environments', async () => {

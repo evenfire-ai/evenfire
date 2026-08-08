@@ -42,17 +42,11 @@ async function fillIdentity(name = 'brave-search') {
   )
 }
 
-function continueToRuntime() {
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-}
-
-function continueToNetwork() {
-  continueToRuntime()
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+function openAdvanced() {
+  fireEvent.click(screen.getByText('Advanced options'))
 }
 
 function continueToSecrets() {
-  continueToNetwork()
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 }
 
@@ -86,17 +80,30 @@ describe('CreateMcpServerForm — render', () => {
     expect(screen.getByRole('option', { name: 'research' })).toBeInTheDocument()
   })
 
-  it('uses four connector steps', () => {
+  it('uses two connector steps', () => {
     const { container } = render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(4)
+    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(2)
+    expect(screen.queryByText('Step 1 of 3')).not.toBeInTheDocument()
     expect(screen.queryByText('Step 1 of 4')).not.toBeInTheDocument()
-    expect(screen.queryByText('Step 1 of 5')).not.toBeInTheDocument()
+  })
+
+  it('hides the advanced options by default and reveals them on toggle', async () => {
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity()
+    const summary = screen.getByText('Advanced options')
+    const details = summary.closest('details')
+    expect(details).not.toBeNull()
+    expect(details).not.toHaveAttribute('open')
+
+    fireEvent.click(summary)
+
+    expect(details).toHaveAttribute('open')
   })
 
   it('shows the Port field when transport is streamableHttp (default)', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToRuntime()
+    openAdvanced()
     expect(screen.getByDisplayValue('3000')).toBeInTheDocument()
   })
 })
@@ -130,7 +137,7 @@ describe('CreateMcpServerForm — transport', () => {
   it('hides the Port field when transport is set to stdio', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToRuntime()
+    openAdvanced()
     // Port defaults to 3000 and is visible initially
     expect(screen.getByDisplayValue('3000')).toBeInTheDocument()
 
@@ -238,7 +245,7 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits exact-host egress bindings when configured', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'exact-host' },
@@ -267,7 +274,7 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits public-web as one explicit egress class binding', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'public-web' },
@@ -288,7 +295,7 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits exact-cidr egress bindings when configured', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'exact-cidr' },

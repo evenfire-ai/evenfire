@@ -1,4 +1,12 @@
-import { BrowserWindow, IpcMainInvokeEvent, Notification, app, dialog, ipcMain } from 'electron'
+import {
+  BrowserWindow,
+  IpcMainInvokeEvent,
+  Notification,
+  app,
+  clipboard,
+  dialog,
+  ipcMain,
+} from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -31,9 +39,73 @@ function sanitizeSubjectKeys(input: unknown): string[] {
 
 function sanitizeOptionalInteger(input: unknown): number | undefined {
   if (input === undefined || input === null || input === '') return undefined
-  const value = Number(input)
-  if (!Number.isInteger(value)) throw new Error('Invalid integer')
-  return value
+  if (typeof input !== 'number' || !Number.isSafeInteger(input)) {
+    throw new Error('Invalid integer')
+  }
+  return input
+}
+
+function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
+  if (input === undefined || input === null || input === '') return undefined
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < 1) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return input
+}
+
+export function sanitizeChatLoadWindow(
+  limitInput: unknown,
+  offsetInput: unknown
+): { limit?: number; offset?: number } {
+  const limit = sanitizeOptionalInteger(limitInput)
+  const offset = sanitizeOptionalInteger(offsetInput)
+  if (limit !== undefined && (limit < 1 || limit > 1000)) {
+    throw new Error('Invalid chat message limit')
+  }
+  if (offset !== undefined && offset < 0) {
+    throw new Error('Invalid chat message offset')
+  }
+  return {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(offset !== undefined ? { offset } : {}),
+  }
+}
+
+function sanitizeSessionsListQuery(
+  input: import('./types.js').SessionsListQuery | undefined
+): import('./types.js').SessionsListQuery {
+  const agent = sanitizeString(input?.agent)
+  const cursor = sanitizeString(input?.cursor)
+  if (agent && (agent.length > 200 || agent.includes(':'))) {
+    throw new Error('Invalid session agent')
+  }
+  if (cursor.length > 2048) throw new Error('Invalid sessions cursor')
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid sessions limit')
+  return {
+    ...(agent ? { agent } : {}),
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 100) } : {}),
+    ...(cursor ? { cursor } : {}),
+  }
+}
+
+function sanitizeSessionMessagesQuery(
+  input: import('./types.js').SessionMessagesQuery | undefined
+): import('./types.js').SessionMessagesQuery {
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  const beforeTurn = sanitizeOptionalInteger(input?.beforeTurn)
+  const afterTurn = sanitizeOptionalInteger(input?.afterTurn)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid messages limit')
+  if (beforeTurn !== undefined && beforeTurn < 1) throw new Error('Invalid beforeTurn')
+  if (afterTurn !== undefined && afterTurn < 0) throw new Error('Invalid afterTurn')
+  if (beforeTurn !== undefined && afterTurn !== undefined) {
+    throw new Error('beforeTurn and afterTurn are mutually exclusive')
+  }
+  return {
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 200) } : {}),
+    ...(beforeTurn !== undefined ? { beforeTurn } : {}),
+    ...(afterTurn !== undefined ? { afterTurn } : {}),
+  }
 }
 
 function runScopedArtifactDownloadName(runId: string, artifactName: string): string {
@@ -458,9 +530,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('approvals:listPending', async (event, payload?: { limit?: number }) => {
     assertTrustedSender(event)
-    return service.listPendingWorkflowApprovals(
-      typeof payload?.limit === 'number' ? payload.limit : 20
-    )
+    const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'pending approvals limit')
+    return service.listPendingWorkflowApprovals(limit ?? 20)
   })
   ipcMain.handle(
     'approvals:decide',
@@ -696,8 +767,9 @@ export function registerIpcHandlers(service: AppService): void {
       const hostRefs = Array.isArray(payload?.hostRefs)
         ? payload.hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'host activity limit')
       return service.getHostActivity(hostRef, {
-        limit: typeof payload?.limit === 'number' ? payload.limit : undefined,
+        limit,
         sinceEventId: sanitizeString(payload?.sinceEventId) || undefined,
         hostRefs,
       })
@@ -918,11 +990,22 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'rpc:listSessions',
-    async (event, payload: { hostRef: string; hostRefs?: string[] }) => {
+    async (
+      event,
+      payload: {
+        hostRef: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionsListQuery
+      }
+    ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
       if (!hostRef) throw new Error('hostRef is required')
-      return service.listSessions(hostRef, payload?.hostRefs)
+      return service.listSessions(
+        hostRef,
+        payload?.hostRefs,
+        sanitizeSessionsListQuery(payload?.query)
+      )
     }
   )
 
@@ -930,7 +1013,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:loadSessionMessages',
     async (
       event,
-      payload: { hostRef: string; agent: string; chatId: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        agent: string
+        chatId: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionMessagesQuery
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -939,7 +1028,13 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !agent || !chatId) {
         throw new Error('hostRef, agent, and chatId are required')
       }
-      return service.loadSessionMessages(hostRef, agent, chatId, payload?.hostRefs)
+      return service.loadSessionMessages(
+        hostRef,
+        agent,
+        chatId,
+        payload?.hostRefs,
+        sanitizeSessionMessagesQuery(payload?.query)
+      )
     }
   )
 
@@ -1045,7 +1140,8 @@ export function registerIpcHandlers(service: AppService): void {
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-      return requireChatStore().loadMessages(agentRef, chatId, payload?.limit, payload?.offset)
+      const { limit, offset } = sanitizeChatLoadWindow(payload?.limit, payload?.offset)
+      return requireChatStore().loadMessages(agentRef, chatId, limit, offset)
     }
   )
 
@@ -1067,13 +1163,45 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:replaceMessages',
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        messages: unknown[]
+        options?: import('./types.js').ReplaceChatMessagesOptions
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      const activeTaskIds = Array.isArray(payload?.options?.activeTaskIds)
+        ? payload.options.activeTaskIds
+            .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+            .slice(0, 32)
+        : undefined
+      await requireChatStore().replaceMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[],
+        {
+          activeTaskIds,
+        }
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'chat:backfillCounters',
     async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
-      await requireChatStore().replaceMessages(
+      await requireChatStore().backfillChatCounters(
         agentRef,
         chatId,
         messages as import('./types.js').ChatMessage[]
@@ -1210,7 +1338,8 @@ export function registerIpcHandlers(service: AppService): void {
       const ns = sanitizeString(payload?.ns)
       const name = sanitizeString(payload?.name)
       if (!ns || !name) throw new Error('ns and name are required')
-      return service.listWorkflowRuns(ns, name, payload?.limit)
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'workflow runs limit')
+      return service.listWorkflowRuns(ns, name, limit)
     }
   )
 
@@ -1332,6 +1461,7 @@ export function registerIpcHandlers(service: AppService): void {
         recipeNs: string
         recipeName: string
         defaultPath?: string
+        routePath?: string
         bounds: unknown
       }
     ) => {
@@ -1351,6 +1481,7 @@ export function registerIpcHandlers(service: AppService): void {
         recipeNs,
         recipeName,
         defaultPath: typeof payload?.defaultPath === 'string' ? payload.defaultPath : undefined,
+        routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
         onClosed: () => {
@@ -1373,6 +1504,14 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('sandboxUi:reload', async event => {
     assertTrustedSender(event)
     await service.reloadSandboxUi()
+  })
+
+  ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {
+    assertTrustedSender(event)
+    const teamId = sanitizeString(payload?.teamId)
+    const result = await service.createSandboxUiDeepLink(teamId || undefined)
+    clipboard.writeText(result.url)
+    return result
   })
 
   ipcMain.handle('sandboxUi:setBounds', async (event, payload: { bounds: unknown }) => {

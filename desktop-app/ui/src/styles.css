@@ -6057,6 +6057,24 @@ h3 {
   gap: var(--space-2-5);
 }
 
+.chat-history-page-control {
+  display: flex;
+  justify-content: center;
+  padding-block: var(--space-1);
+}
+
+.virtualized-message-chunk {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 720px;
+}
+
+.chat-thread-dedicated .virtualized-message-chunk {
+  gap: var(--space-2-5);
+}
+
 .chat-empty-state {
   align-content: center;
   justify-items: center;
@@ -6794,6 +6812,23 @@ h3 {
 
 .composer-input-shell {
   position: relative;
+  display: grid;
+  gap: var(--space-1-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.composer-textarea-viewport {
+  overflow: hidden;
+  border-radius: calc(var(--radius-md) - 1px);
+}
+
+.composer-input-shell:focus-within {
+  border-color: rgba(var(--focus-rgb), 0.76);
+  box-shadow:
+    0 0 0 1px rgba(var(--focus-rgb), 0.56),
+    0 0 0 3px rgba(var(--focus-rgb), 0.22);
 }
 
 .composer-input-shell--drag-active textarea {
@@ -6802,8 +6837,19 @@ h3 {
 }
 
 .composer-input-shell textarea {
-  padding-right: 12px;
-  padding-bottom: 40px;
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow-y: hidden;
+}
+
+.composer-input-shell textarea:focus {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .composer-drop-overlay {
@@ -6822,14 +6868,13 @@ h3 {
 }
 
 .composer-input-actions {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1-5);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.16);
 }
 
 .composer textarea::placeholder {
@@ -10784,14 +10829,7 @@ pre {
     align-items: stretch;
   }
 
-  .composer-input-shell textarea {
-    padding-right: 12px;
-    padding-bottom: 72px;
-  }
-
   .composer-input-actions {
-    left: 10px;
-    right: 10px;
     justify-content: flex-end;
     flex-wrap: wrap;
   }
@@ -12273,6 +12311,7 @@ pre {
 
 .sandbox-ui-conversation-btn,
 .sandbox-ui-close-btn,
+.sandbox-ui-copy-link-btn,
 .sandbox-ui-refresh-btn {
   display: inline-flex;
   align-items: center;
@@ -12296,6 +12335,7 @@ pre {
 
 .sandbox-ui-conversation-btn svg,
 .sandbox-ui-close-btn svg,
+.sandbox-ui-copy-link-btn svg,
 .sandbox-ui-refresh-btn svg {
   width: 16px;
   height: 16px;

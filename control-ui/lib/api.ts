@@ -102,16 +102,22 @@ function formatApiError(res: Response, text: string): Error {
             ? 'Desktop App password must be between 8 and 256 characters.'
             : detail === 'password must be between 8 and 256 characters'
               ? 'Password must be between 8 and 256 characters.'
-              : // Exact match is correct HERE: control-ui calls control-api directly,
-                // so a member-registration 503 arrives as the bare { error: '<code>' }
-                // body. profile-ui reaches these same codes through external-rest-api,
-                // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                // so it must use .includes() instead — the two matchers differ on purpose.
-                detail === 'member_registration_unavailable'
-                ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
-                : detail === 'member_registration_misconfigured'
-                  ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                  : detail
+              : detail === 'precondition_failed'
+                ? 'This item changed since it was loaded. Reload the page, review the latest state, and try again.'
+                : detail === 'agent_grant_precondition_required'
+                  ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
+                  : detail === 'deleted_agent_history_limit_exceeded'
+                    ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
+                    : // Exact match is correct HERE: control-ui calls control-api directly,
+                      // so a member-registration 503 arrives as the bare { error: '<code>' }
+                      // body. profile-ui reaches these same codes through external-rest-api,
+                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
+                      // so it must use .includes() instead — the two matchers differ on purpose.
+                      detail === 'member_registration_unavailable'
+                      ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+                      : detail === 'member_registration_misconfigured'
+                        ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+                        : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
@@ -786,9 +792,26 @@ export type HostResource = {
     conditions?: HostStatusCondition[]
   }
 }
+/**
+ * Condition entry on `status.conditions[]` of the McpServer CRD, as written by
+ * the HCC reconciler (host-context-controller/src/reconciler.ts). `status` is
+ * the K8s-standard string tri-state, not a boolean. `lastTransitionTime` only
+ * advances when `status` itself changes (writeStatusCondition) — the UI relies
+ * on that to tell "this rollout" apart from a stale prior condition (issue #223,
+ * Fase 3 requisito 6).
+ */
+export type McpServerCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason: string
+  message: string
+  lastTransitionTime: string
+}
+
 export type McpServerResource = {
   metadata?: Metadata
   spec?: AnyRecord
+  status?: { conditions?: McpServerCondition[] }
 }
 export type ContextUser = {
   id: string
@@ -815,10 +838,14 @@ export type TeamContextAccess = {
 export type UserAgentAccess = {
   userId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamAgentAccess = {
   teamId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamMember = {
   id: string
@@ -859,6 +886,16 @@ export type AdminUser = {
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.
 export type HostSecretResource = { name: string; keys?: string[] }
+
+/**
+ * Host/LLM Secret metadata only. `keys` are Kubernetes data-key names; values
+ * are never returned. SDK target editors use this rather than recipe-scoped
+ * sandbox secrets because promptBridge credentials resolve from host Secrets.
+ */
+export async function listLlmHostSecrets() {
+  return apiGet('/api/v1/admin/secrets') as Promise<{ items?: HostSecretResource[] }>
+}
+
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -1307,6 +1344,29 @@ export async function deleteMcpSecret(name: string) {
   }>
 }
 
+/**
+ * Rotates one or more keys on an EXISTING MCP Server Secret (issue #223).
+ * `data` carries only the keys the operator wants to rotate — every other key
+ * already on the Secret survives untouched (server-side merge-patch). The
+ * response is names-only: `keys` lists the resulting key names (never
+ * values), and `affectedConnectors` names every McpServer whose
+ * `spec.envSecret.name` matches this Secret, so the UI can tell the operator
+ * exactly what is about to restart. Saving does NOT restart anything itself —
+ * the HCC's SecretInformer reacts to the Secret change and rolls the affected
+ * Deployments; the caller must poll getMcpServer() for DeploymentReady to know
+ * whether the rollout actually landed (see control-ui/components/UpdateConnectorCredentials).
+ */
+export async function updateMcpSecret(name: string, data: Record<string, string>) {
+  return apiSend('PUT', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`, {
+    data,
+  }) as Promise<{
+    name: string
+    namespace: string
+    keys: string[]
+    affectedConnectors: string[]
+  }>
+}
+
 export type RecipeSecretOwnership =
   | { kind: 'shared' }
   | { kind: 'owner-recipe'; recipeName: string }
@@ -1596,9 +1656,10 @@ export async function deleteLlmModel(id: string) {
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
 // Discovery pulls the public models.dev catalog into `llm_allowed_models` as
 // `source='discovery', enabled=false`. The operator reviews and enables from a
-// fresh catalog. These wrappers drive the /llm-models/discovery review surface;
-// enable/disable/delete of the discovered rows reuse the existing update/delete
-// routes above (no dedicated discovery mutation endpoint).
+// fresh catalog. These wrappers drive the Discovery Review section on the
+// unified /llm-models surface; enable/disable/delete of discovered rows reuse
+// the existing update/delete routes above (no dedicated discovery mutation
+// endpoint).
 
 // `live` = fetched from the upstream catalog; `vendored` = served from the
 // bundled snapshot fallback (upstream unreachable).
@@ -1800,9 +1861,14 @@ export async function getAdminUserAgents(userId: string) {
   ) as Promise<UserAgentAccess>
 }
 
-export async function updateAdminUserAgents(userId: string, agentNames: string[]) {
+export async function updateAdminUserAgents(
+  userId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<UserAgentAccess>
 }
 
@@ -1842,9 +1908,14 @@ export async function getAdminTeamAgents(teamId: string) {
   ) as Promise<TeamAgentAccess>
 }
 
-export async function updateAdminTeamAgents(teamId: string, agentNames: string[]) {
+export async function updateAdminTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<TeamAgentAccess>
 }
 
@@ -2859,7 +2930,7 @@ export type GrantedToMeItem = {
 // tests, so normalize defensively here — accept camelCase OR snake_case — and
 // hand components one canonical camelCase shape. This keeps the mocked→live
 // transition safe regardless of which the registry emits, and avoids silent
-// empty lists (ShareAccessPanel filters on pluginName) or "@undefined" rows.
+// empty lists (GrantAccessModal filters on pluginName) or "@undefined" rows.
 type RawOrgGrant = {
   id?: string
   pluginName?: string
@@ -3126,6 +3197,14 @@ export type PluginWorkloadSdkModelPolicy = {
   maxCostUsd?: number
 }
 
+export type PluginWorkloadSdkPromptTarget = {
+  targetRef: string
+  provider: string
+  model: string
+  // Identity of a provider-owned secret data key; never a secret value.
+  credentialSlot: string
+}
+
 export type PluginWorkloadSdkQuotaLimits = {
   maxRequestsPerRun?: number
   maxNotificationsPerRun?: number
@@ -3140,8 +3219,9 @@ export type PluginWorkloadSdkGrant = {
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
   // Explicit provider bound to a promptBridge grant (R1). `null` for older
-  // grants written before the column existed (and for clientNotifications) —
-  // the form falls back to inferProviderFromModels when reading a null provider.
+  // grants written before the column existed (and for clientNotifications).
+  // Null promptBridge grants are legacy/unreviewed; the editor must require an
+  // explicit operator resave and never infer a routable provider from models.
   provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
@@ -3150,8 +3230,32 @@ export type PluginWorkloadSdkGrant = {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
+  revocationId: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
+}
+
+export type PluginWorkloadSdkLegacyGrantInventoryItem = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export type PluginWorkloadSdkLegacyGrantInventory = {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
 }
 
 export type PluginWorkloadSdkGrantInput = {
@@ -3167,6 +3271,8 @@ export type PluginWorkloadSdkGrantInput = {
   allowedCallers?: string[]
   quotaLimits?: PluginWorkloadSdkQuotaLimits
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export type PluginWorkloadSdkQuotaCounter = {
@@ -3210,6 +3316,16 @@ export async function listPluginWorkloadSdkGrants(filter?: {
     recipeNamespace: filter?.recipeNamespace,
     recipeName: filter?.recipeName,
   }) as Promise<{ items?: PluginWorkloadSdkGrant[] }>
+}
+
+export async function getPluginWorkloadSdkLegacyInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  return apiGet('/api/v1/admin/plugin-workload-sdk/legacy-inventory', {
+    recipeNamespace: filter?.recipeNamespace,
+    recipeName: filter?.recipeName,
+  }) as Promise<PluginWorkloadSdkLegacyGrantInventory>
 }
 
 export async function upsertPluginWorkloadSdkGrant(
@@ -3355,29 +3471,66 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
 }
 
+// ─── Org container images (real repos + tags from the registry) ────────────
+export type OrgImage = {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
+export async function listOrgImages(): Promise<{ org: string; images: OrgImage[] }> {
+  const raw = (await registryCodedRequest('GET', '/api/v1/admin/registry/images')) as {
+    org?: string
+    images?: OrgImage[]
+  }
+  return { org: raw?.org ?? '', images: raw?.images ?? [] }
+}
+
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
-// Drives control-api's /api/v1/admin/registry/connect endpoints (Plan A1 Task 7,
-// control-api/src/routes/admin/registryConnect.ts). GET polls the registry status
-// endpoint, so state ∈ disconnected|pending|approved|rejected|connected — the panel
-// renders one view per state. Uses registryCodedRequest so it can branch on err.code
-// (not_self_hosted, already_connected, not_pending, claim_expired, claim_rejected).
+// Drives control-api's /api/v1/admin/registry/connect endpoints
+// (control-api/src/routes/admin/registryConnect.ts). GET is READ-ONLY and polls
+// the registry status endpoint, so state ∈ disconnected | pending | connecting |
+// approved | rejected | connected — the panel renders one view per state.
 //
-// GET fields by state: connected → { deploymentId, org }; pending/approved/rejected
-// → { deploymentId, requestedOrgName }; disconnected → {}. All fields optional below.
-// There is NO rejection_reason in the contract.
+// `connecting` means the registry AUTO-APPROVED (open registration) and the
+// inline claim has not completed. It is finished by recoverRegistryConnection(),
+// never by pasting a token — under auto-approval no operator ever sees one.
+// `approved` keeps its original meaning: an operator approved and a human must
+// paste the token they were given out of band.
+//
+// GET fields by state: connected → { deploymentId, org, authEnabled };
+// connecting → { deploymentId, requestedOrgName, authEnabled, recoveryError? };
+// pending/approved/rejected → { deploymentId, requestedOrgName };
+// disconnected → {}. There is NO rejection_reason in the contract.
+//
+// Uses registryCodedRequest so callers can branch on err.code: not_self_hosted,
+// already_connected, recovery_in_progress, not_pending, not_recoverable,
+// org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
+// org_blocklisted, claim_expired, claim_rejected, already_claimed,
+// deployment_suspended, client_unavailable, connection_superseded.
 
 export type RegistryConnectionState =
   | 'disconnected'
   | 'pending'
+  | 'connecting'
   | 'approved'
   | 'rejected'
   | 'connected'
+
+export type RegistryRecoveryError =
+  | 'already_claimed'
+  | 'deployment_suspended'
+  | 'client_unavailable'
+  | 'connection_superseded'
+  | 'claim_expired'
+
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string
   requestedOrgName?: string
   org?: string
   authEnabled?: boolean
+  recoveryError?: RegistryRecoveryError
 }
 
 export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {
@@ -3407,4 +3560,11 @@ export async function submitRegistryClaim(input: {
 
 export async function disconnectRegistryConnection(): Promise<void> {
   await registryCodedRequest('DELETE', '/api/v1/admin/registry/connect')
+}
+
+export async function recoverRegistryConnection(): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest(
+    'POST',
+    '/api/v1/admin/registry/connect/recover'
+  ) as Promise<RegistryConnectionStatus>
 }

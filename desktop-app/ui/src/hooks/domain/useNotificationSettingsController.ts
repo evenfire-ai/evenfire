@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NOTIFICATION_SETTINGS_STORAGE_KEY } from '@constants/notificationSettings'
+import { useBrowserWindowState } from '@hooks/useBrowserWindowState'
 import {
   sanitizeNotificationSettings,
   shouldDeliverChatResponseNotification,
@@ -40,16 +41,12 @@ function readInitialNotificationSettings(): NotificationSettings {
   }
 }
 
-function isAppFocused(): boolean {
-  if (typeof document === 'undefined') return true
-  return document.visibilityState === 'visible' && document.hasFocus()
-}
-
 export function useNotificationSettingsController() {
   const [settings, setSettings] = useState<NotificationSettings>(readInitialNotificationSettings)
   const [desktopNotificationPermission, setDesktopNotificationPermission] =
     useState<DesktopNotificationPermission>(readDesktopNotificationPermission)
   const desktopNotificationHandlersRef = useRef<Map<string, DesktopNotificationHandler>>(new Map())
+  const { isAppFocused } = useBrowserWindowState()
 
   const runDesktopNotificationHandler = useCallback(
     (handler: (() => void | Promise<void>) | undefined, warning: string) => {
@@ -243,10 +240,10 @@ export function useNotificationSettingsController() {
   const canDeliverChatResponseNotification = useCallback(
     (channel: 'inApp' | 'desktop', context: { activeChatVisible: boolean }) =>
       shouldDeliverChatResponseNotification(settings[channel], {
-        appFocused: isAppFocused(),
+        appFocused: isAppFocused,
         activeChatVisible: context.activeChatVisible,
       }),
-    [settings]
+    [isAppFocused, settings]
   )
 
   return {

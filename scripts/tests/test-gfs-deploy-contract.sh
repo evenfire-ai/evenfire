@@ -22,7 +22,7 @@ provision_contract="$(sed -n '/verify_role_contract()/,/^}/p' deploy/scripts/pro
 [[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'team_members', 'status', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
 writer_case="$(sed -n '/rotate-writer)/,/;;/p' deploy/scripts/provision-gfs-db.sh)"
 [[ "$writer_case" == *'reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true'* && "$writer_case" != *'gfsc-reader'* ]] || fail 'writer rollout scope'
-runtime_script="$(cat deploy/scripts/provision-gfs-runtime.sh)"
+runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.sh)"
 [[ "$runtime_script" == *'reconcile-gfs-deploy-credentials.sh'* ]] \
   || fail 'post-overlay runtime path does not reconcile staged credentials'
 [[ "$runtime_script" == *'rollout status deployment/gfsc-writer'* && \
@@ -92,9 +92,13 @@ assert_minikube_upgrade_classifier() {
      "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
-assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'kustomize deploy/overlays/minikube'
+# The block ends where the overlay apply begins. That apply no longer names a
+# fixed overlay: it resolves one from the mode the cluster's images were
+# acquired in (scripts/minikube/image-mode.sh), so the resolver call is the
+# anchor.
+assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
-assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'make minikube-build-images'
+assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'incremental_build_images'
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
@@ -115,9 +119,11 @@ reset_full_overlay="$(grep -n 'kubectl kustomize .* | .* apply -f -' <<<"$full_s
 pre_gate_crds="$(grep -n 'make minikube-deploy-crds' scripts/minikube/pre-gate-sync.sh | cut -d: -f1)"
 pre_gate_writer="$(grep -n 'apply-gfs-writer-secret.sh' scripts/minikube/pre-gate-sync.sh | head -1 | cut -d: -f1)"
 pre_gate_overlay="$(grep -n 'make minikube-deploy-all' scripts/minikube/pre-gate-sync.sh | head -1 | cut -d: -f1)"
+pre_gate_migration="$(grep -n 'run-control-api-db-migration.sh' scripts/minikube/pre-gate-sync.sh | head -1 | cut -d: -f1)"
 [[ "$(wc -l <<<"$pre_gate_crds" | tr -d ' ')" -eq 1 ]] || fail 'pre-gate must apply CRDs exactly once'
-[[ "$pre_gate_crds" -lt "$pre_gate_writer" && "$pre_gate_writer" -lt "$pre_gate_overlay" ]] \
-  || fail 'pre-gate must apply namespaces/CRDs before GFS Secrets and overlay'
+[[ "$pre_gate_crds" -lt "$pre_gate_writer" && "$pre_gate_writer" -lt "$pre_gate_migration" && \
+   "$pre_gate_migration" -lt "$pre_gate_overlay" ]] \
+  || fail 'pre-gate must apply CRDs, secrets, and schema migration before the consumer overlay'
 # The GFS writer Secret must never be applied into a missing namespace. In the
 # OSS deploy model, namespaces are applied by the prior deploy-crds/pre-gate step
 # (asserted above for pre-gate-sync: CRDs -> writer Secret -> overlay), and

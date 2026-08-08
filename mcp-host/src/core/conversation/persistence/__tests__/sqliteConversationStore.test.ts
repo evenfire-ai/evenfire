@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConversationState, type PendingApproval, type TraceContextV1 } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { CacheOverflowError } from '../pinnedLruMap'
@@ -226,6 +226,315 @@ describe('SqliteConversationStore — session token counters', () => {
       // derived from cache columns being 0 → false
       expect(reloaded?.cacheTokensReported).toBe(false)
       expect(reloaded?.input_tokens).toBe(30)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+})
+
+describe('SqliteConversationStore — session summary listing', () => {
+  it('pages summaries from durable rows without hydrating full transcripts', async () => {
+    const handle = await freshStore({ cacheSize: 8 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const sessions = [
+        { key: 'u-1:rpc:agent-x:chat-1', timestamp: 100 },
+        { key: 'u-1:rpc:agent-x:chat-2', timestamp: 200 },
+        { key: 'u-1:rpc:agent-y:chat-3', timestamp: 300, awaitingApproval: true },
+        // Invalid legacy key: it must be removed before LIMIT so it cannot
+        // consume the pagination probe row and end the catalog early.
+        { key: 'u-1:rpc:malformed', timestamp: 400 },
+      ]
+
+      for (const session of sessions) {
+        const conv = await manager.getOrCreate(session.key)
+        await manager.startTurn(conv, `hello ${session.key}`, `task-${session.timestamp}`)
+        if (session.awaitingApproval) {
+          await manager.suspendForApproval(conv, {
+            request_id: 'req-chat-3',
+            tool_name: 'shell_exec',
+            tool_call_id: 'tc-chat-3',
+            parameters: {},
+            description: 'approve test',
+            context_snapshot: [],
+          })
+        } else {
+          manager.recordSessionUsage(conv, {
+            input_tokens: session.timestamp,
+            output_tokens: session.timestamp / 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          })
+          await manager.completeTurn(conv, `done ${session.key}`)
+        }
+        await handle.persistQueue.drainSessionKey(session.key)
+        handle.worker.db
+          .prepare('UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?')
+          .run(session.timestamp - 1, session.timestamp, conv.id)
+        handle.worker.db
+          .prepare('UPDATE messages SET timestamp = ? WHERE session_id = ?')
+          .run(session.timestamp, conv.id)
+      }
+
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, ?)`
+        )
+        .run('degenerate-newest', 'u-1:rpc::bad', 'u-1', 399, 400)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, ?)`
+        )
+        .run('degenerate-empty-chat', 'u-1:rpc:agent-x:', 'u-1', 398, 399)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, NULL)`
+        )
+        .run('legacy-null-activity', 'u-1:rpc:agent-z:legacy-null', 'u-1', 50)
+
+      const firstPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', { limit: 2 })
+      expect(firstPage.map(session => session.chatId)).toEqual(['chat-3', 'chat-2'])
+      expect(firstPage[0]).toMatchObject({
+        agent: 'agent-y',
+        state: ConversationState.AwaitingApproval,
+        activeTaskId: 'task-300',
+        pendingApproval: {
+          request_id: 'req-chat-3',
+          tool_name: 'shell_exec',
+        },
+        turnCount: 1,
+        messageCount: 1,
+      })
+      expect(firstPage[1]).toMatchObject({
+        agent: 'agent-x',
+        state: ConversationState.Idle,
+        turnCount: 1,
+        messageCount: 2,
+        input_tokens: 200,
+        output_tokens: 100,
+        cacheTokensReported: true,
+      })
+      expect(handle.store['cache'].size()).toBe(0)
+
+      const agentPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
+        limit: 2,
+      })
+      expect(agentPage.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-2'],
+        ['agent-x', 'chat-1'],
+      ])
+
+      const colonKey = 'u-1:rpc:agent-x:chat:with:colons'
+      const colonConversation = await manager.getOrCreate(colonKey)
+      await manager.startTurn(colonConversation, 'colon chat', 'task-colon')
+      await manager.completeTurn(colonConversation, 'done')
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const colonPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
+        limit: 10,
+      })
+      expect(colonPage.find(session => session.key === colonKey)).toMatchObject({
+        agent: 'agent-x',
+        chatId: 'chat:with:colons',
+      })
+
+      const rpcAgentKey = 'u-1:rpc:rpc:chat-rpc'
+      const rpcAgentConversation = await manager.getOrCreate(rpcAgentKey)
+      await manager.startTurn(rpcAgentConversation, 'rpc agent chat', 'task-rpc-agent')
+      await manager.completeTurn(rpcAgentConversation, 'done')
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const rpcAgentPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:rpc:', {
+        agent: 'rpc',
+        limit: 10,
+      })
+      expect(rpcAgentPage.find(session => session.key === rpcAgentKey)).toMatchObject({
+        agent: 'rpc',
+        chatId: 'chat-rpc',
+      })
+
+      const secondPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', {
+        limit: 2,
+        cursor: {
+          updatedAt: firstPage[1]!.lastActivityAt,
+          key: firstPage[1]!.key,
+        },
+      })
+      expect(secondPage.map(session => session.chatId)).toEqual(['chat-1', 'legacy-null'])
+      expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('fails closed on persisted ownership mismatches with overlapping key prefixes', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const callerUserId = 'subject'
+      const ownerUserId = 'subject:rpc:embedded'
+      const key = `${ownerUserId}:rpc:agent-x:chat-1`
+      const conversation = await manager.getOrCreate(key, {
+        userId: ownerUserId,
+        channelType: 'rpc',
+        channelId: 'agent-x',
+        threadId: 'chat-1',
+        source: 'rpc',
+      })
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(key)
+
+      await expect(
+        handle.store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
+      handle.store['cache'].clear()
+
+      const ownerSummaries = await handle.store.listSessionSummariesByPrefix(`${ownerUserId}:rpc:`)
+      expect(ownerSummaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
+
+      const callerSummaries = await handle.store.listSessionSummariesByPrefix(
+        `${callerUserId}:rpc:`
+      )
+      expect(callerSummaries).toEqual([])
+      await expect(
+        handle.store.getSessionMessagesByKey(key, `${callerUserId}:rpc:`)
+      ).resolves.toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('preserves a trailing colon in a chat id under an unscoped prefix', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const key = 'u-1:rpc:agent-x:chat-trailing:'
+      const conversation = await manager.getOrCreate(key)
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(key)
+      handle.store['cache'].clear()
+
+      const summaries = await handle.store.listSessionSummariesByPrefix('u-1:rpc:')
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-trailing:'],
+      ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('fails closed instead of treating unsafe limits as unbounded reads', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conversation = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.store['cache'].clear()
+
+      await expect(
+        handle.store.listSessionSummariesByPrefix('u-1:rpc:', { limit: -1 })
+      ).resolves.toEqual([])
+      await expect(
+        handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', { limit: -1 })
+      ).resolves.toMatchObject({ turns: [] })
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('loads a bounded message page without hydrating the full conversation cache', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      for (let turn = 1; turn <= 5; turn += 1) {
+        await manager.startTurn(conv, `user ${turn}`, `task-${turn}`)
+        await manager.completeTurn(conv, `assistant ${turn}`)
+      }
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      const page = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', {
+        limit: 2,
+        beforeTurn: 5,
+      })
+
+      expect(page?.totalTurns).toBe(5)
+      expect(page?.firstTurnNumber).toBe(1)
+      expect(page?.lastTurnNumber).toBe(5)
+      expect(page?.turns.map(turn => turn.number)).toEqual([3, 4])
+      expect(page?.turns.map(turn => turn.user_input)).toEqual(['user 3', 'user 4'])
+      expect(page?.turns.map(turn => turn.response)).toEqual(['assistant 3', 'assistant 4'])
+      expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('does not expose legacy NULL turn rows as synthetic turn zero on cold reads', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      for (let turn = 1; turn <= 3; turn += 1) {
+        await manager.startTurn(conv, `user ${turn}`, `task-${turn}`)
+        await manager.completeTurn(conv, `assistant ${turn}`)
+      }
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO messages (session_id, ordinal, role, content, timestamp, turn_number)
+           VALUES (?, ?, 'user', 'legacy turnless row', ?, NULL)`
+        )
+        .run(conv.id, 99, 99)
+      handle.worker.db
+        .prepare(
+          `UPDATE sessions
+              SET last_activity_at = COALESCE(
+                    (SELECT MAX(timestamp) FROM messages WHERE session_id = ?),
+                    started_at
+                  ),
+                  turn_count = (
+                    SELECT COUNT(DISTINCT turn_number)
+                      FROM messages
+                     WHERE session_id = ?
+                       AND turn_number IS NOT NULL
+                  )
+            WHERE id = ?`
+        )
+        .run(conv.id, conv.id, conv.id)
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', {
+        limit: 10,
+      })
+
+      expect(messages?.totalTurns).toBe(3)
+      expect(messages?.firstTurnNumber).toBe(1)
+      expect(messages?.lastTurnNumber).toBe(3)
+      expect(messages?.turns.map(turn => turn.number)).toEqual([1, 2, 3])
     } finally {
       await handle.shutdown()
     }
@@ -511,6 +820,79 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     }
   })
 
+  it('reserves a distinct durable turn number before an async cancel write completes', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+
+      await manager.startTurn(conv, 'first', 'task-cancelled')
+      manager.cancelTurn(conv)
+      // Deliberately do not drain or await the fire-and-forget cancel write.
+      await manager.startTurn(conv, 'second', 'task-next')
+      await manager.completeTurn(conv, 'second response')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+
+      const rows = handle.worker.db
+        .prepare(
+          'SELECT role, content, turn_number FROM messages WHERE session_id = ? ORDER BY ordinal'
+        )
+        .all(conv.id) as Array<{ role: string; content: string; turn_number: number }>
+
+      expect(rows.map(row => [row.role, row.content, row.turn_number])).toEqual([
+        ['user', 'first', 1],
+        ['assistant', '[Task cancelled by user before completion]', 1],
+        ['user', 'second', 2],
+        ['assistant', 'second response', 2],
+      ])
+
+      handle.store['cache'].clear()
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:')
+      expect(messages?.turns.map(turn => [turn.number, turn.user_input, turn.response])).toEqual([
+        [1, 'first', '[Task cancelled by user before completion]'],
+        [2, 'second', 'second response'],
+      ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('does not reuse a turn number after completion and failure writes both reject', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'first', 'task-complete')
+
+      const enqueueSpy = vi
+        .spyOn(handle.persistQueue, 'enqueueSync')
+        .mockRejectedValueOnce(new Error('disk unavailable'))
+        .mockRejectedValueOnce(new Error('disk still unavailable'))
+      await expect(manager.completeTurn(conv, 'failed write')).rejects.toThrow(/disk unavailable/)
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
+      await expect(manager.failTurn(conv)).rejects.toThrow(/disk still unavailable/)
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
+
+      enqueueSpy.mockRestore()
+      await manager.startTurn(conv, 'second', 'task-next')
+      await manager.completeTurn(conv, 'durable response')
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(3)
+
+      const rows = handle.worker.db
+        .prepare(
+          'SELECT role, content, turn_number FROM messages WHERE session_id = ? ORDER BY ordinal'
+        )
+        .all(conv.id) as Array<{ role: string; content: string; turn_number: number }>
+      expect(rows.map(row => [row.role, row.content, row.turn_number])).toEqual([
+        ['user', 'first', 1],
+        ['user', 'second', 2],
+        ['assistant', 'durable response', 2],
+      ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('persistTurnFail is an awaited durability barrier: the failed-turn state is durable when it resolves', async () => {
     const handle = await freshStore()
     try {
@@ -530,6 +912,37 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       expect(row?.state).toBe('idle')
       expect(row?.active_task_id).toBeNull()
       expect(conv.activeTaskId).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('advances durable turn numbering after a failed turn', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'first', 'task-1')
+      await manager.completeTurn(conv, 'done')
+      await manager.startTurn(conv, 'failed', 'task-2')
+      await manager.failTurn(conv)
+      await manager.startTurn(conv, 'retry', 'task-3')
+      await manager.completeTurn(conv, 'recovered')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+
+      const turnNumbers = handle.worker.db
+        .prepare(
+          'SELECT DISTINCT turn_number FROM messages WHERE session_id = ? ORDER BY turn_number'
+        )
+        .all(conv.id) as Array<{ turn_number: number }>
+      expect(turnNumbers.map(row => row.turn_number)).toEqual([1, 2, 3])
+
+      handle.store['cache'].clear()
+      const summaries = await handle.store.listSessionSummariesByPrefix('u-1:rpc:')
+      expect(summaries[0]?.turnCount).toBe(3)
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:')
+      expect(messages?.totalTurns).toBe(3)
+      expect(messages?.turns.map(turn => turn.number)).toEqual([1, 2, 3])
     } finally {
       await handle.shutdown()
     }

@@ -46,8 +46,8 @@ named `chatllm`:
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required, no default ships) and ONE LLM key
-make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
-make minikube-status    # wait for every deployment READY
+MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this override
+make minikube-status                            # wait for every deployment READY
 ```
 
 Then run the UIs from your workstation and say hello to the `chatllm` agent:
@@ -84,17 +84,17 @@ Evenfire is not just an agent runtime. It is nine first-class capabilities,
 each backed by code in this repo and declared as configuration. Each row links
 to its deep dive.
 
-| Capability | What you get | Deep dive |
-| ---------- | ------------ | --------- |
-| **Agents** | Real actions across Telegram / Email / Slack / desktop (`shell_exec`, HTTP, a real browser, files), plus memory and approval gates | [mcp-host](mcp-host/README.md) |
-| **Console & client** | An admin **Control UI** console and an Electron **Desktop App**, plus a small Profile UI for invites | [surfaces](docs/surfaces/README.md) |
-| **Connectors (MCP)** | Governed MCP servers with per-`Context` allowlists; stdio tools via the bridge; remote SaaS behind a pinned egress proxy | [mcp-servers](mcp-servers/README.md) |
-| **Workflows** | Declarative multi-workload `WorkflowRecipe`s with a lifecycle: risk-based approval, shadow testing, rollback | [workflowrecipe](docs/crds/workflowrecipe.md) |
-| **Plugins & registry** | Author, publish, and install connectors and recipes through a governed, trust-rated registry | [workflow-sdk](packages/workflow-sdk/README.md) |
-| **Teams & access** | Profiles, teams, roles (admin / inviter / member), invitations, and session → scoped-RPC token brokerage | [external-rest-api](external-rest-api/README.md) |
-| **Files** | Read-only team workspaces agents can draw on, plus a brokered, audited shared drive where every read and write is checked and logged | [gfs-controller](gfs-controller/README.md) |
-| **Cost & governance** | Token budgets per scope (block/warn), usage and LLM-price accounting, and a connector-image allowlist | [token budgets](docs/how-to/token-budgets-and-usage.md) |
-| **Config as code** | The whole fleet as eight `clerum.io` ([why that name?](docs/concepts/code-names.md)) CRDs: version-controlled, reviewable, GitOps-friendly | [crds](docs/crds/README.md) |
+| Capability             | What you get                                                                                                                               | Deep dive                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| **Agents**             | Real actions across Telegram / Email / Slack / desktop (`shell_exec`, HTTP, a real browser, files), plus memory and approval gates         | [mcp-host](mcp-host/README.md)                          |
+| **Console & client**   | An admin **Control UI** console and an Electron **Desktop App**, plus a small Profile UI for invites                                       | [surfaces](docs/surfaces/README.md)                     |
+| **Connectors (MCP)**   | Governed MCP servers with per-`Context` allowlists; stdio tools via the bridge; remote SaaS behind a pinned egress proxy                   | [mcp-servers](mcp-servers/README.md)                    |
+| **Workflows**          | Declarative multi-workload `WorkflowRecipe`s with a lifecycle: risk-based approval, shadow testing, rollback                               | [workflowrecipe](docs/crds/workflowrecipe.md)           |
+| **Plugins & registry** | Author, publish, and install connectors and recipes through a governed, trust-rated registry                                               | [workflow-sdk](packages/workflow-sdk/README.md)         |
+| **Teams & access**     | Profiles, teams, roles (admin / inviter / member), invitations, and session → scoped-RPC token brokerage                                   | [external-rest-api](external-rest-api/README.md)        |
+| **Files**              | Read-only team workspaces agents can draw on, plus a brokered, audited shared drive where every read and write is checked and logged       | [gfs-controller](gfs-controller/README.md)              |
+| **Cost & governance**  | Token budgets per scope (block/warn), usage and LLM-price accounting, and a connector-image allowlist                                      | [token budgets](docs/how-to/token-budgets-and-usage.md) |
+| **Config as code**     | The whole fleet as eight `clerum.io` ([why that name?](docs/concepts/code-names.md)) CRDs: version-controlled, reviewable, GitOps-friendly | [crds](docs/crds/README.md)                             |
 
 ---
 
@@ -146,29 +146,29 @@ A broad, growing set of providers behind one interface, from frontier labs to
 local models. Keys live in a Kubernetes Secret you create (dev mode: a single
 environment variable; setup infers the matching provider).
 
-| Provider          | `provider` value | Integration       |
-| ----------------- | ---------------- | ----------------- |
-| OpenAI            | `openai`         | Native SDK        |
-| Anthropic         | `claude`         | Native SDK        |
-| Z.AI              | `zai`            | OpenAI-compatible |
-| Bailian           | `bailian`        | OpenAI-compatible |
-| Google Vertex AI  | `vertex`         | Native SDK        |
-| Amazon Bedrock    | `bedrock`        | Native SDK        |
-| OpenRouter        | `openrouter`     | OpenAI-compatible |
-| Google Gemini     | `gemini`         | OpenAI-compatible |
-| DeepSeek          | `deepseek`       | OpenAI-compatible |
-| Groq              | `groq`           | OpenAI-compatible |
-| Together AI       | `together`       | OpenAI-compatible |
-| Fireworks AI      | `fireworks`      | OpenAI-compatible |
-| Mistral AI        | `mistral`        | OpenAI-compatible |
-| xAI (Grok)        | `xai`            | OpenAI-compatible |
-| Cerebras          | `cerebras`       | OpenAI-compatible |
-| DeepInfra         | `deepinfra`      | OpenAI-compatible |
-| Perplexity        | `perplexity`     | OpenAI-compatible |
-| Moonshot (Kimi)   | `moonshot`       | OpenAI-compatible |
-| Nebius            | `nebius`         | OpenAI-compatible |
-| Novita AI         | `novita`         | OpenAI-compatible |
-| Azure OpenAI      | `azure`          | Light driver      |
+| Provider         | `provider` value | Integration       |
+| ---------------- | ---------------- | ----------------- |
+| OpenAI           | `openai`         | Native SDK        |
+| Anthropic        | `claude`         | Native SDK        |
+| Z.AI             | `zai`            | OpenAI-compatible |
+| Bailian          | `bailian`        | OpenAI-compatible |
+| Google Vertex AI | `vertex`         | Native SDK        |
+| Amazon Bedrock   | `bedrock`        | Native SDK        |
+| OpenRouter       | `openrouter`     | OpenAI-compatible |
+| Google Gemini    | `gemini`         | OpenAI-compatible |
+| DeepSeek         | `deepseek`       | OpenAI-compatible |
+| Groq             | `groq`           | OpenAI-compatible |
+| Together AI      | `together`       | OpenAI-compatible |
+| Fireworks AI     | `fireworks`      | OpenAI-compatible |
+| Mistral AI       | `mistral`        | OpenAI-compatible |
+| xAI (Grok)       | `xai`            | OpenAI-compatible |
+| Cerebras         | `cerebras`       | OpenAI-compatible |
+| DeepInfra        | `deepinfra`      | OpenAI-compatible |
+| Perplexity       | `perplexity`     | OpenAI-compatible |
+| Moonshot (Kimi)  | `moonshot`       | OpenAI-compatible |
+| Nebius           | `nebius`         | OpenAI-compatible |
+| Novita AI        | `novita`         | OpenAI-compatible |
+| Azure OpenAI     | `azure`          | Light driver      |
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
@@ -208,40 +208,40 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **Start here**
 
-| Doc                                                                                | For                   |
-| ---------------------------------------------------------------------------------- | --------------------- |
-| [docs/README.md](docs/README.md)                                                   | Docs index            |
-| [docs/get-started/learning-path.md](docs/get-started/learning-path.md)             | Role-based path       |
-| [docs/concepts/why-evenfire.md](docs/concepts/why-evenfire.md)                     | Product intent        |
-| [docs/concepts/when-to-use-evenfire.md](docs/concepts/when-to-use-evenfire.md)     | Fit by category       |
-| [docs/faq.md](docs/faq.md)                                                          | FAQ & troubleshooting |
-| [ARCHITECTURE.md](ARCHITECTURE.md)                                                 | Architecture & data flow |
-| [docs/crds/README.md](docs/crds/README.md)                                         | Config as code (the 8 CRDs) |
-| [docs/llms.txt](docs/llms.txt)                                                      | Map for coding agents |
+| Doc                                                                            | For                         |
+| ------------------------------------------------------------------------------ | --------------------------- |
+| [docs/README.md](docs/README.md)                                               | Docs index                  |
+| [docs/get-started/learning-path.md](docs/get-started/learning-path.md)         | Role-based path             |
+| [docs/concepts/why-evenfire.md](docs/concepts/why-evenfire.md)                 | Product intent              |
+| [docs/concepts/when-to-use-evenfire.md](docs/concepts/when-to-use-evenfire.md) | Fit by category             |
+| [docs/faq.md](docs/faq.md)                                                     | FAQ & troubleshooting       |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                                             | Architecture & data flow    |
+| [docs/crds/README.md](docs/crds/README.md)                                     | Config as code (the 8 CRDs) |
+| [docs/llms.txt](docs/llms.txt)                                                 | Map for coding agents       |
 
 **Components**: every deployable service has its own README (the deep dive):
 
-| Component                                                                                      | Role                                                  |
-| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| [mcp-host](mcp-host/README.md)                                                                 | Agent runtime: LLM loop, tools, approval gate         |
-| [channel-reader](channel-reader/README.md)                                                     | Telegram / Email / Slack ingress                      |
-| [control-api](control-api/README.md)                                                           | Control plane: CRDs, secrets, token mint, usage       |
-| [control-ui](control-ui/README.md)                                                             | Admin dashboard                                       |
-| [profile-ui](profile-ui/README.md)                                                             | End-user profile and invitation confirmation          |
-| [desktop-app](desktop-app/README.md)                                                           | Electron + React desktop client                       |
-| [external-rest-api](external-rest-api/README.md)                                               | Auth, profiles, teams, RPC-token brokerage            |
-| [rpc-proxy](rpc-proxy/README.md)                                                               | External JWT-gated gateway for desktop/tenant traffic |
-| [host-context-controller](host-context-controller/README.md)                                  | Operator: CRDs → Deployments + NetworkPolicies        |
-| [workflow-recipes](workflow-recipes/README.md)                                                 | Operator: `WorkflowRecipe` lifecycle                  |
-| [gfs-controller](gfs-controller/README.md)                                                     | Brokered `GlobalFileSystem` API + audit chain         |
-| [workspace-files-controller](workspace-files-controller/README.md)                             | `SharedFileSystem` write path                          |
-| [mcp-proxy](mcp-proxy/README.md)                                                               | Optional centralized MCP router                       |
-| [mcp-servers](mcp-servers/README.md)                                                           | Connector catalog (MongoDB, Airtable, …)              |
-| [stdio-bridge](stdio-bridge/README.md)                                                         | Sidecar: stdio MCP → StreamableHTTP                   |
-| [nginx-egress-proxy](nginx-egress-proxy/README.md)                                             | Pinned egress path for remote connectors              |
-| [webhook-gateway](webhook-gateway/README.md)                                                   | Per-recipe webhook signature verifier                 |
-| [webhook-proxy](webhook-proxy/README.md)                                                       | Stateless public webhook router                       |
-| [workflow-approval-request-reader](workflow-approval-request-reader/README.md)                 | Inbound Telegram/Slack approval callbacks             |
+| Component                                                                      | Role                                                  |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| [mcp-host](mcp-host/README.md)                                                 | Agent runtime: LLM loop, tools, approval gate         |
+| [channel-reader](channel-reader/README.md)                                     | Telegram / Email / Slack ingress                      |
+| [control-api](control-api/README.md)                                           | Control plane: CRDs, secrets, token mint, usage       |
+| [control-ui](control-ui/README.md)                                             | Admin dashboard                                       |
+| [profile-ui](profile-ui/README.md)                                             | End-user profile and invitation confirmation          |
+| [desktop-app](desktop-app/README.md)                                           | Electron + React desktop client                       |
+| [external-rest-api](external-rest-api/README.md)                               | Auth, profiles, teams, RPC-token brokerage            |
+| [rpc-proxy](rpc-proxy/README.md)                                               | External JWT-gated gateway for desktop/tenant traffic |
+| [host-context-controller](host-context-controller/README.md)                   | Operator: CRDs → Deployments + NetworkPolicies        |
+| [workflow-recipes](workflow-recipes/README.md)                                 | Operator: `WorkflowRecipe` lifecycle                  |
+| [gfs-controller](gfs-controller/README.md)                                     | Brokered `GlobalFileSystem` API + audit chain         |
+| [workspace-files-controller](workspace-files-controller/README.md)             | `SharedFileSystem` write path                         |
+| [mcp-proxy](mcp-proxy/README.md)                                               | Optional centralized MCP router                       |
+| [mcp-servers](mcp-servers/README.md)                                           | Connector catalog (MongoDB, Airtable, …)              |
+| [stdio-bridge](stdio-bridge/README.md)                                         | Sidecar: stdio MCP → StreamableHTTP                   |
+| [nginx-egress-proxy](nginx-egress-proxy/README.md)                             | Pinned egress path for remote connectors              |
+| [webhook-gateway](webhook-gateway/README.md)                                   | Per-recipe webhook signature verifier                 |
+| [webhook-proxy](webhook-proxy/README.md)                                       | Stateless public webhook router                       |
+| [workflow-approval-request-reader](workflow-approval-request-reader/README.md) | Inbound Telegram/Slack approval callbacks             |
 
 Ops & platform directories:
 
@@ -270,4 +270,4 @@ The code uses the internal name clerum for the same project (`clerum.io` CRDs,
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**: community standards
 
 Evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
-(MPL-2.0), an OSI-approved, file-level copyleft license. 
+(MPL-2.0), an OSI-approved, file-level copyleft license.

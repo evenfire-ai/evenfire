@@ -6,7 +6,7 @@ named `chatllm` you can message immediately.
 
 > **What you get:** the real platform — operators, approvals, Control UI,
 > desktop app, network isolation. Nothing is mocked or weakened.
-> **Time:** ~5–10 minutes on first run (image builds dominate).
+> **Time:** roughly 15 minutes on a cold cache (pulling images dominates).
 
 ## Prerequisites
 
@@ -16,7 +16,12 @@ named `chatllm` you can message immediately.
 - **kubectl**
 - **python3** (used by the JWT key sync)
 - **Node.js 24+** (service builds; desktop app)
-- One LLM API key: OpenAI, Anthropic Claude, Z.AI, or Alibaba Bailian
+- **git**, **make**, and **ruby** (ruby renders the control-api DB migration
+  overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu)
+- One LLM API key from any of the 21 supported providers (e.g. OpenAI,
+  Anthropic Claude, Google Gemini, Groq, Mistral, Z.AI, Alibaba Bailian) —
+  optional for setup (it boots with placeholders), but the agent can't call a
+  model without one. Full list: [../deploy/llm-providers.md](../deploy/llm-providers.md)
 
 ## 1. Configure
 
@@ -50,12 +55,27 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 ## 2. Set up the cluster (one command)
 
 ```bash
-make minikube-setup
+MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the override note below
 ```
 
 This runs an idempotent 12-step setup: minikube cluster (Calico) → namespaces →
-CRDs → JWT signing keys → secrets from `.env` → service images built in
-minikube's Docker → deploy → readiness wait with auto-recovery → seed → verify.
+CRDs → JWT signing keys → secrets from `.env` → service images pulled from
+`ghcr.io/evenfire-ai` → deploy → readiness wait with auto-recovery → seed →
+verify.
+
+**You do not build images.** The 23 service images are published for
+`linux/amd64` and `linux/arm64`, so an Apple Silicon Mac pulls a native image
+instead of compiling anything. MCP servers are not loaded into the cluster at
+all — they are installed on demand from the evenfire registry.
+
+`MINIKUBE_IMAGE_TAG=latest` is required today. The cluster manifests pin the
+next release tag, whose images are created by promotion _on_ that tag, so the
+pin currently names something that does not exist yet. Without the override the
+pull fails with a message naming the image, the tag, and this variable. Drop the
+override once that release is tagged and promoted.
+
+To build every image from source instead, use `make minikube-setup-local`
+(equivalently `IMAGE_SOURCE=local`). That path needs no tag override.
 
 It seeds for you:
 
@@ -151,21 +171,22 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 
 ## Troubleshooting
 
-| Symptom                                    | Fix                                                                                               |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1) |
-| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default) |
-| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                     |
-| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                              |
-| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                  |
+| Symptom                                    | Fix                                                                                                                                                                                                            |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                                              |
+| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default) |
+| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                  |
+| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                           |
+| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                                                                                                                               |
 
 ## Next steps
 
-| Goal                      | Doc                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------- |
-| Wire an MCP connector     | [Add an MCP server](../how-to/add-mcp-server.md)                                               |
-| Tune the approval gates   | [Configure approvals](../how-to/configure-approvals.md)                                        |
-| Understand the design     | [Why evenfire](../concepts/why-evenfire.md) · [Security model](../../README.md#security-model) |
-| Deep deployment reference | [Minikube guide](../deploy/minikube.md) · [Production notes](../deploy/production.md)          |
-| Tour the other UIs        | [Surfaces index](../surfaces/README.md)                                                        |
-| Learning paths            | [Learning path](learning-path.md)                                                              |
+| Goal                           | Doc                                                                                            |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- |
+| Wire an MCP connector          | [Add an MCP server](../how-to/add-mcp-server.md)                                               |
+| Connect to the shared registry | [Connect to the registry](../how-to/connect-to-registry.md)                                    |
+| Tune the approval gates        | [Configure approvals](../how-to/configure-approvals.md)                                        |
+| Understand the design          | [Why evenfire](../concepts/why-evenfire.md) · [Security model](../../README.md#security-model) |
+| Deep deployment reference      | [Minikube guide](../deploy/minikube.md) · [Production notes](../deploy/production.md)          |
+| Tour the other UIs             | [Surfaces index](../surfaces/README.md)                                                        |
+| Learning paths                 | [Learning path](learning-path.md)                                                              |

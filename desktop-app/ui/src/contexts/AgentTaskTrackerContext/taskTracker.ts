@@ -35,6 +35,24 @@ function errMessage(err: unknown): string {
 }
 
 /**
+ * Folds the OPEN pause segment (if any) into the `pausedMs` accumulator and
+ * re-establishes the §AC3 invariant `pausedAt !== undefined` ⟺ segment OPEN.
+ *
+ * The D.5b tier is meant to measure how long the AGENT has been working, not
+ * wall-clock: freezing the clock while suspended is only half of it, because on
+ * resume the age would jump back to `now - startedAt` and swallow the whole
+ * human wait (approve after 10min → instant T4 "your agent is still working").
+ * Closed segments live here; the open one stays covered by the `pausedAt`
+ * freeze in `useTaskTier`. Idempotent (no open segment → no-op), so callers can
+ * invoke it defensively on any resume/terminal path.
+ */
+function closePauseSegment(s: TaskState): void {
+  if (s.pausedAt === undefined) return
+  s.pausedMs = (s.pausedMs ?? 0) + Math.max(0, Date.now() - s.pausedAt)
+  s.pausedAt = undefined
+}
+
+/**
  * Lifecycle owner for in-flight agent tasks. Lives in a React context provider
  * (so it survives controller re-renders) but is a plain class — testable
  * without React. Each task is keyed by (agentRef, chatId); the SSE progress
@@ -446,8 +464,12 @@ export class TaskTracker implements AgentTaskTracker {
           s.currentIteration = step.iteration || s.currentIteration
           // Execution moved past the approval (decided on ANY surface: in-chat,
           // notification, another device) — drop it so the suspended affordance
-          // can't linger on a running task.
-          if (wasSuspended) s.pendingApproval = undefined
+          // can't linger on a running task, and CLOSE the pause segment: the wait
+          // is over and must not count as agent work in the D.5b tier (§AC3).
+          if (wasSuspended) {
+            s.pendingApproval = undefined
+            closePauseSegment(s)
+          }
         })
         if (wasSuspended) this.fireResumed(key)
         return
@@ -531,7 +553,12 @@ export class TaskTracker implements AgentTaskTracker {
           s.status = 'streaming'
           s.llmElapsedMs = elapsedMs
           s.currentIteration = iteration ?? s.currentIteration
-          if (wasSuspended) s.pendingApproval = undefined
+          // Same resume bookkeeping as `tool_start` — the approval was decided and
+          // the pause segment closes here too (§AC3, tier = active time).
+          if (wasSuspended) {
+            s.pendingApproval = undefined
+            closePauseSegment(s)
+          }
         })
         if (wasSuspended) this.fireResumed(key)
         return
@@ -539,9 +566,25 @@ export class TaskTracker implements AgentTaskTracker {
 
       case 'suspended': {
         const sd = event.data
+        // OPEN a pause segment: stamp `pausedAt` ONLY on the TRANSITION into
+        // suspended (§AC3 freezes the D.5b tier timer at `pausedAt` so an approval
+        // wait can't escalate the nudges; the segment is closed into `pausedMs` on
+        // resume/terminal, which is what keeps the tier measuring ACTIVE time once
+        // the task runs again). This event is NOT once-per-suspension: mcp-host keeps the last
+        // `suspended` as a sticky event and replays it to every new subscriber, and
+        // the main-process bridge (`appService.startTaskProgressStream`) reconnects
+        // the SSE transparently whenever the 300s RPC token lapses mid-stream
+        // (`auth-expired`) — i.e. roughly every 5 min on a long approval wait. Each
+        // replay re-entering this branch used to re-stamp `pausedAt = now`, turning
+        // the "frozen" age (`pausedAt - startedAt`) back into full wall-clock and
+        // escalating the task to T3/T4/T5 while it sat suspended. Guarding on the
+        // PREVIOUS status keeps a genuine RE-suspension correct: a decided approval
+        // routes through `tool_start`/`llm_in_progress`, which set status back to
+        // 'streaming', so the next `suspended` is a real transition and re-stamps.
+        const wasSuspended = state.status === 'suspended'
         this.mutate(key, s => {
           s.status = 'suspended'
-          s.pausedAt = Date.now()
+          if (!wasSuspended) s.pausedAt = Date.now()
           s.pendingApproval = sd.requestId
             ? {
                 requestId: sd.requestId,
@@ -703,16 +746,30 @@ export class TaskTracker implements AgentTaskTracker {
     if (this.terminalFired.has(key)) return
     this.terminalFired.add(key)
     this.clearTimers(key)
+    // A task can reach terminal with its pause segment still OPEN — a denied
+    // approval that ends the run goes suspended → `terminal: cancelled` with no
+    // resume event in between, and a gate can also fail/time out. Close it here so
+    // the §AC3 invariant holds at terminal and the totals below are complete.
+    // Guarded: `mutate` always emits, and the common case (no open segment) must
+    // not fire an extra notification to every subscriber on each terminal.
+    if (this.states.get(key)?.pausedAt !== undefined) this.mutate(key, s => closePauseSegment(s))
     const state = this.states.get(key)
     if (!state) return
     // Telemetry (§4.8): the coordinator owns the task lifecycle, so it emits the
     // duration + elapsed-time tier on the terminal (moved off the hook, which
-    // previously logged it in `onTrackerTerminal`).
+    // previously logged it in `onTrackerTerminal`). `duration_ms` stays wall-clock
+    // (that's what the user waited), but the tier is classified off `active_ms`:
+    // the tier exists to describe how long the AGENT worked, and a long approval
+    // wait would otherwise report a T4/T5 that no nudge ever showed.
     const durationMs = Date.now() - state.startedAt
+    const pausedMs = state.pausedMs ?? 0
+    const activeMs = Math.max(0, durationMs - pausedMs)
     console.log('[telemetry] task_duration_seconds', {
       duration_ms: durationMs,
+      paused_ms: pausedMs,
+      active_ms: activeMs,
       status: state.status,
-      tier_at_terminal: classifyTier(durationMs),
+      tier_at_terminal: classifyTier(activeMs),
     })
     // B8 — a throwing consumer callback must never wedge the coordinator: the
     // timers are already cleared above (before the await), and the error is caught

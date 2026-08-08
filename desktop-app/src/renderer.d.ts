@@ -18,16 +18,20 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
-  MessageToolStep,
   PasswordLoginResult,
-  PendingApprovalLite,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
+  SandboxUiApp,
+  SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
+  SessionMessagesQuery,
+  SessionMessagesResult,
   SessionState,
-  SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -397,41 +401,16 @@ declare global {
         ) => Promise<Buffer>
         listSessions: (
           hostRef: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          items: Array<{
-            agent: string
-            chatId: string
-            turnCount: number
-            lastActivityAt: string
-            state?: SessionLifecycleState
-            activeTaskId?: string
-            pendingApproval?: PendingApprovalLite
-            tokens?: SessionTokensLite
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionsListQuery
+        ) => Promise<SessionsListResult>
         loadSessionMessages: (
           hostRef: string,
           agent: string,
           chatId: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          agent: string
-          chatId: string
-          state?: SessionLifecycleState
-          activeTaskId?: string
-          pendingApproval?: PendingApprovalLite
-          tokens?: SessionTokensLite
-          turns: Array<{
-            number: number
-            user_input: string
-            response?: string
-            started_at: string
-            completed_at?: string
-            tokens?: SessionTokensLite
-            tool_steps?: MessageToolStep[]
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionMessagesQuery
+        ) => Promise<SessionMessagesResult>
         getContextBreakdown: (
           hostRef: string,
           agent: string,
@@ -462,10 +441,13 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
+        rendererReady: () => Promise<void>
       }
       window: {
-        getVisibility: () => Promise<{ visible: boolean }>
-        onVisibilityChange: (callback: (state: { visible: boolean }) => void) => () => void
+        getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        onVisibilityChange: (
+          callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
       }
       system: {
         /** GAP-D1 (§4.5-4): OS resume / screen unlock tick — reconcile in-flight chats. */
@@ -517,6 +499,12 @@ declare global {
         replaceMessages: (
           agentRef: string,
           chatId: string,
+          messages: ChatMessage[],
+          options?: ReplaceChatMessagesOptions
+        ) => Promise<void>
+        backfillCounters?: (
+          agentRef: string,
+          chatId: string,
           messages: ChatMessage[]
         ) => Promise<void>
         getLastActive: (agentRef: string) => Promise<string | null>
@@ -532,26 +520,22 @@ declare global {
       }
       sandboxUi: {
         listApps: () => Promise<{
-          apps: Array<{
-            appRef: string
-            title?: string
-            description?: string
-            icon?: string
-            defaultPath: string
-            ready: boolean
-            phase: string | null
-            updatedAt: string | null
-          }>
+          apps: SandboxUiApp[]
         }>
         mintSession: (recipeNs: string, recipeName: string) => Promise<{ setCookie: string }>
         open: (args: {
           recipeNs: string
           recipeName: string
           defaultPath?: string
+          routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        copyDeepLink: (teamId?: string) => Promise<{ url: string }>
+        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        clearPendingDeepLinks: () => Promise<void>
+        acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number
           y: number
@@ -561,6 +545,7 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void

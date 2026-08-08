@@ -1,16 +1,18 @@
 import { Router } from 'express'
 import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
+import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
-import { K8sGateway } from '../../k8s.js'
+import { K8sGateway, extractHttpStatus } from '../../k8s.js'
 import {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
@@ -22,6 +24,30 @@ const BEDROCK_CREDENTIAL_KEYS: readonly string[] = PROVIDER_CREDENTIAL_SLOTS.bed
   slot => slot.dataKey
 )
 const VERTEX_SERVICE_ACCOUNT_KEY: string = PROVIDER_CREDENTIAL_SLOTS.vertex[0].dataKey
+
+// The ownership label every WorkflowRecipe Secret carries. Declared at module
+// scope so the recipe-secret routes below and the mcp-secret rotation guard
+// read the SAME constant: a literal duplicated in either place would silently
+// stop the guard from firing the day the other one changes.
+const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
+const RECIPE_SECRET_LABEL_VALUE = 'true'
+
+// `evenfire-registry-pull` is control-api's own image-pull credential, self-provisioned
+// into every platform workload namespace (registryPullSecretService). The mcp-secret and
+// recipe-secret routes below write into that SAME set of namespaces, so the name is
+// reachable from here — and the damage is not recoverable in place: the provisioner's
+// first invariant is "never write a Secret we do not own", so an operator who deletes the
+// platform Secret and creates an `Opaque` one under the reserved name makes every
+// private-image install into that namespace fail with `foreign_secret_unusable`, forever.
+// Reserve the name on the write and delete surfaces, exactly as the recipe surfaces do
+// (`isPlatformManagedWorkflowSecretName` in routes/admin/recipes.ts).
+function isPlatformManagedSecretName(name: unknown): boolean {
+  return typeof name === 'string' && name.trim() === EVENFIRE_REGISTRY_PULL_SECRET_NAME
+}
+
+const PLATFORM_MANAGED_SECRET_ERROR =
+  `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
+  'registry image-pull credential) and cannot be created, modified, or deleted here'
 
 // The plaintext data being written, merging base64 `data` and plaintext
 // `stringData` (stringData wins, matching Kubernetes Secret semantics).
@@ -310,6 +336,10 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         })
         return
       }
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
         res
           .status(400)
@@ -317,8 +347,15 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      // Ensure all values are strings
+      // Reject invalid Secret keys and non-string values up front so creating a
+      // Secret with a key the apiserver refuses returns a clear 400 instead of
+      // the opaque 500 (mirrors the rotation guard on the PUT route).
       for (const [key, val] of Object.entries(data)) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
@@ -338,6 +375,162 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     })
   )
 
+  // Rotate credentials on an EXISTING MCP Server Secret (issue #223).
+  //
+  // Body: { data: Record<string, string> } — only the keys the operator means
+  // to rotate. Keys sent here are added or replaced; every other key on the
+  // Secret survives untouched, because one connector Secret can hold several
+  // credentials and rotating one must not wipe the rest. The merge is a
+  // server-side RFC 7396 merge-patch (atomic, no read/replace race), which is
+  // why this namespace's Role grants `secrets: patch`.
+  //
+  // Restarting the connector is NOT this route's job: HCC watches Secrets and
+  // rolls the affected Deployments through the credentials-revision annotation.
+  // `affectedConnectors` names the McpServers that reference this Secret, so
+  // the UI can tell the operator exactly what is about to restart.
+  //
+  // The response is names-only. No secret value is ever echoed back — not in
+  // plaintext, not in base64, and not as a hash of the values.
+  //
+  // Namespace is always `config.mcpServersNamespace`; any caller-supplied
+  // namespace is ignored.
+  router.put(
+    '/admin/mcp-secrets/:name',
+    enforceNamespace(config.mcpServersNamespace),
+    asyncHandler(async (req, res) => {
+      const name = (req.params.name || '').trim()
+      const { data } = req.body as { data?: Record<string, string> }
+
+      if (!name) {
+        res.status(400).json({ error: 'name is required' })
+        return
+      }
+      if (!isValidDNSSubdomain(name)) {
+        res.status(400).json({
+          error: 'Invalid secret name: must be lowercase alphanumeric and hyphens, max 253 chars',
+        })
+        return
+      }
+      // The reserved name is guarded on POST and DELETE below; without it here the merge
+      // path was the way through. The recipe-secret label check further down does NOT cover
+      // it — the platform Secret carries `clerum.io/managed-by`, not the recipe label, so it
+      // passes that gate — and `mergeSecret` replaces any key it is given, including
+      // `.dockerconfigjson`. That is every private image pull in this namespace, broken by
+      // a route whose whole job is to refuse this name.
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
+      if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
+        res
+          .status(400)
+          .json({ error: 'data is required and must contain at least one key-value pair' })
+        return
+      }
+      for (const [key, val] of Object.entries(data)) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
+        if (typeof val !== 'string') {
+          res.status(400).json({ error: `data["${key}"] must be a string` })
+          return
+        }
+        // A blank value is an operator slip, not a delete instruction: this
+        // route writes the keys the operator chose to rotate, and retiring a
+        // key is DELETE's job. Skipping it silently would report a rotation
+        // that never happened.
+        if (!val.trim()) {
+          res.status(400).json({ error: `data["${key}"] must not be empty` })
+          return
+        }
+      }
+
+      const targetNs = config.mcpServersNamespace
+
+      // Rotation targets a Secret that already exists — creating one is POST's
+      // job. Read it first so a missing Secret is a 404 instead of a silent
+      // upsert, and so the ownership guard below sees the stored labels.
+      let existing: {
+        metadata?: { labels?: Record<string, string> }
+        data?: Record<string, string>
+      }
+      try {
+        existing = (await gateway.getSecret(name, targetNs)) as typeof existing
+      } catch (err) {
+        if (extractHttpStatus(err) === 404) {
+          res.status(404).json({ error: `Secret "${name}" not found in ${targetNs}` })
+          return
+        }
+        // 403 (Role missing the verb), 5xx, timeouts: propagate. Dressing them
+        // up as 404 would tell the operator "no such credential" when the truth
+        // is that the API server refused the read.
+        throw err
+      }
+
+      // `mcp-server` is a shared namespace: WorkflowRecipe Secrets live here too
+      // (see RECIPE_SECRET_NAMESPACES below) behind their own ownership gate.
+      // Without this guard, rotating through the connector route would be a way
+      // around that gate.
+      if (existing.metadata?.labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE) {
+        res.status(409).json({
+          error: `Secret "${name}" is owned by a WorkflowRecipe; rotate it through /admin/recipe-secrets`,
+        })
+        return
+      }
+
+      await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
+
+      const keys = [...new Set([...Object.keys(existing.data || {}), ...Object.keys(data)])].sort(
+        (a, b) => a.localeCompare(b)
+      )
+
+      // The credential IS rotated at this point. Emit the audit record NOW,
+      // before anything that could throw — a rotation that actually happened
+      // must never go unlogged just because a later, secondary step failed.
+      // Key NAMES are safe to log; values never are.
+      console.log(
+        JSON.stringify({
+          event: 'mcp-secret-rotated',
+          name,
+          namespace: targetNs,
+          rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
+        })
+      )
+
+      // affectedConnectors is a best-effort convenience for the UI ("who
+      // restarts"), NOT part of the rotation's success. The Secret is already
+      // written and HCC will roll the affected Deployments regardless. So a
+      // failure to LIST connectors must not turn a successful rotation into a
+      // 500 that would make the operator think the credential is unchanged (and
+      // possibly re-rotate). Fail loud in the log, then return the rotation as
+      // the success it is, with an empty list the UI renders as "unknown".
+      let affectedConnectors: string[] = []
+      try {
+        affectedConnectors = (await gateway.listResource('mcpservers', targetNs))
+          .filter(
+            item =>
+              (item as { spec?: { envSecret?: { name?: string } } }).spec?.envSecret?.name === name
+          )
+          .map(item => (item as { metadata?: { name?: string } }).metadata?.name)
+          .filter((connector): connector is string => typeof connector === 'string')
+          .sort((a, b) => a.localeCompare(b))
+      } catch (err) {
+        console.warn(
+          JSON.stringify({
+            event: 'mcp-secret-rotated-affected-connectors-unavailable',
+            name,
+            namespace: targetNs,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        )
+      }
+
+      res.status(200).json({ name, namespace: targetNs, keys, affectedConnectors })
+    })
+  )
+
   // Delete an MCP Server Secret. Used by the Control UI as a best-effort
   // rollback when CRD creation fails after the Secret was already created
   // (see PR-A / A2 — Secret-first + CRD-second transactional create).
@@ -345,6 +538,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
     asyncHandler(async (req, res) => {
+      // This route deletes by name with no ownership guard, so the reserved name is the
+      // only thing standing between a rollback call and the platform pull credential.
+      if (isPlatformManagedSecretName(req.params.name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       const deleted = await gateway.deleteSecret(req.params.name, config.mcpServersNamespace)
       res.status(200).json(deleted)
     })
@@ -362,8 +561,6 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   //     it. WRC's reconciler refuses projection for any other recipe; the
   //     boundary holds even against malicious third-party recipe authors.
 
-  const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
-  const RECIPE_SECRET_LABEL_VALUE = 'true'
   const RECIPE_SECRET_NAMESPACES = new Set([
     config.sandboxNamespace,
     config.mcpServersNamespace,
@@ -532,6 +729,10 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         })
         return
       }
+      if (isPlatformManagedSecretName(name)) {
+        res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
+        return
+      }
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
         res
           .status(400)
@@ -539,6 +740,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of Object.entries(data)) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
@@ -608,6 +814,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       for (const [key, val] of dataEntries) {
+        const keyError = invalidSecretDataKeyReason(key)
+        if (keyError) {
+          res.status(400).json({ error: keyError })
+          return
+        }
         if (typeof val !== 'string') {
           res.status(400).json({ error: `data["${key}"] must be a string` })
           return
