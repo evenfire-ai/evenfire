@@ -235,10 +235,17 @@ function isStepValid(
     directoryLoadFailed: boolean
   }
 ): boolean {
-  if (stepIndex === 0) return state.hostName.trim().length > 0
+  // Gate on the DERIVED slug, not the raw text: a name with no ASCII
+  // alphanumerics ("!!!", "日本語", "---", whitespace) trims to a non-empty
+  // string but toKebabCase()s to "", which would send metadata.name: "" — and
+  // because the secret/context are created BEFORE the host in submit(), a
+  // failed host create would orphan those siblings.
+  if (stepIndex === 0) return toKebabCase(state.hostName).length > 0
   if (stepIndex === 1) {
     if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
-    return state.contextName.trim().length > 0
+    // Same slug-derivation gate: the new context upsert runs before the host
+    // create, so an empty derived name here has the same orphan risk.
+    return toKebabCase(state.contextName).length > 0
   }
   if (stepIndex === 2) {
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
@@ -629,11 +636,11 @@ export function HostWizard({
   )
 
   const validationMessage = useMemo(() => {
-    if (step === 0 && !hostName.trim()) return 'Agent name is required.'
+    if (step === 0 && !toKebabCase(hostName)) return 'Agent name must contain letters or numbers.'
     if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
       return 'Select an existing context.'
-    if (step === 1 && contextMode === 'new' && !contextName.trim())
-      return 'Context name is required.'
+    if (step === 1 && contextMode === 'new' && !toKebabCase(contextName))
+      return 'Context name must contain letters or numbers.'
     if (step === 2 && !modelName.trim()) return 'Model name is required.'
     if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
       return 'Select an existing secret.'
