@@ -1399,22 +1399,23 @@ export async function acceptInvitationById(email: string, invitationId: string) 
 export async function searchDirectory(teamId: string, q: string) {
   const query = q.trim()
   if (!query) return []
+  const literalPattern = query.replace(/[\\%_]/g, character => `\\${character}`)
 
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, p.display_name, p.channels
+    `SELECT u.id, u.email, u.name, p.display_name
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
         AND (
-          u.email ILIKE $2
-          OR COALESCE(u.name, '') ILIKE $2
-          OR COALESCE(p.display_name, '') ILIKE $2
+          u.email ILIKE $2 ESCAPE '\\'
+          OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
+          OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
    ORDER BY COALESCE(p.display_name, u.name, u.email) ASC
       LIMIT 25`,
-    [teamId, `%${query}%`]
+    [teamId, `%${literalPattern}%`]
   )
   return result.rows
 }
