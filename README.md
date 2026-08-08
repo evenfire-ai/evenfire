@@ -48,10 +48,6 @@ MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this ove
 make minikube-status                            # wait for every deployment READY
 ```
 
-To build locally instead use `make minikube-setup-local`
-(or `IMAGE_SOURCE=local`). MCP servers are not part of either path: they are
-installed on demand from the evenfire registry.
-
 Then run the UIs from your workstation and say hello to the `chatllm` agent:
 
 ```bash
