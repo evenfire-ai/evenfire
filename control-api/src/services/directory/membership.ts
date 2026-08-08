@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
@@ -10,6 +11,8 @@ import {
   roleCanInviteMembers,
 } from './types.js'
 import { adminDeleteUser } from './users.js'
+
+const logger = rootLogger.child({ module: 'directory-membership' })
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -411,10 +414,28 @@ export async function authorizeLiveTeamMembership(
   try {
     const membership = await findMembership(userId, teamId)
     if (!membership) {
+      logger.info(
+        {
+          event: 'live_team_authorization_denied',
+          userId: userId.trim(),
+          teamId: teamId.trim(),
+          code: 'team_membership_inactive',
+        },
+        'Live team authorization denied'
+      )
       return { status: 'denied', code: 'team_membership_inactive' }
     }
     return { status: 'active', membership }
   } catch {
+    logger.warn(
+      {
+        event: 'live_team_authorization_unavailable',
+        userId: userId.trim(),
+        teamId: teamId.trim(),
+        code: 'team_authorization_unavailable',
+      },
+      'Live team authorization dependency unavailable'
+    )
     return { status: 'unavailable', code: 'team_authorization_unavailable' }
   }
 }

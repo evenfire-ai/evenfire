@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
@@ -9,10 +9,15 @@ import {
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 
 const dbMocks = vi.hoisted(() => ({ query: vi.fn() }))
+const logMocks = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn() }))
 
 vi.mock('../src/db.js', () => ({
   pool: { query: dbMocks.query },
   withTransaction: vi.fn(),
+}))
+
+vi.mock('../src/observability/logger.js', () => ({
+  rootLogger: { child: () => logMocks },
 }))
 
 function sessionToken(role: 'admin' | 'inviter' | 'member' = 'member') {
@@ -39,6 +44,8 @@ function buildApp(allowedRoles: Array<'admin' | 'inviter' | 'member'> = []) {
 describe('external session live team authorization', () => {
   beforeEach(() => {
     dbMocks.query.mockReset()
+    logMocks.info.mockReset()
+    logMocks.warn.mockReset()
   })
 
   it('denies a deleted membership through the repository active-state predicate', async () => {
@@ -56,6 +63,16 @@ describe('external session live team authorization', () => {
       .set('x-user-session-token', sessionToken())
       .expect(403)
       .expect({ error: 'team_membership_inactive' })
+
+    expect(logMocks.info).toHaveBeenCalledWith(
+      {
+        event: 'live_team_authorization_denied',
+        userId: 'user-1',
+        teamId: 'team-1',
+        code: 'team_membership_inactive',
+      },
+      'Live team authorization denied'
+    )
   })
 
   it('enforces the current demoted role instead of the token role', async () => {
@@ -92,5 +109,15 @@ describe('external session live team authorization', () => {
       .set('x-user-session-token', sessionToken())
       .expect(503)
       .expect({ error: 'team_authorization_unavailable' })
+
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      {
+        event: 'live_team_authorization_unavailable',
+        userId: 'user-1',
+        teamId: 'team-1',
+        code: 'team_authorization_unavailable',
+      },
+      'Live team authorization dependency unavailable'
+    )
   })
 })
