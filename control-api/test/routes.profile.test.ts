@@ -414,6 +414,61 @@ describe('routes/profile', () => {
     ).expect(200)
   })
 
+  it('requires the current live admin role to rename a team', async () => {
+    svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed Team' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(request(app).put('/external/teams/t1/name'))
+      .send({ userId: 'u1', name: 'Renamed Team' })
+      .expect(403)
+      .expect({ error: 'team_role_insufficient' })
+
+    expect(svc.renameTeam).not.toHaveBeenCalled()
+
+    svc.authorizeLiveTeamMembership.mockResolvedValue({
+      status: 'active',
+      membership: { team_id: 't1', role: 'admin', team_name: 'Team One' },
+    })
+
+    await withInternalServiceAuthAndUserSession(request(app).put('/external/teams/t1/name'))
+      .send({ userId: 'u1', name: 'Renamed Team' })
+      .expect(200)
+      .expect({ id: 't1', name: 'Renamed Team' })
+
+    expect(svc.renameTeam).toHaveBeenCalledOnce()
+    expect(svc.renameTeam).toHaveBeenCalledWith('t1', 'Renamed Team')
+  })
+
+  it('keeps current-role guards on representative team mutations', async () => {
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).patch('/external/teams/t1/members/u2/role')
+    )
+      .send({ userId: 'u1', role: 'admin' })
+      .expect(403)
+      .expect({ error: 'team_role_insufficient' })
+
+    await withInternalServiceAuthAndUserSession(request(app).post('/external/teams/t1/invitations'))
+      .send({ userId: 'u1', name: 'Invitee', email: 'invitee@example.com', role: 'member' })
+      .expect(403)
+      .expect({ error: 'team_role_insufficient' })
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).delete('/external/teams/t1/members/u2')
+    )
+      .expect(403)
+      .expect({ error: 'team_role_insufficient' })
+
+    expect(svc.updateMemberRole).not.toHaveBeenCalled()
+    expect(svc.createInvitation).not.toHaveBeenCalled()
+    expect(svc.softDeleteMember).not.toHaveBeenCalled()
+  })
+
   it('live-authorizes the directory query team without changing its response shape', async () => {
     svc.searchDirectory.mockResolvedValue([{ id: 'u2', email: 'two@example.com' }])
     const app = express()
