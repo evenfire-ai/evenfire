@@ -37,7 +37,7 @@
 
 ## Quick start
 
-> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. It is for evaluation and development; Evenfire is designed to run on a **remote Kubernetes cluster**. When you're ready for that, jump to [Deploying to a remote cluster](#deploying-to-a-remote-cluster).
+> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. 
 
 Stand up every service on minikube with one command, including a seeded agent
 named `chatllm`:
