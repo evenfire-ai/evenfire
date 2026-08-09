@@ -7,6 +7,9 @@ spec:
   triggers:
     onDemand: {}
   description: Layer 3A snippet runtime direct MongoDB and PostgreSQL SDK flow.
+  # DB workloads need root/writable rootfs; opt out of the platform 'standard' default.
+  security:
+    isolationLevel: minimal
   resources:
     - id: pg-auth
       type: secret
