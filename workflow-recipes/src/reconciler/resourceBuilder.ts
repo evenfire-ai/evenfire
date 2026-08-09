@@ -948,7 +948,7 @@ export interface WorkloadBuildOptions {
 export function buildDeployment(
   workload: DeploymentDef,
   recipe: WorkflowRecipeCRD,
-  isolationLevel: SecurityIsolationLevel = 'minimal',
+  isolationLevel: SecurityIsolationLevel = 'standard',
   secretKeys?: SecretKeysByName,
   buildOptions?: WorkloadBuildOptions
 ): k8s.V1Deployment {
@@ -1019,7 +1019,7 @@ export function buildDeployment(
 export function buildStatefulSet(
   workload: StatefulSetDef,
   recipe: WorkflowRecipeCRD,
-  isolationLevel: SecurityIsolationLevel = 'minimal',
+  isolationLevel: SecurityIsolationLevel = 'standard',
   secretKeys?: SecretKeysByName,
   buildOptions?: WorkloadBuildOptions
 ): { statefulSet: k8s.V1StatefulSet; headlessService: k8s.V1Service } {
@@ -1121,7 +1121,7 @@ export function buildStatefulSet(
 export function buildCronJob(
   workload: CronJobDef,
   recipe: WorkflowRecipeCRD,
-  isolationLevel: SecurityIsolationLevel = 'minimal',
+  isolationLevel: SecurityIsolationLevel = 'standard',
   secretKeys?: SecretKeysByName,
   buildOptions?: WorkloadBuildOptions
 ): k8s.V1CronJob {
@@ -1168,7 +1168,7 @@ export function buildCronJob(
 export function buildJob(
   workload: JobDef,
   recipe: WorkflowRecipeCRD,
-  isolationLevel: SecurityIsolationLevel = 'minimal',
+  isolationLevel: SecurityIsolationLevel = 'standard',
   secretKeys?: SecretKeysByName,
   buildOptions?: WorkloadBuildOptions
 ): k8s.V1Job {
@@ -1210,7 +1210,7 @@ export function buildJob(
 export function buildDaemonSet(
   workload: DaemonSetDef,
   recipe: WorkflowRecipeCRD,
-  isolationLevel: SecurityIsolationLevel = 'minimal',
+  isolationLevel: SecurityIsolationLevel = 'standard',
   secretKeys?: SecretKeysByName,
   buildOptions?: WorkloadBuildOptions
 ): k8s.V1DaemonSet {

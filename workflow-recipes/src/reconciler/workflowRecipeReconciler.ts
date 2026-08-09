@@ -2052,7 +2052,7 @@ export class WorkflowRecipeReconciler {
       }
 
       const isolationLevel: SecurityIsolationLevel =
-        recipe.spec.security?.isolationLevel ?? 'minimal'
+        recipe.spec.security?.isolationLevel ?? 'standard'
 
       // Step 7: Create resources first (PVCs, Secrets, ConfigMaps)
       if (!(await this.hasVerifiedInheritedParentResources(recipe))) {
@@ -2932,7 +2932,8 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    const isolationLevel: SecurityIsolationLevel = recipe.spec.security?.isolationLevel ?? 'minimal'
+    const isolationLevel: SecurityIsolationLevel =
+      recipe.spec.security?.isolationLevel ?? 'standard'
     const sortOrder = sortDependencies(
       workloads.map(w => ({ id: w.id, dependsOn: w.dependsOn ?? [] }))
     )
@@ -4892,7 +4893,7 @@ export class WorkflowRecipeReconciler {
     // still rotate the (potentially compromised) Secret to fully remediate.
     if (workload.type === 'statefulset') {
       const isolationLevel: SecurityIsolationLevel =
-        recipe.spec.security?.isolationLevel ?? 'minimal'
+        recipe.spec.security?.isolationLevel ?? 'standard'
       await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys)
       await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
       return
