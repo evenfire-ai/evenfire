@@ -436,6 +436,119 @@ assert_source_paths_match_filters() {
   fi
 }
 
+# A change in the shared egress core must rebuild both direct controller
+# consumers. HCC owns its own filter, while four published artifacts share the
+# workflow-recipes filter: the controller, coordinator, snippet runner, and
+# published workflow base. The base is deliberately not Minikube-deployed; it
+# remains a published SDK build base rather than acquiring a runtime overlay.
+#
+# This is intentionally more specific than the generic source_paths/filter
+# parity guard above. A synchronized omission from both hand-maintained copies
+# would otherwise stay green while a core-only change selected no image at all.
+assert_network_policy_core_change_rebuilds_all_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePath = "packages/network-policy-core/**"
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter filters block in ${wfPath}`)
+        process.exit(1)
+      }
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        } else {
+          console.log(`PARSE_ERROR: unrecognized line in the filters block: ${JSON.stringify(line)}`)
+          process.exit(1)
+        }
+      }
+
+      const expectedFilterKeys = ["host-context-controller", "workflow-recipes"]
+      const coreFilterKeys = Object.entries(filters)
+        .filter(([, paths]) => paths.includes(sourcePath))
+        .map(([key]) => key)
+        .sort()
+      const problems = []
+      if (coreFilterKeys.join(",") !== expectedFilterKeys.join(",")) {
+        problems.push(`filters for ${sourcePath} are ${coreFilterKeys.join(",") || "<none>"}, expected ${expectedFilterKeys.join(",")}`)
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const imageFilterKeys = {}
+      for (const block of sectionMatch[1].split(/\n(?=\s*- image:)/)) {
+        const image = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!image) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (!changedKey) {
+          console.log(`PARSE_ERROR: matrix entry ${image} has no detect output mapping`)
+          process.exit(1)
+        }
+        imageFilterKeys[image] = changedKey
+      }
+
+      const expectedImages = [
+        "clerum-workflow-base",
+        "host-context-controller",
+        "workflow-coordinator",
+        "workflow-recipes",
+        "workflow-snippet-runner",
+      ]
+      const selectedImages = Object.entries(imageFilterKeys)
+        .filter(([, filterKey]) => coreFilterKeys.includes(filterKey))
+        .map(([image]) => image)
+        .sort()
+      if (selectedImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`core-only selection is ${selectedImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+
+      const manifestByName = new Map(m.IMAGES.map(image => [image.name, image]))
+      for (const imageName of expectedImages) {
+        const image = manifestByName.get(imageName)
+        if (!image) {
+          problems.push(`${imageName} has no deploy/images.json row`)
+        } else if (!image.source_paths?.includes(sourcePath)) {
+          problems.push(`${imageName} does not mirror ${sourcePath} in source_paths`)
+        }
+      }
+      const workflowBase = manifestByName.get("clerum-workflow-base")
+      if (!workflowBase) {
+        problems.push("clerum-workflow-base has no deploy/images.json row")
+      } else {
+        if (workflowBase.published !== true) problems.push("clerum-workflow-base must remain published")
+        if (workflowBase.deployed_to_minikube !== false) problems.push("clerum-workflow-base must remain non-deployed")
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "network-policy-core changed-path contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "a network-policy-core-only change rebuilds HCC and the four-artifact WRC fan-out"
+  else
+    fail "network-policy-core changed-path contract failed: $output"
+  fi
+}
+
 # THREE copies of the 28-image list exist in build-publish.yml, not two:
 # build-push's `image:` matrix dimension (the array that, crossed with
 # `arch`, produces the 56 base combinations), build-push's `include:` list
@@ -924,6 +1037,7 @@ assert_unpublished_images_are_exactly_the_known_two
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
+assert_network_policy_core_change_rebuilds_all_consumers
 assert_all_three_image_lists_agree
 assert_the_verify_set_splits_on_published_not_on_mode
 assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures
