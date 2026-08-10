@@ -106,12 +106,13 @@ export function PluginConsentModal({ request, onResolve }: PluginConsentModalPro
       role="presentation"
       style={backdropStyle}
     >
-      <div
-        className="confirm-dialog da-plugin-consent"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
+      {/* Deliberately NOT aria-modal: the backdrop is scoped to the plugin's
+          embed rectangle (see backdropStyle above), so the surrounding trusted
+          app chrome stays visible and interactive by design. Claiming full-window
+          modality here would misdescribe the DOM to assistive tech. The plugin
+          cannot exploit the un-dimmed chrome — main hides the plugin's own
+          WebContentsView while this prompt is up. */}
+      <div className="confirm-dialog da-plugin-consent" role="dialog" aria-labelledby={titleId}>
         <h3 id={titleId}>{request.pluginTitle} wants access to your information</h3>
 
         {request.priorPromptCount > 0 ? (

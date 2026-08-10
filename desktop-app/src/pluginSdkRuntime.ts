@@ -288,9 +288,14 @@ export class PluginSdkRuntime {
 
   /**
    * Resolve a `gfs://` link with the USER's session and hand it to the trusted
-   * renderer to display. The plugin gets back only whether it opened: it never
-   * sees the name, size, or bytes, and an unauthorized or missing resource is
-   * the same "could not open" either way, so this is not an existence oracle.
+   * renderer to display. The plugin gets back only whether it opened — never the
+   * name, size, or bytes. The internal `reason` returned here is for the audit
+   * line and the navigation path; the `gfs.open` capability drops it before the
+   * plugin sees it, so absent and unauthorized both read as `opened: false`.
+   * A resolvable link IS still distinguishable from a non-resolvable one, so this
+   * is a narrow accessibility signal — bounded by the 6/min budget, unguessable
+   * resource ids, a live user session, and a viewer that paints over the plugin
+   * on every hit. Reads over that bound: mark the capability `requiresConsent`.
    *
    * Reached two ways, both landing here so they share the rate budget and the
    * audit line: `clerum.gfs.open(uri)` through the broker, and a plain

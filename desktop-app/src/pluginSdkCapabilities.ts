@@ -412,11 +412,13 @@ export const CAPABILITIES: Record<string, CapabilityDescriptor> = {
     // Unscoped, and the second capability to qualify. The rule from §6.7 is that
     // `requiresConsent: false` needs the response to carry nothing about the
     // user; this one adds the other half: the ACTION must be unmissable. The
-    // plugin gets back `{ opened }` and nothing else — it never learns the file's
-    // name, size, or contents. What happens is that the Desktop's own viewer
-    // opens, over the plugin, showing the user a file they already have access
-    // to, resolved with their session. Prompting "may this plugin show you your
-    // own file?" would be noise in front of an action the user can see.
+    // plugin gets back a bare `{ opened }` and nothing else — not the file's
+    // name, size, contents, nor WHY a failure happened (the `run` below drops the
+    // internal `reason`, so absent/unauthorized/transient all collapse to
+    // `opened: false`). What happens is that the Desktop's own viewer opens, over
+    // the plugin, showing the user a file they already have access to, resolved
+    // with their session. Prompting "may this plugin show you your own file?"
+    // would be noise in front of an action the user can see.
     requiresConsent: false,
     consent: {
       title: 'Open a shared file in the Evenfire viewer',
@@ -434,7 +436,12 @@ export const CAPABILITIES: Record<string, CapabilityDescriptor> = {
       if (!uri.startsWith('gfs://')) throw new CapabilityInputError('uri must be a gfs:// link')
       return { uri }
     },
-    run: async (ctx, params) => ctx.source.openGfsResource({ uri: params.uri as string }),
+    run: async (ctx, params) => {
+      // Never forward the internal `reason` to the plugin: it would turn a
+      // failed open into an accessibility oracle (not_found vs unavailable).
+      const result = await ctx.source.openGfsResource({ uri: params.uri as string })
+      return { opened: result.opened }
+    },
   },
 
   'theme.read': {

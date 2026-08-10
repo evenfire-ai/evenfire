@@ -218,7 +218,9 @@ export function App() {
   /**
    * Plugin permission prompts (spec §9). Main hides the plugin's
    * `WebContentsView` before pushing the request and restores it once the user
-   * answers, so this modal is the only thing on screen while it is up.
+   * answers, so the plugin can neither fake the prompt nor paint over it. The
+   * prompt is centered over — and its backdrop scoped to — the plugin's embed
+   * rect, not the whole window; the rest of the trusted app chrome stays visible.
    */
   const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
     null

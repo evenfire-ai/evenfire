@@ -261,26 +261,39 @@ export class PluginConsentGate {
     session.promptCount += 1
     session.lastPromptAt = this.now()
 
+    // Register the pending prompt BEFORE the surface-visibility await. If the
+    // plugin unmounts during that await (unpin → releasePlugin → resetPlugin),
+    // resetPlugin must be able to find and cancel this prompt; otherwise it sees
+    // `pending === null`, cancels nothing, and the await below hangs until the
+    // 120 s timeout.
+    let resolvePrompt!: (allowed: Set<string>) => void
+    const promptResult = new Promise<Set<string>>(resolve => {
+      resolvePrompt = resolve
+    })
+    const timer = setTimeout(() => {
+      if (this.pending?.promptId !== promptId) return
+      this.pending = null
+      this.deps.cancelPrompt(promptId)
+      // A prompt nobody answered counts as a denial (spec §9.3).
+      resolvePrompt(new Set())
+    }, CONSENT_PROMPT_TIMEOUT_MS)
+    this.pending = {
+      promptId,
+      pluginId: input.pluginId,
+      capabilities: new Set(stillNeeded),
+      resolve: resolvePrompt,
+      timer,
+    }
+
     let allowed = new Set<string>()
-    await this.deps.setSurfaceVisible(false)
     try {
-      allowed = await new Promise<Set<string>>(resolve => {
-        const timer = setTimeout(() => {
-          if (this.pending?.promptId !== promptId) return
-          this.pending = null
-          this.deps.cancelPrompt(promptId)
-          // A prompt nobody answered counts as a denial (spec §9.3).
-          resolve(new Set())
-        }, CONSENT_PROMPT_TIMEOUT_MS)
-        this.pending = {
-          promptId,
-          pluginId: input.pluginId,
-          capabilities: new Set(stillNeeded),
-          resolve,
-          timer,
-        }
+      await this.deps.setSurfaceVisible(false)
+      // If the plugin unmounted during the await, resetPlugin already cleared
+      // `this.pending` and resolved the prompt as a denial — never present it.
+      if (this.pending?.promptId === promptId) {
         this.deps.presentPrompt(request)
-      })
+      }
+      allowed = await promptResult
     } finally {
       await this.deps.setSurfaceVisible(true).catch(() => undefined)
     }

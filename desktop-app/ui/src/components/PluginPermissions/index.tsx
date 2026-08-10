@@ -125,7 +125,7 @@ export function PluginPermissions() {
                       <Button
                         color="danger"
                         disabled={controller.revoking}
-                        onClick={() => void controller.revoke(group.pluginId)}
+                        onClick={() => controller.revoke(group.pluginId).catch(() => undefined)}
                         size="sm"
                         variant="ghost"
                       >
@@ -152,7 +152,9 @@ export function PluginPermissions() {
                               color="danger"
                               disabled={controller.revoking}
                               onClick={() =>
-                                void controller.revoke(grant.pluginId, grant.capability)
+                                controller
+                                  .revoke(grant.pluginId, grant.capability)
+                                  .catch(() => undefined)
                               }
                               size="sm"
                               variant="ghost"
@@ -199,7 +201,7 @@ export function PluginPermissions() {
           <div className="settings-form">
             <Button
               color="neutral"
-              onClick={() => void controller.clearActivity()}
+              onClick={() => controller.clearActivity().catch(() => undefined)}
               size="sm"
               variant="ghost"
             >

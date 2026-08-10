@@ -25,6 +25,14 @@ let clock: number
 type GateOptions = {
   decide?: (request: PluginConsentRequest) => string[] | null
   windowReady?: () => boolean
+  setSurfaceVisible?: (visible: boolean) => Promise<void>
+}
+
+/** Spin the macrotask queue until `pred` holds — deterministic, no fixed sleep. */
+async function flushUntil(pred: () => boolean, maxTicks = 1000): Promise<void> {
+  for (let i = 0; i < maxTicks && !pred(); i++) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
 }
 
 function makeGate(options: GateOptions = {}): PluginConsentGate {
@@ -41,9 +49,11 @@ function makeGate(options: GateOptions = {}): PluginConsentGate {
       }
     },
     cancelPrompt: promptId => cancelled.push(promptId),
-    setSurfaceVisible: async visible => {
-      visibility.push(visible)
-    },
+    setSurfaceVisible:
+      options.setSurfaceVisible ??
+      (async visible => {
+        visibility.push(visible)
+      }),
     isWindowReady: options.windowReady ?? (() => true),
     now: () => clock,
     sleep: async ms => {
@@ -163,11 +173,38 @@ describe('PluginConsentGate', () => {
   it('cancels a pending prompt when its plugin goes away', async () => {
     const gate = makeGate({ decide: () => null })
     const pending = gate.ensure({ ...BASE, capabilities: ['identity.read'] })
-    await new Promise(resolve => setTimeout(resolve, 0))
+    // Wait until the prompt is actually presented (deterministic) rather than a
+    // single arbitrary tick, which raced the async setup under I/O load.
+    await flushUntil(() => prompts.length === 1)
     gate.resetPlugin(BASE.pluginId)
     const outcome = await pending
     expect(cancelled).toHaveLength(1)
     expect(outcome.granted['identity.read']).toBe(false)
+  })
+
+  it('cancels a prompt whose plugin unmounts during the surface-hide flip', async () => {
+    // Regression for the ordering window: the pending prompt is registered before
+    // the `setSurfaceVisible(false)` await, so an unmount mid-flip is cancelled as
+    // a denial instead of hanging until the 120 s timeout — and is never shown.
+    let releaseHide!: () => void
+    const hideBlocked = new Promise<void>(resolve => {
+      releaseHide = resolve
+    })
+    const gate = makeGate({
+      decide: () => null,
+      setSurfaceVisible: async visible => {
+        visibility.push(visible)
+        if (visible === false) await hideBlocked
+      },
+    })
+    const pending = gate.ensure({ ...BASE, capabilities: ['identity.read'] })
+    await flushUntil(() => visibility.includes(false))
+    gate.resetPlugin(BASE.pluginId)
+    releaseHide()
+    const outcome = await pending
+    expect(cancelled).toHaveLength(1)
+    expect(outcome.granted['identity.read']).toBe(false)
+    expect(prompts).toHaveLength(0)
   })
 
   it('does not prompt for an ambient capability', async () => {

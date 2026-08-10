@@ -30,15 +30,23 @@ function refill(bucket: Bucket, now: number): void {
   bucket.updatedAt = now
 }
 
-function tryTake(bucket: Bucket, now: number): RateLimitDecision {
-  refill(bucket, now)
-  if (bucket.tokens >= 1) {
-    bucket.tokens -= 1
-    return { allowed: true }
+/**
+ * Refill both buckets of a pair, then take a token from each only if BOTH have
+ * capacity. Checking before committing means a request denied by one window
+ * never spends a token in the other — so the limiter stays exactly as strict as
+ * the spec and no token is silently lost between the minute/hour windows.
+ */
+function tryTakePair(pair: [Bucket, Bucket], now: number): RateLimitDecision {
+  for (const bucket of pair) refill(bucket, now)
+  for (const bucket of pair) {
+    if (bucket.tokens < 1) {
+      // Time until one whole token exists again in the starved window.
+      const deficit = 1 - bucket.tokens
+      return { allowed: false, retryAfterMs: Math.ceil(deficit / bucket.refillPerMs) }
+    }
   }
-  // Time until one whole token exists again.
-  const deficit = 1 - bucket.tokens
-  return { allowed: false, retryAfterMs: Math.ceil(deficit / bucket.refillPerMs) }
+  for (const bucket of pair) bucket.tokens -= 1
+  return { allowed: true }
 }
 
 export class PluginRateLimiter {
@@ -61,25 +69,23 @@ export class PluginRateLimiter {
 
   /**
    * Consume one token from the capability bucket AND the plugin-global bucket.
-   * Both must have capacity; when the capability bucket allows but the global
-   * one does not, the capability token is refunded so a globally throttled
-   * plugin does not also burn its per-capability budget.
+   * Both pairs must have capacity in both their windows; a denial anywhere spends
+   * nothing. If the capability pair allows but the global pair denies, the
+   * capability tokens are refunded so a globally throttled plugin does not also
+   * burn its per-capability budget.
    */
   take(pluginId: string, capability: string, spec: RateLimitSpec): RateLimitDecision {
     const now = this.now()
     const capPair = this.pair(`${pluginId}::${capability}`, spec)
     const globalPair = this.pair(`${pluginId}::*`, PLUGIN_GLOBAL_LIMIT)
 
-    for (const bucket of capPair) {
-      const decision = tryTake(bucket, now)
-      if (!decision.allowed) return decision
-    }
-    for (const bucket of globalPair) {
-      const decision = tryTake(bucket, now)
-      if (!decision.allowed) {
-        for (const b of capPair) b.tokens = Math.min(b.capacity, b.tokens + 1)
-        return decision
-      }
+    const capDecision = tryTakePair(capPair, now)
+    if (!capDecision.allowed) return capDecision
+
+    const globalDecision = tryTakePair(globalPair, now)
+    if (!globalDecision.allowed) {
+      for (const b of capPair) b.tokens = Math.min(b.capacity, b.tokens + 1)
+      return globalDecision
     }
     return { allowed: true }
   }

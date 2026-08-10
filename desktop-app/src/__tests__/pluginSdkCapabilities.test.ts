@@ -298,6 +298,19 @@ describe('gfs.open', () => {
     expect(result).toEqual({ opened: true })
   })
 
+  it('drops the internal reason on failure so it is not an accessibility oracle', async () => {
+    // The producer distinguishes not_found / unavailable internally; the plugin
+    // must only ever see `{ opened: false }` — otherwise it can tell an absent or
+    // unauthorized resource apart from a transient failure without consent.
+    const result = await run(
+      'gfs.open',
+      { uri: 'gfs://main/secret.png' },
+      { openGfsResource: async () => ({ opened: false, reason: 'not_found' }) }
+    )
+    expect(result).toEqual({ opened: false })
+    expect(result).not.toHaveProperty('reason')
+  })
+
   it('rejects a non-gfs uri and unexpected params', () => {
     const descriptor = getCapability('gfs.open')
     expect(() => descriptor?.validate({ uri: 'https://evil.example/x' })).toThrow()

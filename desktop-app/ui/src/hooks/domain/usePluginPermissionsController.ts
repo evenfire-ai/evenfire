@@ -87,11 +87,19 @@ export function usePluginPermissionsController() {
     groups,
     activity,
     loading: grantsQuery.isPending || activityQuery.isPending,
+    // Surface query AND mutation failures. Without the mutation errors a failed
+    // revoke/clear silently left the UI unchanged, so the user believed a
+    // permission was revoked when it was not. React Query clears each mutation's
+    // error on its next run, so a stale message does not linger.
     error: grantsQuery.error
       ? toErrorMessage(grantsQuery.error)
       : activityQuery.error
         ? toErrorMessage(activityQuery.error)
-        : null,
+        : revokeMutation.error
+          ? toErrorMessage(revokeMutation.error)
+          : clearActivityMutation.error
+            ? toErrorMessage(clearActivityMutation.error)
+            : null,
     revoking: revokeMutation.isPending,
     revoke: (pluginId: string, capability?: string) =>
       revokeMutation.mutateAsync({ pluginId, ...(capability ? { capability } : {}) }),
