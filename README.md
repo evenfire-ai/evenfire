@@ -11,8 +11,8 @@
 <h3 align="center">Build your company's intelligence layer, without losing control.</h3>
 
 <p align="center">
-  Where your <b>team and AI agents work together</b> — a complete, fully open-source platform,<br/>
-  from a native desktop app to a secure, self-hosted backend.<br/>
+  Where your team and AI agents work together — a complete, fully open-source platform,
+  from a native desktop app to a secure, self-hosted backend.
   Bring your own model keys; every risky action waits for a human "yes."
 </p>
 
