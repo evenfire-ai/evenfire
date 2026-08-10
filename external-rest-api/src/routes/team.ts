@@ -40,7 +40,9 @@ export function createTeamRouter(): Router {
         res.status(400).json({ error: 'Team name is required' })
         return
       }
-      res.status(201).json(await createTeamForUser({ ...auth, sessionToken }, name))
+      const result = await createTeamForUser({ ...auth, sessionToken }, name)
+      const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      res.status(201).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
     }

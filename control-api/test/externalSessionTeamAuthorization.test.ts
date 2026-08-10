@@ -9,9 +9,11 @@ import {
 
 const session = vi.hoisted(() => ({ verifyExternalSessionToken: vi.fn() }))
 const authorization = vi.hoisted(() => ({ getLiveTeamMembership: vi.fn() }))
+const userSessions = vi.hoisted(() => ({ validateUserSessionClaims: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => session)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => authorization)
+vi.mock('../src/services/auth/userSessionService.js', () => userSessions)
 
 function app() {
   const value = express()
@@ -35,6 +37,56 @@ describe('external team authorization', () => {
       role: 'admin',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })
+  })
+
+  it('rejects a revoked v2 session before team authorization', async () => {
+    session.verifyExternalSessionToken.mockReturnValue({
+      userId: 'user-1',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      sessionContract: 'v2',
+      sid: 'session-1',
+      jti: 'representation-1',
+      sv: 1,
+      authTime: Math.floor(Date.now() / 1000),
+      amr: ['pwd'],
+    })
+    userSessions.validateUserSessionClaims.mockResolvedValue({
+      status: 'revoked',
+      reason: 'logout',
+    })
+
+    await request(app())
+      .get('/teams/team-1')
+      .set('x-user-session-token', 'revoked-v2-token')
+      .expect(401)
+    expect(authorization.getLiveTeamMembership).not.toHaveBeenCalled()
+  })
+
+  it('returns unavailable when the v2 session store cannot decide', async () => {
+    session.verifyExternalSessionToken.mockReturnValue({
+      userId: 'user-1',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      sessionContract: 'v2',
+      sid: 'session-1',
+      jti: 'representation-1',
+      sv: 1,
+      authTime: Math.floor(Date.now() / 1000),
+      amr: ['pwd'],
+    })
+    userSessions.validateUserSessionClaims.mockRejectedValue(new Error('database unavailable'))
+
+    await request(app())
+      .get('/teams/team-1')
+      .set('x-user-session-token', 'v2-token')
+      .expect(503)
+      .expect({ error: 'authority_unavailable' })
+    expect(authorization.getLiveTeamMembership).not.toHaveBeenCalled()
   })
 
   it('uses the current database role instead of the token role', async () => {

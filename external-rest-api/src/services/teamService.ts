@@ -45,26 +45,13 @@ export async function createTeamForUser(
     userSessionToken: auth.sessionToken,
   })
 
-  const { token } = await controlApiRequest<{ token: string }>(
-    'POST',
-    '/external/auth/session-token',
-    {
-      body: {
-        userId: auth.userId,
-        email: auth.email,
-        teamId: team.id,
-        role: 'admin',
-      },
-    }
-  )
-
   return {
     team: {
       id: team.id,
       name: team.name,
       role: 'admin' as const,
     },
-    token,
+    token: auth.sessionToken,
   }
 }
 

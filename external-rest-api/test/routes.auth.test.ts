@@ -7,6 +7,9 @@ import { createAuthRouter } from '../src/routes/auth.js'
 const authServiceMock = vi.hoisted(() => ({
   loginWithGoogle: vi.fn(),
   loginWithPassword: vi.fn(),
+  logoutUserSession: vi.fn(),
+  renewUserSession: vi.fn(),
+  requestPasswordReset: vi.fn(),
 }))
 
 vi.mock('../src/services/authService.js', () => authServiceMock)
@@ -28,7 +31,7 @@ function buildApp() {
 
 describe('routes/auth password-login', () => {
   beforeEach(() => {
-    authServiceMock.loginWithPassword.mockReset()
+    vi.clearAllMocks()
   })
 
   it('propagates invalid credentials as a 401 instead of a 500', async () => {
@@ -96,5 +99,35 @@ describe('routes/auth password-login', () => {
     expect(res.body.token).toBe('desktop-session-jwt')
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+  })
+
+  it('rotates the browser cookie without exposing the renewed bearer', async () => {
+    authServiceMock.renewUserSession.mockResolvedValueOnce({
+      token: 'renewed-session-jwt',
+      expiresInSeconds: 3600,
+      absoluteExpiresAt: '2026-09-09T00:00:00.000Z',
+    })
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/session/renew')
+      .set('origin', 'http://localhost:3001')
+      .set('cookie', 'profile_session=current-session-jwt')
+      .expect(200)
+
+    expect(res.body).toEqual({ expiresInSeconds: 3600 })
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith('current-session-jwt')
+    expect(String(res.headers['set-cookie'])).toContain('profile_session=renewed-session-jwt')
+  })
+
+  it('revokes the server session before clearing the browser cookie on logout', async () => {
+    authServiceMock.logoutUserSession.mockResolvedValueOnce({ revoked: true })
+
+    await request(buildApp())
+      .post('/api/v1/auth/logout')
+      .set('cookie', 'profile_session=current-session-jwt')
+      .expect(200)
+      .expect({ ok: true })
+
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('current-session-jwt')
   })
 })

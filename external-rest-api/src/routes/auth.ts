@@ -6,9 +6,16 @@ import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
   loginWithGoogle,
   loginWithPassword,
+  logoutUserSession,
+  renewUserSession,
   requestPasswordReset,
 } from '../services/authService.js'
-import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
+import {
+  PROFILE_SESSION_COOKIE,
+  clearProfileSessionCookie,
+  readCookie,
+  setProfileSessionCookie,
+} from '../sessionCookie.js'
 
 const googleClient = new OAuth2Client(config.googleClientId)
 const passwordResetRateLimit = createRateLimiter({
@@ -145,9 +152,49 @@ export function createAuthRouter(): Router {
     }
   })
 
-  router.post('/auth/logout', (req, res) => {
-    clearProfileSessionCookie(req, res)
-    res.status(200).json({ ok: true })
+  router.post('/auth/session/renew', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (!token || token.length > 4096) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const renewed = await renewUserSession(token)
+      setProfileSessionCookie(req, res, renewed.token)
+      const body = shouldExposeBearerToken(req)
+        ? { token: renewed.token, expiresInSeconds: renewed.expiresInSeconds }
+        : { expiresInSeconds: renewed.expiresInSeconds }
+      res.status(200).json(body)
+    } catch (error) {
+      if (isControlApiStatus(error, 401)) {
+        clearProfileSessionCookie(req, res)
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      next(error)
+    }
+  })
+
+  router.post('/auth/logout', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (token) await logoutUserSession(token)
+      clearProfileSessionCookie(req, res)
+      res.status(200).json({ ok: true })
+    } catch (error) {
+      if (isControlApiStatus(error, 401)) {
+        clearProfileSessionCookie(req, res)
+        res.status(200).json({ ok: true })
+        return
+      }
+      next(error)
+    }
   })
 
   return router

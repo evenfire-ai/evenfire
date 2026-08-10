@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
@@ -1094,6 +1095,7 @@ export async function setInvitationPasswordForUser(
         WHERE id = $1`,
       [user.id, passwordHash]
     )
+    await revokeAllUserSessions(user.id, 'password_changed', db)
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
       await db.query(
         `UPDATE invitations
@@ -1176,6 +1178,7 @@ export async function setInvitationPasswordForEmail(
         WHERE id = $1`,
       [user.id, passwordHash]
     )
+    await revokeAllUserSessions(user.id, 'password_changed', db)
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
       await db.query(
         `UPDATE invitations
@@ -1896,5 +1899,6 @@ export async function updateUserPassword(
       WHERE id = $1`,
     [normalizedUserId, await bcrypt.hash(nextPassword, 12)]
   )
+  await revokeAllUserSessions(normalizedUserId, 'password_changed')
   return { updated: true as const }
 }

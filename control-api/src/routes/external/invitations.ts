@@ -6,6 +6,7 @@ import {
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { createUserSession } from '../../services/auth/userSessionService.js'
 import {
   acceptInvitationForEmail,
   getInvitationByToken,
@@ -19,7 +20,6 @@ import {
   validateInvitationFlowToken,
 } from '../../services/invitationFlowRegistrationService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
-import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
 function invitationLookupIpKey(req: {
   ip?: string
@@ -124,11 +124,10 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
-        const sessionToken = signExternalSessionToken({
+        const { token: sessionToken } = await createUserSession({
           userId,
           email: result.data.email,
-          teamId: result.data.teamId || null,
-          role: result.data.role,
+          authenticationMethods: ['invitation'],
         })
 
         return res.status(200).json({
@@ -269,11 +268,10 @@ export function createExternalInvitationsRouter(): Router {
         return res.status(400).json({ error: 'not_pending' })
       }
 
-      const sessionToken = signExternalSessionToken({
+      const { token: sessionToken } = await createUserSession({
         userId: result.data.userId,
         email: result.data.email,
-        teamId: result.data.teamId || null,
-        role: result.data.role,
+        authenticationMethods: ['invitation'],
       })
 
       return res.status(200).json({

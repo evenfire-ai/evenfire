@@ -87,21 +87,8 @@ export async function switchTeam(
   }
 
   const role = membership.role as TeamRole
-  const { token } = await controlApiRequest<{ token: string }>(
-    'POST',
-    '/external/auth/session-token',
-    {
-      body: {
-        userId,
-        email,
-        teamId: membership.team_id,
-        role,
-      },
-    }
-  )
-
   return {
-    token,
+    token: sessionToken,
     team: {
       id: membership.team_id,
       name: membership.team_name,

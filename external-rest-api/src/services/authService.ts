@@ -45,3 +45,19 @@ export async function requestPasswordReset(email: string): Promise<{ requested: 
     body: { email },
   })
 }
+
+export async function renewUserSession(sessionToken: string): Promise<{
+  token: string
+  expiresInSeconds: number
+  absoluteExpiresAt: string
+}> {
+  return controlApiRequest('POST', '/external/auth/session/renew', {
+    userSessionToken: sessionToken,
+  })
+}
+
+export async function logoutUserSession(sessionToken: string): Promise<{ revoked: boolean }> {
+  return controlApiRequest('POST', '/external/auth/session/logout', {
+    userSessionToken: sessionToken,
+  })
+}

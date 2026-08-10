@@ -178,4 +178,36 @@ describe('routes/access forwarding', () => {
     const app = appWith(createMeRouter)
     await request(app).get('/me/contexts').set('authorization', 'Bearer bad-token').expect(401)
   })
+
+  it('does not expose a user bearer on browser team creation or switch responses', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    teamServiceMock.createTeamForUser.mockResolvedValue({
+      team: { id: 'team-2', name: 'New Team', role: 'admin' },
+      token: 'replayable-user-token',
+    })
+    meServiceMock.switchTeam.mockResolvedValue({
+      team: { id: 'team-2', name: 'New Team', role: 'admin' },
+      token: 'replayable-user-token',
+    })
+
+    const teamResponse = await request(appWith(createTeamRouter))
+      .post('/team')
+      .set('authorization', 'Bearer good-token')
+      .set('origin', 'http://localhost:3001')
+      .send({ name: 'New Team' })
+      .expect(201)
+    const switchResponse = await request(appWith(createMeRouter))
+      .post('/me/switch-team')
+      .set('authorization', 'Bearer good-token')
+      .set('sec-fetch-site', 'same-origin')
+      .send({ teamId: 'team-2' })
+      .expect(200)
+
+    expect(teamResponse.body).toEqual({
+      team: { id: 'team-2', name: 'New Team', role: 'admin' },
+    })
+    expect(switchResponse.body).toEqual({
+      team: { id: 'team-2', name: 'New Team', role: 'admin' },
+    })
+  })
 })

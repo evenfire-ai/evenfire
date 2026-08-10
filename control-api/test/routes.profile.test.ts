@@ -57,6 +57,14 @@ const liveTeamAuthorizationMock = vi.hoisted(() => ({
   getLiveTeamMembership: vi.fn(),
 }))
 
+const userSessionServiceMock = vi.hoisted(() => ({
+  createUserSession: vi.fn(),
+  renewUserSessionToken: vi.fn(),
+  revokeAllUserSessions: vi.fn(),
+  revokeUserSession: vi.fn(),
+  validateUserSessionClaims: vi.fn(),
+}))
+
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 vi.mock(
@@ -73,6 +81,7 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
+vi.mock('../src/services/auth/userSessionService.js', () => userSessionServiceMock)
 
 describe('routes/profile', () => {
   const token = 'dev-external-rest-api-token'
@@ -116,6 +125,11 @@ describe('routes/profile', () => {
       async (_userId: string, teamId: string) =>
         teamId === 't1' ? { teamId: 't1', role: 'member' } : null
     )
+    userSessionServiceMock.createUserSession.mockResolvedValue({
+      token: 'user-session-v2',
+      expiresInSeconds: 3600,
+      identity: {},
+    })
     rateLimitMock.checkAndIncrement.mockReset()
     rateLimitMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
@@ -965,6 +979,11 @@ describe('routes/profile', () => {
       email: 'user@example.com',
       name: 'User',
       picture: 'https://example.com/avatar.png',
+    })
+    expect(userSessionServiceMock.createUserSession).toHaveBeenCalledWith({
+      userId: 'u1',
+      email: 'user@example.com',
+      authenticationMethods: ['google'],
     })
   })
 })

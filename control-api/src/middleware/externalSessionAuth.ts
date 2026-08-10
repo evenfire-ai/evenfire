@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
+import { validateUserSessionClaims } from '../services/auth/userSessionService.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
 
 export type ExternalAuthedRequest = Request & {
@@ -15,25 +16,51 @@ function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
 }
 
-export function requireValidExternalSessionToken(
+export async function requireValidExternalSessionToken(
   req: ExternalAuthedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const token = extractUserSessionToken(req)
   if (!token || token.length > 4096) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
 
-  const claims = verifyExternalSessionToken(token)
-  if (!claims) {
-    res.status(401).json({ error: 'Unauthorized' })
-    return
-  }
+  try {
+    const claims = verifyExternalSessionToken(token)
+    if (!claims) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    if (claims.sessionContract === 'v2') {
+      const validation = await validateUserSessionClaims({
+        sub: claims.userId,
+        sid: claims.sid!,
+        jti: claims.jti!,
+        sv: claims.sv!,
+        ver: 2,
+        typ: 'user_session',
+        ...(claims.email ? { email: claims.email } : {}),
+        auth_time: claims.authTime!,
+        amr: [...(claims.amr || [])],
+        iat: claims.iat!,
+        exp: claims.exp,
+      })
+      if (validation.status !== 'valid') {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      claims.email = validation.identity.email
+      claims.jti = validation.identity.jti
+      claims.sv = validation.identity.sessionVersion
+    }
 
-  req.externalAuth = claims
-  next()
+    req.externalAuth = claims
+    next()
+  } catch {
+    res.status(503).json({ error: 'authority_unavailable' })
+  }
 }
 
 export function requireExternalUserParamMatch(paramName = 'userId') {

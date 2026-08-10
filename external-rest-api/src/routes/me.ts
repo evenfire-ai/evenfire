@@ -69,7 +69,8 @@ export function createMeRouter(): Router {
         res.status(403).json({ error: 'You are not a member of this team' })
         return
       }
-      res.status(200).json(result)
+      const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      res.status(200).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
     }

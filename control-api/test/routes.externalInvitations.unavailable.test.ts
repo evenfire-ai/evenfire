@@ -43,6 +43,10 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: vi.fn(() => 'session-token'),
 }))
+vi.mock('../src/services/auth/userSessionService.js', () => ({
+  createUserSession: vi.fn(async () => ({ token: 'session-token' })),
+  validateUserSessionClaims: vi.fn(),
+}))
 
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
 // The real app.ts middleware is covered separately in

@@ -3,6 +3,13 @@ import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
+import { authenticateExternalSessionToken } from '../../services/auth/externalSessionAuthentication.js'
+import {
+  createUserSession,
+  renewUserSessionToken,
+  revokeAllUserSessions,
+  revokeUserSession,
+} from '../../services/auth/userSessionService.js'
 import {
   getTeamAgents,
   getUserAgents,
@@ -10,10 +17,6 @@ import {
   passwordLoginData,
   requestProfilePasswordReset,
 } from '../../services/directory/index.js'
-import {
-  signExternalSessionToken,
-  verifyExternalSessionToken,
-} from '../../utils/auth/externalSessionAuthToken.js'
 import { verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
 import {
   SANDBOX_UI_RPC_HOST_REF,
@@ -40,11 +43,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         picture: google.picture,
       })
       const role = login.membership.role
-      const token = signExternalSessionToken({
+      const { token } = await createUserSession({
         userId: login.user.id,
         email: google.email,
-        teamId: login.membership.team_id || null,
-        role,
+        authenticationMethods: ['google'],
       })
       return res.status(200).json({
         token,
@@ -86,11 +88,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       }
 
       const role = login.membership.role
-      const token = signExternalSessionToken({
+      const { token } = await createUserSession({
         userId: login.user.id,
         email: login.user.email,
-        teamId: login.membership.team_id || null,
-        role,
+        authenticationMethods: ['pwd'],
       })
       return res.status(200).json({
         token,
@@ -138,9 +139,11 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     try {
       const token = String(req.body?.token || '').trim()
       if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
-      const claims = verifyExternalSessionToken(token)
-      if (!claims) return res.status(401).json({ error: 'Unauthorized' })
-      return res.status(200).json({ claims })
+      const authentication = await authenticateExternalSessionToken(token)
+      if (authentication.status !== 'authenticated') {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      return res.status(200).json({ claims: authentication.claims })
     } catch (error) {
       return next(error)
     }
@@ -157,6 +160,20 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (!userId || !email || !teamId || !TEAM_ROLES.includes(role)) {
         return res.status(400).json({ error: 'invalid payload' })
       }
+      const currentToken = String(
+        req.header('x-user-session-token') || req.body?.sessionToken || ''
+      ).trim()
+      if (!currentToken || currentToken.length > 4096) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      const authentication = await authenticateExternalSessionToken(currentToken)
+      if (
+        authentication.status !== 'authenticated' ||
+        authentication.claims.userId !== userId ||
+        authentication.claims.email.toLowerCase() !== email
+      ) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
       const membership = await pool.query(
         `SELECT 1
            FROM users u
@@ -172,8 +189,84 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if ((membership.rowCount ?? 0) === 0) {
         return res.status(403).json({ error: 'membership_not_found' })
       }
-      const token = signExternalSessionToken({ userId, email, teamId, role })
-      return res.status(200).json({ token })
+      return res.status(200).json({
+        token: currentToken,
+        deprecated: true,
+        sessionContract: authentication.claims.sessionContract === 'v2' ? 'v2' : 'v1',
+      })
+    } catch (error) {
+      return next(error)
+    }
+  })
+
+  router.post('/external/auth/session/renew', async (req, res, next) => {
+    try {
+      const token = String(req.header('x-user-session-token') || req.body?.token || '').trim()
+      if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
+      const renewed = await renewUserSessionToken(token)
+      if (!('token' in renewed)) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      return res.status(200).json({
+        token: renewed.token,
+        expiresInSeconds: renewed.expiresInSeconds,
+        absoluteExpiresAt: renewed.identity.absoluteExpiresAt.toISOString(),
+      })
+    } catch (error) {
+      return next(error)
+    }
+  })
+
+  router.post('/external/auth/session/logout', async (req, res, next) => {
+    try {
+      const token = String(req.header('x-user-session-token') || req.body?.token || '').trim()
+      const authentication = token ? await authenticateExternalSessionToken(token) : null
+      if (!authentication || authentication.status !== 'authenticated') {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      if (authentication.claims.sessionContract !== 'v2' || !authentication.claims.sid) {
+        return res.status(200).json({ revoked: false, legacy: true })
+      }
+      await revokeUserSession(authentication.claims.userId, authentication.claims.sid, 'logout')
+      return res.status(200).json({ revoked: true })
+    } catch (error) {
+      return next(error)
+    }
+  })
+
+  router.post('/external/auth/sessions/:sid/revoke', async (req, res, next) => {
+    try {
+      const token = String(req.header('x-user-session-token') || '').trim()
+      const authentication = token ? await authenticateExternalSessionToken(token) : null
+      if (!authentication || authentication.status !== 'authenticated') {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      if (authentication.claims.sessionContract !== 'v2') {
+        return res.status(409).json({ error: 'v2_session_required' })
+      }
+      const revoked = await revokeUserSession(
+        authentication.claims.userId,
+        String(req.params.sid || '').trim(),
+        'user_revoked'
+      )
+      return res.status(200).json({ revoked })
+    } catch (error) {
+      return next(error)
+    }
+  })
+
+  router.post('/external/auth/sessions/revoke-all', async (req, res, next) => {
+    try {
+      const token = String(req.header('x-user-session-token') || '').trim()
+      const authentication = token ? await authenticateExternalSessionToken(token) : null
+      if (!authentication || authentication.status !== 'authenticated') {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      if (authentication.claims.sessionContract !== 'v2') {
+        return res.status(409).json({ error: 'v2_session_required' })
+      }
+      const revoked = await revokeAllUserSessions(authentication.claims.userId, 'user_revoked_all')
+      return res.status(200).json({ revoked })
     } catch (error) {
       return next(error)
     }
@@ -184,8 +277,11 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const sessionToken = String(req.body?.sessionToken || '').trim()
       if (!sessionToken || sessionToken.length > 4096)
         return res.status(401).json({ error: 'Unauthorized' })
-      const claims = verifyExternalSessionToken(sessionToken)
-      if (!claims) return res.status(401).json({ error: 'Unauthorized' })
+      const authentication = await authenticateExternalSessionToken(sessionToken)
+      if (authentication.status !== 'authenticated') {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      const claims = authentication.claims
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {

@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
 import { createPublicKey } from 'node:crypto'
 import { config } from '../../config.js'
 import { AuthClaims, TEAM_ROLES } from '../../profileTypes.js'
+import { verifyUserSessionV2Token } from './userSessionV2Token.js'
 
 const ALLOWED_ROLES = new Set<AuthClaims['role']>(TEAM_ROLES)
 const sessionJwtPublicKey = createPublicKey(config.sessionJwtPrivateKey).export({
@@ -22,6 +23,26 @@ export function signExternalSessionToken(
 }
 
 export function verifyExternalSessionToken(token: string): AuthClaims | null {
+  const userSession = verifyUserSessionV2Token(token)
+  if (userSession) {
+    return {
+      userId: userSession.sub,
+      email: userSession.email || '',
+      teamId: null,
+      // Compatibility-only normalized field. It is absent from the signed v2
+      // representation and must never be used as authorization authority.
+      role: 'member',
+      exp: userSession.exp,
+      sessionContract: 'v2',
+      sid: userSession.sid,
+      jti: userSession.jti,
+      sv: userSession.sv,
+      ver: userSession.ver,
+      authTime: userSession.auth_time,
+      amr: [...userSession.amr],
+      iat: userSession.iat,
+    }
+  }
   try {
     const payload = jwt.verify(token, sessionJwtPublicKey, {
       algorithms: ['RS256'],
