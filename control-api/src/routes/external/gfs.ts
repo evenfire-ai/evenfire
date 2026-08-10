@@ -60,7 +60,6 @@ function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[]
 async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<string>> {
   const claims = req.externalAuth!
   const subjects = new Set<string>([`user:${claims.userId}`])
-  if (claims.teamId) subjects.add(`team:${claims.teamId}`)
   const result = await pool.query(
     `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
     [claims.userId]

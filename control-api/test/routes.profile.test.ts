@@ -53,6 +53,10 @@ const rateLimitMock = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
 }))
 
+const liveTeamAuthorizationMock = vi.hoisted(() => ({
+  getLiveTeamMembership: vi.fn(),
+}))
+
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 vi.mock(
@@ -68,6 +72,7 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 })
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
+vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
 
 describe('routes/profile', () => {
   const token = 'dev-external-rest-api-token'
@@ -106,6 +111,11 @@ describe('routes/profile', () => {
     Object.values(googleAuthMock).forEach(fn => fn.mockReset())
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
     Object.values(invitationFlowRegistrationMock).forEach(fn => fn.mockReset())
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockReset()
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockImplementation(
+      async (_userId: string, teamId: string) =>
+        teamId === 't1' ? { teamId: 't1', role: 'member' } : null
+    )
     rateLimitMock.checkAndIncrement.mockReset()
     rateLimitMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
@@ -366,6 +376,34 @@ describe('routes/profile', () => {
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/teams/t2/agents')
     ).expect(403)
+  })
+
+  it('binds pending invitation listing to the authenticated email', async () => {
+    svc.listPendingInvitations.mockResolvedValue([])
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/invitations/pending?email=victim@example.com')
+    )
+      .expect(200)
+      .expect({ items: [] })
+
+    expect(svc.listPendingInvitations).toHaveBeenCalledWith('u@example.com')
+  })
+
+  it('does not allow an ordinary team member to rename a team', async () => {
+    svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
+
+    expect(svc.renameTeam).not.toHaveBeenCalled()
   })
 
   it('allows membership lookup for another team when user claim matches', async () => {

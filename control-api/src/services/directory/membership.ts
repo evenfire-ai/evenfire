@@ -292,14 +292,17 @@ async function invitationListResponse(rows: InvitationRow[]) {
     pool,
     rows.map(row => row.id)
   )
-  return rows.map(row => ({
-    ...row,
-    teams: (teamsByInvitationId.get(row.id) || []).map(team => ({
-      id: team.team_id,
-      name: team.team_name,
-      role: team.role,
-    })),
-  }))
+  return rows.map(row => {
+    const { token: _secretCapability, ...safeInvitation } = row
+    return {
+      ...safeInvitation,
+      teams: (teamsByInvitationId.get(row.id) || []).map(team => ({
+        id: team.team_id,
+        name: team.team_name,
+        role: team.role,
+      })),
+    }
+  })
 }
 
 async function applyInvitationMemberships(
@@ -743,7 +746,7 @@ export async function getPendingMemberInvitationForEmail(email: string) {
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
   const result = await pool.query(
-    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -886,7 +889,7 @@ export async function softDeleteMember(teamId: string, userId: string, operatorS
 
 export async function listPendingInvitations(email: string) {
   const result = await pool.query(
-    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -903,7 +906,7 @@ export async function listPendingInvitations(email: string) {
 
 export async function listPendingInvitationsForTeam(teamId: string) {
   const result = await pool.query(
-    `SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+    `SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -921,7 +924,7 @@ export async function listPendingInvitationsForTeam(teamId: string) {
 
 export async function listAllPendingInvitationsAdmin() {
   const result = await pool.query(
-    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -1603,7 +1606,7 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
           AND tm.status = 'active'
           AND tm.role IN ('admin', 'inviter')
      )
-     SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+     SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
