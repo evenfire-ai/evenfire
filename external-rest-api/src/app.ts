@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { sendPublicApiError } from './http/publicApiError.js'
 import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { createAccessRouter } from './routes/access.js'
 import { createAuthRouter } from './routes/auth.js'
@@ -71,8 +72,6 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  const correlationId =
-    String(req.header('x-correlation-id') || '').trim() || Math.random().toString(36).slice(2, 12)
   const status =
     err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
       ? (err as Error & { status: number }).status
@@ -85,37 +84,35 @@ export function externalRestPublicErrorHandler(
           ? 'forbidden'
           : status === 404
             ? 'not_found'
-            : 'invalid_request'
-    res.status(status).json({
-      error: {
-        code,
-        message:
-          status === 404 ? 'The resource was not found.' : 'The request could not be completed.',
-        correlationId,
-        retryable: false,
-      },
-    })
+            : status === 429
+              ? 'rate_limited'
+              : 'invalid_request'
+    sendPublicApiError(
+      req,
+      res,
+      status,
+      code,
+      status === 404
+        ? 'The resource was not found.'
+        : status === 429
+          ? 'Too many requests; retry later.'
+          : 'The request could not be completed.',
+      status === 429
+    )
     return
   }
 
   if (status === 503) {
-    res.status(503).json({
-      error: {
-        code: 'authority_unavailable',
-        message: 'Authorization is temporarily unavailable.',
-        correlationId,
-        retryable: true,
-      },
-    })
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      'authority_unavailable',
+      'Authorization is temporarily unavailable.',
+      true
+    )
     return
   }
 
-  res.status(500).json({
-    error: {
-      code: 'internal_error',
-      message: 'The request could not be completed.',
-      correlationId,
-      retryable: false,
-    },
-  })
+  sendPublicApiError(req, res, 500, 'internal_error', 'The request could not be completed.')
 }

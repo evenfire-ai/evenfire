@@ -190,7 +190,7 @@ export function createExternalMembersRouter(): Router {
       const result = await deleteManagedUserForUser(managerUserId, req.params.userId)
       if ('error' in result) {
         if (result.error === 'forbidden_uncontrolled_teams') {
-          return res.status(403).json({ error: 'forbidden_uncontrolled_teams' })
+          return res.status(403).json({ error: 'forbidden' })
         }
         if (result.error === 'invalid_target') {
           return res.status(400).json({ error: 'invalid_target' })

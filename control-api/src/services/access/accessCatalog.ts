@@ -5,6 +5,7 @@ import type { K8sGateway } from '../../k8s.js'
 import type { AuthClaims, TeamRole } from '../../profileTypes.js'
 import { type AccessPath, type AccessPathBehavior, buildAccessPath } from './accessPath.js'
 import { type Capability, isCapability, normalizeCapabilities } from './capabilityRegistry.js'
+import { resourceAuthorizationRevision } from './liveAuthorizationResolver.js'
 import {
   type CanonicalResourceIdentity,
   type ResourceType,
@@ -35,6 +36,7 @@ type CatalogSeed = {
   relationships: CatalogRelationship[]
   pathSeeds: CatalogPathSeed[]
   resourceRevision?: string
+  authorizationResourceRevision: number | string
 }
 
 export type AccessCatalogPartialError = {
@@ -115,6 +117,7 @@ type DbSeedRow = {
   capabilities: unknown
   permissions: unknown
   resource_revision: unknown
+  authorization_resource_revision?: unknown
   relationship_type: string | null
   relationship_target_type: ResourceType | null
   relationship_target_id: string | null
@@ -260,7 +263,7 @@ async function loadAuthoritySnapshot(
   }
 }
 
-function catalogGrantSql(): string {
+export function accessCatalogGrantSql(): string {
   return `WITH active_memberships AS (
       SELECT tm.team_id, t.name AS team_name, tm.role
         FROM team_members tm
@@ -447,7 +450,8 @@ function catalogGrantSql(): string {
            cp.current_role,
            cp.capabilities,
            cp.permissions,
-           COALESCE(arr.revision::text, cp.resource_revision) AS resource_revision,
+           cp.resource_revision,
+           COALESCE(arr.revision, 1) AS authorization_resource_revision,
            cp.relationship_type,
            cp.relationship_target_type,
            cp.relationship_target_id,
@@ -531,6 +535,7 @@ function rowToSeed(row: DbSeedRow, environmentId: string, userId: string): Catal
     }),
     relationships: relationshipFromRow(row),
     pathSeeds: [pathSeed],
+    authorizationResourceRevision: Number(row.authorization_resource_revision || 1),
     ...(row.resource_revision ? { resourceRevision: String(row.resource_revision) } : {}),
   }
 }
@@ -569,6 +574,7 @@ export function mergeCatalogSeeds(seeds: readonly CatalogSeed[]): CatalogSeed[] 
       pathSeedKey(a).localeCompare(pathSeedKey(b))
     )
     if (seed.resourceRevision) current.resourceRevision = seed.resourceRevision
+    current.authorizationResourceRevision = seed.authorizationResourceRevision
     if (seed.resource.providerUid) current.resource.providerUid = seed.resource.providerUid
     current.resource.displayName = seed.resource.displayName
   }
@@ -756,6 +762,7 @@ function hydrateOperationalSeeds(
           })
           derived.push({
             resource: appIdentity,
+            authorizationResourceRevision: seed.authorizationResourceRevision,
             resourceRevision: providerProjection(resource),
             relationships: [{ type: 'recipe', targetResourceId: seed.resource.canonicalId }],
             pathSeeds: seed.pathSeeds.map(path =>
@@ -798,6 +805,7 @@ function hydrateOperationalSeeds(
         })
         derived.push({
           resource: identity,
+          authorizationResourceRevision: contextSeed.authorizationResourceRevision,
           ...(server ? { resourceRevision: providerProjection(server) } : {}),
           relationships: [{ type: 'context', targetResourceId: contextSeed.resource.canonicalId }],
           pathSeeds: contextSeed.pathSeeds.map(path =>
@@ -829,6 +837,7 @@ function hydrateOperationalSeeds(
           .digest('base64url')
         derived.push({
           resource: identity,
+          authorizationResourceRevision: contextSeed.authorizationResourceRevision,
           ...(sfs ? { resourceRevision: providerProjection(sfs) } : {}),
           relationships: [{ type: 'context', targetResourceId: contextSeed.resource.canonicalId }],
           pathSeeds: contextSeed.pathSeeds.map(path =>
@@ -868,6 +877,7 @@ function hydrateOperationalSeeds(
         })
         derived.push({
           resource: identity,
+          authorizationResourceRevision: host.authorizationResourceRevision,
           ...(server ? { resourceRevision: providerProjection(server) } : {}),
           relationships: [{ type: 'host', targetResourceId: host.resource.canonicalId }],
           pathSeeds: host.pathSeeds.map(path =>
@@ -968,14 +978,32 @@ function safePath(path: AccessPath, seed: CatalogPathSeed): AccessCatalogPath {
   }
 }
 
-function itemFromSeed(
-  seed: CatalogSeed,
-  userId: string,
-  authorizationRevision: string
-): AccessCatalogItem {
+function itemFromSeed(seed: CatalogSeed, snapshot: AuthoritySnapshot): AccessCatalogItem {
+  const authorizationRevision = resourceAuthorizationRevision({
+    userId: snapshot.userId,
+    userRevision: snapshot.userRevision,
+    sessionVersion: snapshot.sessionVersion,
+    memberships: snapshot.memberships,
+    resource: seed.resource,
+    resourceRevision: seed.authorizationResourceRevision,
+    candidates: seed.pathSeeds.map(path => ({
+      kind: path.kind,
+      grantId: path.grantId,
+      ...(path.teamId ? { teamId: path.teamId } : {}),
+      ...(path.currentRole ? { currentRole: path.currentRole } : {}),
+      capabilities: [...path.behavior.capabilities],
+      budgetRef: path.behavior.budgetRef,
+      credentialPolicyRef: path.behavior.credentialPolicyRef,
+      approvalPolicyRef: path.behavior.approvalPolicyRef,
+      filesystemScopeRef: path.behavior.filesystemScopeRef,
+      runtimeRef: path.behavior.runtimeRef,
+      providerModelPolicyRef: path.behavior.providerModelPolicyRef,
+      auditSubject: path.behavior.auditSubject,
+    })),
+  })
   const paths = seed.pathSeeds.map(pathSeed => {
     const path = buildAccessPath({
-      principalUserId: userId,
+      principalUserId: snapshot.userId,
       resource: seed.resource,
       kind: pathSeed.kind,
       grantId: pathSeed.grantId,
@@ -1073,7 +1101,7 @@ export async function buildAccessCatalog(
       await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
       snapshot = await loadAuthoritySnapshot(db, claims)
       if (!snapshot) return
-      const grants = await db.query(catalogGrantSql(), [claims.userId, environmentId])
+      const grants = await db.query(accessCatalogGrantSql(), [claims.userId, environmentId])
       rows = grants.rows as DbSeedRow[]
     })
   } catch {
@@ -1138,7 +1166,7 @@ export async function buildAccessCatalog(
     generatedAt: (options.now ?? new Date()).toISOString(),
     complete: partialErrors.length === 0,
     partialErrors,
-    items: pageSeeds.map(seed => itemFromSeed(seed, snapshot!.userId, authorizationRevision)),
+    items: pageSeeds.map(seed => itemFromSeed(seed, snapshot!)),
     ...(nextCursor ? { nextCursor } : {}),
   }
 }

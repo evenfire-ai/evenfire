@@ -5,6 +5,8 @@ import {
   AccessCatalogCursorError,
   buildAccessCatalog,
 } from '../src/services/access/accessCatalog.js'
+import { resolveLiveAuthorizationInTransaction } from '../src/services/access/liveAuthorizationResolver.js'
+import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 const state = vi.hoisted(() => ({
   snapshot: {
@@ -254,6 +256,60 @@ describe('aggregate access catalog', () => {
         code: 'access_path_stale',
       })
     )
+  })
+
+  it('emits a path handle that the live resolver accepts for the same current grant', async () => {
+    state.snapshot.memberships = []
+    state.rows = [row()]
+    const catalog = await buildAccessCatalog(claims, gateway() as never)
+    const item = catalog.items.find(resource => resource.resource.type === 'host')!
+    const accessPathId = item.accessPaths[0]!.accessPathId
+    const resolverDb = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              user_id: claims.userId,
+              user_revision: 5,
+              resource_revision: 1,
+              session_version: 1,
+              session_live: true,
+              memberships: [],
+            },
+          ],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              kind: 'direct',
+              grant_id: 'user_agents:user-1:agent-a',
+              capabilities: ['host.read'],
+            },
+          ],
+          rowCount: 1,
+        }),
+    }
+
+    const result = await resolveLiveAuthorizationInTransaction(
+      {
+        principalUserId: claims.userId,
+        sid: claims.sid,
+        requiredCapability: 'host.read',
+        requestedAccessPathId: accessPathId,
+        resource: canonicalResourceIdentity({
+          environmentId: item.resource.environmentId,
+          type: 'host',
+          logicalId: item.resource.id.replace(/^host:/, ''),
+          displayName: item.resource.displayName,
+        }),
+      },
+      resolverDb
+    )
+
+    expect(result.status).toBe('allowed')
+    if (result.status === 'allowed') expect(result.selectedPath?.id).toBe(accessPathId)
   })
 
   it('preserves safe database items and marks an operational source failure partial', async () => {

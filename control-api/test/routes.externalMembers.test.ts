@@ -76,4 +76,17 @@ describe('external members routes', () => {
 
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
+
+  it('does not disclose that a target belongs to hidden teams when deletion is denied', async () => {
+    directoryMock.deleteManagedUserForUser.mockResolvedValueOnce({
+      error: 'forbidden_uncontrolled_teams',
+    })
+
+    const response = await request(makeApp()).delete('/external/members/target-1')
+
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ error: 'forbidden' })
+    expect(JSON.stringify(response.body)).not.toContain('team')
+    expect(JSON.stringify(response.body)).not.toContain('uncontrolled')
+  })
 })

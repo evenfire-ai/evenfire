@@ -89,6 +89,7 @@ describe('live authorization resolver', () => {
     ).toEqual(['00000000-0000-4000-8000-000000000010', '00000000-0000-4000-8000-000000000020'])
     expect(result.paths.find(path => path.teamId?.endsWith('20'))?.currentRole).toBe('admin')
     expect(result.authorizationRevision).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(db.query.mock.calls[1]?.[1]?.[2]).toBe('agent-a')
     expect(db.query.mock.calls[1]?.[1]?.[3]).toEqual([
       '00000000-0000-4000-8000-000000000010',
       '00000000-0000-4000-8000-000000000020',
@@ -128,6 +129,33 @@ describe('live authorization resolver', () => {
       expect(result.safePathDescriptors).toHaveLength(2)
       expect(result.safePathDescriptors.every(path => path.id.startsWith('ap1_'))).toBe(true)
     }
+  })
+
+  it('binds explicit target-team context and cannot satisfy it with a direct or other-team path', async () => {
+    const result = await resolveLiveAuthorizationInTransaction(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'host.read',
+        resource: host,
+        operationTarget: { teamId: '00000000-0000-4000-8000-000000000020' },
+      },
+      dbFor([
+        {
+          kind: 'direct',
+          grant_id: 'user_agents:user-1:agent-a',
+          capabilities: ['host.read'],
+        },
+        {
+          kind: 'team',
+          grant_id: 'team_agents:team-a:agent-a',
+          team_id: '00000000-0000-4000-8000-000000000010',
+          current_role: 'member',
+          capabilities: ['host.read'],
+        },
+      ])
+    )
+
+    expect(result).toEqual({ status: 'denied', code: 'forbidden' })
   })
 
   it('rejects stale or tampered path handles and fails unknown capabilities closed', async () => {

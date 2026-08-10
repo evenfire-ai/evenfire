@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, withTransaction } from '../../db.js'
 import type { AuthClaims, TeamRole } from '../../profileTypes.js'
 import { type AccessPath, buildAccessPath, selectEquivalentAccessPath } from './accessPath.js'
@@ -88,7 +89,7 @@ export class AuthorizationRequestMemo {
       input.resource.environmentId,
       input.resource.type,
       input.resource.logicalId,
-      input.operationTarget ?? null,
+      stableOperationTarget(input.operationTarget),
       input.requestedAccessPathId ?? null,
       input.requireSelectedPath ?? false,
     ])
@@ -205,19 +206,23 @@ async function loadPrincipalSnapshot(
   }
 }
 
-function authorizationRevision(
-  input: LiveAuthorizationInput,
-  snapshot: PrincipalSnapshot,
+export function resourceAuthorizationRevision(input: {
+  userId: string
+  userRevision: number
+  sessionVersion: number
+  memberships: readonly MembershipSnapshot[]
+  resource: CanonicalResourceIdentity
+  resourceRevision: number | string
   candidates: readonly GrantCandidate[]
-): string {
+}): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
         'authorization_revision_v1',
-        snapshot.userId,
-        snapshot.userRevision,
-        snapshot.sessionVersion,
-        snapshot.memberships.map(membership => [
+        input.userId,
+        input.userRevision,
+        input.sessionVersion,
+        input.memberships.map(membership => [
           membership.teamId,
           membership.role,
           membership.membershipUpdatedAt,
@@ -226,8 +231,8 @@ function authorizationRevision(
         input.resource.environmentId,
         input.resource.type,
         input.resource.logicalId,
-        snapshot.resourceRevision,
-        [...candidates]
+        input.resourceRevision,
+        [...input.candidates]
           .sort((left, right) =>
             JSON.stringify([left.kind, left.teamId ?? '', left.grantId]).localeCompare(
               JSON.stringify([right.kind, right.teamId ?? '', right.grantId])
@@ -250,6 +255,50 @@ function authorizationRevision(
       ])
     )
     .digest('base64url')
+}
+
+function stableOperationTarget(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableOperationTarget)
+  if (!value || typeof value !== 'object') return value ?? null
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableOperationTarget(item)])
+  )
+}
+
+function grantLookupId(resource: CanonicalResourceIdentity): string {
+  if (resource.type === 'host') {
+    const prefix = `${config.hostsNamespace}/`
+    return resource.logicalId.startsWith(prefix) ? resource.logicalId.slice(prefix.length) : ''
+  }
+  if (resource.type === 'context') {
+    const prefix = `${config.contextsNamespace}/`
+    return resource.logicalId.startsWith(prefix) ? resource.logicalId.slice(prefix.length) : ''
+  }
+  return resource.logicalId
+}
+
+function applyOperationTarget(
+  input: LiveAuthorizationInput,
+  candidates: GrantCandidate[]
+): GrantCandidate[] | null {
+  const target = input.operationTarget
+  if (!target) return candidates
+  const targetTeamId = typeof target.teamId === 'string' ? target.teamId.trim() : ''
+  if (targetTeamId) {
+    if (input.resource.type === 'team' && input.resource.logicalId !== targetTeamId) return null
+    if (input.resource.type !== 'team') {
+      return candidates.filter(
+        candidate => candidate.kind === 'team' && candidate.teamId === targetTeamId
+      )
+    }
+  }
+  const targetUserId = typeof target.userId === 'string' ? target.userId.trim() : ''
+  if (targetUserId && input.resource.type === 'user' && input.resource.logicalId !== targetUserId) {
+    return null
+  }
+  return candidates
 }
 
 function teamCapabilities(role: TeamRole): Capability[] {
@@ -313,7 +362,7 @@ async function loadGrantCandidates(
           ? [
               {
                 kind: 'direct',
-                grantId: `user:self:${input.principalUserId}`,
+                grantId: `users:${input.principalUserId}`,
                 capabilities: ['user.profile.read'],
                 budgetRef: null,
                 credentialPolicyRef: null,
@@ -353,6 +402,8 @@ async function loadGrantCandidates(
   }
 
   const teamIds = snapshot.memberships.map(membership => membership.teamId)
+  const resourceLookupId = grantLookupId(input.resource)
+  if (!resourceLookupId) return { exists: false, candidates: [] }
   const result = await db.query(
     `WITH requested AS (
        SELECT $2::text AS resource_type, $3::text AS resource_id
@@ -360,37 +411,38 @@ async function loadGrantCandidates(
        SELECT 'direct'::text AS kind,
               'user_agents:' || ua.user_id || ':' || ua.agent_name AS grant_id,
               NULL::uuid AS team_id, NULL::text AS current_role,
-              ARRAY['host.read']::text[] AS capabilities, NULL::text[] AS permissions
+              ARRAY['host.read']::text[] AS capabilities, NULL::text[] AS permissions,
+              NULL::text AS filesystem_scope_ref
          FROM user_agents ua, requested r
         WHERE r.resource_type = 'host' AND ua.user_id = $1 AND ua.agent_name = r.resource_id
        UNION ALL
        SELECT 'team', 'team_agents:' || ta.team_id || ':' || ta.agent_name,
-              ta.team_id, tm.role, ARRAY['host.read']::text[], NULL::text[]
+              ta.team_id, tm.role, ARRAY['host.read']::text[], NULL::text[], NULL::text
          FROM team_agents ta JOIN team_members tm ON tm.team_id = ta.team_id, requested r
         WHERE r.resource_type = 'host' AND tm.user_id = $1 AND tm.status = 'active'
           AND ta.agent_name = r.resource_id
        UNION ALL
        SELECT 'direct', 'user_contexts:' || uc.user_id || ':' || uc.context_id,
-              NULL, NULL, ARRAY['context.read']::text[], NULL::text[]
+              NULL, NULL, ARRAY['context.read']::text[], NULL::text[], NULL::text
          FROM user_contexts uc, requested r
         WHERE r.resource_type = 'context' AND uc.user_id = $1 AND uc.context_id = r.resource_id
        UNION ALL
        SELECT 'team', 'team_contexts:' || tc.team_id || ':' || tc.context_id,
-              tc.team_id, tm.role, ARRAY['context.read']::text[], NULL::text[]
+              tc.team_id, tm.role, ARRAY['context.read']::text[], NULL::text[], NULL::text
          FROM team_contexts tc JOIN team_members tm ON tm.team_id = tc.team_id, requested r
         WHERE r.resource_type = 'context' AND tm.user_id = $1 AND tm.status = 'active'
           AND tc.context_id = r.resource_id
        UNION ALL
        SELECT 'direct', 'user_workflow_triggers:' || uwt.user_id || ':' ||
               uwt.recipe_namespace || '/' || uwt.recipe_name,
-              NULL, NULL, ARRAY['workflow.read']::text[], NULL::text[]
+              NULL, NULL, ARRAY['workflow.read']::text[], NULL::text[], NULL::text
          FROM user_workflow_triggers uwt, requested r
         WHERE r.resource_type IN ('workflow_recipe','sandbox_app') AND uwt.user_id = $1
           AND uwt.recipe_namespace || '/' || uwt.recipe_name = r.resource_id
        UNION ALL
        SELECT 'team', 'team_workflow_triggers:' || twt.team_id || ':' ||
               twt.recipe_namespace || '/' || twt.recipe_name,
-              twt.team_id, tm.role, ARRAY['workflow.read']::text[], NULL::text[]
+              twt.team_id, tm.role, ARRAY['workflow.read']::text[], NULL::text[], NULL::text
          FROM team_workflow_triggers twt JOIN team_members tm ON tm.team_id = twt.team_id, requested r
         WHERE r.resource_type IN ('workflow_recipe','sandbox_app')
           AND tm.user_id = $1 AND tm.status = 'active'
@@ -399,7 +451,8 @@ async function loadGrantCandidates(
        SELECT CASE WHEN g.subject_type = 'user' THEN 'direct' ELSE 'team' END,
               'gfs_grants:' || g.id,
               CASE WHEN g.subject_type = 'team' THEN g.subject_id::uuid ELSE NULL END,
-              tm.role, NULL::text[], g.permissions
+              tm.role, NULL::text[], g.permissions,
+              'gfs:' || g.drive || ':' || g.resource_id
          FROM gfs_grants g
     LEFT JOIN team_members tm ON g.subject_type = 'team'
           AND tm.team_id::text = g.subject_id AND tm.user_id = $1 AND tm.status = 'active', requested r
@@ -410,7 +463,8 @@ async function loadGrantCandidates(
        SELECT CASE WHEN s.subject_type = 'user' THEN 'direct' ELSE 'team' END,
               'gfs_shares:' || s.id,
               CASE WHEN s.subject_type = 'team' THEN s.subject_id::uuid ELSE NULL END,
-              tm.role, NULL::text[], s.permissions
+              tm.role, NULL::text[], s.permissions,
+              'gfs:' || s.drive || ':' || s.resource_id
          FROM gfs_shares s
     LEFT JOIN team_members tm ON s.subject_type = 'team'
           AND tm.team_id::text = s.subject_id AND tm.user_id = $1 AND tm.status = 'active', requested r
@@ -420,7 +474,7 @@ async function loadGrantCandidates(
      )
      SELECT c.*, TRUE AS resource_exists
        FROM candidates c`,
-    [input.principalUserId, input.resource.type, input.resource.logicalId, teamIds]
+    [input.principalUserId, input.resource.type, resourceLookupId, teamIds]
   )
   const rows = result.rows as Record<string, unknown>[]
   return {
@@ -429,10 +483,8 @@ async function loadGrantCandidates(
       const candidate = candidateFromRow(row, input.principalUserId)
       if (!candidate) return []
       if (input.resource.type === 'sandbox_app') {
-        candidate.capabilities = normalizeCapabilities([
-          ...candidate.capabilities,
-          'sandbox_app.read',
-        ])
+        candidate.grantId = `${candidate.grantId}:sandbox-app`
+        candidate.capabilities = ['sandbox_app.read']
       }
       return [candidate]
     }),
@@ -451,9 +503,21 @@ export async function resolveLiveAuthorizationInTransaction(
   if (!snapshot.sessionLive) return { status: 'denied', code: 'session_not_live' }
   const grants = await loadGrantCandidates(input, snapshot, db)
   if (!grants.exists) return { status: 'not_found', code: 'not_found' }
-  const revision = authorizationRevision(input, snapshot, grants.candidates)
+  const targetedCandidates = applyOperationTarget(input, grants.candidates)
+  if (!targetedCandidates || targetedCandidates.length === 0) {
+    return { status: 'denied', code: 'forbidden' }
+  }
+  const revision = resourceAuthorizationRevision({
+    userId: snapshot.userId,
+    userRevision: snapshot.userRevision,
+    sessionVersion: snapshot.sessionVersion,
+    memberships: snapshot.memberships,
+    resource: input.resource,
+    resourceRevision: snapshot.resourceRevision,
+    candidates: targetedCandidates,
+  })
 
-  const paths = grants.candidates
+  const paths = targetedCandidates
     .filter(candidate => candidate.capabilities.includes(input.requiredCapability as Capability))
     .map(candidate =>
       buildAccessPath({

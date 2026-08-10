@@ -1,4 +1,4 @@
-import { pool, withTransaction } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import type { AdminDeleteUserResult } from './types.js'
 import { normalizeChannels } from './types.js'
 
@@ -195,34 +195,41 @@ export async function updateAdminUserContext(
  * Hard-delete a user account. Teams are retained even when this delete leaves them with zero
  * active members. Memberships are removed via CASCADE when the user row is deleted.
  */
-export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
-  return withTransaction(async db => {
-    const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
-    if ((exists.rowCount ?? 0) === 0) {
-      return { error: 'not_found' }
-    }
+export async function adminDeleteUserInTransaction(
+  db: DbClient,
+  userId: string
+): Promise<AdminDeleteUserResult> {
+  const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
+  if ((exists.rowCount ?? 0) === 0) {
+    return { error: 'not_found' }
+  }
 
-    await db.query(
-      `UPDATE workflow_approval_medium_accounts
+  await db.query(
+    `UPDATE workflow_approval_medium_accounts
           SET disabled_at = COALESCE(disabled_at, NOW()),
               updated_at = NOW()
         WHERE user_id = $1
           AND disabled_at IS NULL`,
-      [userId]
-    )
-    await db.query(
-      `UPDATE workflow_approval_medium_challenges
+    [userId]
+  )
+  await db.query(
+    `UPDATE workflow_approval_medium_challenges
           SET consumed_at = COALESCE(consumed_at, NOW()),
               expires_at = LEAST(expires_at, NOW())
         WHERE user_id = $1
           AND consumed_at IS NULL`,
-      [userId]
-    )
+    [userId]
+  )
 
-    const del = await db.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [userId])
-    if ((del.rowCount ?? 0) === 0) {
-      return { error: 'not_found' }
-    }
-    return { ok: true, id: userId }
+  const del = await db.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [userId])
+  if ((del.rowCount ?? 0) === 0) {
+    return { error: 'not_found' }
+  }
+  return { ok: true, id: userId }
+}
+
+export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
+  return withTransaction(async db => {
+    return adminDeleteUserInTransaction(db, userId)
   })
 }

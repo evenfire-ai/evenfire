@@ -1,4 +1,6 @@
 import bcrypt from 'bcryptjs'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
@@ -10,7 +12,7 @@ import {
   roleCanDeleteMembers,
   roleCanInviteMembers,
 } from './types.js'
-import { adminDeleteUser } from './users.js'
+import { adminDeleteUserInTransaction } from './users.js'
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -263,7 +265,8 @@ async function loadInvitationTeams(
 
 async function loadInvitationTeamsByInvitationIds(
   db: Pick<DbClient, 'query'>,
-  invitationIds: readonly string[]
+  invitationIds: readonly string[],
+  managerUserId?: string
 ): Promise<Map<string, InvitationTeamRow[]>> {
   const byInvitationId = new Map<string, InvitationTeamRow[]>()
   if (invitationIds.length === 0) return byInvitationId
@@ -272,9 +275,15 @@ async function loadInvitationTeamsByInvitationIds(
     `SELECT it.invitation_id, it.team_id, t.name AS team_name, it.role
        FROM invitation_teams it
        JOIN teams t ON t.id = it.team_id
+  LEFT JOIN team_members manager
+         ON manager.team_id = it.team_id
+        AND manager.user_id::text = $2
+        AND manager.status = 'active'
+        AND manager.role IN ('admin', 'inviter')
       WHERE it.invitation_id = ANY($1::uuid[])
+        AND ($2 = '' OR manager.user_id IS NOT NULL)
       ORDER BY it.invitation_id ASC, t.name ASC`,
-    [invitationIds]
+    [invitationIds, managerUserId?.trim() || '']
   )
   for (const row of result.rows as Array<InvitationTeamRow & { invitation_id: string }>) {
     const rows = byInvitationId.get(row.invitation_id) || []
@@ -288,10 +297,11 @@ async function loadInvitationTeamsByInvitationIds(
   return byInvitationId
 }
 
-async function invitationListResponse(rows: InvitationRow[]) {
+async function invitationListResponse(rows: InvitationRow[], managerUserId?: string) {
   const teamsByInvitationId = await loadInvitationTeamsByInvitationIds(
     pool,
-    rows.map(row => row.id)
+    rows.map(row => row.id),
+    managerUserId
   )
   return rows.map(row => {
     const { token: _secretCapability, ...safeInvitation } = row
@@ -1379,27 +1389,125 @@ export async function acceptInvitationById(email: string, invitationId: string) 
   })
 }
 
-export async function searchDirectory(teamId: string, q: string) {
+export const DIRECTORY_SEARCH_MAX_QUERY_LENGTH = 100
+export const DIRECTORY_SEARCH_PAGE_SIZE = 25
+
+export class DirectorySearchCursorError extends Error {
+  constructor() {
+    super('invalid directory search cursor')
+    this.name = 'DirectorySearchCursorError'
+  }
+}
+
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, character => `\\${character}`)
+}
+
+function directorySearchCursorSignature(value: string): string {
+  return createHmac('sha256', config.sessionJwtPrivateKey).update(value).digest('base64url')
+}
+
+function encodeDirectorySearchCursor(input: {
+  teamId: string
+  query: string
+  sortKey: string
+  userId: string
+}): string {
+  const body = Buffer.from(JSON.stringify(input)).toString('base64url')
+  return `ds1.${body}.${directorySearchCursorSignature(body)}`
+}
+
+function decodeDirectorySearchCursor(
+  value: string,
+  teamId: string,
+  query: string
+): { sortKey: string; userId: string } {
+  const [prefix, body, signature, extra] = value.split('.')
+  if (prefix !== 'ds1' || !body || !signature || extra) throw new DirectorySearchCursorError()
+  const expected = directorySearchCursorSignature(body)
+  const suppliedBytes = Buffer.from(signature)
+  const expectedBytes = Buffer.from(expected)
+  if (
+    suppliedBytes.length !== expectedBytes.length ||
+    !timingSafeEqual(suppliedBytes, expectedBytes)
+  ) {
+    throw new DirectorySearchCursorError()
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    const sortKey = typeof parsed.sortKey === 'string' ? parsed.sortKey : ''
+    const userId = typeof parsed.userId === 'string' ? parsed.userId : ''
+    if (parsed.teamId !== teamId || parsed.query !== query || !sortKey || !userId) {
+      throw new Error('cursor mismatch')
+    }
+    return { sortKey, userId }
+  } catch {
+    throw new DirectorySearchCursorError()
+  }
+}
+
+export async function searchDirectory(teamId: string, q: string, cursor?: string) {
   const query = q.trim()
-  if (!query) return []
+  if (!query) return { items: [], nextCursor: null }
+  if (query.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
+    throw new DirectorySearchCursorError()
+  }
+  const after = cursor ? decodeDirectorySearchCursor(cursor, teamId, query) : null
+  const pattern = `%${escapeLikeLiteral(query)}%`
 
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, p.display_name, p.channels
+    `SELECT u.id, u.email, u.name, p.display_name,
+            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) AS sort_key
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
         AND (
-          u.email ILIKE $2
-          OR COALESCE(u.name, '') ILIKE $2
-          OR COALESCE(p.display_name, '') ILIKE $2
+          u.email ILIKE $2 ESCAPE '\\'
+          OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
+          OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
-   ORDER BY COALESCE(p.display_name, u.name, u.email) ASC
-      LIMIT 25`,
-    [teamId, `%${query}%`]
+        AND (
+          $3::text IS NULL
+          OR (
+            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)),
+            u.id
+          ) > ($3, $4::uuid)
+        )
+   ORDER BY sort_key ASC, u.id ASC
+      LIMIT $5`,
+    [teamId, pattern, after?.sortKey ?? null, after?.userId ?? null, DIRECTORY_SEARCH_PAGE_SIZE + 1]
   )
-  return result.rows
+  const rows = result.rows as Array<{
+    id: string
+    email: string
+    name: string | null
+    display_name: string | null
+    sort_key: string
+  }>
+  const page = rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE)
+  const last = page[page.length - 1]
+  return {
+    items: page.map(row => ({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      displayName: row.display_name,
+    })),
+    nextCursor:
+      rows.length > DIRECTORY_SEARCH_PAGE_SIZE && last
+        ? encodeDirectorySearchCursor({
+            teamId,
+            query,
+            sortKey: last.sort_key,
+            userId: last.id,
+          })
+        : null,
+  }
 }
 
 export async function listManageableTeamsForUser(userId: string) {
@@ -1470,7 +1578,7 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            FROM users u
            JOIN team_members target_tm ON target_tm.user_id = u.id AND target_tm.status = 'active'
            JOIN teams t ON t.id = target_tm.team_id
-      LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
+           JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
           WHERE u.id::text = $2
             AND EXISTS (SELECT 1 FROM eligible_target)
@@ -1522,9 +1630,9 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            JOIN team_members target_tm
              ON target_tm.user_id = vu.user_id
             AND target_tm.status = 'active'
+           JOIN managed_teams mt ON mt.team_id = target_tm.team_id
            JOIN teams t ON t.id = target_tm.team_id
            JOIN users u ON u.id = target_tm.user_id
-      LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
        GROUP BY u.id, u.email, u.name, u.picture, p.display_name
        ORDER BY COALESCE(p.display_name, u.name, u.email) ASC`,
@@ -1622,7 +1730,10 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
       ORDER BY i.created_at ASC`,
     [normalizedManagerUserId]
   )
-  const invitations = await invitationListResponse(result.rows as InvitationRow[])
+  const invitations = await invitationListResponse(
+    result.rows as InvitationRow[],
+    normalizedManagerUserId
+  )
   const allTeamIds = Array.from(
     new Set(
       invitations.flatMap(invitation =>
@@ -1730,17 +1841,66 @@ export async function updateManagedMemberRoleForUser(
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
   }
-  const manager = await findMemberRole(teamId, managerUserId)
-  if (!roleCanDeleteMembers(manager?.role)) {
-    return { error: 'forbidden' as const }
-  }
-  const target = await findMemberRole(teamId, targetUserId)
-  if (!target) {
-    return { error: 'not_found' as const }
-  }
-  return {
-    membership: await updateMemberRole(teamId, targetUserId, normalizedRole, managerUserId),
-  }
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT user_id::text AS user_id, role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY user_id
+        FOR UPDATE`,
+      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+    )
+    const memberships = new Map(
+      (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
+        row.user_id,
+        row.role,
+      ])
+    )
+    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+      return { error: 'forbidden' as const }
+    }
+    const previousRole = memberships.get(targetUserId.trim())
+    if (!previousRole) return { error: 'not_found' as const }
+
+    const result = await db.query(
+      `UPDATE team_members
+          SET role = $3,
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId.trim(), targetUserId.trim(), normalizedRole]
+    )
+    const membership = result.rows[0]
+    if (!membership) return { error: 'not_found' as const }
+    if (previousRole !== normalizedRole) {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: managerUserId.trim(),
+        changes: [
+          {
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${previousRole}`,
+            subject: { kind: 'user', id: targetUserId.trim() },
+            teamId: teamId.trim(),
+            status: 'role_replaced',
+          },
+          {
+            action: 'grant',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${normalizedRole}`,
+            subject: { kind: 'user', id: targetUserId.trim() },
+            teamId: teamId.trim(),
+            status: 'role_assigned',
+          },
+        ],
+      })
+    }
+    return { membership }
+  })
 }
 
 export async function deleteManagedMemberForUser(
@@ -1751,15 +1911,56 @@ export async function deleteManagedMemberForUser(
   if (managerUserId.trim() === targetUserId.trim()) {
     return { error: 'invalid_target' as const }
   }
-  const manager = await findMemberRole(teamId, managerUserId)
-  if (!roleCanDeleteMembers(manager?.role)) {
-    return { error: 'forbidden' as const }
-  }
-  const deleted = await softDeleteMember(teamId, targetUserId, managerUserId)
-  if (!deleted) {
-    return { error: 'not_found' as const }
-  }
-  return { deleted }
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT user_id::text AS user_id, role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY user_id
+        FOR UPDATE`,
+      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+    )
+    const memberships = new Map(
+      (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
+        row.user_id,
+        row.role,
+      ])
+    )
+    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+      return { error: 'forbidden' as const }
+    }
+    const targetRole = memberships.get(targetUserId.trim())
+    if (!targetRole) return { error: 'not_found' as const }
+
+    const result = await db.query(
+      `UPDATE team_members
+          SET status = 'deleted',
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId.trim(), targetUserId.trim()]
+    )
+    const deleted = result.rows[0]
+    if (!deleted) return { error: 'not_found' as const }
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: managerUserId.trim(),
+      changes: [
+        {
+          action: 'revoke',
+          resourceClass: 'team_membership',
+          resourceRef: `team_membership:${teamId}:role:${targetRole}`,
+          subject: { kind: 'user', id: targetUserId.trim() },
+          teamId: teamId.trim(),
+          status: 'membership_removed',
+        },
+      ],
+    })
+    return { deleted }
+  })
 }
 
 export async function deleteManagedUserForUser(managerUserId: string, targetUserId: string) {
@@ -1772,27 +1973,48 @@ export async function deleteManagedUserForUser(managerUserId: string, targetUser
     return { error: 'invalid_target' as const }
   }
 
-  const teamsResult = await pool.query(
-    `SELECT team_id
-       FROM team_members
-      WHERE user_id = $1
-        AND status = 'active'`,
-    [normalizedTargetUserId]
-  )
-  const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
-  if (teamIds.length === 0) {
-    return { error: 'not_found' as const }
-  }
-  const managerRoles = await getManagerRolesForTeams(normalizedManagerUserId, teamIds)
-  if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
-    return { error: 'forbidden_uncontrolled_teams' as const }
-  }
+  return withTransaction(async db => {
+    const targetExists = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+      normalizedTargetUserId,
+    ])
+    if ((targetExists.rowCount ?? 0) === 0) return { error: 'not_found' as const }
 
-  const deleted = await adminDeleteUser(normalizedTargetUserId)
-  if ('error' in deleted) {
-    return { error: 'not_found' as const }
-  }
-  return { deleted }
+    const teamsResult = await db.query(
+      `SELECT team_id
+         FROM team_members
+        WHERE user_id = $1
+          AND status = 'active'
+        ORDER BY team_id
+        FOR UPDATE`,
+      [normalizedTargetUserId]
+    )
+    const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
+    if (teamIds.length === 0) return { error: 'not_found' as const }
+
+    const managerResult = await db.query(
+      `SELECT team_id, role
+         FROM team_members
+        WHERE user_id = $1
+          AND team_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY team_id
+        FOR UPDATE`,
+      [normalizedManagerUserId, teamIds]
+    )
+    const managerRoles = new Map(
+      (managerResult.rows as Array<{ team_id: string; role: TeamRole }>).map(row => [
+        row.team_id,
+        row.role,
+      ])
+    )
+    if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
+      return { error: 'forbidden_uncontrolled_teams' as const }
+    }
+
+    const deleted = await adminDeleteUserInTransaction(db, normalizedTargetUserId)
+    if ('error' in deleted) return { error: 'not_found' as const }
+    return { deleted }
+  })
 }
 
 export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
@@ -1891,14 +2113,23 @@ export async function updateUserPassword(
     return { error: 'invalid_current_password' as const }
   }
 
-  await pool.query(
-    `UPDATE users
-        SET password_hash = $2,
-            password_set_at = NOW(),
-            updated_at = NOW()
-      WHERE id = $1`,
-    [normalizedUserId, await bcrypt.hash(nextPassword, 12)]
-  )
-  await revokeAllUserSessions(normalizedUserId, 'password_changed')
-  return { updated: true as const }
+  const nextPasswordHash = await bcrypt.hash(nextPassword, 12)
+  return withTransaction(async db => {
+    const updated = await db.query(
+      `UPDATE users
+          SET password_hash = $3,
+              password_set_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1
+          AND email = $2
+          AND password_hash = $4
+      RETURNING id`,
+      [normalizedUserId, normalizedEmail, nextPasswordHash, user.password_hash]
+    )
+    if ((updated.rowCount ?? 0) === 0) {
+      return { error: 'invalid_current_password' as const }
+    }
+    await revokeAllUserSessions(normalizedUserId, 'password_changed', db)
+    return { updated: true as const }
+  })
 }

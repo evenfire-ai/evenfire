@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import { pool } from '../../db.js'
+import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { externalUserSessionEventsTotal } from '../../observability/metrics.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import { authenticateExternalSessionToken } from '../../services/auth/externalSessionAuthentication.js'
 import {
@@ -48,6 +50,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         email: google.email,
         authenticationMethods: ['google'],
       })
+      externalUserSessionEventsTotal.inc({ event: 'issue', contract: 'v2', result: 'success' }, 1)
       return res.status(200).json({
         token,
         me: {
@@ -93,6 +96,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         email: login.user.email,
         authenticationMethods: ['pwd'],
       })
+      externalUserSessionEventsTotal.inc({ event: 'issue', contract: 'v2', result: 'success' }, 1)
       return res.status(200).json({
         token,
         me: {
@@ -138,14 +142,26 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post('/external/auth/verify', async (req, res, next) => {
     try {
       const token = String(req.body?.token || '').trim()
-      if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
+      if (!token || token.length > 4096) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
       const authentication = await authenticateExternalSessionToken(token)
       if (authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       return res.status(200).json({ claims: authentication.claims })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 
@@ -164,7 +180,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         req.header('x-user-session-token') || req.body?.sessionToken || ''
       ).trim()
       if (!currentToken || currentToken.length > 4096) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const authentication = await authenticateExternalSessionToken(currentToken)
       if (
@@ -172,7 +189,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         authentication.claims.userId !== userId ||
         authentication.claims.email.toLowerCase() !== email
       ) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const membership = await pool.query(
         `SELECT 1
@@ -187,33 +205,63 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         [userId, email, teamId, role]
       )
       if ((membership.rowCount ?? 0) === 0) {
+        externalUserSessionEventsTotal.inc(
+          { event: 'legacy_switch', contract: 'compatibility', result: 'denied' },
+          1
+        )
         return res.status(403).json({ error: 'membership_not_found' })
       }
+      externalUserSessionEventsTotal.inc(
+        { event: 'legacy_switch', contract: 'compatibility', result: 'success' },
+        1
+      )
       return res.status(200).json({
         token: currentToken,
         deprecated: true,
         sessionContract: authentication.claims.sessionContract === 'v2' ? 'v2' : 'v1',
       })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Authorization is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 
   router.post('/external/auth/session/renew', async (req, res, next) => {
     try {
       const token = String(req.header('x-user-session-token') || req.body?.token || '').trim()
-      if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
+      if (!token || token.length > 4096) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
       const renewed = await renewUserSessionToken(token)
       if (!('token' in renewed)) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        externalUserSessionEventsTotal.inc({ event: 'renew', contract: 'v2', result: 'denied' }, 1)
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
+      externalUserSessionEventsTotal.inc({ event: 'renew', contract: 'v2', result: 'success' }, 1)
       return res.status(200).json({
         token: renewed.token,
         expiresInSeconds: renewed.expiresInSeconds,
         absoluteExpiresAt: renewed.identity.absoluteExpiresAt.toISOString(),
       })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 
@@ -222,15 +270,32 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const token = String(req.header('x-user-session-token') || req.body?.token || '').trim()
       const authentication = token ? await authenticateExternalSessionToken(token) : null
       if (!authentication || authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       if (authentication.claims.sessionContract !== 'v2' || !authentication.claims.sid) {
         return res.status(200).json({ revoked: false, legacy: true })
       }
-      await revokeUserSession(authentication.claims.userId, authentication.claims.sid, 'logout')
+      const revoked = await revokeUserSession(
+        authentication.claims.userId,
+        authentication.claims.sid,
+        'logout'
+      )
+      if (!revoked) {
+        sendPublicApiError(req, res, 401, 'session_revoked', 'The session is already revoked.')
+        return
+      }
       return res.status(200).json({ revoked: true })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 
@@ -239,7 +304,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const token = String(req.header('x-user-session-token') || '').trim()
       const authentication = token ? await authenticateExternalSessionToken(token) : null
       if (!authentication || authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       if (authentication.claims.sessionContract !== 'v2') {
         return res.status(409).json({ error: 'v2_session_required' })
@@ -251,7 +317,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       )
       return res.status(200).json({ revoked })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 
@@ -260,7 +334,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const token = String(req.header('x-user-session-token') || '').trim()
       const authentication = token ? await authenticateExternalSessionToken(token) : null
       if (!authentication || authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       if (authentication.claims.sessionContract !== 'v2') {
         return res.status(409).json({ error: 'v2_session_required' })
@@ -268,7 +343,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const revoked = await revokeAllUserSessions(authentication.claims.userId, 'user_revoked_all')
       return res.status(200).json({ revoked })
     } catch (error) {
-      return next(error)
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+      return
     }
   })
 

@@ -46,4 +46,19 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('postgres')
     expect(JSON.stringify(response.body)).not.toContain('secret')
   })
+
+  it('maps upstream throttling to the stable retryable rate-limit error', async () => {
+    const response = await request(
+      appThrowing(new ControlApiError('raw rate limiter state', 429, { internal: 'bucket-key' }))
+    ).get('/failure')
+
+    expect(response.status).toBe(429)
+    expect(response.body.error).toEqual({
+      code: 'rate_limited',
+      message: 'Too many requests; retry later.',
+      correlationId: expect.any(String),
+      retryable: true,
+    })
+    expect(JSON.stringify(response.body)).not.toContain('bucket-key')
+  })
 })

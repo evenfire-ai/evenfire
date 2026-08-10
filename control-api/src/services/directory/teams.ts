@@ -96,6 +96,32 @@ export async function renameTeam(teamId: string, name: string) {
   return (updated.rows[0] as { id: string; name: string } | undefined) || null
 }
 
+export async function renameTeamForUser(userId: string, teamId: string, name: string) {
+  return withTransaction(async db => {
+    const membership = await db.query(
+      `SELECT role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+        FOR UPDATE`,
+      [teamId, userId]
+    )
+    if ((membership.rows[0] as { role?: string } | undefined)?.role !== 'admin') {
+      return { error: 'forbidden' as const }
+    }
+    const updated = await db.query(
+      `UPDATE teams
+          SET name = $2
+        WHERE id = $1
+      RETURNING id, name`,
+      [teamId, name]
+    )
+    const team = (updated.rows[0] as { id: string; name: string } | undefined) || null
+    return team ? { team } : { error: 'not_found' as const }
+  })
+}
+
 /**
  * Hard-delete an empty team and all dependent rows (CASCADE from schema: invitations,
  * team_contexts, team_agents). Active memberships block deletion.

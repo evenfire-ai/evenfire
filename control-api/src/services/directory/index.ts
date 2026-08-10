@@ -20,6 +20,7 @@ export {
   listAllTeams,
   listTeams,
   renameTeam,
+  renameTeamForUser,
 } from './teams.js'
 
 export {
@@ -54,6 +55,8 @@ export {
   setInvitationPasswordForUser,
   setInvitationPasswordForEmail,
   searchDirectory,
+  DirectorySearchCursorError,
+  DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
   softDeleteMember,
   startDraftInvitationCleanup,
   stopDraftInvitationCleanup,

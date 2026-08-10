@@ -24,6 +24,6 @@ describe('parseCorsOrigin', () => {
 
 describe('config', () => {
   it('uses the configured profile session cookie TTL default', () => {
-    expect(config.profileSessionCookieTtlSeconds).toBe(60 * 60 * 12)
+    expect(config.profileSessionCookieTtlSeconds).toBe(60 * 60)
   })
 })

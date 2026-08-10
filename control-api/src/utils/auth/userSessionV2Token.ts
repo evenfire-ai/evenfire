@@ -4,6 +4,7 @@ import { config } from '../../config.js'
 
 export const USER_SESSION_V2_AUDIENCE = 'evenfire-user-session'
 export const USER_SESSION_V2_TTL_SECONDS = 60 * 60
+export const USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS = 5
 export const USER_SESSION_V2_TYPE = 'user_session' as const
 export const USER_SESSION_V2_VERSION = 2 as const
 
@@ -84,9 +85,11 @@ export function verifyUserSessionV2Token(token: string): UserSessionV2Claims | n
       algorithms: ['RS256'],
       issuer: config.jwtIssuer,
       audience: USER_SESSION_V2_AUDIENCE,
+      clockTolerance: USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS,
     }) as jwt.JwtPayload
 
     if (FORBIDDEN_AUTHORITY_CLAIMS.some(claim => payload[claim] !== undefined)) return null
+    const now = Math.floor(Date.now() / 1000)
     if (
       !isNonEmptyString(payload.sub) ||
       !isNonEmptyString(payload.sid) ||
@@ -100,6 +103,9 @@ export function verifyUserSessionV2Token(token: string): UserSessionV2Claims | n
       !payload.amr.every(isNonEmptyString) ||
       typeof payload.iat !== 'number' ||
       typeof payload.exp !== 'number' ||
+      payload.exp - payload.iat !== USER_SESSION_V2_TTL_SECONDS ||
+      payload.iat > now + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS ||
+      payload.auth_time > now + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS ||
       (payload.email !== undefined && !isNonEmptyString(payload.email))
     ) {
       return null

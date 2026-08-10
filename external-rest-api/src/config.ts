@@ -111,7 +111,7 @@ export const config: Config = {
   jwtAudience: requiredOrDevDefault('EXTERNAL_REST_API_JWT_AUDIENCE', 'profile-ui'),
   profileSessionCookieTtlSeconds: positiveIntegerFromEnv(
     'EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS',
-    60 * 60 * 12
+    60 * 60
   ),
   publicBaseUrl: requiredOrDevDefault(
     'EXTERNAL_REST_API_PUBLIC_BASE_URL',

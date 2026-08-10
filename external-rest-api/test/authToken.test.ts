@@ -33,6 +33,7 @@ describe('authToken', () => {
   })
 
   it('accepts the v2 user-session audience without team or role authority', () => {
+    const issuedAt = Math.floor(Date.now() / 1000)
     jwtMock.verify.mockReturnValue({
       sub: 'user-1',
       email: 'user@example.com',
@@ -41,7 +42,10 @@ describe('authToken', () => {
       sv: 3,
       ver: 2,
       typ: 'user_session',
-      exp: 9999999999,
+      iat: issuedAt,
+      exp: issuedAt + 3600,
+      auth_time: issuedAt,
+      amr: ['pwd'],
     })
 
     expect(verifyToken('v2-token')).toEqual({
@@ -49,7 +53,7 @@ describe('authToken', () => {
       email: 'user@example.com',
       teamId: '',
       role: 'member',
-      exp: 9999999999,
+      exp: issuedAt + 3600,
       sessionContract: 'v2',
       sid: 'session-1',
       jti: 'representation-1',

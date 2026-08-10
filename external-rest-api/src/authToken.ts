@@ -4,6 +4,24 @@ import { AuthClaims, TEAM_ROLES } from './types.js'
 
 const ALLOWED_ROLES = new Set<AuthClaims['role']>(TEAM_ROLES)
 const USER_SESSION_V2_AUDIENCE = 'evenfire-user-session'
+const USER_SESSION_V2_TTL_SECONDS = 60 * 60
+const USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS = 5
+const FORBIDDEN_USER_SESSION_AUTHORITY_CLAIMS = [
+  'teamId',
+  'role',
+  'memberships',
+  'grants',
+  'resources',
+  'budgets',
+  'credentials',
+  'policies',
+  'capabilities',
+  'filesystemScope',
+  'runtime',
+  'providerPolicy',
+  'modelPolicy',
+  'auditOwner',
+] as const
 
 function verifyUserSessionV2(token: string): AuthClaims | null {
   try {
@@ -11,7 +29,9 @@ function verifyUserSessionV2(token: string): AuthClaims | null {
       algorithms: ['RS256'],
       issuer: config.jwtIssuer,
       audience: USER_SESSION_V2_AUDIENCE,
+      clockTolerance: USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS,
     }) as jwt.JwtPayload
+    const now = Math.floor(Date.now() / 1000)
     if (
       typeof payload.sub !== 'string' ||
       typeof payload.sid !== 'string' ||
@@ -20,13 +40,16 @@ function verifyUserSessionV2(token: string): AuthClaims | null {
       Number(payload.sv) < 1 ||
       payload.ver !== 2 ||
       payload.typ !== 'user_session' ||
+      typeof payload.iat !== 'number' ||
       typeof payload.exp !== 'number' ||
+      payload.exp - payload.iat !== USER_SESSION_V2_TTL_SECONDS ||
+      payload.iat > now + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS ||
+      typeof payload.auth_time !== 'number' ||
+      payload.auth_time > now + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS ||
+      !Array.isArray(payload.amr) ||
+      !payload.amr.every(method => typeof method === 'string' && Boolean(method.trim())) ||
       (payload.email !== undefined && typeof payload.email !== 'string') ||
-      payload.teamId !== undefined ||
-      payload.role !== undefined ||
-      payload.memberships !== undefined ||
-      payload.grants !== undefined ||
-      payload.capabilities !== undefined
+      FORBIDDEN_USER_SESSION_AUTHORITY_CLAIMS.some(claim => payload[claim] !== undefined)
     ) {
       return null
     }
