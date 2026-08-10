@@ -83,24 +83,32 @@ export function usePluginPermissionsController() {
     [activityQuery.data]
   )
 
+  // Show the error of the most-recently-submitted action, so a newer success
+  // supersedes an older failure and no stale error lingers. Derived from
+  // submittedAt rather than .reset()-ing the sibling — resetting an in-flight
+  // mutation would drop a real failure and desync isPending. submittedAt is 0
+  // for a mutation that has never run.
+  const latestAction =
+    clearActivityMutation.submittedAt > revokeMutation.submittedAt
+      ? clearActivityMutation
+      : revokeMutation
+  const actionError = latestAction.error ? toErrorMessage(latestAction.error) : null
+
   return {
     groups,
     activity,
     loading: grantsQuery.isPending || activityQuery.isPending,
-    // Surface query AND mutation failures. Without the mutation errors a failed
+    // Query errors take precedence; otherwise the most-recent action's error
+    // (null when it succeeded). Without surfacing mutation failures a failed
     // revoke/clear silently left the UI unchanged, so the user believed a
-    // permission was revoked when it was not. React Query clears each mutation's
-    // error on its next run, so a stale message does not linger.
+    // permission was revoked when it was not.
     error: grantsQuery.error
       ? toErrorMessage(grantsQuery.error)
       : activityQuery.error
         ? toErrorMessage(activityQuery.error)
-        : revokeMutation.error
-          ? toErrorMessage(revokeMutation.error)
-          : clearActivityMutation.error
-            ? toErrorMessage(clearActivityMutation.error)
-            : null,
+        : actionError,
     revoking: revokeMutation.isPending,
+    clearingActivity: clearActivityMutation.isPending,
     revoke: (pluginId: string, capability?: string) =>
       revokeMutation.mutateAsync({ pluginId, ...(capability ? { capability } : {}) }),
     clearActivity: () => clearActivityMutation.mutateAsync(),

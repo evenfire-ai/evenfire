@@ -294,6 +294,19 @@ export class PluginConsentGate {
         this.deps.presentPrompt(request)
       }
       allowed = await promptResult
+    } catch (err) {
+      // The hide flip (or presentPrompt) threw — e.g. the WebContentsView was
+      // destroyed mid-flip, the exact race the pre-await registration targets.
+      // Tear down this prompt's pending entry + timer so a thrown runPrompt does
+      // not leak them for up to the 120 s timeout, and withdraw the prompt in
+      // case presentPrompt threw after partially registering it (symmetry with
+      // resetPlugin / the timeout path).
+      if (this.pending?.promptId === promptId) {
+        clearTimeout(timer)
+        this.pending = null
+        this.deps.cancelPrompt(promptId)
+      }
+      throw err
     } finally {
       await this.deps.setSurfaceVisible(true).catch(() => undefined)
     }

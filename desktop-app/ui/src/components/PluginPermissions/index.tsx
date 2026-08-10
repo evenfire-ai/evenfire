@@ -201,6 +201,7 @@ export function PluginPermissions() {
           <div className="settings-form">
             <Button
               color="neutral"
+              disabled={controller.clearingActivity || controller.revoking}
               onClick={() => controller.clearActivity().catch(() => undefined)}
               size="sm"
               variant="ghost"

@@ -33,6 +33,9 @@ async function flushUntil(pred: () => boolean, maxTicks = 1000): Promise<void> {
   for (let i = 0; i < maxTicks && !pred(); i++) {
     await new Promise(resolve => setTimeout(resolve, 0))
   }
+  // Fail loudly rather than returning silently — a swallowed timeout lets a test
+  // go green even when the awaited condition never became true.
+  if (!pred()) throw new Error('flushUntil: predicate did not hold within maxTicks')
 }
 
 function makeGate(options: GateOptions = {}): PluginConsentGate {
@@ -204,6 +207,24 @@ describe('PluginConsentGate', () => {
     const outcome = await pending
     expect(cancelled).toHaveLength(1)
     expect(outcome.granted['identity.read']).toBe(false)
+    expect(prompts).toHaveLength(0)
+  })
+
+  it('does not leak a pending prompt when the surface-hide flip rejects', async () => {
+    // Regression (R2-L1): the pending entry + 120s timer are registered before
+    // the hide await. If that await throws (WebContentsView destroyed mid-flip),
+    // runPrompt must tear them down rather than leak them until the timeout.
+    const gate = makeGate({
+      decide: () => null,
+      setSurfaceVisible: async visible => {
+        visibility.push(visible)
+        if (visible === false) throw new Error('view destroyed mid-flip')
+      },
+    })
+    await expect(gate.ensure({ ...BASE, capabilities: ['identity.read'] })).rejects.toThrow(
+      'view destroyed mid-flip'
+    )
+    expect(gate.hasPendingPrompt()).toBe(false)
     expect(prompts).toHaveLength(0)
   })
 
