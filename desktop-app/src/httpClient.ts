@@ -27,8 +27,14 @@ const TRANSIENT_RETRY_DELAY_MS = 250
  * through the FULL request lifecycle, covering a rpc-proxy that streams headers
  * then stalls the response body (security review, M8 follow-up).
  */
-export function withTimeout(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(config.requestTimeoutMs)
+export function withTimeout(signal?: AbortSignal, timeoutMs?: number): AbortSignal {
+  // A caller may pass a longer per-call deadline (e.g. GFS uploads) than the
+  // app-wide default; fall back to config.requestTimeoutMs otherwise.
+  const effectiveTimeoutMs =
+    typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : config.requestTimeoutMs
+  const timeout = AbortSignal.timeout(effectiveTimeoutMs)
   if (!signal) return timeout
   // Abort on whichever fires first (caller cancellation OR timeout).
   return AbortSignal.any([signal, timeout])
@@ -88,6 +94,8 @@ export async function requestJson<T>(
     body?: unknown
     headers?: Record<string, string>
     signal?: AbortSignal
+    /** Per-call deadline override (ms); defaults to config.requestTimeoutMs. */
+    timeoutMs?: number
     retryTransientOnce?: boolean
   }
 ): Promise<T> {
@@ -104,7 +112,7 @@ export async function requestJson<T>(
       method,
       headers,
       body: options?.body === undefined ? undefined : JSON.stringify(options.body),
-      signal: withTimeout(options?.signal),
+      signal: withTimeout(options?.signal, options?.timeoutMs),
     })
 
     const raw = await response.text()

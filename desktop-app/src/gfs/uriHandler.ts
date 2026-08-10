@@ -9,6 +9,7 @@
  * form); a human path may carry a trailing -<32hex> rid; otherwise it resolves
  * by path. Diverging from the server grammar would break deep links.
  */
+import { config } from '../config.js'
 
 const RID_RE = /^[0-9a-f]{32}$/
 const TRAILING_RID_RE = /-([0-9a-f]{32})$/
@@ -84,7 +85,7 @@ export interface GfsTransport {
   requestJson<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     url: string,
-    options?: { token?: string; body?: unknown }
+    options?: { token?: string; body?: unknown; timeoutMs?: number }
   ): Promise<T>
   /** Binary fetch for downloads (resolves to the raw bytes). */
   fetchBytes(url: string, token: string): Promise<ArrayBuffer>
@@ -245,7 +246,13 @@ async function createGfsResource(
   }
   if (input.kind === 'file') body.contentBase64 = input.encodedData ?? ''
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.parentResourceId)}/children?${q.toString()}`
-  const options = { body } as { token?: string; body?: unknown }
+  // Uploads carry a base64 body up to the 16 MB cap (~22.4 MB): use the generous
+  // GFS upload deadline, not the 60s app-wide default that would abort a slow link.
+  const options = { body, timeoutMs: config.gfsUploadTimeoutMs } as {
+    token?: string
+    body?: unknown
+    timeoutMs?: number
+  }
   options[TRANSPORT_TOKEN_FIELD] = session
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'POST',
@@ -267,7 +274,13 @@ async function replaceGfsFile(
   }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}/content?${q.toString()}`
-  const options = { body } as { token?: string; body?: unknown }
+  // Replace uploads carry the same base64 body as create: use the generous GFS
+  // upload deadline instead of the 60s app-wide default.
+  const options = { body, timeoutMs: config.gfsUploadTimeoutMs } as {
+    token?: string
+    body?: unknown
+    timeoutMs?: number
+  }
   options[TRANSPORT_TOKEN_FIELD] = session
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'PUT',
