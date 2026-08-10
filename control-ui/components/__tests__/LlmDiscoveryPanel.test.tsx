@@ -146,7 +146,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
 
     resolveInitialStatus({
       ranAt: '2026-07-01T00:00:00.000Z',
-      source: 'fallback',
+      source: 'vendored',
       added: 99,
       updated: 99,
       staled: 99,

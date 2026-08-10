@@ -134,7 +134,6 @@ function AccessSummary({ summary }: { summary?: ConnectorAccessSummary }) {
 function ConnectorContexts({
   connectorName,
   namespace,
-  contextRef,
   contexts,
   busy,
   onOpenContext,
@@ -143,27 +142,13 @@ function ConnectorContexts({
 }: {
   connectorName: string
   namespace: string
-  contextRef: string
   contexts: ConnectorContextBinding[]
   busy: boolean
   onOpenContext?: (contextName: string) => void
   onAdd?: () => void
   onRemove?: McpServerTableProps['onRemoveFromContext']
 }) {
-  const assignedNames = new Set(contexts.map(context => context.name))
-  const linkedContexts = [
-    ...(contextRef
-      ? [
-          {
-            name: contextRef,
-            removable: assignedNames.has(contextRef),
-          },
-        ]
-      : []),
-    ...contexts
-      .filter(context => context.name !== contextRef)
-      .map(context => ({ name: context.name, removable: true })),
-  ]
+  const linkedContexts = contexts.map(context => ({ name: context.name, removable: true }))
 
   return (
     <section className="cu-registry-context-access__group" data-kind="contexts">
@@ -324,7 +309,6 @@ export function McpServerTable({
             namespace,
             name,
             spec.image,
-            spec.contextRef,
             spec.description,
             spec.transport?.type,
             spec.transport?.url,
@@ -509,7 +493,6 @@ export function McpServerTable({
               {filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
                 const expanded = expandedKeys.has(key)
-                const contextRef = spec.contextRef || ''
                 const assignedContexts = contextsForConnector(name)
                 const contextMembershipBusy = updatingContextMembershipKey === key
                 return (
@@ -635,7 +618,6 @@ export function McpServerTable({
                                   <ConnectorContexts
                                     connectorName={name}
                                     namespace={namespace}
-                                    contextRef={contextRef}
                                     contexts={assignedContexts}
                                     busy={contextMembershipBusy}
                                     onOpenContext={onOpenContext}

@@ -561,7 +561,9 @@ async function submitRegistryInstallForm(
     await credentialInputs.nth(i).fill('e2e-test-value')
   }
   await installForm.getByRole('button', { name: 'Continue' }).click()
-  await expect(page.getByLabel('Install summary').getByText(serverName, { exact: true })).toBeVisible({
+  await expect(
+    page.getByLabel('Install summary').getByText(serverName, { exact: true })
+  ).toBeVisible({
     timeout: 10_000,
   })
   const responsePromise = page.waitForResponse(
@@ -1552,7 +1554,7 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await openRegistryInstallPackage(page, exactEntryName)
     const installForm = await continueToRegistryInstallForm(page)
     await expect(installForm.getByText('External Egress')).toBeVisible()
-    await expect(installForm.getByDisplayValue('Exact-host egress')).toBeVisible()
+    await expect(installForm.getByLabel('Egress mode')).toHaveValue('exact-host')
 
     await submitRegistryInstallForm(page, installForm, exactServerName, exactEntryName)
 
@@ -1574,8 +1576,10 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await login(page)
     await openRegistryInstallPackage(page, publicEntryName)
     const installForm = await continueToRegistryInstallForm(page)
-    await expect(installForm.getByDisplayValue('Public web egress')).toBeVisible()
-    await expect(installForm.getByText(/Public web egress allows outbound TCP 80\/443/i)).toBeVisible()
+    await expect(installForm.getByLabel('Egress mode')).toHaveValue('public-web')
+    await expect(
+      installForm.getByText(/Public web egress allows outbound TCP 80\/443/i)
+    ).toBeVisible()
 
     await submitRegistryInstallForm(page, installForm, publicServerName, publicEntryName)
 

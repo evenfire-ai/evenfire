@@ -23,6 +23,12 @@ import {
   updateContext,
 } from '../../lib/api'
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
+import {
+  contextNamesForConnector,
+  mergeAccessSummaries,
+  sortAccessPrincipals,
+} from '../../lib/connectorAccess'
+import { buildContextUpdatePayload, contextMutationError } from '../../lib/contextMutation'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
   return resource.metadata?.name || 'unknown'
@@ -41,25 +47,8 @@ function getContextRef(resource: { spec?: Record<string, unknown> }): string {
   return typeof contextRef === 'string' ? contextRef.trim() : ''
 }
 
-function sortPrincipals(items: ConnectorAccessPrincipal[]): ConnectorAccessPrincipal[] {
-  return [...items].sort((a, b) => a.label.localeCompare(b.label))
-}
-
-function mergeAccessSummaries(summaries: ConnectorAccessSummary[]): ConnectorAccessSummary {
-  const mergeGroup = (group: keyof ConnectorAccessSummary) => {
-    const items = summaries.flatMap(summary => summary[group])
-    return sortPrincipals(Array.from(new Map(items.map(item => [item.id, item] as const)).values()))
-  }
-
-  return {
-    agents: mergeGroup('agents'),
-    users: mergeGroup('users'),
-    teams: mergeGroup('teams'),
-  }
-}
-
 function agentsForContext(hosts: HostResource[], contextRef: string): ConnectorAccessPrincipal[] {
-  return sortPrincipals(
+  return sortAccessPrincipals(
     hosts
       .filter(host => getContextRef(host) === contextRef)
       .map(host => {
@@ -86,7 +75,7 @@ async function loadContextAccess(
   }
   const users =
     usersResult.status === 'fulfilled'
-      ? sortPrincipals(
+      ? sortAccessPrincipals(
           (usersResult.value.items ?? []).map(user => ({
             id: user.id,
             label: user.displayName || user.name || user.email || user.id,
@@ -95,7 +84,7 @@ async function loadContextAccess(
       : []
   const teams =
     teamsResult.status === 'fulfilled'
-      ? sortPrincipals(
+      ? sortAccessPrincipals(
           (teamsResult.value.items ?? []).map(team => ({
             id: team.id,
             label: team.name || team.id,
@@ -142,12 +131,11 @@ export default function McpServersPage() {
       const hosts = (hostsResult.items || []) as HostResource[]
       const nextContexts = (contextsResult.items || []) as ContextResource[]
       const contextRefs = [
-        ...new Set([
-          ...connectors.map(connector => getContextRef(connector)).filter(Boolean),
-          ...nextContexts
+        ...new Set(
+          nextContexts
             .map(context => String(context.metadata?.name || context.spec?.contextId || '').trim())
-            .filter(Boolean),
-        ]),
+            .filter(Boolean)
+        ),
       ]
       const accessResults = await Promise.all(
         contextRefs.map(
@@ -166,19 +154,10 @@ export default function McpServersPage() {
       const nextAccessByConnectorKey = connectors.reduce<ConnectorAccessSummaryMap>(
         (acc, connector) => {
           const connectorName = resourceName(connector)
-          const connectorContexts = new Set(
-            [
-              getContextRef(connector),
-              ...nextContexts
-                .filter(context => context.spec?.mcpServers?.includes(connectorName))
-                .map(context =>
-                  String(context.metadata?.name || context.spec?.contextId || '').trim()
-                ),
-            ].filter(Boolean)
-          )
-          if (connectorContexts.size > 0) {
+          const connectorContexts = contextNamesForConnector(nextContexts, connectorName)
+          if (connectorContexts.length > 0) {
             acc[connectorKey(connector)] = mergeAccessSummaries(
-              [...connectorContexts].map(
+              connectorContexts.map(
                 contextRef =>
                   accessByContext.get(contextRef) ?? { agents: [], users: [], teams: [] }
               )
@@ -260,12 +239,13 @@ export default function McpServersPage() {
         targets.map(context => {
           const name = contextName(context)
           const spec = contextSpec(context)
-          return updateContext(name, {
-            spec: {
+          return updateContext(
+            name,
+            buildContextUpdatePayload(context.metadata?.resourceVersion, {
               ...spec,
               mcpServers: Array.from(new Set([...spec.mcpServers, server.name])),
-            },
-          })
+            })
+          )
         })
       )
       await loadAll()
@@ -277,7 +257,7 @@ export default function McpServersPage() {
       )
     } catch (e) {
       if (isSilentApiError(e)) return
-      setError(e instanceof Error ? e.message : `Failed to add ${server.name} to contexts`)
+      setError(contextMutationError(e, `Failed to add ${server.name} to contexts`))
     } finally {
       setUpdatingContextMembershipKey(null)
     }
@@ -298,17 +278,18 @@ export default function McpServersPage() {
     setError('')
     try {
       const spec = contextSpec(target)
-      await updateContext(targetContextName, {
-        spec: {
+      await updateContext(
+        targetContextName,
+        buildContextUpdatePayload(target.metadata?.resourceVersion, {
           ...spec,
           mcpServers: spec.mcpServers.filter(name => name !== server.name),
-        },
-      })
+        })
+      )
       await loadAll()
       showToast(`Connector ${server.name} removed from ${targetContextName}.`, { tone: 'success' })
     } catch (e) {
       if (isSilentApiError(e)) return
-      setError(e instanceof Error ? e.message : `Failed to remove ${server.name} from context`)
+      setError(contextMutationError(e, `Failed to remove ${server.name} from context`))
     } finally {
       setUpdatingContextMembershipKey(null)
     }

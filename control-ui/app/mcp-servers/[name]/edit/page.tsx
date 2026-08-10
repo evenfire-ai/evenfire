@@ -20,8 +20,26 @@ import {
 } from '@constants/connectorEdit'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
-import { getContextTeams, getContextUsers, getHosts, getMcpServer, updateMcpServer } from '@lib/api'
-import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
+import {
+  getContextTeams,
+  getContextUsers,
+  getContexts,
+  getHosts,
+  getMcpServer,
+  updateMcpServer,
+} from '@lib/api'
+import type {
+  ContextResource,
+  EgressBinding,
+  EnvSecret,
+  EnvSecretKeyMapping,
+  McpServerResource,
+} from '@lib/api'
+import {
+  contextNamesForConnector,
+  mergeAccessSummaries,
+  sortAccessPrincipals,
+} from '@lib/connectorAccess'
 import type { EgressEditorStatus } from '@lib/egressModel'
 
 /**
@@ -95,6 +113,7 @@ export default function EditMcpServerPage() {
   const [egressBindings, setEgressBindings] = useState<EgressBinding[] | undefined>(undefined)
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
   const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
+  const [contextNames, setContextNames] = useState<string[]>([])
   const [contextAccessError, setContextAccessError] = useState('')
   const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
@@ -124,9 +143,12 @@ export default function EditMcpServerPage() {
       setLoading(true)
       setLoadError('')
       try {
-        const result = await getMcpServer(name)
+        const [result, contextsResult] = await Promise.all([getMcpServer(name), getContexts()])
         if (cancelled) return
         setServer(result)
+        setContextNames(
+          contextNamesForConnector((contextsResult.items ?? []) as ContextResource[], name)
+        )
         setEgressBindings((result.spec?.egressBindings as EgressBinding[] | undefined) ?? undefined)
       } catch (error) {
         if (!cancelled) {
@@ -142,11 +164,8 @@ export default function EditMcpServerPage() {
     }
   }, [name])
 
-  const contextRef =
-    typeof server?.spec?.contextRef === 'string' ? server.spec.contextRef.trim() : ''
-
   useEffect(() => {
-    if (!contextRef) {
+    if (contextNames.length === 0) {
       setContextAccess(EMPTY_CONTEXT_ACCESS)
       setContextAccessError('')
       setLoadingContextAccess(false)
@@ -158,39 +177,60 @@ export default function EditMcpServerPage() {
     setContextAccessError('')
 
     void (async () => {
-      const [usersResult, teamsResult, hostsResult] = await Promise.allSettled([
-        getContextUsers(contextRef),
-        getContextTeams(contextRef),
-        getHosts(),
+      const [hostsResults, contextResults] = await Promise.all([
+        Promise.allSettled([getHosts()]),
+        Promise.all(
+          contextNames.map(async contextName => {
+            const [usersResult, teamsResult] = await Promise.allSettled([
+              getContextUsers(contextName),
+              getContextTeams(contextName),
+            ])
+            return { contextName, usersResult, teamsResult }
+          })
+        ),
       ])
       if (cancelled) return
 
+      const hostsResult = hostsResults[0]
       const failed =
-        usersResult.status === 'rejected' ||
-        teamsResult.status === 'rejected' ||
-        hostsResult.status === 'rejected'
-      setContextAccess({
-        users:
-          usersResult.status === 'fulfilled'
-            ? (usersResult.value.items ?? []).map(user => ({
-                id: user.id,
-                label: user.displayName || user.name || user.email || user.id,
-              }))
-            : [],
-        teams:
-          teamsResult.status === 'fulfilled'
-            ? (teamsResult.value.items ?? []).map(team => ({ id: team.id, label: team.name }))
-            : [],
-        agents:
-          hostsResult.status === 'fulfilled'
-            ? (hostsResult.value.items ?? [])
-                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextRef)
+        hostsResult.status === 'rejected' ||
+        contextResults.some(
+          result =>
+            result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
+        )
+      const hosts = hostsResult.status === 'fulfilled' ? (hostsResult.value.items ?? []) : []
+      setContextAccess(
+        mergeAccessSummaries(
+          contextResults.map(({ contextName, usersResult, teamsResult }) => ({
+            users:
+              usersResult.status === 'fulfilled'
+                ? sortAccessPrincipals(
+                    (usersResult.value.items ?? []).map(user => ({
+                      id: user.id,
+                      label: user.displayName || user.name || user.email || user.id,
+                    }))
+                  )
+                : [],
+            teams:
+              teamsResult.status === 'fulfilled'
+                ? sortAccessPrincipals(
+                    (teamsResult.value.items ?? []).map(team => ({
+                      id: team.id,
+                      label: team.name || team.id,
+                    }))
+                  )
+                : [],
+            agents: sortAccessPrincipals(
+              hosts
+                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextName)
                 .map(host => {
                   const agentName = host.metadata?.name || 'unknown'
                   return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
                 })
-            : [],
-      })
+            ),
+          }))
+        )
+      )
       setContextAccessError(
         failed
           ? 'Some access information could not be loaded. The lists below may be incomplete.'
@@ -202,7 +242,7 @@ export default function EditMcpServerPage() {
     return () => {
       cancelled = true
     }
-  }, [contextRef])
+  }, [contextNames])
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -308,16 +348,18 @@ export default function EditMcpServerPage() {
                       Context access
                     </h2>
                     <p className="cu-form-section__description">
-                      This connector is available in the context shown below. Context assignments
-                      cannot be changed here yet.
+                      This connector is available in the contexts shown below. Context assignments
+                      are derived from the current Context allowlists and cannot be changed here
+                      yet.
                     </p>
                   </div>
 
-                  <p className="cu-connector-edit-context-name" aria-label="Connector context">
-                    Context: <strong>{contextRef || 'No context assigned'}</strong>
+                  <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
+                    Contexts:{' '}
+                    <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
                   </p>
 
-                  {contextRef ? (
+                  {contextNames.length > 0 ? (
                     loadingContextAccess ? (
                       <p className="cu-muted">Loading context access…</p>
                     ) : (
@@ -370,10 +412,7 @@ export default function EditMcpServerPage() {
                     <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
                   </div>
                   <div>
-                    <strong>Context:</strong>{' '}
-                    <code>
-                      {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
-                    </code>
+                    <strong>Contexts:</strong> <code>{contextNames.join(', ') || '-'}</code>
                   </div>
                 </div>
 

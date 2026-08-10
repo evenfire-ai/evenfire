@@ -12,11 +12,18 @@ vi.mock('../../lib/api', () => ({
   deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
   getContexts: vi.fn().mockResolvedValue({
     items: [
-      { metadata: { name: 'context1' }, spec: { contextId: 'context1', mcpServers: [] } },
-      { metadata: { name: 'research' }, spec: { contextId: 'research', mcpServers: [] } },
+      {
+        metadata: { name: 'context1', resourceVersion: 'rv-context1' },
+        spec: { contextId: 'context1', mcpServers: [] },
+      },
+      {
+        metadata: { name: 'research', resourceVersion: 'rv-research' },
+        spec: { contextId: 'research', mcpServers: [] },
+      },
     ],
   }),
   getContext: vi.fn().mockResolvedValue({
+    metadata: { name: 'context1', resourceVersion: 'rv-context1' },
     spec: { contextId: 'context1', mcpServers: [] },
   }),
   getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
@@ -87,7 +94,9 @@ describe('CreateMcpServerForm — render', () => {
 
     await fillIdentity()
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Context access' })).toBeInTheDocument())
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Context access' })).toBeInTheDocument()
+    )
     const contextSelector = screen.getByRole('button', { name: 'context1' })
     fireEvent.click(contextSelector)
 
@@ -305,6 +314,7 @@ describe('CreateMcpServerForm — submit', () => {
     const updateCall = (api.updateContext as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(updateCall[0]).toBe('context1')
     expect(updateCall[1]).toMatchObject({
+      metadata: { resourceVersion: 'rv-context1' },
       spec: { contextId: 'context1', mcpServers: ['brave-search'] },
     })
 

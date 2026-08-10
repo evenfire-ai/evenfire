@@ -7,6 +7,7 @@ import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconX } from '@/components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
+import { getAgentDisplayName } from '@/lib/agentName'
 import {
   createMcpSecret,
   createMcpServer,
@@ -21,8 +22,8 @@ import {
 } from '@/lib/api'
 import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
+import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
-import { getAgentDisplayName } from '@/lib/agentName'
 import { EgressEditor } from '../EgressEditor'
 import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
@@ -242,8 +243,7 @@ export function CreateMcpServerForm({
     !submitting
   const connectorComplete = Boolean(name && image && nameValid) && egressValid
   const contextComplete = Boolean(contextRef)
-  const canContinue =
-    step === 0 ? connectorComplete : step === 1 ? contextComplete : egressValid
+  const canContinue = step === 0 ? connectorComplete : step === 1 ? contextComplete : egressValid
   const contextOptions = useMemo(
     () => contexts.map(context => ({ value: context.name, label: context.name })),
     [contexts]
@@ -347,7 +347,9 @@ export function CreateMcpServerForm({
             : [],
       })
       setContextAccessError(
-        failed ? 'Some access information could not be loaded. The lists below may be incomplete.' : ''
+        failed
+          ? 'Some access information could not be loaded. The lists below may be incomplete.'
+          : ''
       )
       setLoadingContextAccess(false)
     })()
@@ -547,13 +549,15 @@ export function CreateMcpServerForm({
         const existingServers = context.spec?.mcpServers ?? []
 
         if (!existingServers.includes(name)) {
-          await updateContext(contextRef, {
-            spec: {
+          await updateContext(
+            contextRef,
+            buildContextUpdatePayload(context.metadata?.resourceVersion, {
               contextId: context.spec?.contextId ?? contextRef,
               description: context.spec?.description,
               mcpServers: [...existingServers, name],
-            },
-          })
+              sharedFileSystems: context.spec?.sharedFileSystems ?? [],
+            })
+          )
         }
       } catch (contextError) {
         setError(
@@ -836,9 +840,7 @@ export function CreateMcpServerForm({
                               ))}
                             </ul>
                           ) : (
-                            <p className="cu-muted">
-                              No {group.title.toLowerCase()} have access.
-                            </p>
+                            <p className="cu-muted">No {group.title.toLowerCase()} have access.</p>
                           )}
                         </section>
                       ))}

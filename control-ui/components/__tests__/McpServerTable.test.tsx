@@ -360,6 +360,27 @@ describe('McpServerTable — connector access summaries', () => {
 })
 
 describe('McpServerTable — context membership', () => {
+  it('does not display a stale legacy contextRef without authoritative allowlist membership', () => {
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server', contextRef: 'removed-context' })]}
+        contexts={[
+          { name: 'removed-context', mcpServers: [] },
+          { name: 'active-context', mcpServers: ['another-server'] },
+        ]}
+        accessByConnectorKey={{}}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+
+    expect(screen.queryByText('removed-context')).not.toBeInTheDocument()
+    expect(screen.getByText('No contexts linked.')).toBeInTheDocument()
+    expect(screen.getByText('No agents have access.')).toBeInTheDocument()
+    expect(screen.getByText('No teams have access.')).toBeInTheDocument()
+    expect(screen.getByText('No users have access.')).toBeInTheDocument()
+  })
+
   it('shows attached contexts and lets an operator remove the connector from one', async () => {
     const onRemoveFromContext = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
