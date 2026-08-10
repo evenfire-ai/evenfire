@@ -209,5 +209,11 @@ describe('routes/access forwarding', () => {
     expect(switchResponse.body).toEqual({
       team: { id: 'team-2', name: 'New Team', role: 'admin' },
     })
+    expect(String(teamResponse.headers['set-cookie'])).toContain(
+      'profile_session=replayable-user-token'
+    )
+    expect(String(switchResponse.headers['set-cookie'])).toContain(
+      'profile_session=replayable-user-token'
+    )
   })
 })

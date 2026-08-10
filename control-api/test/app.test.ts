@@ -5,6 +5,7 @@ import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
@@ -169,7 +170,7 @@ describe('app router wiring', () => {
       role: 'member',
       userId: 'user-1',
       email: 'user@example.com',
-      teamId: 'team-1',
+      teamId: 'team-b',
     }
 
     await request(app)
@@ -185,7 +186,7 @@ describe('app router wiring', () => {
         rowCount: 1,
       })
       .mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
-    const currentSession = signExternalSessionToken(payload)
+    const currentSession = signExternalSessionToken({ ...payload, teamId: 'team-a' })
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')
@@ -194,10 +195,16 @@ describe('app router wiring', () => {
       .set('x-user-session-token', currentSession)
       .send(payload)
       .expect(200)
+    const replacementClaims = verifyExternalSessionToken(res.body.token)
     expect(res.body).toMatchObject({
-      token: currentSession,
       deprecated: true,
       sessionContract: 'v1',
+    })
+    expect(res.body.token).not.toBe(currentSession)
+    expect(replacementClaims).toMatchObject({
+      userId: 'user-1',
+      teamId: 'team-b',
+      role: 'member',
     })
   })
 

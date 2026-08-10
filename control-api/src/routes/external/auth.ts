@@ -24,6 +24,7 @@ import {
   passwordLoginData,
   requestProfilePasswordReset,
 } from '../../services/directory/index.js'
+import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 import { verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
 import {
   SANDBOX_UI_RPC_HOST_REF,
@@ -234,8 +235,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         { event: 'legacy_switch', contract: 'compatibility', result: 'success' },
         1
       )
+      const token =
+        authentication.claims.sessionContract === 'v2'
+          ? currentToken
+          : signExternalSessionToken({ userId, email, teamId, role })
       return res.status(200).json({
-        token: currentToken,
+        token,
         deprecated: true,
         sessionContract: authentication.claims.sessionContract === 'v2' ? 'v2' : 'v1',
       })

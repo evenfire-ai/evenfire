@@ -11,6 +11,7 @@ import {
   renameTeam,
   updateMemberRole,
 } from '../services/teamService.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
 import { TeamRole } from '../types.js'
 
 export function createTeamRouter(): Router {
@@ -42,6 +43,7 @@ export function createTeamRouter(): Router {
       }
       const result = await createTeamForUser({ ...auth, sessionToken }, name)
       const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      if (browserRequest) setProfileSessionCookie(req, res, result.token)
       res.status(201).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
