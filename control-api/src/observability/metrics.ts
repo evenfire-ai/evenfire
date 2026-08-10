@@ -254,6 +254,21 @@ export const rateLimitHitsTotal = getOrCreateCounter({
   labelNames: ['bucket_type', 'result'] as const as Array<'bucket_type' | 'result'>,
 })
 
+// ─── External user-session and aggregate-access transition ──────────────
+// Keep labels bounded to contract and outcome values. User, session, team,
+// resource, and access-path identifiers belong in traces, never metrics.
+export const externalUserSessionEventsTotal = getOrCreateCounter({
+  name: 'external_user_session_events_total',
+  help: 'Count of external user-session lifecycle and compatibility events.',
+  labelNames: ['event', 'contract', 'result'] as const as Array<'event' | 'contract' | 'result'>,
+})
+
+export const aggregateAccessRequestsTotal = getOrCreateCounter({
+  name: 'aggregate_access_requests_total',
+  help: 'Count of aggregate access contract requests by operation and safe outcome.',
+  labelNames: ['operation', 'result'] as const as Array<'operation' | 'result'>,
+})
+
 // ─── Workflow-run archival cron metrics (DB-first, replaces CRD reaper) ──
 export const workflowRunsArchiveRunsTotal = getOrCreateCounter({
   name: 'workflow_runs_archive_runs_total',

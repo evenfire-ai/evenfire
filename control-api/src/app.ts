@@ -261,7 +261,7 @@ export function createApp(gateway: K8sGateway) {
         {
           event: memberRegistration.error,
           correlationId,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'member registration unavailable'
       )
@@ -286,12 +286,13 @@ export function createApp(gateway: K8sGateway) {
           event: 'forwarded_client_error',
           correlationId,
           status: errStatus,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'forwarded client error from upstream'
       )
-      res.status(errStatus as number).json({
-        error: err instanceof Error ? err.message : 'Bad Request',
+      const status = errStatus as number
+      res.status(status).json({
+        error: status === 404 ? 'Not Found' : 'Bad Request',
         correlationId,
       })
       return
@@ -315,7 +316,7 @@ export function createApp(gateway: K8sGateway) {
           correlationId,
           status: integrationStatus,
           code: integrationCode,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'forwarded registry integration error'
       )
@@ -331,23 +332,14 @@ export function createApp(gateway: K8sGateway) {
       {
         event: 'unhandled_error',
         correlationId,
-        err: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
+        errorName: err instanceof Error ? err.name : 'unknown',
       },
       'unhandled error'
     )
-    if (process.env.NODE_ENV !== 'production') {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        message: err instanceof Error ? err.message : 'Unknown error',
-        correlationId,
-      })
-    } else {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        correlationId,
-      })
-    }
+    res.status(500).json({
+      error: 'Internal Server Error',
+      correlationId,
+    })
   })
 
   return app

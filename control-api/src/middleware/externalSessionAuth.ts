@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { validateUserSessionClaims } from '../services/auth/userSessionService.js'
@@ -16,21 +17,30 @@ function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
 }
 
-export async function requireValidExternalSessionToken(
+async function validateExternalSessionToken(
   req: ExternalAuthedRequest,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
+  publicErrors: boolean
 ): Promise<void> {
   const token = extractUserSessionToken(req)
   if (!token || token.length > 4096) {
-    res.status(401).json({ error: 'Unauthorized' })
+    if (publicErrors) {
+      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+    } else {
+      res.status(401).json({ error: 'Unauthorized' })
+    }
     return
   }
 
   try {
     const claims = verifyExternalSessionToken(token)
     if (!claims) {
-      res.status(401).json({ error: 'Unauthorized' })
+      if (publicErrors) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+      } else {
+        res.status(401).json({ error: 'Unauthorized' })
+      }
       return
     }
     if (claims.sessionContract === 'v2') {
@@ -48,7 +58,11 @@ export async function requireValidExternalSessionToken(
         exp: claims.exp,
       })
       if (validation.status !== 'valid') {
-        res.status(401).json({ error: 'Unauthorized' })
+        if (publicErrors) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        } else {
+          res.status(401).json({ error: 'Unauthorized' })
+        }
         return
       }
       claims.email = validation.identity.email
@@ -59,8 +73,35 @@ export async function requireValidExternalSessionToken(
     req.externalAuth = claims
     next()
   } catch {
-    res.status(503).json({ error: 'authority_unavailable' })
+    if (publicErrors) {
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Authorization is temporarily unavailable.',
+        true
+      )
+    } else {
+      res.status(503).json({ error: 'authority_unavailable' })
+    }
   }
+}
+
+export async function requireValidExternalSessionToken(
+  req: ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  return validateExternalSessionToken(req, res, next, false)
+}
+
+export async function requireValidExternalSessionTokenWithPublicErrors(
+  req: ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  return validateExternalSessionToken(req, res, next, true)
 }
 
 export function requireExternalUserParamMatch(paramName = 'userId') {
@@ -75,26 +116,53 @@ export function requireExternalUserParamMatch(paramName = 'userId') {
   }
 }
 
-export function requireExternalTeamParamMatch(paramName = 'teamId') {
+function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
   return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const claims = req.externalAuth
     const requestedTeamId = String(req.params?.[paramName] || req.query?.[paramName] || '').trim()
     if (!claims || !requestedTeamId) {
-      res.status(403).json({ error: 'Forbidden' })
+      if (publicErrors) {
+        sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
+      } else {
+        res.status(403).json({ error: 'Forbidden' })
+      }
       return
     }
     try {
       const membership = await getLiveTeamMembership(claims.userId, requestedTeamId)
       if (!membership) {
-        res.status(403).json({ error: 'Forbidden' })
+        if (publicErrors) {
+          sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
+        } else {
+          res.status(403).json({ error: 'Forbidden' })
+        }
         return
       }
       req.externalTeamAuth = membership
       next()
     } catch {
-      res.status(503).json({ error: 'authority_unavailable' })
+      if (publicErrors) {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Authorization is temporarily unavailable.',
+          true
+        )
+      } else {
+        res.status(503).json({ error: 'authority_unavailable' })
+      }
     }
   }
+}
+
+export function requireExternalTeamParamMatch(paramName = 'teamId') {
+  return externalTeamParamMatcher(paramName, false)
+}
+
+export function requireExternalTeamParamMatchWithPublicErrors(paramName = 'teamId') {
+  return externalTeamParamMatcher(paramName, true)
 }
 
 export function rejectBodyUserTeamMismatch(
