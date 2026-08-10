@@ -15,7 +15,7 @@ import {
   listActiveContextIds,
 } from '../../services/directory/accessReconciliation.js'
 import {
-  createInvitation,
+  createManagedInvitationForUser,
   createTeamForUser,
   deleteManagedMemberForUser,
   findMemberRole,
@@ -230,9 +230,16 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid invitation payload' })
         }
         const fallbackName = email.split('@')[0] || email
-        return res
-          .status(200)
-          .json(await createInvitation(req.params.teamId, name || fallbackName, email, role))
+        const result = await createManagedInvitationForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          email,
+          [{ teamId: req.params.teamId, role }],
+          name || fallbackName
+        )
+        if ('error' in result) {
+          return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
+        }
+        return res.status(200).json(result.invitation)
       } catch (error) {
         return next(error)
       }

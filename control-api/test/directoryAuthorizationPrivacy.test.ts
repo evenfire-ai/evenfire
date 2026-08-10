@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import {
   DirectorySearchCursorError,
+  createManagedInvitationForUser,
   deleteManagedMemberForUser,
   listManagedMembersForUser,
   listManagedPendingInvitationsForUser,
+  resendManagedInvitationForUser,
+  revokeManagedInvitationForUser,
   searchDirectory,
   updateManagedMemberRoleForUser,
   updateUserPassword,
@@ -14,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   query: vi.fn(),
   withTransaction: vi.fn(),
   appendEvents: vi.fn().mockResolvedValue(undefined),
+  registerInvitation: vi.fn(),
 }))
 
 vi.mock('../src/db.js', () => ({
@@ -24,7 +28,7 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: mocks.appendEvents,
 }))
 vi.mock('../src/services/invitationFlowRegistrationService.js', () => ({
-  registerAndSendInvitation: vi.fn(),
+  registerAndSendInvitation: mocks.registerInvitation,
 }))
 
 const MANAGER = '00000000-0000-4000-8000-000000000001'
@@ -37,6 +41,8 @@ describe('directory privacy and atomic authorization', () => {
     mocks.query.mockReset()
     mocks.withTransaction.mockReset()
     mocks.appendEvents.mockClear()
+    mocks.registerInvitation.mockReset()
+    mocks.registerInvitation.mockResolvedValue(undefined)
     mocks.withTransaction.mockImplementation(async work => work({ query: mocks.query }))
   })
 
@@ -146,6 +152,66 @@ describe('directory privacy and atomic authorization', () => {
     expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
     expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
   })
+
+  it('locks invitation authority and denies inviter-to-admin assignment before mutation', async () => {
+    mocks.query.mockResolvedValueOnce({
+      rows: [{ team_id: TEAM_A, role: 'inviter' }],
+      rowCount: 1,
+    })
+
+    await expect(
+      createManagedInvitationForUser(
+        MANAGER,
+        'invitee@example.com',
+        [{ teamId: TEAM_A, role: 'admin' }],
+        'Invitee'
+      )
+    ).resolves.toEqual({ error: 'forbidden' })
+
+    expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    expect(mocks.registerInvitation).not.toHaveBeenCalled()
+  })
+
+  it.each(['resend', 'revoke'] as const)(
+    'prevents %s after the locked manager authority is gone',
+    async operation => {
+      const invitation = {
+        id: '00000000-0000-4000-8000-000000000200',
+        team_id: TEAM_A,
+        invitee_name: 'Invitee',
+        email: 'invitee@example.com',
+        role: 'member',
+        token: 'secret',
+        status: 'pending',
+        purpose: 'member_invitation',
+        created_at: new Date('2026-08-10T12:00:00Z'),
+        expires_at: new Date('2026-08-11T12:00:00Z'),
+        accepted_at: null,
+        accepted_user_id: null,
+        team_name: 'Team A',
+      }
+      mocks.query
+        .mockResolvedValueOnce({ rows: [invitation], rowCount: 1 })
+        .mockResolvedValueOnce({
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+      const result =
+        operation === 'resend'
+          ? await resendManagedInvitationForUser(MANAGER, invitation.id)
+          : await revokeManagedInvitationForUser(MANAGER, invitation.id)
+
+      expect(result).toEqual({ error: 'forbidden' })
+      expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
+      expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR UPDATE')
+      expect(mocks.query).toHaveBeenCalledTimes(3)
+      expect(mocks.registerInvitation).not.toHaveBeenCalled()
+    }
+  )
 
   it('does not mutate when the locked manager membership is already revoked', async () => {
     mocks.query.mockResolvedValueOnce({
