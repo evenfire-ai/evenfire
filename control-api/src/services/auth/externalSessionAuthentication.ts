@@ -1,7 +1,7 @@
 import type { AuthClaims } from '../../profileTypes.js'
 import { verifyExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 import type { UserSessionV2Claims } from '../../utils/auth/userSessionV2Token.js'
-import { validateUserSessionClaims } from './userSessionService.js'
+import { validateLegacyUserSession, validateUserSessionClaims } from './userSessionService.js'
 
 export type ExternalSessionAuthentication =
   | { status: 'authenticated'; claims: AuthClaims }
@@ -12,7 +12,12 @@ export async function authenticateExternalSessionToken(
 ): Promise<ExternalSessionAuthentication> {
   const claims = verifyExternalSessionToken(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  if (claims.sessionContract !== 'v2') return { status: 'authenticated', claims }
+  if (claims.sessionContract !== 'v2') {
+    const validation = await validateLegacyUserSession(token, claims)
+    return validation.status === 'valid'
+      ? { status: 'authenticated', claims }
+      : { status: validation.status, reason: validation.reason }
+  }
 
   const validation = await validateUserSessionClaims({
     sub: claims.userId,

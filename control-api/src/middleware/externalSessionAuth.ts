@@ -2,7 +2,10 @@ import { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
-import { validateUserSessionClaims } from '../services/auth/userSessionService.js'
+import {
+  validateLegacyUserSession,
+  validateUserSessionClaims,
+} from '../services/auth/userSessionService.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
 
 export type ExternalAuthedRequest = Request & {
@@ -68,6 +71,16 @@ async function validateExternalSessionToken(
       claims.email = validation.identity.email
       claims.jti = validation.identity.jti
       claims.sv = validation.identity.sessionVersion
+    } else {
+      const validation = await validateLegacyUserSession(token, claims)
+      if (validation.status !== 'valid') {
+        if (publicErrors) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        } else {
+          res.status(401).json({ error: 'Unauthorized' })
+        }
+        return
+      }
     }
 
     req.externalAuth = claims

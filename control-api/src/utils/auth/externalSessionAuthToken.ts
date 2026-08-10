@@ -70,6 +70,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       teamId,
       role: payload.role as AuthClaims['role'],
       exp: payload.exp,
+      ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
     }
   } catch {
     return null

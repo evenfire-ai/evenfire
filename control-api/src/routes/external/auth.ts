@@ -13,6 +13,7 @@ import {
 import {
   renewUserSessionToken,
   revokeAllUserSessions,
+  revokeLegacyUserSession,
   revokeUserSession,
 } from '../../services/auth/userSessionService.js'
 import {
@@ -291,7 +292,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return
       }
       if (authentication.claims.sessionContract !== 'v2' || !authentication.claims.sid) {
-        return res.status(200).json({ revoked: false, legacy: true })
+        const revoked = await revokeLegacyUserSession(token, authentication.claims, 'logout')
+        return res.status(200).json({ revoked, legacy: true })
       }
       const revoked = await revokeUserSession(
         authentication.claims.userId,

@@ -36,6 +36,13 @@ vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async () => ({ status: 'valid', identity: {} })),
+  }
+})
 
 vi.mock('../src/utils/auth/internalControlToken.js', () => ({
   verifyInternalControlJwt: (...args: unknown[]) => mockVerifyInternalControlJwt(...args),

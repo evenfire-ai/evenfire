@@ -22,6 +22,13 @@ const mockWithTransaction = vi.hoisted(() => vi.fn())
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async () => ({ status: 'valid', identity: {} })),
+  }
+})
 vi.mock('../src/auth/gfsToken.js', () => ({
   GFS_DELETE_SCOPE: 'gfs.delete',
   GFS_READ_SCOPE: 'gfs.read',

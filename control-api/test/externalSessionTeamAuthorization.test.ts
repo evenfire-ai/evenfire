@@ -9,7 +9,10 @@ import {
 
 const session = vi.hoisted(() => ({ verifyExternalSessionToken: vi.fn() }))
 const authorization = vi.hoisted(() => ({ getLiveTeamMembership: vi.fn() }))
-const userSessions = vi.hoisted(() => ({ validateUserSessionClaims: vi.fn() }))
+const userSessions = vi.hoisted(() => ({
+  validateUserSessionClaims: vi.fn(),
+  validateLegacyUserSession: vi.fn(),
+}))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => session)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => authorization)
@@ -49,6 +52,7 @@ describe('external team authorization', () => {
       role: 'admin',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })
+    userSessions.validateLegacyUserSession.mockResolvedValue({ status: 'valid', identity: {} })
   })
 
   it('rejects a revoked v2 session before team authorization', async () => {

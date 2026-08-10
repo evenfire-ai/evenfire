@@ -184,3 +184,27 @@ export async function applyUserSessionAccessFoundation(db: DbClient): Promise<vo
     $$;
   `)
 }
+
+export async function applyLegacySessionRevocationFoundation(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS external_user_session_security_epochs (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      valid_after TIMESTAMPTZ NOT NULL,
+      reason TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS external_v1_session_revocations (
+      token_hash TEXT PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reason TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS external_v1_session_revocations_user_idx
+      ON external_v1_session_revocations (user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS external_v1_session_revocations_expiry_idx
+      ON external_v1_session_revocations (expires_at);
+  `)
+}

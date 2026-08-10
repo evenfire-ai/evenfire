@@ -15,6 +15,13 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => ({
   getLiveTeamMembership: mocks.membership,
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async () => ({ status: 'valid', identity: {} })),
+  }
+})
 vi.mock('../src/services/directory/index.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/directory/index.js')>()
   return { ...actual, searchDirectory: mocks.searchDirectory }

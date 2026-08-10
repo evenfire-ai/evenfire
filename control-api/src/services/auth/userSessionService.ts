@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import type { AuthClaims } from '../../profileTypes.js'
 import type { UserSessionV2Claims } from '../../utils/auth/userSessionV2Token.js'
 import {
   USER_SESSION_V2_TTL_SECONDS,
@@ -347,6 +348,16 @@ export async function revokeAllUserSessions(
   db: Pick<DbClient, 'query'> = pool,
   now = new Date()
 ): Promise<number> {
+  const revokedAt = new Date(now)
+  await db.query(
+    `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
+     VALUES($1, $2, $3, $2)
+     ON CONFLICT (user_id) DO UPDATE
+       SET valid_after = GREATEST(external_user_session_security_epochs.valid_after, EXCLUDED.valid_after),
+           reason = EXCLUDED.reason,
+           updated_at = EXCLUDED.updated_at`,
+    [userId, revokedAt, reason]
+  )
   const result = await db.query(
     `UPDATE external_user_sessions
         SET revoked_at = $2,
@@ -354,7 +365,84 @@ export async function revokeAllUserSessions(
             session_version = session_version + 1
       WHERE user_id = $1
         AND revoked_at IS NULL`,
-    [userId, atSecond(now), reason]
+    [userId, revokedAt, reason]
   )
   return result.rowCount ?? 0
+}
+
+function legacySessionFingerprint(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex')
+}
+
+export async function validateLegacyUserSession(
+  token: string,
+  claims: AuthClaims,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<UserSessionValidation> {
+  if (claims.sessionContract === 'v2' || !claims.iat) {
+    return { status: 'invalid', reason: 'invalid_legacy_representation' }
+  }
+  const result = await db.query(
+    `SELECT u.id,
+            epoch.valid_after,
+            EXISTS (
+              SELECT 1
+                FROM external_v1_session_revocations revoked
+               WHERE revoked.token_hash = $2
+                 AND revoked.user_id = u.id
+                 AND revoked.expires_at > NOW()
+            ) AS token_revoked
+       FROM users u
+  LEFT JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
+      WHERE u.id = $1
+      LIMIT 1`,
+    [claims.userId, legacySessionFingerprint(token)]
+  )
+  const row = result.rows[0] as
+    | { id: string; valid_after: Date | string | null; token_revoked: boolean }
+    | undefined
+  if (!row) return { status: 'invalid', reason: 'user_not_found' }
+  if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
+  if (row.valid_after && claims.iat * 1000 < dateOf(row.valid_after).getTime()) {
+    return { status: 'revoked', reason: 'security_event' }
+  }
+  return {
+    status: 'valid',
+    identity: {
+      userId: claims.userId,
+      email: claims.email,
+      sid: '',
+      jti: legacySessionFingerprint(token),
+      sessionVersion: 0,
+      expiresAt: new Date(claims.exp * 1000),
+      absoluteExpiresAt: new Date(claims.exp * 1000),
+      authenticationMethods: [],
+    },
+  }
+}
+
+export async function revokeLegacyUserSession(
+  token: string,
+  claims: AuthClaims,
+  reason: string,
+  db: Pick<DbClient, 'query'> = pool,
+  now = new Date()
+): Promise<boolean> {
+  if (claims.sessionContract === 'v2') return false
+  const result = await db.query(
+    `INSERT INTO external_v1_session_revocations(
+       token_hash, user_id, expires_at, revoked_at, reason
+     )
+     VALUES($1, $2, $3, $4, $5)
+     ON CONFLICT (token_hash) DO NOTHING
+     RETURNING token_hash`,
+    [
+      legacySessionFingerprint(token),
+      claims.userId,
+      new Date(claims.exp * 1000),
+      atSecond(now),
+      reason,
+    ]
+  )
+  return (result.rowCount ?? 0) > 0
 }

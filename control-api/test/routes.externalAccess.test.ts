@@ -4,13 +4,14 @@ import request from 'supertest'
 import { createExternalAccessRouter } from '../src/routes/external/access.js'
 
 const token = vi.hoisted(() => ({ verify: vi.fn() }))
-const sessions = vi.hoisted(() => ({ validate: vi.fn() }))
+const sessions = vi.hoisted(() => ({ validate: vi.fn(), validateLegacy: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: token.verify,
 }))
 vi.mock('../src/services/auth/userSessionService.js', () => ({
   validateUserSessionClaims: sessions.validate,
+  validateLegacyUserSession: sessions.validateLegacy,
 }))
 
 function app() {
@@ -24,6 +25,8 @@ describe('external aggregate access routes', () => {
   beforeEach(() => {
     token.verify.mockReset()
     sessions.validate.mockReset()
+    sessions.validateLegacy.mockReset()
+    sessions.validateLegacy.mockResolvedValue({ status: 'valid', identity: {} })
     sessions.validate.mockResolvedValue({
       status: 'valid',
       identity: {

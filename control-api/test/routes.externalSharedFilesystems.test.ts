@@ -12,6 +12,13 @@ const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async () => ({ status: 'valid', identity: {} })),
+  }
+})
 
 vi.mock('../src/services/directory/index.js', () => ({
   getUserContexts: (...args: unknown[]) => mockGetUserContexts(...args),

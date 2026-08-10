@@ -30,4 +30,21 @@ describe('user-session and authorization revision foundation migration', () => {
     expect(sql).toContain('authorization_bump_team_grant_revision')
     expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)
   })
+
+  it('adds token-specific and security-event revocation for v1 compatibility', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0092_legacy_session_revocation_foundation'
+    )
+
+    expect(migration).toBeDefined()
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    await migration!.apply({ query })
+    const sql = query.mock.calls.map(call => String(call[0])).join('\n')
+
+    expect(sql).toContain('external_user_session_security_epochs')
+    expect(sql).toContain('external_v1_session_revocations')
+    expect(sql).toContain('external_v1_session_revocations_user_idx')
+    expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)
+  })
 })

@@ -66,6 +66,7 @@ const userSessionServiceMock = vi.hoisted(() => ({
   revokeAllUserSessions: vi.fn(),
   revokeUserSession: vi.fn(),
   validateUserSessionClaims: vi.fn(),
+  validateLegacyUserSession: vi.fn(),
 }))
 
 vi.mock('../src/services/directory/index.js', () => svc)
@@ -131,6 +132,10 @@ describe('routes/profile', () => {
     userSessionServiceMock.createUserSession.mockResolvedValue({
       token: 'user-session-v2',
       expiresInSeconds: 3600,
+      identity: {},
+    })
+    userSessionServiceMock.validateLegacyUserSession.mockResolvedValue({
+      status: 'valid',
       identity: {},
     })
     rateLimitMock.checkAndIncrement.mockReset()
