@@ -150,11 +150,15 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
       const environmentId =
         typeof resource?.environmentId === 'string' ? resource.environmentId.trim() : ''
       const type = typeof resource?.type === 'string' ? resource.type.trim() : ''
+      const canonicalPrefix = resourceTypes.has(type) ? `${type}:` : ''
       const logicalId =
         typeof resource?.logicalId === 'string'
           ? resource.logicalId.trim()
           : typeof resource?.id === 'string'
-            ? resource.id.replace(new RegExp(`^${type}:`), '').trim()
+            ? (canonicalPrefix && resource.id.startsWith(canonicalPrefix)
+                ? resource.id.slice(canonicalPrefix.length)
+                : resource.id
+              ).trim()
             : ''
       const requiredCapability =
         typeof body?.requiredCapability === 'string' ? body.requiredCapability.trim() : ''
