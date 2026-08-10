@@ -314,6 +314,8 @@ export function OwnedEntries({
                           >
                             Share access
                           </Button>
+                        ) : !isPrivate ? (
+                          <span className="cu-muted">Public — no grant needed</span>
                         ) : null}
                         <RowActionsMenu
                           ariaLabel={`Actions for ${e.name} v${e.version}`}

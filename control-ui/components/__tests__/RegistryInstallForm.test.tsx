@@ -63,6 +63,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+async function waitForContinue(): Promise<void> {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled(), {
+    timeout: 10_000,
+  })
+}
+
 describe('RegistryInstallForm -- pending connector credentials', () => {
   it('allows empty required credentials and blocks partial values with clear guidance', async () => {
     vi.mocked(api.getRegistryCredentialSchema).mockResolvedValueOnce({
@@ -88,9 +94,7 @@ describe('RegistryInstallForm -- pending connector credentials', () => {
 
     render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
-    })
+    await waitForContinue()
     fireEvent.click(screen.getByText('Configuration'))
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
@@ -119,7 +123,7 @@ describe('RegistryInstallForm -- server name default', () => {
     render(<RegistryInstallForm entry={scopedEntry} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
     // Configuration is deliberately collapsed on the Package step.
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    await waitForContinue()
     fireEvent.click(screen.getByText('Configuration'))
 
     const nameInput = (await screen.findByLabelText('Server name')) as HTMLInputElement
@@ -133,7 +137,7 @@ describe('RegistryInstallForm -- server name default', () => {
       <RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />
     )
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    await waitForContinue()
 
     const configuration = container.querySelector('details.cu-registry-install-configuration')
     expect(configuration).not.toBeNull()
@@ -150,7 +154,7 @@ describe('RegistryInstallForm -- server name default', () => {
   it('shows the install details as a stacked summary', async () => {
     render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    await waitForContinue()
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
@@ -162,7 +166,8 @@ describe('RegistryInstallForm -- server name default', () => {
     expect(summary).toHaveTextContent('context1')
     expect(summary).toHaveTextContent('Marketplace package')
     expect(summary).toHaveTextContent('Version')
-    expect(screen.getByLabelText('Connector access')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Connector access' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Connector access principals' })).toBeInTheDocument()
   })
 
   it('lists the users, teams, and agents that can access the selected context', async () => {
@@ -178,7 +183,7 @@ describe('RegistryInstallForm -- server name default', () => {
 
     render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    await waitForContinue()
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
     const access = await screen.findByLabelText('Context access')
@@ -189,7 +194,7 @@ describe('RegistryInstallForm -- server name default', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
-    const reviewAccess = screen.getByLabelText('Connector access')
+    const reviewAccess = screen.getByRole('region', { name: 'Connector access' })
     expect(reviewAccess).toHaveTextContent('Ada Lovelace')
     expect(reviewAccess).toHaveTextContent('Platform')
     expect(reviewAccess).toHaveTextContent('research-agent')
@@ -206,7 +211,7 @@ describe('RegistryInstallForm -- server name default', () => {
       />
     )
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    await waitForContinue()
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))

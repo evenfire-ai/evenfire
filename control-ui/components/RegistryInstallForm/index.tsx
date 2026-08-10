@@ -3,9 +3,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { EgressEditor } from '@components/EgressEditor'
-import { IconCheck } from '@components/icons'
 import { SelectionDropdown } from '@components/SelectionDropdown'
+import { IconCheck } from '@components/icons'
 import { Button } from '@components/ui'
+import { getAgentDisplayName } from '@lib/agentName'
 import type { CredentialSchema } from '@lib/api'
 import {
   getContextTeams,
@@ -17,7 +18,6 @@ import {
 } from '@lib/api'
 import { registryEntryToEgressBindings } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
-import { getAgentDisplayName } from '@lib/agentName'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
 import { buildPastedValue } from '@lib/pasteUtils'
 import { getEmbeddedCredentialSchema } from '../registryInstallHelpers'
@@ -174,7 +174,9 @@ export function RegistryInstallForm({
             : [],
       })
       setContextAccessError(
-        failed ? 'Some access information could not be loaded. The lists below may be incomplete.' : ''
+        failed
+          ? 'Some access information could not be loaded. The lists below may be incomplete.'
+          : ''
       )
       setLoadingContextAccess(false)
     })()
@@ -375,7 +377,10 @@ export function RegistryInstallForm({
                       multiple={false}
                       value={contextRef ? [contextRef] : []}
                       onChange={next => setContextRef(next[0] ?? '')}
-                      options={contexts.map(context => ({ value: context.name, label: context.name }))}
+                      options={contexts.map(context => ({
+                        value: context.name,
+                        label: context.name,
+                      }))}
                       placeholder="Select a context..."
                       searchPlaceholder="Search contexts..."
                       selectionLabel="Context"
@@ -417,7 +422,9 @@ export function RegistryInstallForm({
                                 ))}
                               </ul>
                             ) : (
-                              <p className="cu-muted">No {group.title.toLowerCase()} have access.</p>
+                              <p className="cu-muted">
+                                No {group.title.toLowerCase()} have access.
+                              </p>
                             )}
                           </section>
                         ))}
@@ -442,7 +449,9 @@ export function RegistryInstallForm({
                         <input
                           id={`ri-cred-${key.name}`}
                           className="cu-input"
-                          type={key.kind === 'api-key' || key.kind === 'password' ? 'password' : 'text'}
+                          type={
+                            key.kind === 'api-key' || key.kind === 'password' ? 'password' : 'text'
+                          }
                           value={credValues[key.name] ?? ''}
                           onChange={event =>
                             setCredValues(previous => ({
@@ -467,7 +476,9 @@ export function RegistryInstallForm({
                     ) : null}
                   </fieldset>
                 ) : (
-                  <div className="cu-agent-review">This connector does not require credentials.</div>
+                  <div className="cu-agent-review">
+                    This connector does not require credentials.
+                  </div>
                 )}
               </div>
             ) : null}
@@ -507,14 +518,16 @@ export function RegistryInstallForm({
                   ) : (
                     <section
                       className="cu-registry-install-access-summary"
-                      aria-label="Connector access"
+                      aria-label="Connector access principals"
                     >
                       {CONTEXT_ACCESS_GROUPS.map(group => (
                         <div className="cu-registry-install-access-summary__row" key={group.key}>
                           <span>{group.key === 'users' ? 'Members' : group.title}</span>
                           <strong>
                             {contextAccess[group.key].length > 0
-                              ? contextAccess[group.key].map(principal => principal.label).join(', ')
+                              ? contextAccess[group.key]
+                                  .map(principal => principal.label)
+                                  .join(', ')
                               : `No ${group.key === 'users' ? 'members' : group.title.toLowerCase()}`}
                           </strong>
                         </div>
@@ -568,9 +581,9 @@ export function RegistryInstallForm({
                 Congratulations — you&apos;re ready to go
               </h2>
               <p id="registry-install-success-copy" className="cu-modal-copy">
-                <strong>{serverName}</strong> is available in <strong>{contextRef}</strong>. You
-                can now use it in the desktop app; visit Connectors to check its status or adjust
-                its settings.
+                <strong>{serverName}</strong> is available in <strong>{contextRef}</strong>. You can
+                now use it in the desktop app; visit Connectors to check its status or adjust its
+                settings.
               </p>
             </div>
             <div className="cu-modal-panel__foot cu-registry-install-success__actions">

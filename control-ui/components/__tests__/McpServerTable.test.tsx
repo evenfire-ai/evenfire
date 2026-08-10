@@ -285,7 +285,7 @@ describe('McpServerTable — connector access summaries', () => {
 
   it('orders URL, image, transport, and managed together and copies both full URLs', async () => {
     const image =
-      'us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-3cbdf33'
+      'us-central1-docker.pkg.dev/example-project/example/nginx-egress-proxy:sha-3cbdf33'
     const url = 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
