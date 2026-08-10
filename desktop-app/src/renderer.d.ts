@@ -207,6 +207,83 @@ declare global {
           version: number
           bytes: number
         }>
+        createFileFromPath: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        startFileUpload: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        startFileReplace: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        getUploadSnapshot: (uploadId: string) => Promise<{
+          state:
+            | 'initiated'
+            | 'uploading'
+            | 'paused'
+            | 'finalizing'
+            | 'canceling'
+            | 'completed'
+            | 'aborted'
+            | 'failed'
+          session: {
+            uploadId: string
+            state: string
+            expectedBytes: number
+            committedBytes: number
+            resultResourceId?: string
+            resultVersion?: number
+          } | null
+          uploadedBytes: number
+          totalBytes: number
+        } | null>
+        listUploadSessions: () => Promise<
+          Array<{
+            uploadId: string
+            fileName: string
+            fileSize: number
+            name: string
+            target: {
+              operation: 'create' | 'replace'
+              parentRid?: string
+              resourceRid?: string
+              ifMatch?: number
+            }
+          }>
+        >
+        pauseUpload: (uploadId: string) => Promise<unknown>
+        resumeUpload: (uploadId: string) => Promise<unknown>
+        cancelUpload: (uploadId: string) => Promise<{ ok: true }>
         replaceFile: (
           resourceId: string,
           encodedData: string,
@@ -224,6 +301,18 @@ declare global {
           version: number
           bytes: number
         }>
+        replaceFileFromPath: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        getPathForFile: (file: File) => string
         renameResource: (
           resourceId: string,
           newName: string,

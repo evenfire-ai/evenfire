@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic'
 
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
 const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 30_000
+const DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS = 600_000
 
 // setTimeout / AbortSignal.timeout reject non-integers and values above the 32-bit
 // signed ceiling (ERR_OUT_OF_RANGE), so an out-of-range env value must NOT reach them.
@@ -26,6 +27,14 @@ function resolveProxyTimeoutMs(): number {
   return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_PROXY_TIMEOUT_MS
     ? parsed
     : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
+}
+
+function resolveGfsUploadProxyTimeoutMs(): number {
+  const raw = process.env.CONTROL_UI_GFS_UPLOAD_PROXY_TIMEOUT_MS
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_PROXY_TIMEOUT_MS
+    ? parsed
+    : DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS
 }
 
 // Runtime-configurable cap on the request body this proxy will buffer, homologous
@@ -122,6 +131,12 @@ function buildUpstreamUrl(req: NextRequest, path: string[]): string {
   return `${base}${upstreamPath}${req.nextUrl.search}`
 }
 
+function isGfsUploadRoute(req: NextRequest, path: string[]): boolean {
+  if (req.method !== 'PUT') return false
+  const pathname = `/${path.join('/')}`
+  return /^\/api\/v1\/gfs\/proxy\/v1\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+$/i.test(pathname)
+}
+
 function copyRequestHeaders(req: NextRequest): Headers {
   const headers = new Headers()
   req.headers.forEach((value, key) => {
@@ -165,10 +180,22 @@ async function proxyControlApi(
   const path = Array.isArray(params.path) ? params.path : []
   const upstreamUrl = buildUpstreamUrl(req, path)
   const headers = copyRequestHeaders(req)
+  const rawUpload = isGfsUploadRoute(req, path)
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
   let body: ArrayBuffer | undefined
-  if (hasBody) {
+  let streamingBody: ReadableStream<Uint8Array> | null = null
+  if (rawUpload) {
+    const declaredChunk = Number(req.headers.get('upload-chunk-length'))
+    if (
+      !Number.isSafeInteger(declaredChunk) ||
+      declaredChunk <= 0 ||
+      declaredChunk > 16 * 1024 * 1024
+    ) {
+      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    }
+    streamingBody = req.body
+  } else if (hasBody) {
     const cap = resolveMaxBodyBytes()
     // Fast path: reject a declared-oversize length before reading a single byte.
     const declared = Number(req.headers.get('content-length'))
@@ -184,7 +211,9 @@ async function proxyControlApi(
   // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
   // including long-lived SSE notification streams — rely solely on the client's own
   // abort signal, so this timeout can never cut a streaming response.
-  const timeoutSignal = hasBody ? AbortSignal.timeout(resolveProxyTimeoutMs()) : undefined
+  const timeoutSignal = hasBody
+    ? AbortSignal.timeout(rawUpload ? resolveGfsUploadProxyTimeoutMs() : resolveProxyTimeoutMs())
+    : undefined
   const signal = timeoutSignal
     ? typeof AbortSignal.any === 'function'
       ? AbortSignal.any([timeoutSignal, req.signal])
@@ -192,14 +221,16 @@ async function proxyControlApi(
     : req.signal
 
   try {
-    const upstream = await fetch(upstreamUrl, {
+    const fetchInit: RequestInit & { duplex?: 'half' } = {
       method: req.method,
       headers,
-      body,
+      body: rawUpload ? streamingBody : body,
       cache: 'no-store',
       redirect: 'manual',
       signal,
-    })
+    }
+    if (rawUpload) fetchInit.duplex = 'half'
+    const upstream = await fetch(upstreamUrl, fetchInit)
 
     return new NextResponse(upstream.body, {
       status: upstream.status,

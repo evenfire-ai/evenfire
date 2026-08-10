@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Small, dependency-free E2E Guardian gate for changed Playwright specs.
+
+This is intentionally a conservative source audit. It does not replace a real
+browser run; it prevents common shortcuts from entering the large-upload
+project where a green test must represent a user journey.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+
+RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("fixed sleep", re.compile(r"\b(?:waitForTimeout|sleep\s*\()")),
+    ("browser storage/session mutation", re.compile(r"\b(?:localStorage|sessionStorage|storageState)\b")),
+    ("fragile positional selector", re.compile(r"\.(?:nth|first|last)\s*\(")),
+    ("fragile text/class CSS selector", re.compile(r"locator\(\s*['\"](?:[^'\"]*has-text|[^'\"]*class=)")),
+    ("core-route success mock", re.compile(r"(?:route|fulfill)\s*\([^\n]*(?:uploads|gfs|complete|parts)[^\n]*(?:status\s*:\s*2|status\s*:\s*20)")),
+)
+
+
+def audit_file(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    findings: list[str] = []
+    for label, pattern in RULES:
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            findings.append(f"{path}:{line}: {label}")
+
+    if "waitForResponse" not in text and "waitForRequest" not in text:
+        findings.append(f"{path}: missing critical network-response/request wait")
+
+    # Direct navigation is allowed only in an explicitly negative terminal
+    # guard. Happy-path large-upload journeys must enter through UI actions.
+    for match in re.finditer(r"\bpage\.goto\s*\(", text):
+        before = text[max(0, match.start() - 240) : match.start()]
+        if not re.search(r"terminal|deep.?link|foreign|missing|guard", before, re.IGNORECASE):
+            line = text.count("\n", 0, match.start()) + 1
+            findings.append(f"{path}:{line}: direct page.goto outside an explicit negative guard")
+    return findings
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("paths", nargs="+", type=Path)
+    args = parser.parse_args()
+    findings: list[str] = []
+    for path in args.paths:
+        if not path.is_file():
+            findings.append(f"{path}: file does not exist")
+            continue
+        findings.extend(audit_file(path))
+    if findings:
+        print("E2E Guardian static audit: FAIL", file=sys.stderr)
+        print("\n".join(findings), file=sys.stderr)
+        return 1
+    print(f"E2E Guardian static audit: PASS ({len(args.paths)} files)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

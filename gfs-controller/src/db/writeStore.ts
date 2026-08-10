@@ -7,7 +7,8 @@ import { assertIfMatch } from "../api/write";
 import type { AuditSink } from "../authz/audit";
 import type { PermissionEpoch } from "../authz/cache";
 import { normalizeResourceId } from "../storage/paths";
-import { discardCandidate, PgBlobStagingStore, stageVerifiedBlob } from "./blobStaging";
+import { discardCandidate, PgBlobStagingStore, stageVerifiedBlob, type GfsContent } from "./blobStaging";
+export type { GfsContent, GfsContentSource } from "./blobStaging";
 import { publishCopy, type CopyPublicationResult } from "./copyPublication";
 import { acquireBeforeDeadline } from "./deadlineQuery";
 import {
@@ -192,15 +193,25 @@ export interface CreateInput {
   parentId: string;
   name: string;
   kind?: "file" | "directory";
-  content?: Buffer;
+  /** Reserved by an idempotent caller such as an upload session. */
+  resourceId?: string;
+  content?: GfsContent;
   mutation?: ManagedMutationContext;
+  /** Optional hook executed in the same transaction as resource publication. */
+  onPublished?: (client: TxClient, resource: GfsResource, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  deadlineAtMs?: number;
 }
 export interface ReplaceInput {
   drive: string;
   resourceId: string;
   ifMatch?: number;
-  content: Buffer;
+  content: GfsContent;
   mutation?: ManagedMutationContext;
+  /** Optional hook executed in the same transaction as resource publication. */
+  onPublished?: (client: TxClient, resource: GfsResource, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  deadlineAtMs?: number;
 }
 export interface DeleteInput {
   drive: string;
@@ -257,7 +268,7 @@ export class GfsWriteService {
       throw new GfsError("path_invalid", `unsupported resource kind: ${String(kind)}`);
     }
     const content = input.content ?? Buffer.alloc(0);
-    const resourceId = this.ids.resourceId();
+    const resourceId = input.resourceId ?? this.ids.resourceId();
     const dbResourceId = toDbResourceId(resourceId);
     const parentId = toDbResourceId(input.parentId);
     let staged: Awaited<ReturnType<typeof stageVerifiedBlob>> | null = null;
@@ -265,9 +276,15 @@ export class GfsWriteService {
 
     try {
       staged = kind === "file"
-        ? await stageVerifiedBlob(this.manifests, this.blobs, this.ids, resourceId, content)
+        ? await stageVerifiedBlob(this.manifests, this.blobs, this.ids, resourceId, content, {
+          signal: input.signal,
+          ...(input.deadlineAtMs ? { checkDeadline: () => {
+            if (Date.now() >= input.deadlineAtMs!) throw new GfsError("precondition_failed", "upload finalization timed out");
+          } } : {}),
+        })
         : null;
       const created = await this.tx.transaction(async client => {
+        input.signal?.throwIfAborted();
         await this.lockStructure(client, input.drive);
         const observedAncestors = await this.loadAncestorChain(client, parentId);
         if (observedAncestors.length === 0) {
@@ -301,7 +318,7 @@ export class GfsWriteService {
               input.name,
               kind,
               pathCache,
-              kind === "file" ? content.length : 0,
+              kind === "file" ? staged?.bytes ?? 0 : 0,
               staged?.blobKey ?? null,
               staged?.contentSha256 ?? null,
             ]
@@ -315,9 +332,12 @@ export class GfsWriteService {
         }
         if (staged) await this.manifests.markCommitted(client, staged.blobKey);
         expected = rowToResource(row);
+        await input.onPublished?.(client, expected, input.signal);
+        input.signal?.throwIfAborted();
         await recordManagedMutation(input.mutation, { op: "create", resourceId: dbResourceId, drive: input.drive }, "succeeded", undefined, client);
+        input.signal?.throwIfAborted();
         return expected;
-      });
+      }, input.deadlineAtMs ? { deadlineAtMs: input.deadlineAtMs, signal: input.signal } : undefined);
       if (staged) await this.manifests.removeCommitted(staged.blobKey).catch(() => undefined);
       return created;
     } catch (err) {
@@ -344,9 +364,15 @@ export class GfsWriteService {
     let staged: Awaited<ReturnType<typeof stageVerifiedBlob>> | null = null;
     let previous: GfsResource | undefined;
     try {
-      const candidate = await stageVerifiedBlob(this.manifests, this.blobs, this.ids, resourceId, input.content);
+      const candidate = await stageVerifiedBlob(this.manifests, this.blobs, this.ids, resourceId, input.content, {
+        signal: input.signal,
+        ...(input.deadlineAtMs ? { checkDeadline: () => {
+          if (Date.now() >= input.deadlineAtMs!) throw new GfsError("precondition_failed", "upload finalization timed out");
+        } } : {}),
+      });
       staged = candidate;
       const updated = await this.tx.transaction(async client => {
+        input.signal?.throwIfAborted();
         const current = await this.lockResource(client, input.drive, resourceId);
         if (!current) throw new GfsError("not_found", `resource not found: ${input.resourceId}`);
         if (current.deletedAt) {
@@ -363,7 +389,7 @@ export class GfsWriteService {
                   content_sha256 = $5, updated_at = now()
             WHERE drive = $1 AND resource_id = $2 AND deleted_at IS NULL
             RETURNING ${RETURNING}`,
-          [input.drive, resourceId, input.content.length, candidate.blobKey, candidate.contentSha256]
+            [input.drive, resourceId, candidate.bytes, candidate.blobKey, candidate.contentSha256]
         );
         await this.manifests.markCommitted(client, candidate.blobKey);
         if (current.blobKey && current.contentSha256) {
@@ -377,9 +403,12 @@ export class GfsWriteService {
           await this.manifests.markLegacySuperseded(client, resourceId, current.bytes);
         }
         const published = rowToResource(res.rows[0]);
+        await input.onPublished?.(client, published, input.signal);
+        input.signal?.throwIfAborted();
         await recordManagedMutation(input.mutation, { op: "replace", resourceId, drive: input.drive }, "succeeded", undefined, client);
+        input.signal?.throwIfAborted();
         return published;
-      });
+      }, input.deadlineAtMs ? { deadlineAtMs: input.deadlineAtMs, signal: input.signal } : undefined);
       await this.manifests.removeCommitted(staged.blobKey).catch(() => undefined);
       return updated;
     } catch (err) {

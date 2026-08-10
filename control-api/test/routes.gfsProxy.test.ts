@@ -73,6 +73,30 @@ describe('/api/v1/gfs/proxy', () => {
     )
   })
 
+  it('sends upload capabilities and status reads to the writer service', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await buildApp()
+    const status = await request(app).get(
+      '/api/v1/gfs/proxy/v1/uploads/01234567-89ab-cdef-0123-456789abcdef/status?limit=256'
+    )
+    const capabilities = await request(app).get('/api/v1/gfs/proxy/v1/capabilities')
+
+    expect(status.status).toBe(200)
+    expect(capabilities.status).toBe(200)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'http://gfsc-writer.gfs.svc:8087/v1/uploads/01234567-89ab-cdef-0123-456789abcdef/status?limit=256'
+    )
+    expect(fetchMock.mock.calls[1][0]).toBe('http://gfsc-writer.gfs.svc:8087/v1/capabilities')
+  })
+
   it('sends mutations to the writer service', async () => {
     const fetchMock = vi.fn(
       async () =>

@@ -217,6 +217,110 @@ export function createExternalGfsRouter(): Router {
     })
   )
 
+  // Indexed upload-v2 relay. Part PUTs stay a Node stream all the way from
+  // external-rest-api to the writer GFSC; lifecycle requests use the same
+  // writer-scoped token and never fall back to the legacy JSON/base64 path.
+  router.get(
+    '/external/gfs/capabilities',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      await proxyUploadToGfsc(req, res, driveOf(req.query.drive), 'GET', '/v1/capabilities')
+    })
+  )
+  router.post(
+    '/external/gfs/uploads',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      await proxyUploadToGfsc(req, res, driveOf(req.query.drive), 'POST', '/v1/uploads')
+    })
+  )
+  router.head(
+    '/external/gfs/uploads/:id',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      if (!UUID_RE.test(String(req.params.id))) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyUploadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        'HEAD',
+        `/v1/uploads/${encodeURIComponent(req.params.id)}`
+      )
+    })
+  )
+  router.get(
+    '/external/gfs/uploads/:id/status',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      if (!UUID_RE.test(String(req.params.id))) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyUploadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        'GET',
+        `/v1/uploads/${encodeURIComponent(req.params.id)}/status`,
+        {
+          limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
+          cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        }
+      )
+    })
+  )
+  router.put(
+    '/external/gfs/uploads/:id/parts/:part',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const id = String(req.params.id)
+      const part = String(req.params.part)
+      if (!UUID_RE.test(id) || !/^[0-9]+$/.test(part)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyUploadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        'PUT',
+        `/v1/uploads/${encodeURIComponent(id)}/parts/${part}`
+      )
+    })
+  )
+  for (const action of ['pause', 'resume', 'complete'] as const) {
+    router.post(
+      `/external/gfs/uploads/:id/${action}`,
+      asyncHandler(async (req: ExternalAuthedRequest, res) => {
+        if (!UUID_RE.test(String(req.params.id))) {
+          res.status(400).json({ error: 'resource_invalid' })
+          return
+        }
+        await proxyUploadToGfsc(
+          req,
+          res,
+          driveOf(req.query.drive),
+          'POST',
+          `/v1/uploads/${encodeURIComponent(req.params.id)}/${action}`
+        )
+      })
+    )
+  }
+  router.delete(
+    '/external/gfs/uploads/:id',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      if (!UUID_RE.test(String(req.params.id))) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyUploadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        'DELETE',
+        `/v1/uploads/${encodeURIComponent(req.params.id)}`
+      )
+    })
+  )
+
   // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
   // memberships resolved here; assertMayGrant enforces no-escalation (a user may
@@ -673,4 +777,111 @@ async function proxyMutationToGfsc(
     )
   }
   res.send(text)
+}
+
+async function proxyUploadToGfsc(
+  req: ExternalAuthedRequest,
+  res: import('express').Response,
+  drive: string,
+  method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE',
+  gfscPath: string,
+  query?: Record<string, string | undefined>
+): Promise<void> {
+  const claims = req.externalAuth!
+  const { token } = signGfsToken({ subject: claims.userId, drive, scopes: [GFS_WRITE_SCOPE] })
+  const targetUrl = new URL(`${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`)
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== undefined && value !== '') targetUrl.searchParams.set(key, value)
+  }
+  const target = targetUrl.toString()
+  const rawPart = method === 'PUT' && /\/parts\/[0-9]+$/.test(gfscPath)
+  const headers: Record<string, string> = { authorization: `Bearer ${token}` }
+  if (rawPart) {
+    for (const name of [
+      'content-type',
+      'upload-part-number',
+      'upload-offset',
+      'upload-chunk-length',
+      'upload-checksum',
+    ]) {
+      const value = req.headers[name]
+      if (typeof value === 'string') headers[name] = value
+    }
+  } else if (method !== 'GET' && method !== 'HEAD') {
+    headers['content-type'] = 'application/json'
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(config.gfscProxyTimeoutMs, 600_000))
+  const init: RequestInit & { duplex?: 'half' } = {
+    method,
+    headers,
+    body:
+      method === 'GET' || method === 'HEAD'
+        ? undefined
+        : rawPart
+          ? (req as unknown as BodyInit)
+          : JSON.stringify(req.body ?? {}),
+    signal: controller.signal,
+  }
+  if (rawPart) init.duplex = 'half'
+  let upstream: Response
+  try {
+    upstream = await fetch(target, init)
+  } catch (error) {
+    const timedOut = controller.signal.aborted
+    rootLogger.error(
+      { err: error, gfscPath, method },
+      timedOut ? 'gfs external upload proxy timed out' : 'gfs external upload proxy failed'
+    )
+    res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+    return
+  } finally {
+    clearTimeout(timer)
+  }
+  if (upstream.status >= 400) {
+    const body = await upstream.text()
+    if (upstream.status >= 500)
+      rootLogger.error(
+        { gfscPath, method, status: upstream.status, body: body.slice(0, 2048) },
+        'gfs external upload upstream error'
+      )
+    res.status(upstream.status)
+    const contentType = upstream.headers.get('content-type')
+    if (contentType) res.setHeader('content-type', contentType)
+    res.send(body)
+    return
+  }
+  res.status(upstream.status)
+  for (const name of [
+    'content-type',
+    'content-length',
+    'cache-control',
+    'upload-offset',
+    'upload-length',
+    'upload-part-bytes',
+    'upload-part-count',
+    'upload-active-parts',
+    'upload-state',
+    'upload-expires',
+    'upload-part-number',
+    'upload-part-offset',
+    'upload-part-length',
+    'upload-checksum',
+  ]) {
+    const value = upstream.headers.get(name)
+    if (value) res.setHeader(name, value)
+  }
+  if (!upstream.body) {
+    res.end()
+    return
+  }
+  try {
+    for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>)
+      res.write(Buffer.from(chunk))
+    res.end()
+  } catch (error) {
+    rootLogger.error({ err: error, gfscPath, method }, 'gfs external upload response stream failed')
+    if (!res.headersSent) res.status(502).json({ error: 'gfsc upstream error' })
+    else res.end()
+  }
 }

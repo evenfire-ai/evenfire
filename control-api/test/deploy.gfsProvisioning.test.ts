@@ -101,6 +101,14 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
     expect(script).toContain('pg_auth_members')
     expect(script).toContain("has_table_privilege(:'role_name', 'gfs_resources', 'INSERT')")
     expect(script).toContain("has_table_privilege(:'role_name', 'gfs_blob_manifests', 'DELETE')")
+    expect(script).toContain("has_table_privilege(:'role_name', 'gfs_upload_sessions', 'INSERT')")
+    expect(script).toContain("has_table_privilege(:'role_name', 'gfs_upload_parts', 'DELETE')")
+    expect(script).toContain(
+      "NOT has_table_privilege(:'role_name', 'gfs_upload_sessions', 'TRUNCATE,REFERENCES,TRIGGER')"
+    )
+    expect(script).toContain(
+      "NOT has_table_privilege(:'role_name', 'gfs_upload_parts', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+    )
     expect(script).toContain(
       "has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"
     )

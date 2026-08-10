@@ -96,3 +96,73 @@ describe('GFS_SYNC_COPY_*', () => {
     ).toBe(Number.MAX_SAFE_INTEGER)
   })
 })
+
+describe('GFS_UPLOAD_V2 strict disabled contract', () => {
+  beforeEach(() => vi.stubEnv('GFS_STORAGE_ROLE', 'writer'))
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('uses the 200 MiB product policy, 1 GiB protocol ceiling, and disabled capability defaults', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    expect(loadConfig().uploadV2).toMatchObject({
+      productMaxFileBytes: 209715200,
+      protocolMaxFileBytes: 1073741824,
+      preferredPartBytes: 8388608,
+      maxPartBytes: 16777216,
+      maxConcurrentPartsPerSession: 4,
+      maxConcurrentPartStreamsGlobal: 16,
+      instabilityFailureThreshold: 3,
+      enabled: false,
+    })
+  })
+
+  it('accepts an explicit enable only as a configuration value; runtime readiness owns activation', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_V2_ENABLED', 'true')
+    expect(loadConfig().uploadV2.enabled).toBe(true)
+  })
+
+  it('requires the product boundary and deprecated max-file alias to agree', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', '209715200')
+    vi.stubEnv('GFS_UPLOAD_MAX_FILE_BYTES', '209715199')
+    expect(() => loadConfig()).toThrow(/must match/)
+  })
+
+  it('accepts the plan-owned chunk and millisecond TTL names', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PREFERRED_CHUNK_BYTES', '8388608')
+    vi.stubEnv('GFS_UPLOAD_MAX_CHUNK_BYTES', '16777216')
+    vi.stubEnv('GFS_UPLOAD_MIN_PART_BYTES', '1048576')
+    vi.stubEnv('GFS_UPLOAD_SESSION_TTL_MS', '86400000')
+    vi.stubEnv('GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS', '86400000')
+    expect(loadConfig().uploadV2).toMatchObject({
+      productMaxFileBytes: 209715200,
+      preferredPartBytes: 8388608,
+      maxPartBytes: 16777216,
+      sessionTtlSeconds: 86400,
+      receiptRetentionSeconds: 86400,
+    })
+  })
+
+  it.each(['', '1', 'yes', 'TRUE'])('rejects non-canonical flag %s', raw => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_V2_ENABLED', raw)
+    expect(() => loadConfig()).toThrow(/must be exactly 'true' or 'false'/)
+  })
+
+  it('rejects a protocol ceiling below the product boundary or above 1 GiB', () => {
+    for (const raw of ['209715199', '1073741825']) {
+      vi.stubEnv('GFS_DEV_MODE', 'true')
+      vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', raw)
+      expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES/)
+      vi.unstubAllEnvs()
+      vi.stubEnv('GFS_STORAGE_ROLE', 'writer')
+    }
+  })
+
+  it('rejects a fallback concurrency that cannot reduce the four-part window', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_FALLBACK_CONCURRENCY', '4')
+    expect(() => loadConfig()).toThrow(/FALLBACK_CONCURRENCY must be lower/)
+  })
+})

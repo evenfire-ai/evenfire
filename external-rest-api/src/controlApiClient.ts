@@ -1,6 +1,6 @@
 import { config } from './config.js'
 
-type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+type RequestMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 export class ControlApiError extends Error {
   status: number
@@ -175,13 +175,14 @@ export async function controlApiBinaryRequestWithStatus(
 }
 
 export async function controlApiStreamRequest(
-  method: 'GET',
+  method: RequestMethod,
   path: string,
   options?: {
     query?: Record<string, string | undefined>
     userSessionToken?: string
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
+    body?: unknown
   }
 ): Promise<Response> {
   const headers: Record<string, string> = {
@@ -195,11 +196,16 @@ export async function controlApiStreamRequest(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const response = await fetch(buildUrl(path, options?.query), {
+  const fetchInit: RequestInit & { duplex?: 'half' } = {
     method,
     headers,
     signal: options?.signal,
-  })
+    body: options?.body as BodyInit | null | undefined,
+  }
+  if (options?.body && typeof options.body === 'object' && Symbol.asyncIterator in options.body) {
+    fetchInit.duplex = 'half'
+  }
+  const response = await fetch(buildUrl(path, options?.query), fetchInit)
   if (!response.ok) {
     let parsed: unknown = null
     const raw = await readResponseText(response)

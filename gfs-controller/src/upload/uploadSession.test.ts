@@ -1,0 +1,410 @@
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Readable } from 'node:stream'
+import { afterEach, describe, expect, it } from 'vitest'
+import { GfsUploadSessionService, type UploadSessionServiceDeps } from './uploadSession'
+import { partGeometry } from './protocol'
+import type { GfsUploadConfig } from '../config'
+
+type Row = Record<string, unknown>
+
+class MemoryDb {
+  sessions: Row[] = []
+  parts: Row[] = []
+
+  async query(text: string, values: unknown[] = []): Promise<{ rows: Row[] }> {
+    const sql = text.replace(/\s+/g, ' ').trim()
+    if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+    if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE owner_subject')) {
+      const [owner, drive, key] = values.map(String)
+      return { rows: this.sessions.filter(row => row.owner_subject === owner && row.drive === drive && row.idempotency_key === key) }
+    }
+    if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE upload_id')) {
+      const [id, drive, owner] = values.map(String)
+      return { rows: this.sessions.filter(row => row.upload_id === id && row.drive === drive && row.owner_subject === owner) }
+    }
+    if (sql.startsWith('SELECT session_epoch, state FROM gfs_upload_sessions WHERE upload_id')) {
+      const [id, drive, owner] = values.map(String)
+      return {
+        rows: this.sessions
+          .filter(row => row.upload_id === id && row.drive === drive && row.owner_subject === owner)
+          .map(row => ({ session_epoch: row.session_epoch, state: row.state })),
+      }
+    }
+    if (sql.startsWith('SELECT p.upload_id, p.part_number, p.staging_path FROM gfs_upload_parts p')) {
+      return { rows: [] }
+    }
+    if (sql.startsWith("SELECT upload_id FROM gfs_upload_sessions WHERE state IN ('initiated','uploading','paused','finalizing') AND expires_at <= now()")) {
+      return { rows: [] }
+    }
+    if (sql.startsWith('SELECT p.upload_id, p.part_number, p.offset_bytes, p.length_bytes')) {
+      return { rows: [] }
+    }
+    if (sql.startsWith("SELECT upload_id, state FROM gfs_upload_sessions WHERE state IN ('aborted', 'expired', 'failed', 'completed') AND cleanup_at IS NULL")) {
+      return {
+        rows: this.sessions
+          .filter(row => ['aborted', 'expired', 'failed', 'completed'].includes(String(row.state)) && row.cleanup_at == null)
+          .map(row => ({ upload_id: row.upload_id, state: row.state })),
+      }
+    }
+    if (sql.startsWith("SELECT upload_id FROM gfs_upload_sessions WHERE state = 'completed' AND cleanup_at <= now()")) {
+      return { rows: [] }
+    }
+    if (sql.startsWith('SELECT COALESCE(SUM((expected_bytes - committed_bytes) + expected_bytes)')) {
+      const drive = String(values[0])
+      const reserved = this.sessions
+        .filter(row => row.drive === drive && ['initiated', 'uploading', 'paused', 'finalizing'].includes(String(row.state)))
+        .reduce((sum, row) => sum + (Number(row.expected_bytes) - Number(row.committed_bytes ?? 0)) + Number(row.expected_bytes), 0)
+      return { rows: [{ reserved: String(reserved) }] }
+    }
+    if (sql === "SELECT COUNT(*)::bigint AS count FROM gfs_upload_sessions WHERE state = 'finalizing'") {
+      return { rows: [{ count: String(this.sessions.filter(row => row.state === 'finalizing').length) }] }
+    }
+    if (sql.startsWith('SELECT COUNT(*)::bigint AS count FROM gfs_upload_sessions')) {
+      const [drive, owner] = values.map(value => value === undefined ? undefined : String(value))
+      const active = this.sessions.filter(row =>
+        ['initiated', 'uploading', 'paused', 'finalizing'].includes(String(row.state))
+        && (drive === undefined || row.drive === drive)
+        && (owner === undefined || row.owner_subject === owner)
+      ).length
+      return { rows: [{ count: String(active) }] }
+    }
+    if (sql.startsWith('SELECT COUNT(*)::bigint')) {
+      const drive = String(values[0])
+      return { rows: [{ count: String(this.parts.filter(part => part.state === 'reserved' && this.sessions.some(session => session.upload_id === part.upload_id && session.drive === drive)).length) }] }
+    }
+    if (sql.startsWith('INSERT INTO gfs_upload_sessions')) {
+      const [uploadId, key, drive, owner, primary, operation, fingerprint, parent, resource, name, ifMatch, expected, partBytes, partCount, sha, expiresAt] = values
+      const row: Row = {
+        upload_id: String(uploadId), idempotency_key: String(key), drive: String(drive), owner_subject: String(owner), primary_subject: String(primary),
+        operation: String(operation), request_fingerprint: String(fingerprint), parent_rid: parent, resource_rid: resource,
+        resource_name: name, if_match: ifMatch, expected_bytes: expected, part_bytes: partBytes, part_count: partCount,
+        whole_sha256: sha, committed_bytes: 0, contiguous_bytes: 0, committed_part_count: 0, active_part_count: 0,
+        session_epoch: 0, state: 'initiated', result_resource_id: null, result_version: null, result_sha256: null,
+        failure_code: null, expires_at: expiresAt, completed_at: null,
+        cleanup_at: null,
+      }
+      this.sessions.push(row)
+      return { rows: [row] }
+    }
+    if (sql.startsWith('SELECT upload_id, part_number')) {
+      const [uploadId, partNumber] = values
+      const rows = this.parts.filter(part => part.upload_id === String(uploadId) && (partNumber === undefined || Number(part.part_number) === Number(partNumber)) && (!sql.includes("state = 'committed'") || part.state === 'committed'))
+      return { rows }
+    }
+    if (sql.startsWith('INSERT INTO gfs_upload_parts')) {
+      const [uploadId, partNumber, offset, length, sha, staging, epoch] = values
+      const row: Row = { upload_id: String(uploadId), part_number: partNumber, offset_bytes: offset, length_bytes: length, sha256: sha, state: 'reserved', staging_path: staging, lease_epoch: epoch, committed_at: null }
+      this.parts.push(row)
+      return { rows: [] }
+    }
+    if (sql.startsWith('UPDATE gfs_upload_parts SET offset_bytes')) {
+      const [uploadId, partNumber, offset, length, sha, staging, epoch] = values
+      const row = this.parts.find(part => part.upload_id === String(uploadId) && Number(part.part_number) === Number(partNumber))!
+      Object.assign(row, { offset_bytes: offset, length_bytes: length, sha256: sha, state: 'reserved', staging_path: staging, lease_epoch: epoch, committed_at: null })
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'uploading'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'uploading'; row.active_part_count = Number(row.active_part_count) + 1
+      return { rows: [] }
+    }
+    if (sql.startsWith('UPDATE gfs_upload_parts SET state = \'committed\'')) {
+      const [uploadId, partNumber, path] = values
+      const row = this.parts.find(part => part.upload_id === String(uploadId) && Number(part.part_number) === Number(partNumber))!
+      Object.assign(row, { state: 'committed', staging_path: path })
+      return { rows: [] }
+    }
+    if (sql.startsWith('UPDATE gfs_upload_sessions SET committed_bytes')) {
+      const [uploadId, length] = values
+      const row = this.sessions.find(session => session.upload_id === String(uploadId))!
+      row.committed_bytes = Number(row.committed_bytes) + Number(length)
+      row.committed_part_count = Number(row.committed_part_count) + 1
+      row.active_part_count = Math.max(0, Number(row.active_part_count) - 1)
+      let contiguous = 0
+      for (let number = 0; number < Number(row.part_count); number += 1) {
+        const part = this.parts.find(candidate => candidate.upload_id === row.upload_id && Number(candidate.part_number) === number && candidate.state === 'committed')
+        if (!part) break
+        contiguous += Number(part.length_bytes)
+      }
+      row.contiguous_bytes = contiguous
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_parts SET state = 'failed'")) {
+      const uploadId = String(values[0])
+      for (const row of this.parts.filter(part => part.upload_id === uploadId && part.state === 'reserved')) row.state = 'failed'
+      return { rows: [] }
+    }
+    if (sql.startsWith('UPDATE gfs_upload_sessions SET active_part_count')) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.active_part_count = Math.max(0, Number(row.active_part_count) - 1)
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'paused'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'paused'
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'uploading'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'uploading'
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'aborted'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'aborted'; row.session_epoch = Number(row.session_epoch) + 1
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'finalizing'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'finalizing'
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'failed'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'failed'
+      row.failure_code = values[1]
+      row.active_part_count = 0
+      return { rows: [] }
+    }
+    if (sql.startsWith('UPDATE gfs_upload_sessions SET cleanup_at')) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))
+      if (row) row.cleanup_at = new Date().toISOString()
+      return { rows: [] }
+    }
+    if (sql.startsWith('DELETE FROM gfs_upload_parts')) {
+      const uploadId = String(values[0])
+      this.parts = this.parts.filter(part => part.upload_id !== uploadId)
+      return { rows: [] }
+    }
+    throw new Error(`unhandled fake SQL: ${sql}`)
+  }
+}
+
+const CONFIG: GfsUploadConfig = {
+  productMaxFileBytes: 209715200,
+  protocolMaxFileBytes: 1073741824,
+  preferredPartBytes: 8388608,
+  maxPartBytes: 16777216,
+  maxPartCount: 1024,
+  maxConcurrentPartsPerSession: 4,
+  maxConcurrentPartStreamsGlobal: 16,
+  maxActivePerSubject: 2,
+  maxActiveGlobal: 8,
+  maxConcurrentFinalizations: 1,
+  minFreeBytes: 10 * 1024 * 1024 * 1024,
+  instabilityFailureThreshold: 3,
+  fallbackConcurrency: 2,
+  sessionTtlSeconds: 86400,
+  partTimeoutMs: 300000,
+  finalizeTimeoutMs: 600000,
+  stalePartLeaseMs: 600000,
+  receiptRetentionSeconds: 86400,
+  enabled: true,
+}
+
+const TEST_CONFIG: GfsUploadConfig = {
+  ...CONFIG,
+  preferredPartBytes: 1048576,
+  maxPartBytes: 1048576,
+}
+
+const principal = { drive: 'main', ownerSubject: 'user-1', primarySubject: 'user-1' }
+const key = '11111111-1111-4111-8111-111111111111'
+
+let tempRoot: string
+afterEach(async () => {
+  if (tempRoot) await rm(tempRoot, { recursive: true, force: true })
+})
+
+function service(
+  db: MemoryDb,
+  config: GfsUploadConfig = TEST_CONFIG,
+  overrides: Partial<Pick<UploadSessionServiceDeps, 'now' | 'finalize'>> = {},
+): GfsUploadSessionService {
+  return new GfsUploadSessionService({
+    db,
+    tx: { transaction: async fn => fn(db) },
+    blobs: { availableBytes: async () => 10n ** 12n } as never,
+    storageMountPath: tempRoot,
+    config,
+    ...overrides,
+  })
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs = 500): Promise<
+  | { kind: 'completed'; value: T }
+  | { kind: 'rejected'; error: unknown }
+  | { kind: 'timeout' }
+> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise.then(
+        value => ({ kind: 'completed' as const, value }),
+        error => ({ kind: 'rejected' as const, error }),
+      ),
+      new Promise<{ kind: 'timeout' }>(resolve => {
+        timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+describe('GfsUploadSessionService', () => {
+  it('creates idempotent sessions and keeps indexed commits separate from contiguous progress', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
+    const db = new MemoryDb()
+    const uploads = service(db)
+    const created = await uploads.create({ ...principal, operation: 'create', parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'data.bin', sizeBytes: 2097152, idempotencyKey: key })
+    expect(created.created).toBe(true)
+    const replay = await uploads.create({ ...principal, operation: 'create', parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'data.bin', sizeBytes: 2097152, idempotencyKey: key })
+    expect(replay.created).toBe(false)
+    expect(replay.session.uploadId).toBe(created.session.uploadId)
+
+    const first = Buffer.alloc(1048576, 0x11)
+    const second = Buffer.alloc(1048576, 0x22)
+    const firstGeometry = partGeometry({ expectedBytes: 2097152, partBytes: 1048576 }, 0)
+    const secondGeometry = partGeometry({ expectedBytes: 2097152, partBytes: 1048576 }, 1)
+    const checksum = (value: Buffer) => createSha(value)
+    const outOfOrder = await uploads.putPart(created.session.uploadId, secondGeometry, checksum(second), Readable.from([second]) as never, principal)
+    expect(outOfOrder.session.contiguousBytes).toBe(0)
+    const ordered = await uploads.putPart(created.session.uploadId, firstGeometry, checksum(first), Readable.from([first]) as never, principal)
+    expect(ordered.session.contiguousBytes).toBe(2097152)
+    expect(ordered.session.committedPartCount).toBe(2)
+    expect(await readFile(ordered.part.stagingPath)).toEqual(first)
+    const duplicate = await uploads.putPart(created.session.uploadId, firstGeometry, checksum(first), Readable.from([first]) as never, principal)
+    expect(duplicate.part.sha256).toBe(checksum(first))
+  })
+
+  it('cancels terminally and rejects a conflicting idempotency fingerprint', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
+    const db = new MemoryDb()
+    const uploads = service(db)
+    await uploads.create({ ...principal, operation: 'create', parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'data.bin', sizeBytes: 0, idempotencyKey: key })
+    await expect(uploads.create({ ...principal, operation: 'create', parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'other.bin', sizeBytes: 0, idempotencyKey: key })).rejects.toMatchObject({ code: 'idempotency_conflict' })
+    const session = await uploads.create({ ...principal, operation: 'create', parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'cancel.bin', sizeBytes: 0, idempotencyKey: '22222222-2222-4222-8222-222222222222' })
+    await uploads.cancel(session.session.uploadId, principal)
+    await expect(uploads.get(session.session.uploadId, principal)).rejects.toMatchObject({ code: 'upload_aborted' })
+  })
+
+  it('releases a rejected finalizer before quiescence and cleans the failed upload immediately', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
+    const db = new MemoryDb()
+    let now = 0
+    const uploads = service(db, TEST_CONFIG, {
+      // Advance beyond the drain deadline on its first condition check. This
+      // makes the regression deterministic without waiting for the production
+      // five-minute part timeout: the old code still skipped cleanup because
+      // the failed finalizer remained registered while it drained itself.
+      now: () => (now += TEST_CONFIG.partTimeoutMs + 1),
+      finalize: async () => { throw new Error('synthetic finalizer rejection') },
+    })
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'finalizer-rejection.bin',
+      sizeBytes: 0,
+      idempotencyKey: '33333333-3333-4333-8333-333333333333',
+    })
+    const uploadDirectory = join(tempRoot, '.uploads', created.session.uploadId)
+    await mkdir(uploadDirectory, { recursive: true })
+    await writeFile(join(uploadDirectory, 'finalizer-marker'), 'pending')
+
+    const outcome = await settleWithin(uploads.complete(created.session.uploadId, principal))
+
+    expect(outcome.kind).toBe('rejected')
+    if (outcome.kind !== 'rejected') throw new Error(`unexpected completion outcome: ${outcome.kind}`)
+    expect(outcome.error).toMatchObject({ message: 'synthetic finalizer rejection' })
+    expect(db.sessions[0]).toMatchObject({
+      state: 'failed',
+      failure_code: 'finalization_failed',
+      cleanup_at: expect.any(String),
+    })
+    expect((uploads as unknown as { inFlightFinalizers: Map<string, unknown> }).inFlightFinalizers.size).toBe(0)
+    expect(db.parts).toHaveLength(0)
+    await expect(stat(uploadDirectory)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('releases a timed-out finalizer and preserves the timeout failure code during cleanup', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
+    const db = new MemoryDb()
+    let now = 0
+    const config = { ...TEST_CONFIG, finalizeTimeoutMs: 5 }
+    const uploads = service(db, config, {
+      now: () => (now += config.partTimeoutMs + 1),
+      finalize: async (_session, _parts, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      }),
+    })
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'finalizer-timeout.bin',
+      sizeBytes: 0,
+      idempotencyKey: '44444444-4444-4444-8444-444444444444',
+    })
+    const uploadDirectory = join(tempRoot, '.uploads', created.session.uploadId)
+    await mkdir(uploadDirectory, { recursive: true })
+    await writeFile(join(uploadDirectory, 'finalizer-marker'), 'pending')
+
+    const outcome = await settleWithin(uploads.complete(created.session.uploadId, principal))
+
+    expect(outcome.kind).toBe('rejected')
+    if (outcome.kind !== 'rejected') throw new Error(`unexpected completion outcome: ${outcome.kind}`)
+    expect(outcome.error).toMatchObject({ code: 'precondition_failed' })
+    expect(db.sessions[0]).toMatchObject({
+      state: 'failed',
+      failure_code: 'precondition_failed',
+      cleanup_at: expect.any(String),
+    })
+    expect((uploads as unknown as { inFlightFinalizers: Map<string, unknown> }).inFlightFinalizers.size).toBe(0)
+    expect(db.parts).toHaveLength(0)
+    await expect(stat(uploadDirectory)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('leaves a failed finalizer cleanup eligible for the reconciler after the registry is released', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
+    const db = new MemoryDb()
+    let now = 0
+    const uploads = service(db, TEST_CONFIG, {
+      now: () => (now += TEST_CONFIG.partTimeoutMs + 1),
+      finalize: async () => { throw new Error('synthetic cleanup retry') },
+    })
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'finalizer-cleanup-retry.bin',
+      sizeBytes: 0,
+      idempotencyKey: '55555555-5555-4555-8555-555555555555',
+    })
+    const uploadDirectory = join(tempRoot, '.uploads', created.session.uploadId)
+    await mkdir(join(tempRoot, '.uploads'), { recursive: true })
+    // A non-directory at the private session path makes the strict direct
+    // cleanup fail closed. The terminal row must remain retryable.
+    await writeFile(uploadDirectory, 'not-a-directory')
+
+    const outcome = await settleWithin(uploads.complete(created.session.uploadId, principal))
+    expect(outcome.kind).toBe('rejected')
+    expect(db.sessions[0]).toMatchObject({ state: 'failed', cleanup_at: null })
+    expect((uploads as unknown as { inFlightFinalizers: Map<string, unknown> }).inFlightFinalizers.size).toBe(0)
+
+    await rm(uploadDirectory, { force: true })
+    await mkdir(uploadDirectory, { recursive: true })
+    await writeFile(join(uploadDirectory, 'finalizer-marker'), 'pending')
+    await expect(uploads.reconcile()).resolves.toEqual({ staleParts: 0, expiredSessions: 0 })
+    expect(db.sessions[0]).toMatchObject({ state: 'failed', cleanup_at: expect.any(String) })
+    await expect(stat(uploadDirectory)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
+function createSha(value: Buffer): string {
+  return createHash('sha256').update(value).digest('hex')
+}

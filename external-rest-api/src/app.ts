@@ -19,6 +19,10 @@ import { createUserApprovalDecisionsRouter } from './routes/userApprovalDecision
 import { createWorkflowApprovalMediumsRouter } from './routes/workflowApprovalMediums.js'
 import { createExternalWorkflowsRouter } from './routes/workflows.js'
 
+// Upload v2 part bodies are streamed octets and must not pass through the
+// global JSON parser (which would buffer/reject the binary payload).
+const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+$/i
+
 export function createApp() {
   const app = express()
   app.set('trust proxy', 1)
@@ -28,7 +32,14 @@ export function createApp() {
       credentials: true,
     })
   )
-  app.use(express.json({ limit: config.jsonBodyLimit }))
+  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit })
+  app.use((req, res, next) => {
+    if (req.method === 'PUT' && GFS_UPLOAD_PART_PATH.test(req.path)) {
+      next()
+      return
+    }
+    jsonBodyParser(req, res, next)
+  })
 
   app.use(createHealthRouter())
 

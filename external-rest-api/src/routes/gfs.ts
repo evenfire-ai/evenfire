@@ -20,7 +20,23 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
 // every 5xx to a generic 500 and the documented codes become unobservable at the
 // client (a wedged gfsc looks identical to an internal bug).
 const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
-const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
+const STREAM_HEADERS = [
+  'content-type',
+  'content-length',
+  'content-disposition',
+  'cache-control',
+  'upload-offset',
+  'upload-length',
+  'upload-part-bytes',
+  'upload-part-count',
+  'upload-active-parts',
+  'upload-state',
+  'upload-expires',
+  'upload-part-number',
+  'upload-part-offset',
+  'upload-part-length',
+  'upload-checksum',
+]
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
@@ -36,6 +52,63 @@ export function createGfsRouter(): Router {
   const router = Router()
 
   router.use('/me/gfs', requireAuth)
+
+  // Resumable v2 relay. JSON lifecycle calls remain bounded metadata requests;
+  // a part PUT passes the IncomingMessage directly to control-api so neither
+  // external-rest-api nor control-api materializes the part in memory.
+  router.get('/me/gfs/capabilities', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(req, res, next, 'GET', '/external/gfs/capabilities')
+  })
+  router.post('/me/gfs/uploads', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(req, res, next, 'POST', '/external/gfs/uploads')
+  })
+  router.head('/me/gfs/uploads/:id', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(
+      req,
+      res,
+      next,
+      'HEAD',
+      `/external/gfs/uploads/${encodeURIComponent(req.params.id)}`
+    )
+  })
+  router.get('/me/gfs/uploads/:id/status', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(
+      req,
+      res,
+      next,
+      'GET',
+      `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/status`
+    )
+  })
+  router.put('/me/gfs/uploads/:id/parts/:part', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(
+      req,
+      res,
+      next,
+      'PUT',
+      `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/parts/${encodeURIComponent(req.params.part)}`
+    )
+  })
+  for (const action of ['pause', 'resume', 'complete'] as const) {
+    router.post(`/me/gfs/uploads/:id/${action}`, (req: AuthedRequest, res, next) => {
+      void proxyUploadStream(
+        req,
+        res,
+        next,
+        'POST',
+        `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/${action}`
+      )
+    })
+  }
+  router.delete('/me/gfs/uploads/:id', (req: AuthedRequest, res, next) => {
+    void proxyUploadStream(
+      req,
+      res,
+      next,
+      'DELETE',
+      `/external/gfs/uploads/${encodeURIComponent(req.params.id)}`
+    )
+  })
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
     try {
@@ -282,4 +355,63 @@ export function createGfsRouter(): Router {
   })
 
   return router
+}
+
+async function proxyUploadStream(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+  method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE',
+  path: string
+): Promise<void> {
+  try {
+    const extraHeaders: Record<string, string> = {}
+    for (const name of [
+      'content-type',
+      'upload-part-number',
+      'upload-offset',
+      'upload-chunk-length',
+      'upload-checksum',
+    ]) {
+      const value = req.headers[name]
+      if (typeof value === 'string') extraHeaders[name] = value
+    }
+    const isPart = method === 'PUT' && /\/parts\/[0-9]+$/.test(path)
+    const body =
+      method === 'GET' || method === 'HEAD'
+        ? undefined
+        : isPart
+          ? req
+          : JSON.stringify(req.body ?? {})
+    const upstream = await controlApiStreamRequest(method, path, {
+      userSessionToken: extractAuthToken(req),
+      // Preserve the bounded status cursor contract across the relay.  Dropping
+      // these query parameters makes every resume request fetch page one and
+      // can silently truncate a session with more than 256 parts.
+      query: {
+        drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+        limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
+        cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+      },
+      extraHeaders,
+      body,
+    })
+    res.status(upstream.status)
+    for (const header of STREAM_HEADERS) {
+      const value = upstream.headers.get(header)
+      if (value) res.setHeader(header, value)
+    }
+    if (!upstream.body) {
+      res.end()
+      return
+    }
+    await pipeline(
+      Readable.fromWeb(
+        upstream.body as unknown as import('node:stream/web').ReadableStream<Uint8Array>
+      ),
+      res
+    )
+  } catch (error) {
+    forwardControlApiError(error, res, next)
+  }
 }

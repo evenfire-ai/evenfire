@@ -7,6 +7,7 @@ import type { GfsPermission } from "../authz/resolve";
 import { GfsError } from "./errors";
 import { GfsResource } from "./read";
 import { GfsServingHandler, ServingDeps } from "./serve";
+import type { UploadPartStatus, UploadSessionReceipt } from "../upload/uploadSession";
 
 /** A minimal ServerResponse stand-in: a Writable that also records status/headers. */
 class FakeRes extends Writable {
@@ -48,6 +49,18 @@ function reqBody(
   stream.url = url;
   stream.method = opts.method;
   stream.headers = opts.auth !== undefined ? { authorization: opts.auth } : {};
+  return stream;
+}
+
+function reqPart(
+  url: string,
+  headers: Record<string, string>,
+  body = Buffer.from("part")
+): IncomingMessage {
+  const stream = Readable.from([body]) as unknown as IncomingMessage;
+  stream.url = url;
+  stream.method = "PUT";
+  stream.headers = { authorization: "Bearer t", ...headers };
   return stream;
 }
 
@@ -126,6 +139,134 @@ describe("GfsReadServer.tryHandle — routing", () => {
     );
     expect(handled).toBe(true);
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("GFS Upload v2 capability route", () => {
+  it("requires auth and returns an honest disabled capability", async () => {
+    const unauthenticated = new FakeRes();
+    await run(deps(), req("/v1/capabilities"), unauthenticated);
+    expect(unauthenticated.statusCode).toBe(401);
+
+    const authenticated = new FakeRes();
+    await run(deps(), req("/v1/capabilities", { auth: "Bearer t" }), authenticated);
+    expect(authenticated.statusCode).toBe(200);
+    expect(authenticated.headers["Cache-Control"]).toBe("no-store");
+    expect(authenticated.body).toContain('"resumableV2":{"enabled":false');
+    expect(authenticated.body).toContain('"legacyBase64":{"enabled":true');
+  });
+
+  it("does not treat an unsupported verb as a capability request", async () => {
+    const res = new FakeRes();
+    await run(deps(), req("/v1/capabilities", { method: "POST", auth: "Bearer t" }), res);
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+const UPLOAD_ID = "11111111-1111-4111-8111-111111111111";
+const UPLOAD_SESSION: UploadSessionReceipt = {
+  uploadId: UPLOAD_ID,
+  drive: "main",
+  operation: "create",
+  expectedBytes: 4,
+  partBytes: 4,
+  partCount: 1,
+  state: "uploading",
+  contiguousBytes: 0,
+  committedBytes: 0,
+  committedPartCount: 0,
+  activePartCount: 0,
+  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+};
+const UPLOAD_PART: UploadPartStatus = {
+  partNumber: 0,
+  offsetBytes: 0,
+  lengthBytes: 4,
+  sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+};
+
+function uploadDeps(over: Partial<ServingDeps> = {}): ServingDeps {
+  const service = {
+    create: async () => ({ created: true, session: UPLOAD_SESSION }),
+    target: async () => ({ operation: "create" as const, targetRid: RID }),
+    get: async () => UPLOAD_SESSION,
+    status: async () => ({ session: UPLOAD_SESSION, parts: [UPLOAD_PART] }),
+    putPart: async () => ({ part: UPLOAD_PART, session: UPLOAD_SESSION }),
+    pause: async () => ({ ...UPLOAD_SESSION, state: "paused" }),
+    resume: async () => UPLOAD_SESSION,
+    complete: async () => ({ ...UPLOAD_SESSION, state: "completed" }),
+    cancel: async () => undefined,
+  };
+  return deps({
+    verifyToken: () => USER_WRITE_CLAIMS,
+    uploadService: service as unknown as ServingDeps["uploadService"],
+    ...over,
+  });
+}
+
+describe("GFS Upload v2 route contract", () => {
+  it("creates a session with a Location and writer authorization", async () => {
+    const res = new FakeRes();
+    const authorize = async () => ({ allowed: true });
+    await run(
+      uploadDeps({ authorize }),
+      reqBody("/v1/uploads", {
+        method: "POST",
+        auth: "Bearer t",
+        body: {
+          operation: "create",
+          parentRid: RID,
+          name: "payload.bin",
+          sizeBytes: 4,
+          idempotencyKey: UPLOAD_ID,
+        },
+      }),
+      res,
+    );
+    expect(res.statusCode).toBe(201);
+    expect(res.headers.Location).toBe(`/v1/uploads/${UPLOAD_ID}`);
+    expect(res.headers["Upload-Length"]).toBe("4");
+    expect(res.json).toMatchObject({ ok: true, data: { uploadId: UPLOAD_ID } });
+  });
+
+  it("rejects a binary part when the path/header part number differs", async () => {
+    const res = new FakeRes();
+    const putPart = async () => {
+      throw new Error("putPart must not be reached");
+    };
+    await run(
+      uploadDeps({ uploadService: { ...uploadDeps().uploadService, putPart } as ServingDeps["uploadService"] }),
+      reqPart(`/v1/uploads/${UPLOAD_ID}/parts/0`, {
+        "upload-part-number": "1",
+        "upload-offset": "0",
+        "upload-chunk-length": "4",
+        "upload-checksum": "sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
+        "content-type": "application/offset+octet-stream",
+        "content-length": "4",
+      }),
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
+  });
+
+  it("returns the indexed part receipt and base64 checksum headers", async () => {
+    const res = new FakeRes();
+    await run(
+      uploadDeps(),
+      reqPart(`/v1/uploads/${UPLOAD_ID}/parts/0`, {
+        "upload-part-number": "0",
+        "upload-offset": "0",
+        "upload-chunk-length": "4",
+        "upload-checksum": "sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
+        "content-type": "application/offset+octet-stream",
+        "content-length": "4",
+      }),
+      res,
+    );
+    expect(res.statusCode).toBe(204);
+    expect(res.headers["Upload-Part-Number"]).toBe("0");
+    expect(res.headers["Upload-Checksum"]).toMatch(/^sha256 [A-Za-z0-9+/]{43}={1}$/);
   });
 });
 

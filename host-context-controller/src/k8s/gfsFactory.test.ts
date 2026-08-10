@@ -151,6 +151,7 @@ describe('gfsFactory writer Deployment', () => {
     expect(byName('GFS_SYNC_COPY_MAX_BYTES')).toBeUndefined()
     expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
     expect(byName('GFS_MAX_WRITE_BODY_BYTES')).toBeUndefined()
+    expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
   })
 
   it('passes configured synchronous copy limits verbatim to writer and reader', () => {
@@ -160,6 +161,10 @@ describe('gfsFactory writer Deployment', () => {
       syncCopyMaxBytes: '',
       syncCopyTimeoutMs: '45000',
       maxWriteBodyBytes: '25165824',
+      uploadV2Enabled: 'true',
+      uploadProductMaxFileBytes: '209715200',
+      uploadPreferredChunkBytes: '8388608',
+      uploadMaxChunkBytes: '16777216',
     }
 
     for (const role of ['writer', 'reader'] as const) {
@@ -172,6 +177,11 @@ describe('gfsFactory writer Deployment', () => {
       // The 16MB upload cap depends on this reaching gfsc; a dropped passthrough
       // leaves gfsc on its 16MiB default and 413s a 16MB file.
       expect(byName('GFS_MAX_WRITE_BODY_BYTES')?.value).toBe('25165824')
+      expect(byName('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES')?.value).toBe('209715200')
+      expect(byName('GFS_UPLOAD_PREFERRED_CHUNK_BYTES')?.value).toBe('8388608')
+      expect(byName('GFS_UPLOAD_MAX_CHUNK_BYTES')?.value).toBe('16777216')
+      if (role === 'writer') expect(byName('GFS_UPLOAD_V2_ENABLED')?.value).toBe('true')
+      else expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
     }
   })
 

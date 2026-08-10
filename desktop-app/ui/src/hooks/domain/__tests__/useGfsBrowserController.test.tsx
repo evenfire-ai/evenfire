@@ -94,7 +94,7 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'notes.md')
             : undefined
         }
       >
@@ -118,7 +118,7 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
+            ? void ctrl.replaceFile(ctrl.current.resourceId, 'replacement.md', ctrl.current.version)
             : undefined
         }
       >
@@ -243,7 +243,7 @@ describe('useGfsBrowserController', () => {
       grantableBits: [],
       canCreateShare: false,
     }))
-    const createFile = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -257,7 +257,7 @@ describe('useGfsBrowserController', () => {
           })),
           listChildren,
           affordances,
-          createFile,
+          createFileFromPath,
         },
       },
     })
@@ -274,7 +274,7 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith('root', 'notes.md', 'IyBOb3Rlcw==', 'main')
+      expect(createFileFromPath).toHaveBeenCalledWith('root', 'notes.md', 'notes.md', 'main')
     )
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     expect(affordances).toHaveBeenCalledTimes(1)
@@ -467,7 +467,7 @@ describe('useGfsBrowserController', () => {
             canCreateShare: false,
           })),
           renameResource: vi.fn(async () => ({ resourceId: 'file-1', version: 2 })),
-          replaceFile: vi.fn(async () => ({
+          replaceFileFromPath: vi.fn(async () => ({
             ...fileResource,
             name: 'Renamed report.md',
             version: 3,

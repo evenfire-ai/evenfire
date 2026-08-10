@@ -5,6 +5,10 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import {
+  applyGfsUploadCleanupSchema,
+  applyGfsUploadSessionSchema,
+} from './services/gfsUploadSchema.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5462,6 +5466,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
     apply: reconcilePluginWorkloadSdkRuntimeContracts,
+  },
+  {
+    version: '0091_gfs_upload_sessions',
+    apply: applyGfsUploadSessionSchema,
+  },
+  {
+    version: '0092_gfs_upload_cleanup_receipt',
+    apply: applyGfsUploadCleanupSchema,
   },
 ]
 

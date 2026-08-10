@@ -59,6 +59,11 @@ import {
 
 const TRACING_INTERNAL_PATH_PREFIX = '/api/v1/internal/tracing/'
 const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+\/?$/i
+// Upload v2 part bodies are raw octet streams. They must reach the streaming
+// proxy untouched; parsing them as JSON would either reject the first binary
+// byte or buffer the whole part in the control plane.
+const GFS_UPLOAD_PART_PATH =
+  /^\/api\/v1\/(?:gfs\/proxy\/v1|external\/gfs)\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+$/i
 
 export function createApp(gateway: K8sGateway) {
   const traceIngestDb: DbClient = meterTracingDbClient({
@@ -74,6 +79,10 @@ export function createApp(gateway: K8sGateway) {
       return
     }
     if (req.method === 'POST' && RPC_HOST_ACCESS_PATH.test(req.path)) {
+      next()
+      return
+    }
+    if (req.method === 'PUT' && GFS_UPLOAD_PART_PATH.test(req.path)) {
       next()
       return
     }

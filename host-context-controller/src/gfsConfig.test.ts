@@ -9,6 +9,11 @@ afterEach(() => {
   delete process.env.GFS_SYNC_COPY_MAX_BYTES
   delete process.env.GFS_SYNC_COPY_TIMEOUT_MS
   delete process.env.GFS_MAX_WRITE_BODY_BYTES
+  for (const key of Object.keys(process.env).filter(k =>
+    k.startsWith('CONTEXT_MAPPER_GFSC_UPLOAD_')
+  )) {
+    delete process.env[key]
+  }
   delete process.env.CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
   delete process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR
 })
@@ -30,6 +35,7 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.syncCopyMaxBytes).toBeUndefined()
     expect(c.syncCopyTimeoutMs).toBeUndefined()
     expect(c.maxWriteBodyBytes).toBeUndefined()
+    expect(c.uploadV2Enabled).toBeUndefined()
   })
 
   it('passes synchronous copy limits through verbatim, including explicit empty values', () => {
@@ -43,6 +49,16 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.syncCopyMaxBytes).toBe('')
     expect(c.syncCopyTimeoutMs).toBe('45000')
     expect(c.maxWriteBodyBytes).toBe('25165824')
+  })
+
+  it('maps the private-infra upload prefix to writer-owned gfsc settings', () => {
+    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED = 'true'
+    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES = '209715200'
+    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES = '8388608'
+    const c = gfsDefaultFactoryConfig()
+    expect(c.uploadV2Enabled).toBe('true')
+    expect(c.uploadProductMaxFileBytes).toBe('209715200')
+    expect(c.uploadPreferredChunkBytes).toBe('8388608')
   })
 
   it('fails loud on an invalid image pull policy (no silent default)', () => {

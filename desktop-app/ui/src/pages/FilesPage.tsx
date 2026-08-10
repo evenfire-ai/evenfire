@@ -35,32 +35,12 @@ import type {
   MyAgentEntry,
 } from './FilesPage.types'
 
-async function fileToEncodedData(file: File): Promise<string> {
-  assertGfsFileUploadSize(file.size)
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  assertGfsFileUploadSize(bytes.byteLength)
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
-  }
-  return btoa(binary)
-}
-
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
-}
-
-function isDroppedPreviewFile(file: File): boolean {
-  return (
-    file.type.toLowerCase().startsWith('image/') ||
-    gfsImagePreviewMimeType(file.name) !== null ||
-    isGfsMarkdownPreviewFile(file.name)
-  )
 }
 
 function isGfsPreviewFile(fileName: string): boolean {
@@ -134,6 +114,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  const [uploadFileName, setUploadFileName] = useState<string | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
@@ -153,6 +134,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     openError,
     resolving,
     refreshAffordances,
+    uploadSnapshot,
+    startFileUpload,
+    startFileReplace,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
   } = ctrl
 
   const teamDirectoryQuery = useQuery({
@@ -359,10 +346,29 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   ) => {
     if (!file || !parentResourceId) return
     try {
+      assertGfsFileUploadSize(file.size)
       const name = await normalizeGfsResourceName(file.name)
-      await ctrl.createFile(parentResourceId, name, await fileToEncodedData(file))
-      pushToast?.(`Uploaded ${name}`, 'success')
+      setUploadFileName(name)
+      const filePath = window.clerum.gfs.getPathForFile(file)
+      if (!filePath) throw new Error('Could not resolve the selected local file')
+      // Keep the renderer usable while an older main/preload pair is being
+      // replaced. The resumable IPC path is always preferred; this bounded
+      // compatibility branch uses the existing one-shot API and therefore
+      // retains that API's own size/feature ceiling.
+      if (typeof startFileUpload === 'function') {
+        const result = await startFileUpload({ parentResourceId, name, filePath })
+        if (result.state === 'completed') {
+          pushToast?.(`Uploaded ${name}`, 'success')
+          setUploadFileName(null)
+        } else if (result.state === 'paused')
+          pushToast?.(`Upload paused. Resume ${name} from this page.`, 'info')
+      } else {
+        await ctrl.createFile(parentResourceId, name, filePath)
+        pushToast?.(`Uploaded ${name}`, 'success')
+        setUploadFileName(null)
+      }
     } catch (uploadError) {
+      setUploadFileName(null)
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
     }
   }
@@ -401,23 +407,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
 
     const droppedFiles = Array.from(event.dataTransfer.files || [])
-    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
-    if (!previewFiles.length) {
-      pushToast?.('Only image and Markdown files can be dropped here.', 'error')
+    if (!droppedFiles.length) {
+      pushToast?.('No files were dropped.', 'error')
       return
     }
 
-    setDroppedUploadCount(previewFiles.length)
+    setDroppedUploadCount(droppedFiles.length)
     try {
-      for (const file of previewFiles) {
+      for (const file of droppedFiles) {
         await handleUploadFile(file, destinationResourceId)
-      }
-      const skippedCount = droppedFiles.length - previewFiles.length
-      if (skippedCount > 0) {
-        pushToast?.(
-          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
-          'error'
-        )
       }
     } finally {
       setDroppedUploadCount(0)
@@ -427,9 +425,28 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const handleReplaceCurrentFile = async (file: File | null | undefined) => {
     if (!file || !current) return
     try {
-      await ctrl.replaceFile(current.resourceId, await fileToEncodedData(file), current.version)
-      pushToast?.(`Replaced ${current.name}`, 'success')
+      assertGfsFileUploadSize(file.size)
+      setUploadFileName(current.name)
+      const filePath = window.clerum.gfs.getPathForFile(file)
+      if (!filePath) throw new Error('Could not resolve the selected local file')
+      if (typeof startFileReplace === 'function') {
+        const result = await startFileReplace({
+          resourceId: current.resourceId,
+          filePath,
+          ifMatch: current.version,
+        })
+        if (result.state === 'completed') {
+          pushToast?.(`Replaced ${current.name}`, 'success')
+          setUploadFileName(null)
+        } else if (result.state === 'paused')
+          pushToast?.(`Replace paused. Resume ${current.name} from this page.`, 'info')
+      } else {
+        await ctrl.replaceFile(current.resourceId, filePath, current.version)
+        pushToast?.(`Replaced ${current.name}`, 'success')
+        setUploadFileName(null)
+      }
     } catch (replaceError) {
+      setUploadFileName(null)
       pushToast?.(
         replaceError instanceof Error ? replaceError.message : String(replaceError),
         'error'
@@ -574,12 +591,79 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               {droppedUploadCount > 0
                 ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
                 : droppedUploadRestriction ||
-                  `Drop images or Markdown files to upload to ${current?.name || 'this folder'}`}
+                  `Drop files to upload to ${current?.name || 'this folder'}`}
             </div>
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
           {visibleError ? <StatusBanner tone="error" text={visibleError} /> : null}
+
+          {uploadSnapshot &&
+          ['initiated', 'uploading', 'paused', 'finalizing', 'canceling', 'failed'].includes(
+            uploadSnapshot.state
+          ) ? (
+            <section
+              className="da-gfs-upload-status"
+              data-testid="gfs-upload-row"
+              data-upload-file-name={uploadFileName || undefined}
+              aria-label={
+                uploadFileName ? `GFS upload progress for ${uploadFileName}` : 'GFS upload progress'
+              }
+              aria-live="polite"
+            >
+              <div className="da-gfs-upload-status__head">
+                <strong>
+                  {uploadSnapshot.state === 'paused'
+                    ? 'Upload paused'
+                    : uploadSnapshot.state === 'failed'
+                      ? 'Upload needs attention'
+                      : uploadSnapshot.state === 'finalizing'
+                        ? 'Finalizing upload'
+                        : uploadSnapshot.state === 'canceling'
+                          ? 'Canceling upload'
+                          : 'Uploading file'}
+                </strong>
+                <span>
+                  {formatSharedFileSize(uploadSnapshot.uploadedBytes)} /{' '}
+                  {formatSharedFileSize(uploadSnapshot.totalBytes)}
+                </span>
+              </div>
+              <progress
+                aria-label={
+                  uploadFileName
+                    ? `GFS upload progress for ${uploadFileName}`
+                    : 'GFS upload progress'
+                }
+                aria-valuemin={0}
+                aria-valuemax={Math.max(uploadSnapshot.totalBytes, 1)}
+                aria-valuenow={Math.min(
+                  uploadSnapshot.uploadedBytes,
+                  Math.max(uploadSnapshot.totalBytes, 1)
+                )}
+                max={Math.max(uploadSnapshot.totalBytes, 1)}
+                value={Math.min(
+                  uploadSnapshot.uploadedBytes,
+                  Math.max(uploadSnapshot.totalBytes, 1)
+                )}
+              />
+              <div className="da-gfs-upload-status__actions">
+                {uploadSnapshot.state === 'paused' ? (
+                  <Button size="sm" variant="outline" onClick={() => void resumeUpload()}>
+                    Resume
+                  </Button>
+                ) : uploadSnapshot.state === 'uploading' || uploadSnapshot.state === 'initiated' ? (
+                  <Button size="sm" variant="outline" onClick={() => void pauseUpload()}>
+                    Pause
+                  </Button>
+                ) : null}
+                {uploadSnapshot.state !== 'canceling' && uploadSnapshot.state !== 'finalizing' ? (
+                  <Button size="sm" variant="text" onClick={() => void cancelUpload()}>
+                    Cancel upload
+                  </Button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
 
           {visibleLoading ? (
             <div

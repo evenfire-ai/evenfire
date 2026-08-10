@@ -87,7 +87,7 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export async function requestJson<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'HEAD' | 'DELETE',
   url: string,
   options?: {
     token?: string

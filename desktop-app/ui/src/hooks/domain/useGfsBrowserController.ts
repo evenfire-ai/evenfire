@@ -66,6 +66,28 @@ export interface GfsBrowserControllerOptions {
   grantsListEnabled?: boolean
 }
 
+export interface GfsUploadSnapshot {
+  state:
+    | 'initiated'
+    | 'uploading'
+    | 'paused'
+    | 'finalizing'
+    | 'canceling'
+    | 'completed'
+    | 'aborted'
+    | 'failed'
+  session: {
+    uploadId: string
+    state: string
+    expectedBytes: number
+    committedBytes: number
+    resultResourceId?: string
+    resultVersion?: number
+  } | null
+  uploadedBytes: number
+  totalBytes: number
+}
+
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -85,6 +107,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadSnapshot | null>(null)
+  const uploadIdRef = useRef<string | null>(null)
   const previousSessionScopeRef = useRef<string | null>(null)
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
@@ -191,21 +215,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onSuccess: refreshGfs,
   })
   const createFileMutation = useMutation({
-    mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
-      window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
+    mutationFn: (input: { parentResourceId: string; name: string; filePath: string }) =>
+      window.clerum.gfs.createFileFromPath(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE
+      ),
     onSuccess: refreshGfs,
   })
   const replaceFileMutation = useMutation({
-    mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
-      window.clerum.gfs.replaceFile(input.resourceId, input.encodedData, DRIVE, input.ifMatch),
-    onSuccess: async resource => {
-      setCrumbs(prev =>
-        prev.map(crumb =>
-          crumb.resourceId === resource.resourceId
-            ? { ...crumb, name: resource.name, version: resource.version }
-            : crumb
+    mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
+      window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
+    onSuccess: async receipt => {
+      const legacyResource = receipt as unknown as { resourceId?: string; version?: number }
+      const resourceId = receipt.resultResourceId ?? legacyResource.resourceId
+      const version = receipt.resultVersion ?? legacyResource.version
+      if (resourceId && version !== undefined) {
+        setCrumbs(prev =>
+          prev.map(crumb => (crumb.resourceId === resourceId ? { ...crumb, version } : crumb))
         )
-      )
+      }
       await refreshGfs()
     },
   })
@@ -231,6 +261,107 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       await refreshGfs()
     },
   })
+
+  const waitForUpload = useCallback(async (uploadId: string): Promise<GfsUploadSnapshot> => {
+    const deadline = Date.now() + 24 * 60 * 60 * 1000
+    for (;;) {
+      if (Date.now() > deadline)
+        throw new Error(
+          'GFS upload status polling timed out; the upload can be resumed from the Files page.'
+        )
+      const snapshot = await window.clerum.gfs.getUploadSnapshot(uploadId)
+      if (!snapshot) throw new Error('GFS upload is no longer available in this desktop session')
+      setUploadSnapshot(snapshot)
+      if (
+        snapshot.state === 'paused' ||
+        snapshot.state === 'completed' ||
+        snapshot.state === 'aborted' ||
+        snapshot.state === 'failed'
+      )
+        return snapshot
+      await new Promise(resolve => window.setTimeout(resolve, 500))
+    }
+  }, [])
+
+  const startFileUpload = useCallback(
+    async (input: {
+      parentResourceId: string
+      name: string
+      filePath: string
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileUpload(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      setUploadSnapshot({
+        state: session.state === 'paused' ? 'paused' : 'uploading',
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      })
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const startFileReplace = useCallback(
+    async (input: {
+      resourceId: string
+      filePath: string
+      ifMatch?: number
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileReplace(
+        input.resourceId,
+        input.filePath,
+        DRIVE,
+        input.ifMatch,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      setUploadSnapshot({
+        state: session.state === 'paused' ? 'paused' : 'uploading',
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      })
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const pauseUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No active GFS upload')
+    await window.clerum.gfs.pauseUpload(uploadId)
+    return waitForUpload(uploadId)
+  }, [waitForUpload])
+
+  const resumeUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No paused GFS upload')
+    await window.clerum.gfs.resumeUpload(uploadId)
+    const snapshot = await waitForUpload(uploadId)
+    if (snapshot.state === 'completed') await refreshGfs()
+    return snapshot
+  }, [refreshGfs, waitForUpload])
+
+  const cancelUpload = useCallback(async (): Promise<void> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) return
+    await window.clerum.gfs.cancelUpload(uploadId)
+    setUploadSnapshot(previous => (previous ? { ...previous, state: 'aborted' } : null))
+    uploadIdRef.current = null
+  }, [])
 
   const items = useMemo<GfsBrowserChild[]>(
     () => (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
@@ -406,10 +537,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     revoking: revokeGrantMutation.isPending,
     createShare,
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
-    createFile: (parentResourceId: string, name: string, encodedData: string) =>
-      createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
-    replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
-      replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
+    createFile: (parentResourceId: string, name: string, filePath: string) =>
+      createFileMutation.mutateAsync({ parentResourceId, name, filePath }),
+    replaceFile: (resourceId: string, filePath: string, ifMatch?: number) =>
+      replaceFileMutation.mutateAsync({ resourceId, filePath, ifMatch }),
+    uploadSnapshot,
+    startFileUpload,
+    startFileReplace,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     deleteResource: (resourceId: string, ifMatch?: number) =>

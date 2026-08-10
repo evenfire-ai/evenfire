@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
@@ -15,8 +16,16 @@ import {
   selectDesktopRuntimeConfigOption,
 } from './config.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
-import { GfsClient, parseSubjectKey } from './gfs/uriHandler.js'
-import { ApiError, requestJson } from './httpClient.js'
+import {
+  DesktopGfsUploadJob,
+  DesktopUploadCapabilityError,
+  type DesktopUploadInput,
+  type DesktopUploadSession,
+  type DesktopUploadTransport,
+  uploadLocalFile,
+} from './gfs/upload.js'
+import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
@@ -277,6 +286,96 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
 const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 
+const gfsUploadTransport: DesktopUploadTransport = {
+  requestJson,
+  requestPart: async (url, token, headers, body, timeoutMs, signal) => {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, ...headers },
+      body: body as unknown as BodyInit,
+      // Node's fetch requires this opt-in for a streaming request body.
+      duplex: 'half',
+      signal: withTimeout(signal, timeoutMs),
+    } as RequestInit & { duplex: 'half' })
+    const text = await response.text()
+    return { status: response.status, text }
+  },
+}
+
+const LEGACY_GFS_MAX_FILE_BYTES = 16 * 1024 * 1024
+
+async function legacyEncodedFile(filePath: string): Promise<string> {
+  const info = await fs.promises.stat(filePath)
+  if (!info.isFile()) throw new Error('selected upload path is not a regular file')
+  if (info.size > LEGACY_GFS_MAX_FILE_BYTES) {
+    throw new Error(
+      `This writer does not advertise resumable uploads; legacy GFS is limited to ${LEGACY_GFS_MAX_FILE_BYTES} bytes.`
+    )
+  }
+  return (await fs.promises.readFile(filePath)).toString('base64')
+}
+
+function legacyReceipt(
+  resource: GfsResourceView,
+  operation: 'create' | 'replace'
+): DesktopUploadSession {
+  return {
+    uploadId: resource.resourceId,
+    drive: resource.drive,
+    operation,
+    expectedBytes: resource.bytes,
+    partBytes: resource.bytes || 1,
+    partCount: resource.bytes === 0 ? 0 : 1,
+    state: 'completed',
+    contiguousBytes: resource.bytes,
+    committedBytes: resource.bytes,
+    committedPartCount: resource.bytes === 0 ? 0 : 1,
+    activePartCount: 0,
+    expiresAt: new Date(Date.now()).toISOString(),
+    resultResourceId: resource.resourceId,
+    resultVersion: resource.version,
+  }
+}
+
+interface PersistedDesktopGfsUpload {
+  uploadId: string
+  filePath: string
+  fileName: string
+  fileSize: number
+  target: {
+    operation: 'create' | 'replace'
+    parentRid?: string
+    resourceRid?: string
+    ifMatch?: number
+  }
+  name: string
+  session: DesktopUploadSession
+}
+
+interface DesktopGfsUploadSummary {
+  uploadId: string
+  fileName: string
+  fileSize: number
+  target: PersistedDesktopGfsUpload['target']
+  name: string
+}
+
+const DESKTOP_GFS_UPLOAD_STATE_FILE = 'gfs-upload-sessions.json'
+
+function isPersistedDesktopGfsUpload(value: unknown): value is PersistedDesktopGfsUpload {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<PersistedDesktopGfsUpload>
+  return (
+    typeof item.uploadId === 'string' &&
+    typeof item.filePath === 'string' &&
+    typeof item.fileName === 'string' &&
+    typeof item.fileSize === 'number' &&
+    typeof item.name === 'string' &&
+    Boolean(item.target) &&
+    Boolean(item.session)
+  )
+}
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -307,6 +406,13 @@ export class AppService {
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private logoutInProgress = false
+  private readonly gfsUploadJobs = new Map<
+    string,
+    {
+      job: DesktopGfsUploadJob
+      promise: Promise<DesktopUploadSession>
+    }
+  >()
   private sessionGeneration = 0
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
@@ -661,6 +767,11 @@ export class AppService {
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
       this.workflowTeamByKey.clear()
+      // Resume only the bounded, metadata-only sessions persisted by the main
+      // process. The source fence in DesktopGfsUploadJob rejects a changed or
+      // missing local file; failed records remain available for an explicit
+      // user re-selection instead of silently replacing bytes.
+      void this.resumePersistedDesktopGfsUploads()
       // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
       // here must not block the user from logging in. Any network or fs
       // error is logged inside the module.
@@ -703,6 +814,41 @@ export class AppService {
       }
     } catch (err) {
       console.warn('[SandboxUI] partition GC failed:', err)
+    }
+  }
+
+  private async resumePersistedDesktopGfsUploads(): Promise<void> {
+    try {
+      const records = await this.readDesktopGfsUploadState()
+      for (const record of records) {
+        if (this.gfsUploadJobs.has(record.uploadId)) continue
+        try {
+          const info = await fs.promises.stat(record.filePath)
+          if (!info.isFile() || info.size !== record.fileSize) {
+            console.warn(
+              `[AppService] Skipping persisted GFS upload ${record.uploadId}: source file no longer matches`
+            )
+            continue
+          }
+          await this.startDesktopGfsUpload({
+            filePath: record.filePath,
+            name: record.name,
+            drive: record.session.drive,
+            operation: record.target.operation,
+            parentRid: record.target.parentRid,
+            resourceRid: record.target.resourceRid,
+            ifMatch: record.target.ifMatch,
+            resumeUploadId: record.uploadId,
+          })
+        } catch (error) {
+          console.warn(
+            `[AppService] Could not resume persisted GFS upload ${record.uploadId}:`,
+            error
+          )
+        }
+      }
+    } catch (error) {
+      console.warn('[AppService] Could not inspect persisted GFS uploads:', error)
     }
   }
 
@@ -1124,11 +1270,204 @@ export class AppService {
     )
   }
 
+  private async desktopGfsUploadStatePath(): Promise<string> {
+    const { app } = await import('electron')
+    return path.join(app.getPath('userData'), DESKTOP_GFS_UPLOAD_STATE_FILE)
+  }
+
+  private async readDesktopGfsUploadState(): Promise<PersistedDesktopGfsUpload[]> {
+    try {
+      const raw = await fs.promises.readFile(await this.desktopGfsUploadStatePath(), 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      if (!Array.isArray(parsed)) return []
+      return parsed.filter(isPersistedDesktopGfsUpload).slice(-100)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return []
+      console.warn('[AppService] Could not read GFS upload state:', error)
+      return []
+    }
+  }
+
+  private async writeDesktopGfsUploadState(records: PersistedDesktopGfsUpload[]): Promise<void> {
+    const filePath = await this.desktopGfsUploadStatePath()
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+    const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(records.slice(-100)), { mode: 0o600 })
+    await fs.promises.rename(temporaryPath, filePath)
+  }
+
+  private async persistDesktopGfsUpload(record: PersistedDesktopGfsUpload): Promise<void> {
+    const records = await this.readDesktopGfsUploadState()
+    const next = records.filter(item => item.uploadId !== record.uploadId)
+    next.push(record)
+    await this.writeDesktopGfsUploadState(next)
+  }
+
+  private async clearDesktopGfsUpload(uploadId: string): Promise<void> {
+    const records = await this.readDesktopGfsUploadState()
+    await this.writeDesktopGfsUploadState(records.filter(item => item.uploadId !== uploadId))
+  }
+
+  private async startDesktopGfsUpload(
+    input: Omit<DesktopUploadInput, 'transport' | 'token' | 'baseUrl'> & { resumeUploadId?: string }
+  ): Promise<DesktopUploadSession> {
+    const token = this.requireSessionToken()
+    const job = new DesktopGfsUploadJob({
+      ...input,
+      baseUrl: config.externalRestApiBaseUrl,
+      token,
+      transport: gfsUploadTransport,
+      onPersist: record => this.persistDesktopGfsUpload(record),
+      onClearPersisted: uploadId => this.clearDesktopGfsUpload(uploadId),
+    })
+    const promise = job.start()
+    const session = await job.waitForSession()
+    this.gfsUploadJobs.set(session.uploadId, { job, promise })
+    void promise.then(
+      () => undefined,
+      error => console.warn('[AppService] GFS upload job failed:', error)
+    )
+    return session
+  }
+
+  async startGfsFileUpload(
+    parentResourceId: string,
+    name: string,
+    filePath: string,
+    drive?: string,
+    resumeUploadId?: string
+  ): Promise<DesktopUploadSession> {
+    return this.startDesktopGfsUpload({
+      filePath,
+      name,
+      drive: drive ?? 'main',
+      operation: 'create',
+      parentRid: parentResourceId,
+      resumeUploadId,
+    })
+  }
+
+  async startGfsFileReplace(
+    resourceId: string,
+    filePath: string,
+    drive?: string,
+    ifMatch?: number,
+    resumeUploadId?: string
+  ): Promise<DesktopUploadSession> {
+    return this.startDesktopGfsUpload({
+      filePath,
+      name: resourceId,
+      drive: drive ?? 'main',
+      operation: 'replace',
+      resourceRid: resourceId,
+      ifMatch,
+      resumeUploadId,
+    })
+  }
+
+  async getGfsUploadSnapshot(uploadId: string) {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    if (!entry) return null
+    return entry.job.snapshot()
+  }
+
+  async pauseGfsUpload(uploadId: string): Promise<DesktopUploadSession> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    if (!entry) throw new Error('GFS upload is not active in this desktop session')
+    return entry.job.pause()
+  }
+
+  async resumeGfsUpload(uploadId: string): Promise<DesktopUploadSession> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    if (!entry) throw new Error('GFS upload is not active in this desktop session')
+    return entry.job.resume()
+  }
+
+  async cancelGfsUpload(uploadId: string): Promise<void> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    if (!entry) throw new Error('GFS upload is not active in this desktop session')
+    await entry.job.cancel()
+    this.gfsUploadJobs.delete(uploadId)
+  }
+
+  async listGfsUploadSessions(): Promise<DesktopGfsUploadSummary[]> {
+    const records = await this.readDesktopGfsUploadState()
+    return records.map(({ filePath: _filePath, session: _session, ...safe }) => safe)
+  }
+
+  async createGfsFileFromPath(
+    parentResourceId: string,
+    name: string,
+    filePath: string,
+    drive?: string
+  ): Promise<DesktopUploadSession> {
+    const token = this.requireSessionToken()
+    try {
+      return await uploadLocalFile({
+        baseUrl: config.externalRestApiBaseUrl,
+        token,
+        filePath,
+        name,
+        drive: drive ?? 'main',
+        operation: 'create',
+        parentRid: parentResourceId,
+        transport: gfsUploadTransport,
+      })
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      const resource = await this.gfsClient.createResource(
+        {
+          parentResourceId,
+          drive,
+          name,
+          kind: 'file',
+          encodedData: await legacyEncodedFile(filePath),
+        },
+        token
+      )
+      return legacyReceipt(resource, 'create')
+    }
+  }
+
   async replaceGfsFile(resourceId: string, encodedData: string, drive?: string, ifMatch?: number) {
     return this.gfsClient.replaceFile(
       { resourceId, drive, encodedData, ifMatch },
       this.requireSessionToken()
     )
+  }
+
+  async replaceGfsFileFromPath(
+    resourceId: string,
+    filePath: string,
+    drive?: string,
+    ifMatch?: number
+  ): Promise<DesktopUploadSession> {
+    const token = this.requireSessionToken()
+    try {
+      return await uploadLocalFile({
+        baseUrl: config.externalRestApiBaseUrl,
+        token,
+        filePath,
+        name: resourceId,
+        drive: drive ?? 'main',
+        operation: 'replace',
+        resourceRid: resourceId,
+        ifMatch,
+        transport: gfsUploadTransport,
+      })
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      const resource = await this.gfsClient.replaceFile(
+        {
+          resourceId,
+          drive,
+          ifMatch,
+          encodedData: await legacyEncodedFile(filePath),
+        },
+        token
+      )
+      return legacyReceipt(resource, 'replace')
+    }
   }
 
   async renameGfsResource(resourceId: string, newName: string, drive?: string, ifMatch?: number) {
