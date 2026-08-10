@@ -33,14 +33,6 @@ function configuredUrl(label: string, candidates: Array<string | undefined>): st
   return value.replace(/\/$/, '')
 }
 
-function safeTraceName(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80)
-}
-
 function bcryptHash(password: string): string {
   const output = kubectlOut(
     [
@@ -154,9 +146,6 @@ export class GfsDesktopOperatorJourney {
   successfulCreateAuditFloor = 0
   deniedAuditFloor = 0
 
-  private activeTestInfo: TestInfo | null = null
-  private operatorTraceActive = false
-  private controlTraceActive = false
   private readonly liveDesktopPages = new Set<Page>()
 
   constructor(
@@ -169,25 +158,8 @@ export class GfsDesktopOperatorJourney {
     this.controlPage = await this.controlContext.newPage()
   }
 
-  async beginTest(testInfo: TestInfo): Promise<void> {
-    this.activeTestInfo = testInfo
-    if (this.controlContext) {
-      await this.controlContext.tracing.start({ screenshots: true, snapshots: true, sources: true })
-      this.controlTraceActive = true
-    }
-    if (this.operatorContext) {
-      await this.operatorContext.tracing.start({
-        screenshots: true,
-        snapshots: true,
-        sources: true,
-      })
-      this.operatorTraceActive = true
-    }
-  }
-
   async endTest(testInfo: TestInfo): Promise<void> {
     const failed = testInfo.status !== testInfo.expectedStatus
-    const traceName = safeTraceName(testInfo.title)
     if (failed) {
       for (const [index, page] of [...this.liveDesktopPages].entries()) {
         if (page.isClosed()) continue
@@ -210,26 +182,6 @@ export class GfsDesktopOperatorJourney {
         }
       }
     }
-    if (this.operatorTraceActive && this.operatorContext) {
-      const tracePath = testInfo.outputPath(`${traceName}-electron-trace.zip`)
-      await this.operatorContext.tracing.stop({ path: failed ? tracePath : undefined })
-      this.operatorTraceActive = false
-      if (failed && fs.existsSync(tracePath)) {
-        await testInfo.attach('electron-trace', { path: tracePath, contentType: 'application/zip' })
-      }
-    }
-    if (this.controlTraceActive && this.controlContext) {
-      const tracePath = testInfo.outputPath(`${traceName}-control-trace.zip`)
-      await this.controlContext.tracing.stop({ path: failed ? tracePath : undefined })
-      this.controlTraceActive = false
-      if (failed && fs.existsSync(tracePath)) {
-        await testInfo.attach('control-ui-trace', {
-          path: tracePath,
-          contentType: 'application/zip',
-        })
-      }
-    }
-    this.activeTestInfo = null
   }
 
   async finish(): Promise<void> {
@@ -624,14 +576,6 @@ export class GfsDesktopOperatorJourney {
       recordVideo: { dir: this.operatorVideoDir, size: { width: 1280, height: 720 } },
     })
     this.operatorContext = this.operatorApp.context()
-    if (this.activeTestInfo && !this.operatorTraceActive) {
-      await this.operatorContext.tracing.start({
-        screenshots: true,
-        snapshots: true,
-        sources: true,
-      })
-      this.operatorTraceActive = true
-    }
     this.operatorPage = await this.operatorApp.firstWindow()
     this.liveDesktopPages.add(this.operatorPage)
     await this.operatorPage.waitForLoadState('domcontentloaded')
@@ -725,9 +669,11 @@ export const test = base.extend<GfsDesktopOperatorTestFixtures, GfsDesktopOperat
     },
     { scope: 'worker' },
   ],
+  // Tracing is configured with Playwright's `retain-on-failure` policy. The
+  // fixture only adds screenshots so it cannot start a second trace on a
+  // context that Playwright already owns.
   captureGfsOperatorFailureEvidence: [
     async ({ operatorJourney }, use, testInfo) => {
-      await operatorJourney.beginTest(testInfo)
       try {
         await use()
       } finally {
