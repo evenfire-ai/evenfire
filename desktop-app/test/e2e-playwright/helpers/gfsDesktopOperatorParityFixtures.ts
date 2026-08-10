@@ -236,7 +236,10 @@ export class GfsDesktopOperatorJourney {
   }
 
   async bootstrapInitialAdmin(): Promise<{ controlAdminId: string }> {
-    const response = await fetch(`${this.controlApiUrl}/admin/auth/setup`, {
+    // The service base remains root-scoped so the global setup can probe
+    // /health; application routes are mounted under the production /api/v1
+    // prefix and must use that supported path explicitly.
+    const response = await fetch(`${this.controlApiUrl}/api/v1/admin/auth/setup`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
