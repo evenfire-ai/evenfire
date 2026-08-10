@@ -70,14 +70,12 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await screenshotAndLog(page, testInfo, 'control-ui-create-connector')
   })
 
-  test('Create agent form mounts, steps to context, and renders channel providers', async ({
-    page,
-  }, testInfo) => {
+  test('Create agent form mounts and steps to context', async ({ page }, testInfo) => {
     await openCreatePage(page, '/agents/new')
     await expectShell(
       page,
       'Create agent',
-      'Provision a new agent with context, channels, and access.'
+      'Provision a new agent with context, credentials, and access.'
     )
     await expect(page.getByPlaceholder('agent-name')).toBeVisible({ timeout: 20_000 })
 
@@ -90,14 +88,6 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await expect(page.getByText('Create new context', { exact: true })).toBeVisible({
       timeout: 20_000,
     })
-
-    // The Channels step (Telegram + Slack provider panels) sits behind the
-    // Model & Credentials step, which needs a reusable host Secret and a
-    // selectable model. Drive there read-only when the environment provides
-    // both; otherwise the shell + Context step above already prove the form.
-    if (await canReachAgentChannelsStep(page)) {
-      await assertAgentChannelProviders(page)
-    }
 
     await screenshotAndLog(page, testInfo, 'control-ui-create-agent')
   })
@@ -279,74 +269,3 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await screenshotAndLog(page, testInfo, 'control-ui-marketplace-install')
   })
 })
-
-// The agent Channels step renders both first-party provider panels (Telegram,
-// Slack) only after the wizard advances past Model & Credentials. Reaching it
-// read-only needs an existing host Secret and an auto-selected model, so every
-// advance is guarded: if a step cannot be satisfied in this environment, the
-// helper returns false and the smoke falls back to the shell proof above.
-
-async function clickAgentNext(page: Page, timeout = 8_000): Promise<boolean> {
-  const next = page.locator('.cu-create-actions').getByRole('button', { name: 'Next', exact: true })
-  try {
-    await expect(next).toBeEnabled({ timeout })
-    await next.click()
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function canReachAgentChannelsStep(page: Page): Promise<boolean> {
-  const stepTimeout = 8_000
-
-  // Context step: create a fresh context so the journey does not depend on an
-  // existing one.
-  const newContextRadio = page.getByText('Create new context', { exact: true })
-  if (!(await newContextRadio.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
-  await newContextRadio.click()
-  const contextName = page.getByPlaceholder('context-name')
-  if (!(await contextName.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
-  await contextName.fill('qa-smoke-agent-ctx')
-  if (!(await clickAgentNext(page))) return false
-
-  // Model & Credentials: reuse an existing host Secret and rely on the
-  // allowlist to auto-select a model. Abort if none is available.
-  const reuseSecret = page.getByText('Use an existing Secret', { exact: true })
-  if (!(await reuseSecret.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
-  await reuseSecret.click()
-  const secretPicker = page.locator('.cu-agent-select__button').first()
-  if (!(await secretPicker.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
-  await secretPicker.click()
-  const firstSecret = page.locator('.cu-agent-select__option').first()
-  if (!(await firstSecret.isVisible({ timeout: stepTimeout }).catch(() => false))) return false
-  await firstSecret.click()
-  // Next only enables once a model has been auto-selected from the allowlist.
-  if (!(await clickAgentNext(page, 15_000))) return false
-
-  // Access step: Next is always enabled here.
-  if (!(await clickAgentNext(page))) return false
-
-  // Channels step.
-  return page
-    .getByText('Create new channel', { exact: true })
-    .isVisible({ timeout: stepTimeout })
-    .catch(() => false)
-}
-
-async function assertAgentChannelProviders(page: Page): Promise<void> {
-  // Default provider is Telegram, so its panel is shown as soon as "Create new
-  // channel" is chosen.
-  await page.getByText('Create new channel', { exact: true }).click()
-  await expect(page.getByText('Telegram bot handle')).toBeVisible({ timeout: 10_000 })
-
-  // Switch to Slack and confirm its panel renders.
-  await page.locator('.cu-agent-select__button').first().click()
-  await page.locator('.cu-agent-select__option').filter({ hasText: 'Slack' }).first().click()
-  await expect(page.getByText('Slack App Name')).toBeVisible({ timeout: 10_000 })
-
-  // Switch back to Telegram to prove both providers are wired through the picker.
-  await page.locator('.cu-agent-select__button').first().click()
-  await page.locator('.cu-agent-select__option').filter({ hasText: 'Telegram' }).first().click()
-  await expect(page.getByText('Telegram bot handle')).toBeVisible({ timeout: 10_000 })
-}

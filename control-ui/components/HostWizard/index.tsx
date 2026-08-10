@@ -1,8 +1,6 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChannelCredentialsPanel } from '@/components/ChannelCredentialsPanel'
-import type { CredentialDraft } from '@/components/ChannelCredentialsPanel/types'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -20,7 +18,6 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
-import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '@/lib/hostWorkflowControl'
 import {
   type HostAllowedModel,
   type LlmPolicy,
@@ -44,101 +41,17 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type {
-  ChannelOption,
-  ChannelProvider,
-  ContextOption,
-  HostWizardProps,
-  NewChannelDraft,
-  WizardSelectProps,
-} from './types'
-
-const CHANNEL_PROVIDER_OPTIONS: Array<{ value: ChannelProvider; label: string; meta: string }> = [
-  { value: 'telegram', label: 'Telegram', meta: 'Telegram bot' },
-  { value: 'slack', label: 'Slack', meta: 'Slack app' },
-]
+import type { ContextOption, HostWizardProps, WizardSelectProps } from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
 const SHOW_STATELESS_AGENT_SELECTOR = false
-
-function createNewChannelDraft(): NewChannelDraft {
-  return {
-    slackBotHandle: '',
-    slackReplyOnlyWhenMentioned: true,
-    slackReplyInThreads: false,
-    telegramBotHandle: '',
-    telegramReplyOnlyWhenMentioned: true,
-  }
-}
-
-function requiredCredentialKeysForChannelProvider(
-  provider: ChannelProvider
-): Array<keyof CredentialDraft> {
-  return provider === 'telegram'
-    ? ['telegram-bot-token']
-    : ['slack-signing-secret', 'slack-bot-token']
-}
-
-function hasRequiredChannelCredential(
-  provider: ChannelProvider,
-  credentials: CredentialDraft
-): boolean {
-  return requiredCredentialKeysForChannelProvider(provider).every(key =>
-    Boolean((credentials[key] || '').trim())
-  )
-}
-
-function missingCredentialLabel(
-  provider: ChannelProvider,
-  credentials: CredentialDraft
-): string | null {
-  const missingKey = requiredCredentialKeysForChannelProvider(provider).find(
-    key => !(credentials[key] || '').trim()
-  )
-  switch (missingKey) {
-    case 'telegram-bot-token':
-      return 'Telegram bot token'
-    case 'slack-signing-secret':
-      return 'Slack signing secret'
-    case 'slack-bot-token':
-      return 'Slack Bot User OAuth token'
-    default:
-      return null
-  }
-}
-
-function isValidTelegramBotHandle(value: string): boolean {
-  return /^@?[A-Za-z0-9_]{5,32}$/.test(value.trim())
-}
 
 // Asymmetric save gate (spec Topic 1b): the PRIMARY provider must be usable —
 // its required credential slot(s) filled — before create is allowed. Fallbacks
 // are optional and only warn, so they never enter this gate.
 function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, string>): boolean {
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
-}
-
-function providerSettings(provider: ChannelProvider, draft: NewChannelDraft) {
-  if (provider === 'telegram') {
-    return {
-      slack: [],
-      telegram: [],
-      telegramSettings: {
-        botHandle: draft.telegramBotHandle.trim(),
-        replyOnlyWhenMentioned: draft.telegramReplyOnlyWhenMentioned,
-      },
-    }
-  }
-  return {
-    slack: [],
-    slackSettings: {
-      botHandle: draft.slackBotHandle.trim(),
-      replyOnlyWhenMentioned: draft.slackReplyOnlyWhenMentioned,
-      replyInThreads: draft.slackReplyInThreads,
-    },
-    telegram: [],
-  }
 }
 
 function WizardSelect({
@@ -218,12 +131,6 @@ function isStepValid(
     contextName: string
     selectedExistingContext: string
     selectedMcp: string[]
-    channelMode: 'existing' | 'new' | 'skip'
-    channelName: string
-    channelProvider: ChannelProvider
-    newChannelDraft: NewChannelDraft
-    pendingCredentials: CredentialDraft
-    selectedExistingChannel: string
     secretMode: 'existing' | 'new'
     existingSecret: string
     newSecretName: string
@@ -261,25 +168,7 @@ function isStepValid(
           validateLlmSecretData(projectedDraft).length === 0
     return hasValidSecret && state.modelName.trim().length > 0
   }
-  if (stepIndex === 3) {
-    return true
-  }
-  if (stepIndex === 4) {
-    if (state.channelMode === 'skip') return true
-    if (state.channelMode === 'existing') return state.selectedExistingChannel.trim().length > 0
-    if (!toKebabCase(state.channelName)) return false
-    if (!hasRequiredChannelCredential(state.channelProvider, state.pendingCredentials)) return false
-    if (
-      state.channelProvider === 'telegram' &&
-      !isValidTelegramBotHandle(state.newChannelDraft.telegramBotHandle)
-    ) {
-      return false
-    }
-    if (state.channelProvider === 'slack') {
-      if (!state.newChannelDraft.slackBotHandle.trim()) return false
-    }
-    return true
-  }
+  if (stepIndex === 3) return true
   return false
 }
 
@@ -317,22 +206,9 @@ export function HostWizard({
   const [existingContexts, setExistingContexts] = useState<ContextOption[]>([])
   const contextSelectRef = useRef<HTMLDivElement | null>(null)
 
-  const [channelName, setChannelName] = useState('')
-  const [channelMode, setChannelMode] = useState<'existing' | 'new' | 'skip'>('existing')
-  const [channelProvider, setChannelProvider] = useState<ChannelProvider>('telegram')
-  const [newChannelDraft, setNewChannelDraft] = useState<NewChannelDraft>(() =>
-    createNewChannelDraft()
-  )
-  const [selectedExistingChannel, setSelectedExistingChannel] = useState('')
-  const [channelSelectOpen, setChannelSelectOpen] = useState(false)
-  const [existingChannels, setExistingChannels] = useState<ChannelOption[]>([])
-  const channelSelectRef = useRef<HTMLDivElement | null>(null)
-  const [pendingCredentials, setPendingCredentials] = useState<CredentialDraft>({})
-
-  // Per-host secret: default to a new, auto-named Secret ("this agent's
-  // credentials") so the operator never has to name a Kubernetes Secret; reusing
-  // an existing shared Secret stays a first-class choice (spec Topic 1b R4).
-  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('new')
+  // Reuse an existing shared Secret by default. Creating an agent-specific Secret
+  // remains available when the operator explicitly chooses New credential.
+  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing')
   const [existingSecret, setExistingSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
   const [secretNameTouched, setSecretNameTouched] = useState(false)
@@ -402,17 +278,25 @@ export function HostWizard({
     [existingContexts, selectedExistingContext]
   )
   const selectedContextLabel = selectedContextOption?.contextId || 'Select context...'
-  const selectedChannelOption = useMemo(
-    () =>
-      existingChannels.find(
-        channel => `${channel.namespace}/${channel.name}` === selectedExistingChannel
-      ) || null,
-    [existingChannels, selectedExistingChannel]
-  )
-  const selectedChannelLabel = selectedChannelOption?.name || 'Select channel...'
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, provider),
     [allowedCatalog, provider]
+  )
+  const handleExistingSecretChange = useCallback(
+    (secretName: string) => {
+      setExistingSecret(secretName)
+      const selectedSecret = existingSecrets.find(
+        secret => (secret.name || secret.metadata?.name) === secretName
+      )
+      if (!Array.isArray(selectedSecret?.keys)) return
+      const [linkedProvider] = getProvidersWithCompleteCredentials(selectedSecret.keys)
+      if (!linkedProvider) return
+      setProvider(linkedProvider)
+      setModelName(
+        resolveDefaultModel(linkedProvider, getModelOptions(allowedCatalog, linkedProvider))
+      )
+    },
+    [allowedCatalog, existingSecrets]
   )
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
@@ -466,8 +350,6 @@ export function HostWizard({
     [teams]
   )
 
-  const visibleChannelTypes = useMemo(() => [channelProvider], [channelProvider])
-
   const canNext = useMemo(() => {
     return isStepValid(step, {
       hostName,
@@ -475,12 +357,6 @@ export function HostWizard({
       contextName,
       selectedExistingContext,
       selectedMcp,
-      channelMode,
-      channelName,
-      channelProvider,
-      newChannelDraft,
-      pendingCredentials,
-      selectedExistingChannel,
       secretMode,
       existingSecret,
       newSecretName,
@@ -499,12 +375,6 @@ export function HostWizard({
     contextName,
     selectedExistingContext,
     selectedMcp,
-    channelMode,
-    channelName,
-    channelProvider,
-    newChannelDraft,
-    pendingCredentials,
-    selectedExistingChannel,
     secretMode,
     existingSecret,
     newSecretName,
@@ -522,19 +392,13 @@ export function HostWizard({
     setDirectoryLoadError('')
     setError('')
     try {
-      const [usersData, teamsData, contextsData, channelsData] = await Promise.all([
+      const [usersData, teamsData, contextsData] = await Promise.all([
         getAdminUsers(''),
         getAdminTeams(),
         apiGet('/api/v1/admin/contexts') as Promise<{
           items?: Array<{
             metadata?: { name?: string; namespace?: string }
             spec?: { contextId?: string; mcpServers?: unknown[] }
-          }>
-        }>,
-        apiGet('/api/v1/admin/communication-channels') as Promise<{
-          items?: Array<{
-            metadata?: { name?: string; namespace?: string }
-            spec?: Record<string, unknown>
           }>
         }>,
       ])
@@ -556,15 +420,6 @@ export function HostWizard({
         .filter(ctx => ctx.name && ctx.contextId)
         .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
       setExistingContexts(contextOptions)
-      const channelOptions = (channelsData.items || [])
-        .map(channel => ({
-          name: String(channel.metadata?.name || '').trim(),
-          namespace: String(channel.metadata?.namespace || 'default').trim(),
-          spec: (channel.spec || {}) as Record<string, unknown>,
-        }))
-        .filter(channel => channel.name)
-        .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
-      setExistingChannels(channelOptions)
     } catch (e) {
       if (!mountedRef.current) return
       const message =
@@ -593,12 +448,6 @@ export function HostWizard({
             contextName,
             selectedExistingContext,
             selectedMcp,
-            channelMode,
-            channelName,
-            channelProvider,
-            newChannelDraft,
-            pendingCredentials,
-            selectedExistingChannel,
             secretMode,
             existingSecret,
             newSecretName,
@@ -623,12 +472,6 @@ export function HostWizard({
       contextName,
       selectedExistingContext,
       selectedMcp,
-      channelMode,
-      channelName,
-      channelProvider,
-      newChannelDraft,
-      pendingCredentials,
-      selectedExistingChannel,
       secretMode,
       existingSecret,
       newSecretName,
@@ -665,30 +508,6 @@ export function HostWizard({
       const slotErrors = validateLlmSecretData(projected)
       if (slotErrors.length > 0) return slotErrors[0]
     }
-    if (step === 4 && channelMode === 'existing' && !selectedExistingChannel.trim())
-      return 'Select an existing channel or skip channel setup.'
-    if (step === 4 && channelMode === 'new' && !toKebabCase(channelName))
-      return 'CommunicationChannel name is required, or skip channel setup.'
-    if (
-      step === 4 &&
-      channelMode === 'new' &&
-      !hasRequiredChannelCredential(channelProvider, pendingCredentials)
-    )
-      return `${missingCredentialLabel(channelProvider, pendingCredentials) || 'Channel credential'} is required, or skip channel setup.`
-    if (
-      step === 4 &&
-      channelMode === 'new' &&
-      channelProvider === 'telegram' &&
-      !isValidTelegramBotHandle(newChannelDraft.telegramBotHandle)
-    )
-      return 'A valid Telegram bot handle is required, or skip channel setup.'
-    if (
-      step === 4 &&
-      channelMode === 'new' &&
-      channelProvider === 'slack' &&
-      !newChannelDraft.slackBotHandle.trim()
-    )
-      return 'Slack App Name is required, or skip channel setup.'
     return ''
   }, [
     step,
@@ -697,12 +516,6 @@ export function HostWizard({
     contextName,
     selectedExistingContext,
     selectedMcp,
-    channelMode,
-    channelName,
-    channelProvider,
-    newChannelDraft,
-    pendingCredentials,
-    selectedExistingChannel,
     secretMode,
     existingSecret,
     newSecretName,
@@ -737,14 +550,7 @@ export function HostWizard({
     setSelectedExistingContext('')
     setContextSelectOpen(false)
     setSelectedMcp([])
-    setChannelName('')
-    setChannelMode('existing')
-    setChannelProvider('telegram')
-    setNewChannelDraft(createNewChannelDraft())
-    setSelectedExistingChannel('')
-    setChannelSelectOpen(false)
-    setPendingCredentials({})
-    setSecretMode('new')
+    setSecretMode('existing')
     setExistingSecret('')
     setNewSecretName('')
     setSecretNameTouched(false)
@@ -777,30 +583,14 @@ export function HostWizard({
     setContextSelectOpen(false)
   }
 
-  function selectExistingChannel(channel: ChannelOption) {
-    setSelectedExistingChannel(`${channel.namespace}/${channel.name}`)
-    setChannelSelectOpen(false)
-  }
-
-  function handleChannelProviderChange(provider: ChannelProvider) {
-    setChannelProvider(provider)
-    setPendingCredentials({})
-    setError('')
-  }
-
-  async function submitAll(options: { skipChannels?: boolean } = {}) {
+  async function submitAll() {
     setBusy(true)
     setError('')
     try {
-      const shouldSkipChannels = options.skipChannels || channelMode === 'skip'
       const normalizedHostName = toKebabCase(hostName)
       const normalizedContextName = toKebabCase(contextName)
       const resolvedContextName =
         contextMode === 'existing' ? selectedContextOption?.contextId || '' : normalizedContextName
-      const normalizedChannelName = toKebabCase(channelName)
-      const resolvedChannelName =
-        channelMode === 'existing' ? selectedChannelOption?.name || '' : normalizedChannelName
-      const channelRefs = shouldSkipChannels ? [] : [resolvedChannelName]
       const normalizedSecretName = toKebabCase(newSecretName)
 
       if (secretMode === 'new') {
@@ -849,53 +639,6 @@ export function HostWizard({
         )
       }
 
-      if (!shouldSkipChannels && channelMode === 'new') {
-        const cleanedCredentials: CredentialDraft = {}
-        for (const [key, value] of Object.entries(pendingCredentials) as Array<
-          [keyof CredentialDraft, string | undefined]
-        >) {
-          const trimmed = (value || '').trim()
-          if (trimmed.length > 0) cleanedCredentials[key] = trimmed
-        }
-        const channelAccess = {
-          users: Array.from(new Set(selectedUserIds)),
-          teams: Array.from(new Set(selectedTeamIds)),
-        }
-        const channelSpec = {
-          hostRef: normalizedHostName,
-          access: channelAccess,
-          ...providerSettings(channelProvider, newChannelDraft),
-        }
-
-        await upsertResource(
-          'admin/communication-channels',
-          normalizedChannelName,
-          {
-            metadata: { name: normalizedChannelName },
-            spec: channelSpec,
-            credentials: cleanedCredentials,
-          },
-          {
-            spec: channelSpec,
-          }
-        )
-      } else if (!shouldSkipChannels && channelMode === 'existing' && selectedChannelOption) {
-        await apiSend(
-          'PUT',
-          `/api/v1/admin/communication-channels/${encodeURIComponent(selectedChannelOption.name)}`,
-          {
-            spec: {
-              ...selectedChannelOption.spec,
-              hostRef: normalizedHostName,
-              access: {
-                users: Array.from(new Set(selectedUserIds)),
-                teams: Array.from(new Set(selectedTeamIds)),
-              },
-            },
-          }
-        )
-      }
-
       // Effective per-host model subset (Topic 3a): prune the draft to the
       // providers actually in this host's domain (primary + fallbacks), then
       // collapse unrestricted/all-selected providers via buildAllowedModelsSpec.
@@ -912,7 +655,7 @@ export function HostWizard({
         host: normalizedHostName,
         contextRef: resolvedContextName,
         secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
-        channels: channelRefs,
+        channels: [],
         model: {
           provider,
           name: modelName,
@@ -925,9 +668,6 @@ export function HostWizard({
         // unrestricted providers are omitted so absent=all-global holds.
         ...(allowedModelsSpec.length > 0 ? { allowedModels: allowedModelsSpec } : {}),
         ...(stateless ? { lifecycle: { stateless: true } } : {}),
-        ...(channelRefs.length > 0
-          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
-          : {}),
       }
 
       await upsertResource(
@@ -1106,57 +846,74 @@ export function HostWizard({
             </div>
             {contextMode === 'existing' ? (
               <>
-                <div
-                  className="cu-agent-select"
-                  ref={contextSelectRef}
-                  onBlur={event => {
-                    if (!event.currentTarget.contains(event.relatedTarget)) {
-                      setContextSelectOpen(false)
-                    }
-                  }}
-                >
-                  <button
-                    type="button"
-                    className="cu-agent-select__button"
-                    aria-expanded={contextSelectOpen}
-                    aria-haspopup="listbox"
-                    onClick={() => setContextSelectOpen(open => !open)}
+                <div className="cu-agent-access-section">
+                  <strong>Select Context</strong>
+                  <div
+                    className="cu-agent-select"
+                    ref={contextSelectRef}
+                    onBlur={event => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setContextSelectOpen(false)
+                      }
+                    }}
                   >
-                    <span>{selectedContextLabel}</span>
-                    <span className="cu-agent-select__chevron" aria-hidden="true" />
-                  </button>
-                  {contextSelectOpen ? (
-                    <div className="cu-agent-select__menu" role="listbox">
-                      {existingContexts.length === 0 ? (
-                        <span className="cu-agent-select__empty">No contexts available.</span>
-                      ) : (
-                        existingContexts.map(ctx => {
-                          const value = `${ctx.namespace}/${ctx.name}`
-                          return (
-                            <button
-                              key={value}
-                              type="button"
-                              className="cu-agent-select__option"
-                              data-active={selectedExistingContext === value ? 'true' : 'false'}
-                              role="option"
-                              aria-selected={selectedExistingContext === value}
-                              onClick={() => selectExistingContext(ctx)}
-                            >
-                              {ctx.contextId}
-                            </button>
-                          )
-                        })
-                      )}
-                    </div>
-                  ) : null}
+                    <button
+                      type="button"
+                      className="cu-agent-select__button"
+                      aria-expanded={contextSelectOpen}
+                      aria-haspopup="listbox"
+                      onClick={() => setContextSelectOpen(open => !open)}
+                    >
+                      <span>{selectedContextLabel}</span>
+                      <span className="cu-agent-select__chevron" aria-hidden="true" />
+                    </button>
+                    {contextSelectOpen ? (
+                      <div className="cu-agent-select__menu" role="listbox">
+                        {existingContexts.length === 0 ? (
+                          <span className="cu-agent-select__empty">No contexts available.</span>
+                        ) : (
+                          existingContexts.map(ctx => {
+                            const value = `${ctx.namespace}/${ctx.name}`
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                className="cu-agent-select__option"
+                                data-active={selectedExistingContext === value ? 'true' : 'false'}
+                                role="option"
+                                aria-selected={selectedExistingContext === value}
+                                onClick={() => selectExistingContext(ctx)}
+                              >
+                                {ctx.contextId}
+                              </button>
+                            )
+                          })
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
                 {selectedContextOption && (
-                  <div className="cu-agent-option-meta">
-                    MCP servers:{' '}
-                    {selectedContextOption.mcpServers.length > 0
-                      ? selectedContextOption.mcpServers.join(', ')
-                      : 'none'}
-                  </div>
+                  <section
+                    className="cu-agent-context-mcp-summary"
+                    aria-label="Attached MCP servers"
+                  >
+                    <div className="cu-agent-context-mcp-summary__head">
+                      <span>MCP servers</span>
+                      <span>{selectedContextOption.mcpServers.length}</span>
+                    </div>
+                    {selectedContextOption.mcpServers.length > 0 ? (
+                      <ul className="cu-agent-context-mcp-summary__list">
+                        {selectedContextOption.mcpServers.map(server => (
+                          <li key={server} title={server}>
+                            {server}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="cu-muted">No MCP servers attached.</p>
+                    )}
+                  </section>
                 )}
               </>
             ) : (
@@ -1191,266 +948,6 @@ export function HostWizard({
                     <span className="cu-agent-empty-note">No MCP servers available.</span>
                   ) : null}
                 </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {step === 4 && (
-          <div className="cu-form-stack cu-agent-form-stack">
-            <div className="cu-agent-review">
-              Review: Agent <b>{toKebabCase(hostName) || '-'}</b>, Context{' '}
-              <b>
-                {contextMode === 'existing'
-                  ? selectedContextOption?.contextId || '-'
-                  : toKebabCase(contextName) || '-'}
-              </b>
-              , Model <b>{modelName || '-'}</b>, Secret{' '}
-              <b>
-                {secretMode === 'existing'
-                  ? existingSecret || '-'
-                  : toKebabCase(newSecretName) || '-'}
-              </b>
-              , Channel{' '}
-              <b>
-                {channelMode === 'existing'
-                  ? selectedChannelOption?.name || '-'
-                  : channelMode === 'new'
-                    ? toKebabCase(channelName) || '-'
-                    : 'skipped'}
-              </b>
-            </div>
-            <div className="cu-agent-radio-group">
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={channelMode === 'existing'}
-                  onChange={() => setChannelMode('existing')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Use existing channel</span>
-                  <span className="cu-agent-radio__description">
-                    Attach a saved external channel to this agent.
-                  </span>
-                </span>
-              </label>
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={channelMode === 'new'}
-                  onChange={() => setChannelMode('new')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Create new channel</span>
-                  <span className="cu-agent-radio__description">
-                    Configure a new external channel and attach it immediately.
-                  </span>
-                </span>
-              </label>
-            </div>
-            {channelMode === 'existing' ? (
-              <div
-                className="cu-agent-select"
-                ref={channelSelectRef}
-                onBlur={event => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) {
-                    setChannelSelectOpen(false)
-                  }
-                }}
-              >
-                <button
-                  type="button"
-                  className="cu-agent-select__button"
-                  aria-expanded={channelSelectOpen}
-                  aria-haspopup="listbox"
-                  onClick={() => setChannelSelectOpen(open => !open)}
-                >
-                  <span>{selectedChannelLabel}</span>
-                  <span className="cu-agent-select__chevron" aria-hidden="true" />
-                </button>
-                {channelSelectOpen ? (
-                  <div className="cu-agent-select__menu" role="listbox">
-                    {existingChannels.length === 0 ? (
-                      <span className="cu-agent-select__empty">No channels available.</span>
-                    ) : (
-                      existingChannels.map(channel => {
-                        const value = `${channel.namespace}/${channel.name}`
-                        return (
-                          <button
-                            key={value}
-                            type="button"
-                            className="cu-agent-select__option"
-                            data-active={selectedExistingChannel === value ? 'true' : 'false'}
-                            role="option"
-                            aria-selected={selectedExistingChannel === value}
-                            onClick={() => selectExistingChannel(channel)}
-                          >
-                            <span className="cu-agent-select__option-copy">
-                              <span className="cu-agent-select__option-name">{channel.name}</span>
-                              <span className="cu-agent-select__option-meta">
-                                {channel.namespace}
-                              </span>
-                            </span>
-                          </button>
-                        )
-                      })
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <>
-                <Field
-                  description="Automatically formatted to lowercase with hyphens."
-                  label="CommunicationChannel name"
-                >
-                  <TextInput
-                    value={channelName}
-                    onChange={e => setChannelName(toKebabInput(e.target.value))}
-                    placeholder="channel-name"
-                  />
-                </Field>
-                <div className="cu-agent-access-section">
-                  <strong>Provider</strong>
-                  <span className="cu-muted cu-agent-access-hint">
-                    Users will confirm the Telegram chat or Slack conversation after this channel
-                    exists.
-                  </span>
-                  <WizardSelect
-                    value={channelProvider}
-                    placeholder="Select provider..."
-                    options={CHANNEL_PROVIDER_OPTIONS}
-                    onChange={nextValue =>
-                      handleChannelProviderChange(nextValue as ChannelProvider)
-                    }
-                  />
-                  {channelProvider === 'telegram' ? (
-                    <>
-                      <Field
-                        description="Public bot username, with or without the leading @."
-                        label={
-                          <>
-                            Telegram bot handle{' '}
-                            <span
-                              className="cu-help-tooltip"
-                              tabIndex={0}
-                              aria-label="We use this handle to show users which Telegram bot to message when connecting their account or a group."
-                              data-tooltip="We use this handle to show users which Telegram bot to message when connecting their account or a group."
-                            >
-                              ?
-                            </span>
-                          </>
-                        }
-                      >
-                        <TextInput
-                          value={newChannelDraft.telegramBotHandle}
-                          onChange={e =>
-                            setNewChannelDraft(current => ({
-                              ...current,
-                              telegramBotHandle: e.target.value,
-                            }))
-                          }
-                          placeholder="@your_bot"
-                          autoComplete="off"
-                        />
-                      </Field>
-                      <CheckboxField
-                        checked={newChannelDraft.telegramReplyOnlyWhenMentioned}
-                        description="In groups and supergroups, process messages only when the bot is mentioned or replied to. Private chats are unaffected."
-                        label="Only respond when mentioned in groups"
-                        onChange={e =>
-                          setNewChannelDraft(current => ({
-                            ...current,
-                            telegramReplyOnlyWhenMentioned: e.target.checked,
-                          }))
-                        }
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <div className="cu-banner cu-banner--info">
-                        Install your Slack app in the workspace first. Store the Signing Secret and
-                        Bot User OAuth token below. The workspace is detected when a user verifies a
-                        Slack conversation.
-                      </div>
-                      <Field
-                        description="Shown to users so they know which Slack App to message."
-                        label={
-                          <>
-                            Slack App Name{' '}
-                            <span
-                              className="cu-help-tooltip"
-                              tabIndex={0}
-                              aria-label="We use this name to show users which Slack App to message"
-                              data-tooltip="We use this name to show users which Slack App to message"
-                            >
-                              ?
-                            </span>
-                          </>
-                        }
-                      >
-                        <TextInput
-                          value={newChannelDraft.slackBotHandle}
-                          onChange={e =>
-                            setNewChannelDraft(current => ({
-                              ...current,
-                              slackBotHandle: e.target.value,
-                            }))
-                          }
-                          placeholder="Your Slack App"
-                          autoComplete="off"
-                        />
-                      </Field>
-                      <CheckboxField
-                        checked={newChannelDraft.slackReplyOnlyWhenMentioned}
-                        description="Process Slack messages only when the app bot is mentioned."
-                        label="Only respond when mentioned"
-                        onChange={e =>
-                          setNewChannelDraft(current => ({
-                            ...current,
-                            slackReplyOnlyWhenMentioned: e.target.checked,
-                          }))
-                        }
-                      />
-                      <CheckboxField
-                        checked={newChannelDraft.slackReplyInThreads}
-                        description={
-                          <>
-                            Send app responses in a Slack thread and keep responses in that thread
-                            until a new top-level message starts a new thread.{' '}
-                            <span
-                              className="cu-help-tooltip"
-                              tabIndex={0}
-                              aria-label="When enabled, app responses are posted in a Slack thread and follow-up messages in that thread continue there. New top-level messages start a new thread."
-                              data-tooltip="When enabled, app responses are posted in a Slack thread and follow-up messages in that thread continue there. New top-level messages start a new thread."
-                            >
-                              ?
-                            </span>
-                          </>
-                        }
-                        label="Reply in threads"
-                        onChange={e =>
-                          setNewChannelDraft(current => ({
-                            ...current,
-                            slackReplyInThreads: e.target.checked,
-                          }))
-                        }
-                      />
-                    </>
-                  )}
-                </div>
-                <ChannelCredentialsPanel
-                  ccName={channelName.trim()}
-                  pending={true}
-                  presentation="inline"
-                  onPendingChange={setPendingCredentials}
-                  visibleChannelTypes={visibleChannelTypes}
-                />
-                <p className="cu-agent-access-note">
-                  Channel access will use the members and teams selected in the Access step:{' '}
-                  {selectedUserIds.length} member{selectedUserIds.length === 1 ? '' : 's'} and{' '}
-                  {selectedTeamIds.length} team{selectedTeamIds.length === 1 ? '' : 's'}.
-                </p>
               </>
             )}
           </div>
@@ -1492,12 +989,15 @@ export function HostWizard({
                 </label>
               </div>
               {secretMode === 'existing' ? (
-                <WizardSelect
-                  value={existingSecret}
-                  placeholder="Select secret..."
-                  options={secretOptions}
-                  onChange={setExistingSecret}
-                />
+                <div className="cu-agent-access-section">
+                  <strong>Credential</strong>
+                  <WizardSelect
+                    value={existingSecret}
+                    placeholder="Select secret..."
+                    options={secretOptions}
+                    onChange={handleExistingSecretChange}
+                  />
+                </div>
               ) : (
                 <Field
                   description="Auto-named from the agent — edit if you prefer a different name."
@@ -1686,24 +1186,14 @@ export function HostWizard({
               Next
             </Button>
           ) : (
-            <>
-              <Button
-                onClick={() => void submitAll({ skipChannels: true })}
-                disabled={busy}
-                size="sm"
-                variant="ghost"
-              >
-                Skip channel setup
-              </Button>
-              <Button
-                onClick={() => void submitAll()}
-                disabled={busy || !canNext}
-                size="sm"
-                variant="primary"
-              >
-                {busy ? 'Saving…' : 'Create Agent'}
-              </Button>
-            </>
+            <Button
+              onClick={() => void submitAll()}
+              disabled={busy || !canNext}
+              size="sm"
+              variant="primary"
+            >
+              {busy ? 'Saving…' : 'Create Agent'}
+            </Button>
           )}
         </div>
       </CreateStepFlow>

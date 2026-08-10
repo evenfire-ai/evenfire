@@ -19,16 +19,13 @@ vi.mock('../../lib/api', () => ({
   getRegistryConnection: vi.fn(),
   getPublishScope: vi.fn(),
   deleteRegistryEntry: vi.fn(),
-  installRecipeFromRegistry: vi.fn(),
 }))
 
 const navigation = vi.hoisted(() => ({
-  pathname: '/marketplace/connectors',
   push: vi.fn(),
 }))
 
 vi.mock('next/navigation', () => ({
-  usePathname: () => navigation.pathname,
   useRouter: () => ({ push: navigation.push }),
 }))
 
@@ -126,7 +123,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  navigation.pathname = '/marketplace/connectors'
 })
 
 describe('RegistryCatalog tabs and columns', () => {
@@ -142,16 +138,15 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 
-  it('shows only plugin entries on the plugins route', async () => {
-    navigation.pathname = '/marketplace/plugins'
+  it('keeps the catalog connector-only when recipe entries are returned', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
 
-    expect(await screen.findByText('market-report')).toBeInTheDocument()
-    expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
+    expect(await screen.findByText('brave-search')).toBeInTheDocument()
+    expect(screen.queryByText('market-report')).not.toBeInTheDocument()
   })
 
-  it('uses the same compact columns for both tabs', async () => {
+  it('uses compact connector columns', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
@@ -179,19 +174,20 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText('private-search')).not.toBeInTheDocument()
   })
 
-  it('provides canonical tabs for connectors and plugins', async () => {
+  it('shows a single Connectors tab and hides the Plugins tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
+    expect(screen.getAllByRole('tab', { name: 'Connectors' })).toHaveLength(1)
     expect(screen.getByRole('tab', { name: 'Connectors' })).toHaveAttribute(
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
-      'href',
-      '/marketplace/plugins'
-    )
+    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('tablist', { name: 'Marketplace entry types' })
+    ).not.toBeInTheDocument()
   })
 
   it('places Marketplace navigation below the panel header', async () => {
@@ -286,24 +282,6 @@ describe('RegistryCatalog expansion and actions', () => {
     expect(row).toHaveAttribute('aria-expanded', 'false')
   })
 
-  it('installs a plugin from the plugins tab', async () => {
-    navigation.pathname = '/marketplace/plugins'
-    mockApiSuccess()
-    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({
-      recipeName: 'market-report',
-      registryEntry: 'market-report',
-      registryVersion: '1.0.0',
-      correlationId: 'test-correlation',
-    })
-    render(<RegistryCatalog />)
-    const row = (await screen.findByText('market-report')).closest('tr')!
-
-    fireEvent.click(within(row).getByRole('button', { name: 'Install' }))
-
-    await waitFor(() => expect(api.installRecipeFromRegistry).toHaveBeenCalledOnce())
-    expect(row).toHaveAttribute('aria-expanded', 'false')
-  })
-
   it('marks installed connectors as unavailable for repeat installation', async () => {
     mockApiSuccess(undefined, { installed: { serverNames: ['brave-search'] } })
     render(<RegistryCatalog />)
@@ -386,7 +364,7 @@ describe('RegistryCatalog state handling', () => {
   it('shows the empty state when no entries match', async () => {
     mockApiSuccess([MOCK_RECIPE_ENTRY])
     render(<RegistryCatalog />)
-    expect(await screen.findByText('No entries match your filters.')).toBeInTheDocument()
+    expect(await screen.findByText('No connectors match your filters.')).toBeInTheDocument()
   })
 })
 

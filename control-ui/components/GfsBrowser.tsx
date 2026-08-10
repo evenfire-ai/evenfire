@@ -209,6 +209,7 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function goToCrumb(index: number): void {
+    if (index === crumbs.length - 1) return
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
   }
@@ -460,7 +461,7 @@ export function GfsBrowser(): React.JSX.Element {
         <TablePanelHeader
           title={
             <>
-              <IconFolder /> Global File System
+              <IconPaperclip /> Global File System
             </>
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
@@ -501,7 +502,6 @@ export function GfsBrowser(): React.JSX.Element {
                         <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
                           <IconFolder />
                         </span>
-                        <span className="cu-gfs-breadcrumb__drive-label">Drive</span>
                         <span>{DRIVE}</span>
                       </>
                     ) : (
