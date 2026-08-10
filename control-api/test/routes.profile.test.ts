@@ -667,6 +667,10 @@ describe('routes/profile', () => {
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 'team-from-claims',
+      role: 'member',
+    })
     rpcMock.issueRpcAccessToken.mockReturnValue({
       token: 'rpc-token',
       accessScope: 'team',
@@ -713,6 +717,33 @@ describe('routes/profile', () => {
       ['host-a'],
       [] // extraGrantedScopes — no UI-bearing recipe in this mock
     )
+  })
+
+  it('does not use a stale v1 team hint for RPC issuance', async () => {
+    const sessionToken = signExternalSessionToken({
+      userId: 'user-from-claims',
+      email: 'user@example.com',
+      teamId: 'revoked-team',
+      role: 'admin',
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue(null)
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-from-claims', agentNames: [] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({
+        sessionToken,
+        scopes: ['host:message:invoke'],
+        hostRefs: ['team-only-host'],
+      })
+      .expect(403)
+      .expect({ error: 'direct_host_access_required' })
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
 
   it('issues the existing RPC token as user-scoped for a directly granted teamless agent', async () => {

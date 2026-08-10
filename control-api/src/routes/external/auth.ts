@@ -5,6 +5,7 @@ import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { externalUserSessionEventsTotal } from '../../observability/metrics.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
+import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import { authenticateExternalSessionToken } from '../../services/auth/externalSessionAuthentication.js'
 import {
   issueExternalUserSession,
@@ -384,6 +385,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       }
       const claims = authentication.claims
+      const liveTeam = claims.teamId
+        ? await getLiveTeamMembership(claims.userId, claims.teamId)
+        : null
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {
@@ -406,13 +410,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (agentHostRefs.length > 0) {
         const userAgents = await getUserAgents(claims.userId)
         const grantedHostRefs = new Set(userAgents.agentNames)
-        if (claims.teamId) {
-          const teamAgents = await getTeamAgents(claims.teamId)
+        if (liveTeam) {
+          const teamAgents = await getTeamAgents(liveTeam.teamId)
           for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
         }
         if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
           return res.status(403).json({
-            error: claims.teamId ? 'host_access_denied' : 'direct_host_access_required',
+            error: liveTeam ? 'host_access_denied' : 'direct_host_access_required',
           })
         }
       }
@@ -423,11 +427,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       // paying the sandbox UI recipe lookup cost or receiving unused grants.
       if (
         requestsSandboxUiScope &&
-        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, claims.teamId))
+        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, liveTeam?.teamId ?? null))
       ) {
         extraScopes.push('sandbox:ui:view')
       }
-      const auth = { userId: claims.userId, teamId: claims.teamId, role: claims.role }
+      const auth = {
+        userId: claims.userId,
+        teamId: liveTeam?.teamId ?? null,
+        role: liveTeam?.role ?? 'member',
+      }
       const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
       if (!result) {
         // Distinguish "you need a team for this" from a generic scope failure so
