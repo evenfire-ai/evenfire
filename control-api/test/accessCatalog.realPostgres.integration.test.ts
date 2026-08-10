@@ -75,6 +75,9 @@ describeRealPostgres('aggregate access catalog real PostgreSQL producer', () => 
       'test:postgres',
       'mcp-host',
       'mcp-server',
+      [],
+      10_000,
+      50_000,
     ])
     const hostPaths = result.rows.filter(
       row => row.resource_type === 'host' && row.logical_id === 'shared-host'
@@ -86,7 +89,7 @@ describeRealPostgres('aggregate access catalog real PostgreSQL producer', () => 
 
     const explain = await dbPool.query(
       `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${accessCatalogGrantSql()}`,
-      [userId, 'test:postgres', 'mcp-host', 'mcp-server']
+      [userId, 'test:postgres', 'mcp-host', 'mcp-server', [], 10_000, 50_000]
     )
     expect(explain.rows[0]?.['QUERY PLAN']).toBeDefined()
   })

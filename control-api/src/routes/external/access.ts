@@ -6,9 +6,11 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { aggregateAccessRequestsTotal } from '../../observability/metrics.js'
 import {
   AccessCatalogAuthorityUnavailableError,
+  AccessCatalogCapacityError,
   AccessCatalogCursorError,
   AccessCatalogInvalidSessionError,
   buildAccessCatalog,
@@ -26,6 +28,7 @@ import {
 } from '../../services/access/resourceIdentity.js'
 
 const resourceTypes = new Set<string>(RESOURCE_TYPES)
+const ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE = 10
 
 function catalogTypes(value: unknown): ResourceType[] | null {
   if (value === undefined) return []
@@ -99,6 +102,25 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/access/catalog',
     requireV2AccessContract,
+    rateLimitMiddleware({
+      bucketType: 'external_access_catalog',
+      maxPerMinute: ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE,
+      getBucketKey: req => {
+        const userId = (req as ExternalAuthedRequest).externalAuth?.userId
+        return userId ? `external_access_catalog:${userId}` : 'external_access_catalog:unknown'
+      },
+      onLimited: (req, res, retryAfterSeconds) => {
+        sendPublicApiError(
+          req,
+          res,
+          429,
+          'rate_limited',
+          'Too many access catalog requests; retry later.',
+          true,
+          { retryAfterSeconds }
+        )
+      },
+    }),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const types = catalogTypes(req.query.types)
       const limit = pageLimit(req.query.limit)
@@ -143,7 +165,10 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
-        if (error instanceof AccessCatalogAuthorityUnavailableError) {
+        if (
+          error instanceof AccessCatalogAuthorityUnavailableError ||
+          error instanceof AccessCatalogCapacityError
+        ) {
           aggregateAccessRequestsTotal.inc(
             { operation: 'catalog', result: 'authority_unavailable' },
             1

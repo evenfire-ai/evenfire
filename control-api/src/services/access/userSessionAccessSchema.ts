@@ -208,3 +208,73 @@ export async function applyLegacySessionRevocationFoundation(db: DbClient): Prom
       ON external_v1_session_revocations (expires_at);
   `)
 }
+
+export async function applyAccessCatalogPerformanceFoundation(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS workflow_runs_actor_recipe_run_idx
+      ON workflow_runs (
+        actor_type,
+        actor_id,
+        recipe_namespace,
+        recipe_name,
+        run_id
+      )
+      WHERE actor_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS workflow_runs_team_recipe_run_idx
+      ON workflow_runs (
+        team_id,
+        recipe_namespace,
+        recipe_name,
+        run_id
+      )
+      WHERE team_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS workflow_runs_usage_team_recipe_run_idx
+      ON workflow_runs (
+        usage_team_id,
+        recipe_namespace,
+        recipe_name,
+        run_id
+      )
+      WHERE usage_team_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS notification_deliveries_audience_user_catalog_idx
+      ON notification_deliveries (
+        (audience->>'userId'),
+        expires_at,
+        id
+      )
+      WHERE audience ? 'userId';
+
+    CREATE INDEX IF NOT EXISTS notification_deliveries_audience_team_catalog_idx
+      ON notification_deliveries (
+        (audience->>'teamId'),
+        expires_at,
+        id
+      )
+      WHERE audience ? 'teamId';
+
+    CREATE INDEX IF NOT EXISTS workflow_approval_user_catalog_idx
+      ON workflow_approval_requests (
+        target_user_id,
+        status,
+        expires_at,
+        recipe_namespace,
+        recipe_name,
+        id
+      )
+      WHERE target_user_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS workflow_approval_team_catalog_idx
+      ON workflow_approval_requests (
+        target_team_id,
+        status,
+        expires_at,
+        recipe_namespace,
+        recipe_name,
+        id
+      )
+      WHERE target_team_id IS NOT NULL;
+  `)
+}

@@ -21,6 +21,9 @@ import {
 export const ACCESS_CATALOG_CONTRACT_VERSION = '2' as const
 export const ACCESS_CATALOG_DEFAULT_PAGE_SIZE = 50
 export const ACCESS_CATALOG_MAX_PAGE_SIZE = 100
+export const ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES = 10_000
+export const ACCESS_CATALOG_MAX_SNAPSHOT_PATHS = 50_000
+export const ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE = 10_000
 
 export type CatalogRelationship = {
   type: string
@@ -133,6 +136,8 @@ type DbSeedRow = {
   filesystem_scope_ref: string | null
   runtime_ref: string | null
   provider_model_policy_ref: string | null
+  snapshot_resource_limit_exceeded?: boolean
+  snapshot_path_limit_exceeded?: boolean
 }
 
 type K8sShape = {
@@ -166,6 +171,13 @@ export class AccessCatalogAuthorityUnavailableError extends Error {
   constructor(readonly correlationId?: string) {
     super('authorization authority unavailable')
     this.name = 'AccessCatalogAuthorityUnavailableError'
+  }
+}
+
+export class AccessCatalogCapacityError extends Error {
+  constructor(readonly correlationId?: string) {
+    super('access catalog authority snapshot exceeded its safety bound')
+    this.name = 'AccessCatalogCapacityError'
   }
 }
 
@@ -444,6 +456,25 @@ export function accessCatalogGrantSql(): string {
         FROM notification_deliveries nd
         JOIN active_memberships am ON am.team_id::text = nd.audience->>'teamId'
        WHERE nd.expires_at IS NULL OR nd.expires_at > NOW()
+    ), filtered_paths AS (
+      SELECT *
+        FROM catalog_paths
+       WHERE CARDINALITY($5::text[]) = 0
+          OR resource_type = ANY($5::text[])
+    ), resource_window AS (
+      SELECT resource_type, logical_id
+        FROM filtered_paths
+       GROUP BY resource_type, logical_id
+       ORDER BY resource_type, logical_id
+       LIMIT ($6::int + 1)
+    ), bounded_paths AS (
+      SELECT fp.*
+        FROM filtered_paths fp
+        JOIN resource_window rw
+          ON rw.resource_type = fp.resource_type
+         AND rw.logical_id = fp.logical_id
+       ORDER BY fp.resource_type, fp.logical_id, fp.kind, fp.team_id, fp.grant_id
+       LIMIT ($7::int + 1)
     )
     SELECT cp.resource_type,
            cp.logical_id,
@@ -466,8 +497,12 @@ export function accessCatalogGrantSql(): string {
            cp.approval_policy_ref,
            cp.filesystem_scope_ref,
            cp.runtime_ref,
-           cp.provider_model_policy_ref
-      FROM catalog_paths cp
+           cp.provider_model_policy_ref,
+           (SELECT COUNT(*) FROM resource_window) > $6::int
+             AS snapshot_resource_limit_exceeded,
+           (SELECT COUNT(*) FROM bounded_paths) > $7::int
+             AS snapshot_path_limit_exceeded
+      FROM bounded_paths cp
  LEFT JOIN authorization_resource_revisions arr
         ON arr.environment_id = $2
        AND arr.resource_type = cp.resource_type
@@ -476,6 +511,25 @@ export function accessCatalogGrantSql(): string {
          WHEN 'context' THEN $4::text || '/' || cp.logical_id
          ELSE cp.logical_id
        END`
+}
+
+export function catalogAuthoritySourceTypes(
+  resourceTypes: readonly ResourceType[]
+): ResourceType[] {
+  const sources = new Set<ResourceType>()
+  for (const type of resourceTypes) {
+    if (type === 'mcp_server') {
+      sources.add('host')
+      sources.add('context')
+    } else if (type === 'shared_filesystem') {
+      sources.add('context')
+    } else if (type === 'sandbox_app') {
+      sources.add('workflow_recipe')
+    } else {
+      sources.add(type)
+    }
+  }
+  return [...sources].sort()
 }
 
 function permissionsToCapabilities(values: unknown): Capability[] {
@@ -652,7 +706,20 @@ type OperationalSourceResult =
   | { sourceCode: string; status: 'fulfilled'; resources: K8sShape[] }
   | { sourceCode: string; status: 'rejected' }
 
+const OPERATIONAL_CATALOG_CACHE_MS = 5_000
+const operationalCatalogCache = new WeakMap<
+  K8sGateway,
+  { expiresAt: number; value: Promise<OperationalSourceResult[]> }
+>()
+
+export function invalidateAccessCatalogOperationalCache(gateway: K8sGateway): void {
+  operationalCatalogCache.delete(gateway)
+}
+
 async function loadOperationalSources(gateway: K8sGateway): Promise<OperationalSourceResult[]> {
+  const now = Date.now()
+  const cached = operationalCatalogCache.get(gateway)
+  if (cached && cached.expiresAt > now) return cached.value
   const sources = [
     { sourceCode: 'hosts', plural: 'hosts' as const, namespace: config.hostsNamespace },
     { sourceCode: 'contexts', plural: 'contexts' as const, namespace: config.contextsNamespace },
@@ -672,18 +739,28 @@ async function loadOperationalSources(gateway: K8sGateway): Promise<OperationalS
       namespace: config.sharedFilesystemsNamespace,
     },
   ]
-  const settled = await Promise.allSettled(
+  const value = Promise.allSettled(
     sources.map(source => gateway.listResource(source.plural, source.namespace))
-  )
-  return settled.map((result, index) => {
-    const sourceCode = sources[index]!.sourceCode
-    if (result.status === 'rejected') return { sourceCode, status: 'rejected' }
-    return {
-      sourceCode,
-      status: 'fulfilled',
-      resources: Array.isArray(result.value) ? (result.value as K8sShape[]) : [],
+  ).then(settled => {
+    const results: OperationalSourceResult[] = settled.map((result, index) => {
+      const sourceCode = sources[index]!.sourceCode
+      if (result.status === 'rejected') return { sourceCode, status: 'rejected' }
+      return {
+        sourceCode,
+        status: 'fulfilled',
+        resources: Array.isArray(result.value) ? (result.value as K8sShape[]) : [],
+      }
+    })
+    if (results.some(result => result.status === 'rejected')) {
+      operationalCatalogCache.delete(gateway)
     }
+    return results
   })
+  operationalCatalogCache.set(gateway, {
+    expiresAt: now + OPERATIONAL_CATALOG_CACHE_MS,
+    value,
+  })
+  return value
 }
 
 function operationalMap(
@@ -1141,6 +1218,8 @@ export async function buildAccessCatalog(
   options: { now?: Date; correlationId?: string } = {}
 ): Promise<AccessCatalog> {
   const environmentId = canonicalEnvironmentId()
+  const filters = [...new Set(query.resourceTypes ?? [])].sort()
+  const authoritySourceTypes = catalogAuthoritySourceTypes(filters)
   let snapshot: AuthoritySnapshot | null = null
   let rows: DbSeedRow[] = []
   try {
@@ -1153,6 +1232,9 @@ export async function buildAccessCatalog(
         environmentId,
         config.hostsNamespace,
         config.contextsNamespace,
+        authoritySourceTypes,
+        ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES,
+        ACCESS_CATALOG_MAX_SNAPSHOT_PATHS,
       ])
       rows = grants.rows as DbSeedRow[]
     })
@@ -1160,6 +1242,9 @@ export async function buildAccessCatalog(
     throw new AccessCatalogAuthorityUnavailableError(options.correlationId)
   }
   if (!snapshot) throw new AccessCatalogInvalidSessionError()
+  if (rows.some(row => row.snapshot_resource_limit_exceeded || row.snapshot_path_limit_exceeded)) {
+    throw new AccessCatalogCapacityError(options.correlationId)
+  }
 
   const dbSeeds = mergeCatalogSeeds(
     rows.flatMap(row => {
@@ -1168,6 +1253,15 @@ export async function buildAccessCatalog(
     })
   )
   const operational = await loadOperationalSources(gateway)
+  if (
+    operational.some(
+      source =>
+        source.status === 'fulfilled' &&
+        source.resources.length > ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE
+    )
+  ) {
+    throw new AccessCatalogCapacityError(options.correlationId)
+  }
   const partialErrors: AccessCatalogPartialError[] = operational.flatMap(source =>
     source.status === 'rejected'
       ? [
@@ -1181,8 +1275,14 @@ export async function buildAccessCatalog(
       : []
   )
   const hydrated = hydrateOperationalSeeds(dbSeeds, operational, environmentId)
+  if (
+    hydrated.length > ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES ||
+    hydrated.reduce((count, seed) => count + seed.pathSeeds.length, 0) >
+      ACCESS_CATALOG_MAX_SNAPSHOT_PATHS
+  ) {
+    throw new AccessCatalogCapacityError(options.correlationId)
+  }
   const authorizationRevision = revisionFor(snapshot, hydrated)
-  const filters = [...new Set(query.resourceTypes ?? [])].sort()
   const cursor = query.cursor ? decodeCursor(query.cursor) : null
   if (
     cursor &&

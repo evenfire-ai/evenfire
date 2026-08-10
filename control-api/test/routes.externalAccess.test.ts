@@ -5,6 +5,7 @@ import { createExternalAccessRouter } from '../src/routes/external/access.js'
 
 const token = vi.hoisted(() => ({ verify: vi.fn() }))
 const sessions = vi.hoisted(() => ({ validate: vi.fn(), validateLegacy: vi.fn() }))
+const rateLimits = vi.hoisted(() => ({ check: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: token.verify,
@@ -12,6 +13,9 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 vi.mock('../src/services/auth/userSessionService.js', () => ({
   validateUserSessionClaims: sessions.validate,
   validateLegacyUserSession: sessions.validateLegacy,
+}))
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: rateLimits.check,
 }))
 
 function app() {
@@ -27,6 +31,12 @@ describe('external aggregate access routes', () => {
     sessions.validate.mockReset()
     sessions.validateLegacy.mockReset()
     sessions.validateLegacy.mockResolvedValue({ status: 'valid', identity: {} })
+    rateLimits.check.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      count: 1,
+    })
     sessions.validate.mockResolvedValue({
       status: 'valid',
       identity: {
@@ -170,5 +180,39 @@ describe('external aggregate access routes', () => {
 
     expect(response.status).toBe(400)
     expect(response.body.error.code).toBe('invalid_request')
+  })
+
+  it('rate limits authenticated catalog fan-out with the public error contract', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
+    })
+    rateLimits.check.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30_000,
+      count: 11,
+    })
+
+    const response = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'v2-session')
+
+    expect(response.status).toBe(429)
+    expect(response.body.error).toMatchObject({
+      code: 'rate_limited',
+      retryable: true,
+      details: { retryAfterSeconds: expect.any(Number) },
+    })
   })
 })

@@ -6,6 +6,7 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import {
+  applyAccessCatalogPerformanceFoundation,
   applyLegacySessionRevocationFoundation,
   applyUserSessionAccessFoundation,
 } from './services/access/userSessionAccessSchema.js'
@@ -5474,6 +5475,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0092_legacy_session_revocation_foundation',
     apply: applyLegacySessionRevocationFoundation,
+  },
+  {
+    version: '0093_access_catalog_performance_foundation',
+    apply: applyAccessCatalogPerformanceFoundation,
   },
 ]
 

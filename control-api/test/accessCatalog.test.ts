@@ -2,8 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuthClaims } from '../src/profileTypes.js'
 import {
   AccessCatalogAuthorityUnavailableError,
+  AccessCatalogCapacityError,
   AccessCatalogCursorError,
   buildAccessCatalog,
+  catalogAuthoritySourceTypes,
+  invalidateAccessCatalogOperationalCache,
 } from '../src/services/access/accessCatalog.js'
 import { resolveLiveAuthorizationInTransaction } from '../src/services/access/liveAuthorizationResolver.js'
 import { sharedFilesystemScopeRef } from '../src/services/access/operationalAccessProjection.js'
@@ -166,6 +169,31 @@ describe('aggregate access catalog', () => {
     state.rows = []
     state.failAuthority = false
     state.queryCount = 0
+  })
+
+  it('pushes final resource filters down to only their authority source families', () => {
+    expect(catalogAuthoritySourceTypes(['mcp_server'])).toEqual(['context', 'host'])
+    expect(catalogAuthoritySourceTypes(['shared_filesystem', 'sandbox_app'])).toEqual([
+      'context',
+      'workflow_recipe',
+    ])
+    expect(catalogAuthoritySourceTypes(['workflow_run', 'notification'])).toEqual([
+      'notification',
+      'workflow_run',
+    ])
+  })
+
+  it('bounds repeated operational fan-out and supports active invalidation', async () => {
+    state.rows = [row()]
+    const cachedGateway = gateway()
+
+    await buildAccessCatalog(claims, cachedGateway as never)
+    await buildAccessCatalog(claims, cachedGateway as never)
+    expect(cachedGateway.listResource).toHaveBeenCalledTimes(5)
+
+    invalidateAccessCatalogOperationalCache(cachedGateway as never)
+    await buildAccessCatalog(claims, cachedGateway as never)
+    expect(cachedGateway.listResource).toHaveBeenCalledTimes(10)
   })
 
   it('merges one immutable resource across direct and every live team path', async () => {
@@ -591,6 +619,13 @@ describe('aggregate access catalog', () => {
     state.failAuthority = true
     await expect(buildAccessCatalog(claims, gateway() as never)).rejects.toBeInstanceOf(
       AccessCatalogAuthorityUnavailableError
+    )
+  })
+
+  it('fails a truncated authority snapshot closed instead of dropping access paths', async () => {
+    state.rows = [row({ snapshot_path_limit_exceeded: true })]
+    await expect(buildAccessCatalog(claims, gateway() as never)).rejects.toBeInstanceOf(
+      AccessCatalogCapacityError
     )
   })
 

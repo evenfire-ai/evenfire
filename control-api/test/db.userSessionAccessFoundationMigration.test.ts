@@ -47,4 +47,25 @@ describe('user-session and authorization revision foundation migration', () => {
     expect(sql).toContain('external_v1_session_revocations_user_idx')
     expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)
   })
+
+  it('adds covering indexes for aggregate catalog actor and audience predicates', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0093_access_catalog_performance_foundation'
+    )
+
+    expect(migration).toBeDefined()
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    await migration!.apply({ query })
+    const sql = query.mock.calls.map(call => String(call[0])).join('\n')
+
+    expect(sql).toContain('workflow_runs_actor_recipe_run_idx')
+    expect(sql).toContain('workflow_runs_team_recipe_run_idx')
+    expect(sql).toContain('workflow_runs_usage_team_recipe_run_idx')
+    expect(sql).toContain("(audience->>'userId')")
+    expect(sql).toContain("(audience->>'teamId')")
+    expect(sql).toContain('workflow_approval_user_catalog_idx')
+    expect(sql).toContain('workflow_approval_team_catalog_idx')
+    expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)
+  })
 })
