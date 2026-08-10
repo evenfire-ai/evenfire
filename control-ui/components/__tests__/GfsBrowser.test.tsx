@@ -23,6 +23,7 @@ import { ToastProvider } from '../Toast'
 vi.mock('@lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
+  GFS_UPLOAD_TIMEOUT_MS: 300000,
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
   getGfsGrants: vi.fn(),
@@ -281,7 +282,10 @@ describe('GfsBrowser', () => {
           name: fileName,
           kind: 'file',
           contentBase64: 'b3BlcmF0b3IgdXBsb2Fk',
-        }
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
       )
     )
   })
@@ -319,7 +323,10 @@ describe('GfsBrowser', () => {
           name: 'diagram.png',
           kind: 'file',
           contentBase64: 'b3BlcmF0b3IgaW1hZ2U=',
-        }
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
       )
     )
     await waitFor(() => {
@@ -330,7 +337,10 @@ describe('GfsBrowser', () => {
           name: 'notes.md',
           kind: 'file',
           contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
-        }
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
       )
       expect(mockApiSend).toHaveBeenCalledWith(
         'POST',
@@ -339,7 +349,10 @@ describe('GfsBrowser', () => {
           name: 'report.pdf',
           kind: 'file',
           contentBase64: 'JVBERiBvcGVyYXRvciByZXBvcnQ=',
-        }
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
       )
     })
   })
@@ -362,7 +375,7 @@ describe('GfsBrowser', () => {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
-    expect(await screen.findByText('GFS uploads are limited to 10 MB per file.')).toBeTruthy()
+    expect(await screen.findByText('GFS uploads are limited to 16 MB per file.')).toBeTruthy()
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(mockApiSend).not.toHaveBeenCalled()
   })
@@ -570,10 +583,17 @@ describe('GfsBrowser', () => {
     })
 
     await waitFor(() =>
-      expect(mockApiSend).toHaveBeenCalledWith('PUT', '/api/v1/gfs/proxy/v1/resources/r2/content', {
-        contentBase64: 'cmVwbGFjZW1lbnQ=',
-        ifMatch: 0,
-      })
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/gfs/proxy/v1/resources/r2/content',
+        {
+          contentBase64: 'cmVwbGFjZW1lbnQ=',
+          ifMatch: 0,
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
+      )
     )
   })
 

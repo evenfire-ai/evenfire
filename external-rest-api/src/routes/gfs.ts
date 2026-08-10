@@ -14,7 +14,12 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
  * `routes/contextSharedFilesystems.ts` + `routes/rpc.ts`.
  */
 
-const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 503])
+// 5xx included so control-api's gfsc failure codes reach the desktop verbatim:
+// 504 gfsc_timeout, 502 gfsc_unreachable, plus 500/503 forwarded from gfsc. Without
+// them forwardControlApiError falls through to the global handler, which collapses
+// every 5xx to a generic 500 and the documented codes become unobservable at the
+// client (a wedged gfsc looks identical to an internal bug).
+const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {

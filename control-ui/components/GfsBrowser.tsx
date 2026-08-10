@@ -8,7 +8,7 @@ import { IconFolder, IconServer } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
-import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { GFS_UPLOAD_TIMEOUT_MS, apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
@@ -261,11 +261,18 @@ export function GfsBrowser(): React.JSX.Element {
     setUploading(true)
     try {
       const name = await normalizeGfsResourceName(file.name)
-      await apiSend('POST', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/children`, {
-        name,
-        kind: 'file',
-        contentBase64: await fileToEncodedData(file),
-      })
+      await apiSend(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/children`,
+        {
+          name,
+          kind: 'file',
+          contentBase64: await fileToEncodedData(file),
+        },
+        {},
+        {},
+        { timeoutMs: GFS_UPLOAD_TIMEOUT_MS }
+      )
       showToast('File uploaded.', { tone: 'success' })
       setUploadCandidate(null)
       setUploadOpen(false)
@@ -366,7 +373,10 @@ export function GfsBrowser(): React.JSX.Element {
         {
           contentBase64: await fileToEncodedData(file),
           ifMatch: child.version,
-        }
+        },
+        {},
+        {},
+        { timeoutMs: GFS_UPLOAD_TIMEOUT_MS }
       )
       showToast('File replaced.', { tone: 'success' })
       if (selected?.resourceId === child.resourceId) setSelected(null)
@@ -390,7 +400,10 @@ export function GfsBrowser(): React.JSX.Element {
           name,
           kind: 'file',
           contentBase64: await fileToEncodedData(file),
-        }
+        },
+        {},
+        {},
+        { timeoutMs: GFS_UPLOAD_TIMEOUT_MS }
       )
       showToast('File uploaded.', { tone: 'success' })
       await refreshCurrent()
