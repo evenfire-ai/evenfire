@@ -36,6 +36,14 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
   if (/rate_limit_buckets/i.test(text)) {
     return { rows: [{ count: 1 }], rowCount: 1 }
   }
+  if (/external_v1_session_revocations/i.test(text)) {
+    return {
+      rows: [
+        { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', valid_after: null, token_revoked: false },
+      ],
+      rowCount: 1,
+    }
+  }
   return mockPoolQuery(text, params)
 })
 vi.mock('../src/db.js', () => ({

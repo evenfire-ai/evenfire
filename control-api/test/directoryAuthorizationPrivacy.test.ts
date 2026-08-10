@@ -231,6 +231,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.query
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
     await expect(
@@ -240,7 +241,10 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
     const passwordUpdate = String(mocks.query.mock.calls[1]?.[0])
     expect(passwordUpdate).toContain('AND password_hash = $4')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('UPDATE external_user_sessions')
+    expect(String(mocks.query.mock.calls[2]?.[0])).toContain(
+      'INSERT INTO external_user_session_security_epochs'
+    )
+    expect(String(mocks.query.mock.calls[3]?.[0])).toContain('UPDATE external_user_sessions')
   })
 
   it('treats wildcard characters literally, excludes channels, and publishes a stable cursor', async () => {

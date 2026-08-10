@@ -179,7 +179,12 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query').mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
+    vi.spyOn(pool, 'query')
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-1', valid_after: null, token_revoked: false }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
     const currentSession = signExternalSessionToken(payload)
 
     const res = await request(app)
