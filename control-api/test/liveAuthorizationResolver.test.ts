@@ -78,21 +78,82 @@ describe('live authorization resolver', () => {
       db
     )
 
-    expect(result.status).toBe('allowed')
-    if (result.status !== 'allowed') return
-    expect(result.paths).toHaveLength(3)
+    expect(result.status).toBe('access_path_required')
+    if (result.status !== 'access_path_required') return
+    expect(result.safePathDescriptors).toHaveLength(3)
     expect(
-      result.paths
+      result.safePathDescriptors
         .map(path => path.teamId)
         .filter(Boolean)
         .sort()
     ).toEqual(['00000000-0000-4000-8000-000000000010', '00000000-0000-4000-8000-000000000020'])
-    expect(result.paths.find(path => path.teamId?.endsWith('20'))?.currentRole).toBe('admin')
-    expect(result.authorizationRevision).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(db.query.mock.calls[1]?.[1]?.[2]).toBe('agent-a')
     expect(db.query.mock.calls[1]?.[1]?.[3]).toEqual([
       '00000000-0000-4000-8000-000000000010',
       '00000000-0000-4000-8000-000000000020',
+    ])
+  })
+
+  it('selects a deterministic path only when every current behavior is equivalent', async () => {
+    const result = await resolveLiveAuthorizationInTransaction(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'host.read',
+        resource: host,
+      },
+      dbFor([
+        {
+          kind: 'direct',
+          grant_id: 'user_agents:user-1:agent-z',
+          capabilities: ['host.read'],
+        },
+        {
+          kind: 'direct',
+          grant_id: 'user_agents:user-1:agent-a',
+          capabilities: ['host.read'],
+        },
+      ])
+    )
+
+    expect(result.status).toBe('allowed')
+    if (result.status !== 'allowed') return
+    expect(result.paths).toHaveLength(2)
+    expect(result.selectedPath?.grantId).toBe('user_agents:user-1:agent-a')
+    expect(result.resolvedBehavior).toEqual(result.selectedPath?.behavior)
+  })
+
+  it('binds team-member targets to a current relationship in the same snapshot', async () => {
+    const team = canonicalResourceIdentity({
+      environmentId: 'cluster-a',
+      type: 'team',
+      logicalId: '00000000-0000-4000-8000-000000000010',
+      displayName: 'Team A',
+    })
+    const db = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [principalRow()], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 }),
+    }
+
+    const result = await resolveLiveAuthorizationInTransaction(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'team.member.manage',
+        resource: team,
+        operationTarget: {
+          teamId: team.logicalId,
+          userId: '00000000-0000-4000-8000-000000000099',
+        },
+      },
+      db
+    )
+
+    expect(result).toEqual({ status: 'denied', code: 'forbidden' })
+    expect(String(db.query.mock.calls[1]?.[0])).toContain("status = 'active'")
+    expect(db.query.mock.calls[1]?.[1]).toEqual([
+      team.logicalId,
+      '00000000-0000-4000-8000-000000000099',
     ])
   })
 
@@ -119,7 +180,6 @@ describe('live authorization resolver', () => {
         principalUserId: '00000000-0000-4000-8000-000000000001',
         requiredCapability: 'host.read',
         resource: host,
-        requireSelectedPath: true,
       },
       db
     )

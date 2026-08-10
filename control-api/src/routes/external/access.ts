@@ -175,7 +175,6 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
             displayName: logicalId,
           }),
           ...(requestedAccessPathId ? { requestedAccessPathId } : {}),
-          requireSelectedPath: body?.requireSelectedPath === true,
           ...(body?.operationTarget && typeof body.operationTarget === 'object'
             ? { operationTarget: body.operationTarget as Record<string, unknown> }
             : {}),

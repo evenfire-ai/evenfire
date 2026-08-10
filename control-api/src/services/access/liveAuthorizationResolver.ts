@@ -44,7 +44,6 @@ export type LiveAuthorizationInput = {
   resource: CanonicalResourceIdentity
   operationTarget?: Record<string, unknown>
   requestedAccessPathId?: string
-  requireSelectedPath?: boolean
 }
 
 export type LiveAuthorizationResult =
@@ -91,7 +90,6 @@ export class AuthorizationRequestMemo {
       input.resource.logicalId,
       stableOperationTarget(input.operationTarget),
       input.requestedAccessPathId ?? null,
-      input.requireSelectedPath ?? false,
     ])
     const existing = this.values.get(key)
     if (existing) return existing
@@ -301,6 +299,40 @@ function applyOperationTarget(
   return candidates
 }
 
+async function operationTargetRelationshipIsCurrent(
+  input: LiveAuthorizationInput,
+  db: Pick<DbClient, 'query'>
+): Promise<boolean> {
+  const target = input.operationTarget
+  if (!target) return true
+
+  const targetTeamId = typeof target.teamId === 'string' ? target.teamId.trim() : ''
+  const targetUserId = typeof target.userId === 'string' ? target.userId.trim() : ''
+  if (targetTeamId && input.resource.type === 'team' && targetTeamId !== input.resource.logicalId) {
+    return false
+  }
+  if (targetUserId && input.resource.type === 'user') {
+    return targetUserId === input.resource.logicalId
+  }
+  if (
+    targetUserId &&
+    input.resource.type === 'team' &&
+    ['team.member.read', 'team.member.manage'].includes(input.requiredCapability)
+  ) {
+    const result = await db.query(
+      `SELECT 1
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+        LIMIT 1`,
+      [input.resource.logicalId, targetUserId]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+  return true
+}
+
 function teamCapabilities(role: TeamRole): Capability[] {
   const capabilities: Capability[] = ['team.read']
   if (role === 'admin') {
@@ -501,6 +533,9 @@ export async function resolveLiveAuthorizationInTransaction(
   const snapshot = await loadPrincipalSnapshot(input, db)
   if (!snapshot) return { status: 'not_found', code: 'not_found' }
   if (!snapshot.sessionLive) return { status: 'denied', code: 'session_not_live' }
+  if (!(await operationTargetRelationshipIsCurrent(input, db))) {
+    return { status: 'denied', code: 'forbidden' }
+  }
   const grants = await loadGrantCandidates(input, snapshot, db)
   if (!grants.exists) return { status: 'not_found', code: 'not_found' }
   const targetedCandidates = applyOperationTarget(input, grants.candidates)
@@ -564,7 +599,7 @@ export async function resolveLiveAuthorizationInTransaction(
   }
 
   const selectedPath = selectEquivalentAccessPath(paths)
-  if (input.requireSelectedPath && !selectedPath) {
+  if (!selectedPath) {
     return {
       status: 'access_path_required',
       code: 'access_path_required',
