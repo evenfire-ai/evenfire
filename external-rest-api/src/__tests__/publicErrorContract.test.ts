@@ -63,6 +63,25 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('bucket-key')
   })
 
+  it('preserves only a bounded retry delay from legacy rate-limit bodies', () => {
+    const sanitized = sanitizeControlApiPublicError(
+      new ControlApiError('raw', 429, {
+        error: 'Too Many Requests',
+        retryAfterSeconds: 17,
+        bucket: 'secret-internal-bucket',
+      }),
+      new Set([429])
+    )
+
+    expect(sanitized?.body).toMatchObject({
+      error: {
+        code: 'rate_limited',
+        details: { retryAfterSeconds: 17 },
+      },
+    })
+    expect(JSON.stringify(sanitized?.body)).not.toContain('secret-internal-bucket')
+  })
+
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
     const sentinel = 'postgres://secret@internal/var/run/service.sock'
     for (const status of [400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504]) {

@@ -97,7 +97,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     })
   })
 
-  it('propagates a control-api no-escalation 403 verbatim', async () => {
+  it('maps a control-api no-escalation 403 to the bounded public contract', async () => {
     clientMock.controlApiRequest.mockRejectedValue(
       new ControlApiError('escalation', 403, { error: 'escalation_rejected' })
     )
@@ -110,17 +110,22 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         permissions: ['write'],
       })
     expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'escalation_rejected' })
+    expect(res.body.error).toEqual({
+      code: 'forbidden',
+      message: 'The requested operation is not allowed.',
+      correlationId: expect.any(String),
+      retryable: false,
+    })
   })
 
-  it('propagates control-api gfsc 5xx codes (504/502) verbatim, not a generic 500', async () => {
+  it('maps control-api gfsc 5xx statuses without reflecting internal codes', async () => {
     // control-api emits 504 gfsc_timeout / 502 gfsc_unreachable on the me-path;
     // without them in PROPAGATED, forwardControlApiError fell through to the global
     // handler which collapses every 5xx to 500 — the documented codes became
     // unobservable at the desktop (a wedged gfsc looked like an internal bug).
-    for (const [status, error] of [
-      [504, 'gfsc_timeout'],
-      [502, 'gfsc_unreachable'],
+    for (const [status, error, publicCode] of [
+      [504, 'gfsc_timeout', 'upstream_timeout'],
+      [502, 'gfsc_unreachable', 'upstream_unavailable'],
     ] as const) {
       clientMock.controlApiRequest.mockReset()
       clientMock.controlApiRequest.mockRejectedValue(
@@ -131,7 +136,12 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .set('authorization', 'Bearer sess-xyz')
         .send({ contentBase64: 'AAAA' })
       expect(res.status).toBe(status)
-      expect(res.body).toEqual({ error })
+      expect(res.body.error).toMatchObject({
+        code: publicCode,
+        correlationId: expect.any(String),
+        retryable: true,
+      })
+      expect(JSON.stringify(res.body)).not.toContain(error)
     }
   })
 
@@ -251,7 +261,7 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
     })
   })
 
-  it('propagates the manage_acl_required 403 verbatim', async () => {
+  it('maps manage_acl_required to the bounded public forbidden contract', async () => {
     clientMock.controlApiRequest.mockRejectedValue(
       new ControlApiError('forbidden', 403, { error: 'manage_acl_required' })
     )
@@ -259,7 +269,12 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'manage_acl_required' })
+    expect(res.body.error).toEqual({
+      code: 'forbidden',
+      message: 'The requested operation is not allowed.',
+      correlationId: expect.any(String),
+      retryable: false,
+    })
   })
 
   it('propagates the delegation-plane 429 with retryAfterSeconds intact', async () => {
@@ -273,6 +288,12 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(429)
-    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
+    expect(res.body.error).toEqual({
+      code: 'rate_limited',
+      message: 'Too many requests; retry later.',
+      correlationId: expect.any(String),
+      retryable: true,
+      details: { retryAfterSeconds: 17 },
+    })
   })
 })

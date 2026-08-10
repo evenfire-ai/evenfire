@@ -75,10 +75,12 @@ export function sanitizeControlApiPublicError(
   propagatedStatuses: ReadonlySet<number>
 ): { status: number; body: Record<string, unknown> } | null {
   if (!(error instanceof ControlApiError) || !propagatedStatuses.has(error.status)) return null
-  const rawError =
+  const rawBody =
     error.body && typeof error.body === 'object'
-      ? (error.body as { error?: unknown }).error
+      ? (error.body as Record<string, unknown>)
       : undefined
+  const rawError =
+    rawBody && Object.prototype.hasOwnProperty.call(rawBody, 'error') ? rawBody.error : undefined
   const rawEnvelope = rawError && typeof rawError === 'object' ? rawError : undefined
   const suppliedCode =
     rawEnvelope && typeof (rawEnvelope as { code?: unknown }).code === 'string'
@@ -101,6 +103,15 @@ export function sanitizeControlApiPublicError(
       ? ((rawEnvelope as { details: Record<string, unknown> }).details ?? undefined)
       : undefined
   const paths = code === 'access_path_required' ? safePathDescriptors(rawDetails?.paths) : undefined
+  const rawRetryAfterSeconds = rawDetails?.retryAfterSeconds ?? rawBody?.retryAfterSeconds
+  const retryAfterSeconds =
+    code === 'rate_limited' &&
+    typeof rawRetryAfterSeconds === 'number' &&
+    Number.isSafeInteger(rawRetryAfterSeconds) &&
+    rawRetryAfterSeconds >= 1 &&
+    rawRetryAfterSeconds <= 86_400
+      ? rawRetryAfterSeconds
+      : undefined
 
   return {
     status: error.status,
@@ -110,7 +121,11 @@ export function sanitizeControlApiPublicError(
         message: PUBLIC_MESSAGE_BY_CODE[code] || PUBLIC_MESSAGE_BY_CODE[fallbackCode],
         correlationId,
         retryable,
-        ...(paths ? { details: { paths } } : {}),
+        ...(paths
+          ? { details: { paths } }
+          : retryAfterSeconds
+            ? { details: { retryAfterSeconds } }
+            : {}),
       },
     },
   }

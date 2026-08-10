@@ -169,7 +169,7 @@ describe('routes/userApprovalDecisions', () => {
     expect(userApprovalDecisionsServiceMock.decideUserApprovalDecision).not.toHaveBeenCalled()
   })
 
-  it('propagates expected control-api errors from pending list', async () => {
+  it('maps expected control-api errors from pending list to the public contract', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.listPendingUserApprovalDecisions.mockRejectedValueOnce(
       new ControlApiError('gone', 410, { error: 'expired' })
@@ -181,10 +181,15 @@ describe('routes/userApprovalDecisions', () => {
       .set('authorization', 'Bearer good-token')
       .expect(410)
 
-    expect(response.body).toEqual({ error: 'expired' })
+    expect(response.body.error).toEqual({
+      code: 'gone',
+      message: 'The resource is no longer available.',
+      correlationId: expect.any(String),
+      retryable: false,
+    })
   })
 
-  it('propagates expected control-api errors with message fallback bodies', async () => {
+  it('maps non-envelope control-api errors without reflecting their body', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.decideUserApprovalDecision.mockRejectedValueOnce(
       new ControlApiError('conflict', 409, 'not-json')
@@ -197,7 +202,12 @@ describe('routes/userApprovalDecisions', () => {
       .send({ decision: 'deny' })
       .expect(409)
 
-    expect(response.body).toEqual({ error: 'conflict' })
+    expect(response.body.error).toEqual({
+      code: 'conflict',
+      message: 'The request conflicts with current state.',
+      correlationId: expect.any(String),
+      retryable: false,
+    })
   })
 
   it('delegates unexpected service errors to the express error handler', async () => {
