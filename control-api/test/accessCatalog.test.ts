@@ -6,6 +6,7 @@ import {
   buildAccessCatalog,
 } from '../src/services/access/accessCatalog.js'
 import { resolveLiveAuthorizationInTransaction } from '../src/services/access/liveAuthorizationResolver.js'
+import { sharedFilesystemScopeRef } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 const state = vi.hoisted(() => ({
@@ -335,11 +336,239 @@ describe('aggregate access catalog', () => {
           displayName: item.resource.displayName,
         }),
       },
-      resolverDb
+      resolverDb,
+      {
+        relationships: [
+          {
+            type: 'context',
+            targetResourceId: 'context:mcp-server/ctx-a',
+          },
+        ],
+        relatedContextNames: [],
+        relatedHostNames: [],
+        filesystemScopes: new Map(),
+      }
     )
 
     expect(result.status).toBe('allowed')
     if (result.status === 'allowed') expect(result.selectedPath?.id).toBe(accessPathId)
+  })
+
+  it('emits connector and filesystem paths reconstructible from current relationships', async () => {
+    state.snapshot.memberships = []
+    state.rows = [
+      row({
+        resource_type: 'context',
+        logical_id: 'ctx-a',
+        display_name: 'ctx-a',
+        grant_id: 'user_contexts:user-1:ctx-a',
+        capabilities: ['context.read'],
+      }),
+    ]
+    const catalog = await buildAccessCatalog(claims, gateway() as never)
+    const connector = catalog.items.find(
+      item => item.resource.id === 'mcp_server:mcp-server/github'
+    )!
+    const filesystem = catalog.items.find(
+      item => item.resource.id === 'shared_filesystem:mcp-host/shared-a'
+    )!
+
+    const resolveDerived = async (
+      item: typeof connector,
+      capability: 'mcp_server.read' | 'shared_filesystem.read'
+    ) => {
+      const db = {
+        query: vi
+          .fn()
+          .mockResolvedValueOnce({
+            rows: [
+              {
+                user_id: claims.userId,
+                user_revision: 5,
+                resource_revision: 1,
+                session_version: 1,
+                session_live: true,
+                memberships: [],
+              },
+            ],
+            rowCount: 1,
+          })
+          .mockResolvedValueOnce({
+            rows: [
+              {
+                kind: 'direct',
+                grant_id: 'user_contexts:user-1:ctx-a',
+                source_type: 'context',
+                source_id: 'ctx-a',
+                authorization_resource_revision: 1,
+              },
+            ],
+            rowCount: 1,
+          }),
+      }
+      const isFilesystem = item.resource.type === 'shared_filesystem'
+      return resolveLiveAuthorizationInTransaction(
+        {
+          principalUserId: claims.userId,
+          sid: claims.sid,
+          requiredCapability: capability,
+          requestedAccessPathId: item.accessPaths[0]!.accessPathId,
+          resource: canonicalResourceIdentity({
+            environmentId: item.resource.environmentId,
+            type: item.resource.type,
+            logicalId: item.resource.id.slice(item.resource.type.length + 1),
+            displayName: item.resource.displayName,
+          }),
+        },
+        db,
+        {
+          relationships: [
+            {
+              type: 'context',
+              targetResourceId: 'context:mcp-server/ctx-a',
+            },
+          ],
+          relatedContextNames: ['ctx-a'],
+          relatedHostNames: [],
+          filesystemScopes: new Map(
+            isFilesystem
+              ? [
+                  [
+                    'ctx-a',
+                    sharedFilesystemScopeRef({
+                      contextLogicalId: 'mcp-server/ctx-a',
+                      filesystemLogicalId: 'mcp-host/shared-a',
+                      mountPath: '/workspace',
+                    }),
+                  ],
+                ]
+              : []
+          ),
+        }
+      )
+    }
+
+    const connectorResult = await resolveDerived(connector, 'mcp_server.read')
+    expect(connectorResult.status).toBe('allowed')
+    const filesystemResult = await resolveDerived(filesystem, 'shared_filesystem.read')
+    expect(filesystemResult.status).toBe('allowed')
+  })
+
+  it('emits run, approval, and notification paths reconstructible from live rows', async () => {
+    state.snapshot.memberships = []
+    const runId = '00000000-0000-4000-8000-000000000301'
+    const approvalId = '00000000-0000-4000-8000-000000000302'
+    const notificationId = '00000000-0000-4000-8000-000000000303'
+    state.rows = [
+      row({
+        resource_type: 'workflow_run',
+        logical_id: runId,
+        display_name: runId,
+        grant_id: `workflow_runs:user:${runId}`,
+        capabilities: ['workflow.read'],
+        relationship_type: 'recipe',
+        relationship_target_type: 'workflow_recipe',
+        relationship_target_id: 'sandbox-recipes/recipe-a',
+      }),
+      row({
+        resource_type: 'workflow_approval',
+        logical_id: approvalId,
+        display_name: approvalId,
+        grant_id: `workflow_approval_requests:user:${approvalId}`,
+        capabilities: ['workflow.approval.decide'],
+        approval_policy_ref: `approval:${approvalId}`,
+        relationship_type: 'recipe',
+        relationship_target_type: 'workflow_recipe',
+        relationship_target_id: 'sandbox-recipes/recipe-a',
+      }),
+      row({
+        resource_type: 'notification',
+        logical_id: notificationId,
+        display_name: 'workflow.completed',
+        grant_id: `notification_deliveries:${notificationId}`,
+        capabilities: ['notification.read'],
+      }),
+    ]
+    const catalog = await buildAccessCatalog(claims, gateway() as never)
+
+    const cases = [
+      {
+        type: 'workflow_run' as const,
+        id: runId,
+        capability: 'workflow.read' as const,
+        grantId: `workflow_runs:user:${runId}`,
+        relationship: {
+          relationship_type: 'recipe',
+          target_resource_id: 'workflow_recipe:sandbox-recipes/recipe-a',
+        },
+      },
+      {
+        type: 'workflow_approval' as const,
+        id: approvalId,
+        capability: 'workflow.approval.decide' as const,
+        grantId: `workflow_approval_requests:user:${approvalId}`,
+        relationship: {
+          relationship_type: 'recipe',
+          target_resource_id: 'workflow_recipe:sandbox-recipes/recipe-a',
+        },
+      },
+      {
+        type: 'notification' as const,
+        id: notificationId,
+        capability: 'notification.read' as const,
+        grantId: `notification_deliveries:${notificationId}`,
+      },
+    ]
+
+    for (const fixture of cases) {
+      const item = catalog.items.find(
+        candidate => candidate.resource.id === `${fixture.type}:${fixture.id}`
+      )!
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              user_id: claims.userId,
+              user_revision: 5,
+              resource_revision: 1,
+              session_version: 1,
+              session_live: true,
+              memberships: [],
+            },
+          ],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              kind: 'direct',
+              grant_id: fixture.grantId,
+              capabilities: [fixture.capability],
+            },
+          ],
+          rowCount: 1,
+        })
+      if (fixture.relationship) {
+        query.mockResolvedValueOnce({ rows: [fixture.relationship], rowCount: 1 })
+      }
+      const result = await resolveLiveAuthorizationInTransaction(
+        {
+          principalUserId: claims.userId,
+          sid: claims.sid,
+          requiredCapability: fixture.capability,
+          requestedAccessPathId: item.accessPaths[0]!.accessPathId,
+          resource: canonicalResourceIdentity({
+            environmentId: item.resource.environmentId,
+            type: fixture.type,
+            logicalId: fixture.id,
+            displayName: item.resource.displayName,
+          }),
+        },
+        { query }
+      )
+      expect(result.status, fixture.type).toBe('allowed')
+    }
   })
 
   it('preserves safe database items and marks an operational source failure partial', async () => {

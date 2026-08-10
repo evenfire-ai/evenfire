@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   AuthorizationRequestMemo,
+  resolveLiveAuthorization,
   resolveLiveAuthorizationInTransaction,
 } from '../src/services/access/liveAuthorizationResolver.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
@@ -271,5 +272,53 @@ describe('live authorization resolver', () => {
     await memo.getOrCreate({ ...base, requestedAccessPathId: 'ap1_other' }, factory)
     await memo.getOrCreate({ ...base, operationTarget: { teamId: 'team-a' } }, factory)
     expect(factory).toHaveBeenCalledTimes(3)
+  })
+
+  it('treats deleted operational resources as not found before grant evaluation', async () => {
+    const result = await resolveLiveAuthorization(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'host.read',
+        resource: host,
+      },
+      {
+        gateway: {
+          getResource: vi.fn().mockResolvedValue({
+            metadata: {
+              name: 'agent-a',
+              namespace: 'mcp-host',
+              deletionTimestamp: '2026-08-10T14:00:00.000Z',
+            },
+          }),
+          listResource: vi.fn(),
+        } as never,
+      }
+    )
+
+    expect(result).toEqual({ status: 'not_found', code: 'not_found' })
+  })
+
+  it('returns typed unavailable when operational lifecycle cannot be verified', async () => {
+    const result = await resolveLiveAuthorization(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'host.read',
+        resource: host,
+      },
+      {
+        correlationId: 'corr-operational',
+        gateway: {
+          getResource: vi.fn().mockRejectedValue(new Error('internal cluster endpoint')),
+          listResource: vi.fn(),
+        } as never,
+      }
+    )
+
+    expect(result).toEqual({
+      status: 'unavailable',
+      dependencyClass: 'operational_resource_store',
+      retryable: true,
+      correlationId: 'corr-operational',
+    })
   })
 })

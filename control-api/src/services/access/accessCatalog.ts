@@ -4,8 +4,13 @@ import { type DbClient, withTransaction } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { AuthClaims, TeamRole } from '../../profileTypes.js'
 import { type AccessPath, type AccessPathBehavior, buildAccessPath } from './accessPath.js'
+import {
+  bindAuthorizationRelationships,
+  mergeAuthorizationRevisionValues,
+  resourceAuthorizationRevision,
+} from './authorizationRevision.js'
 import { type Capability, isCapability, normalizeCapabilities } from './capabilityRegistry.js'
-import { resourceAuthorizationRevision } from './liveAuthorizationResolver.js'
+import { scopedLogicalId, sharedFilesystemScopeRef } from './operationalAccessProjection.js'
 import {
   type CanonicalResourceIdentity,
   type ResourceType,
@@ -568,33 +573,6 @@ function relationshipKey(relationship: CatalogRelationship): string {
   return JSON.stringify([relationship.type, relationship.targetResourceId])
 }
 
-const AUTHORIZATION_REVISION_SET_PREFIX = 'ars1.'
-
-function revisionComponents(value: number | string): string[] {
-  const text = String(value)
-  if (!text.startsWith(AUTHORIZATION_REVISION_SET_PREFIX)) return [text]
-  try {
-    const decoded = JSON.parse(
-      Buffer.from(text.slice(AUTHORIZATION_REVISION_SET_PREFIX.length), 'base64url').toString(
-        'utf8'
-      )
-    ) as unknown
-    return Array.isArray(decoded) && decoded.every(item => typeof item === 'string')
-      ? decoded
-      : [text]
-  } catch {
-    return [text]
-  }
-}
-
-export function mergeAuthorizationRevisionValues(values: readonly (number | string)[]): string {
-  const normalized = [...new Set(values.flatMap(revisionComponents))].sort()
-  if (normalized.length === 1) return normalized[0]!
-  return `${AUTHORIZATION_REVISION_SET_PREFIX}${Buffer.from(JSON.stringify(normalized)).toString(
-    'base64url'
-  )}`
-}
-
 function canonicalOptional(values: readonly (string | undefined)[]): string | undefined {
   return values.filter((value): value is string => Boolean(value)).sort()[0]
 }
@@ -651,10 +629,6 @@ export function mergeCatalogSeeds(seeds: readonly CatalogSeed[]): CatalogSeed[] 
   return [...merged.values()].sort((a, b) =>
     resourceIdentityKey(a.resource).localeCompare(resourceIdentityKey(b.resource))
   )
-}
-
-function scopedLogicalId(namespace: string, name: string): string {
-  return `${namespace}/${name}`
 }
 
 function providerProjection(resource: K8sShape): string {
@@ -902,9 +876,6 @@ function hydrateOperationalSeeds(
           displayName: sfs?.metadata?.name || name,
           providerUid: sfs?.metadata?.uid,
         })
-        const scopeFingerprint = createHash('sha256')
-          .update(`${contextSeed.resource.logicalId}\u0000${logicalId}\u0000${mountPath}`)
-          .digest('base64url')
         derived.push({
           resource: identity,
           authorizationResourceRevision: contextSeed.authorizationResourceRevision,
@@ -912,7 +883,11 @@ function hydrateOperationalSeeds(
           relationships: [{ type: 'context', targetResourceId: contextSeed.resource.canonicalId }],
           pathSeeds: contextSeed.pathSeeds.map(path =>
             propagatePath(path, `shared-filesystem:${name}`, ['shared_filesystem.read'], {
-              filesystemScopeRef: `sfs-scope:${scopeFingerprint}`,
+              filesystemScopeRef: sharedFilesystemScopeRef({
+                contextLogicalId: contextSeed.resource.logicalId,
+                filesystemLogicalId: logicalId,
+                mountPath,
+              }),
             })
           ),
         })
@@ -1047,13 +1022,17 @@ function safePath(path: AccessPath, seed: CatalogPathSeed): AccessCatalogPath {
 }
 
 function itemFromSeed(seed: CatalogSeed, snapshot: AuthoritySnapshot): AccessCatalogItem {
+  const boundResourceRevision = bindAuthorizationRelationships(
+    seed.authorizationResourceRevision,
+    seed.relationships
+  )
   const authorizationRevision = resourceAuthorizationRevision({
     userId: snapshot.userId,
     userRevision: snapshot.userRevision,
     sessionVersion: snapshot.sessionVersion,
     memberships: snapshot.memberships,
     resource: seed.resource,
-    resourceRevision: seed.authorizationResourceRevision,
+    resourceRevision: boundResourceRevision,
     candidates: seed.pathSeeds.map(path => ({
       kind: path.kind,
       grantId: path.grantId,

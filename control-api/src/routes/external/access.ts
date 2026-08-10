@@ -212,7 +212,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
             ? { operationTarget: body.operationTarget as Record<string, unknown> }
             : {}),
         },
-        { correlationId: req.correlationId }
+        { correlationId: req.correlationId, gateway }
       )
       aggregateAccessRequestsTotal.inc({ operation: 'resolve', result: result.status }, 1)
       switch (result.status) {
