@@ -27,6 +27,18 @@ function app() {
   return value
 }
 
+function memberReadApp() {
+  const value = express()
+  value.get(
+    '/teams/:teamId/members',
+    requireValidExternalSessionToken,
+    requireExternalTeamParamMatch(),
+    requireExternalRole(['admin', 'inviter']),
+    (_req, res) => res.status(200).json({ ok: true })
+  )
+  return value
+}
+
 describe('external team authorization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -124,5 +136,19 @@ describe('external team authorization', () => {
       .set('x-user-session-token', 'stale-admin-token')
       .expect(503)
       .expect({ error: 'authority_unavailable' })
+  })
+
+  it('enforces team.member.read from the current admin or inviter role', async () => {
+    authorization.getLiveTeamMembership.mockResolvedValueOnce({ teamId: 'team-1', role: 'member' })
+    await request(memberReadApp())
+      .get('/teams/team-1/members')
+      .set('x-user-session-token', 'member-token')
+      .expect(403)
+
+    authorization.getLiveTeamMembership.mockResolvedValueOnce({ teamId: 'team-1', role: 'inviter' })
+    await request(memberReadApp())
+      .get('/teams/team-1/members')
+      .set('x-user-session-token', 'inviter-token')
+      .expect(200)
   })
 })
