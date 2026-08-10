@@ -81,7 +81,25 @@ describe('external aggregate access routes', () => {
         issuanceMode: 'client_negotiated',
         currentContract: 'v1',
       },
-      aggregateCatalog: { shadow: false, served: false, contractVersion: '2' },
+      aggregateCatalog: {
+        shadow: false,
+        served: false,
+        contractVersion: '2',
+        resourceTypes: [
+          'user',
+          'team',
+          'host',
+          'context',
+          'mcp_server',
+          'workflow_recipe',
+          'workflow_run',
+          'workflow_approval',
+          'gfs_resource',
+          'shared_filesystem',
+          'sandbox_app',
+          'notification',
+        ],
+      },
       actionContext: { v2: false },
       rpcDelegation: { v2: false },
       clientModes: { desktopV2: false, profileV2: false },
@@ -116,6 +134,12 @@ describe('external aggregate access routes', () => {
       .set('x-user-session-token', 'v2-session')
     expect(invalid.status).toBe(400)
     expect(invalid.body.error.code).toBe('invalid_request')
+
+    const unsupported = await request(app())
+      .get('/external/access/catalog?types=workflow_artifact')
+      .set('x-user-session-token', 'v2-session')
+    expect(unsupported.status).toBe(400)
+    expect(unsupported.body.error.code).toBe('invalid_request')
   })
 
   it('rejects a caller-selected foreign environment before resolving authority', async () => {

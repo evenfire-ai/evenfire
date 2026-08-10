@@ -24,6 +24,20 @@ export const ACCESS_CATALOG_MAX_PAGE_SIZE = 100
 export const ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES = 10_000
 export const ACCESS_CATALOG_MAX_SNAPSHOT_PATHS = 50_000
 export const ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE = 10_000
+export const ACCESS_CATALOG_RESOURCE_TYPES = [
+  'user',
+  'team',
+  'host',
+  'context',
+  'mcp_server',
+  'workflow_recipe',
+  'workflow_run',
+  'workflow_approval',
+  'gfs_resource',
+  'shared_filesystem',
+  'sandbox_app',
+  'notification',
+] as const satisfies readonly ResourceType[]
 
 export type CatalogRelationship = {
   type: string

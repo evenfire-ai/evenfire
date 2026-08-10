@@ -9,6 +9,7 @@ import {
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { aggregateAccessRequestsTotal } from '../../observability/metrics.js'
 import {
+  ACCESS_CATALOG_RESOURCE_TYPES,
   AccessCatalogAuthorityUnavailableError,
   AccessCatalogCapacityError,
   AccessCatalogCursorError,
@@ -28,6 +29,7 @@ import {
 } from '../../services/access/resourceIdentity.js'
 
 const resourceTypes = new Set<string>(RESOURCE_TYPES)
+const catalogResourceTypes = new Set<string>(ACCESS_CATALOG_RESOURCE_TYPES)
 const ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE = 10
 
 function catalogTypes(value: unknown): ResourceType[] | null {
@@ -41,7 +43,7 @@ function catalogTypes(value: unknown): ResourceType[] | null {
         .filter(Boolean)
     ),
   ]
-  if (!values.every(item => resourceTypes.has(item))) return null
+  if (!values.every(item => resourceTypes.has(item) && catalogResourceTypes.has(item))) return null
   return values as ResourceType[]
 }
 
@@ -68,7 +70,12 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         issuanceMode: 'client_negotiated',
         currentContract: currentV2 ? 'v2' : 'v1',
       },
-      aggregateCatalog: { shadow: false, served: currentV2, contractVersion: '2' },
+      aggregateCatalog: {
+        shadow: false,
+        served: currentV2,
+        contractVersion: '2',
+        resourceTypes: ACCESS_CATALOG_RESOURCE_TYPES,
+      },
       actionContext: { v2: currentV2 },
       rpcDelegation: { v2: false },
       clientModes: { desktopV2: false, profileV2: false },
