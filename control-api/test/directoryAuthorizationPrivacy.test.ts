@@ -73,10 +73,10 @@ describe('directory privacy and atomic authorization', () => {
           rows: [
             {
               id: '00000000-0000-4000-8000-000000000200',
-              team_id: TEAM_A,
+              team_id: TEAM_SECRET,
               invitee_name: 'Invitee',
               email: 'invitee@example.com',
-              role: 'member',
+              role: 'admin',
               token: 'must-never-serialize',
               status: 'pending',
               purpose: 'member_invitation',
@@ -84,7 +84,7 @@ describe('directory privacy and atomic authorization', () => {
               expires_at: new Date('2026-08-11T12:00:00Z'),
               accepted_at: null,
               accepted_user_id: null,
-              team_name: 'Team A',
+              team_name: 'Secret Team',
             },
           ],
           rowCount: 1,
@@ -114,6 +114,10 @@ describe('directory privacy and atomic authorization', () => {
 
     expect(result[0]?.teams).toEqual([{ id: TEAM_A, name: 'Team A', role: 'member' }])
     expect(JSON.stringify(result)).not.toContain(TEAM_SECRET)
+    expect(JSON.stringify(result)).not.toContain('Secret Team')
+    expect(result[0]).not.toHaveProperty('team_id')
+    expect(result[0]).not.toHaveProperty('team_name')
+    expect(result[0]).not.toHaveProperty('role')
     expect(JSON.stringify(result)).not.toContain('must-never-serialize')
   })
 

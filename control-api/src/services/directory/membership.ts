@@ -305,8 +305,19 @@ async function invitationListResponse(rows: InvitationRow[], managerUserId?: str
   )
   return rows.map(row => {
     const { token: _secretCapability, ...safeInvitation } = row
+    const managerSafeInvitation = managerUserId
+      ? (() => {
+          const {
+            team_id: _hiddenPrimaryTeamId,
+            team_name: _hiddenPrimaryTeamName,
+            role: _hiddenPrimaryRole,
+            ...safeManagerFields
+          } = safeInvitation
+          return safeManagerFields
+        })()
+      : safeInvitation
     return {
-      ...safeInvitation,
+      ...managerSafeInvitation,
       teams: (teamsByInvitationId.get(row.id) || []).map(team => ({
         id: team.team_id,
         name: team.team_name,
