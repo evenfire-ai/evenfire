@@ -4,7 +4,10 @@ import request from 'supertest'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalRouter } from '../src/routes/external/index.js'
 import { createRpcAccessRouter } from '../src/routes/rpc-access/index.js'
-import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import {
+  signExternalSessionToken,
+  verifyExternalSessionToken,
+} from '../src/utils/auth/externalSessionAuthToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 const svc = vi.hoisted(() => ({
@@ -971,7 +974,7 @@ describe('routes/profile', () => {
       .expect(400)
 
     await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
-      .send({ idToken: 'google-id-token' })
+      .send({ idToken: 'google-id-token', sessionContract: 'v2' })
       .expect(200)
 
     expect(googleAuthMock.verifyGoogleIdToken).toHaveBeenCalledWith('google-id-token')
@@ -985,5 +988,18 @@ describe('routes/profile', () => {
       email: 'user@example.com',
       authenticationMethods: ['google'],
     })
+
+    userSessionServiceMock.createUserSession.mockClear()
+    const legacy = await withInternalServiceAuth(
+      request(app).post('/external/auth/google-login')
+    ).send({ idToken: 'google-id-token' })
+    expect(legacy.status).toBe(200)
+    expect(legacy.body.sessionContract).toBe('v1')
+    expect(verifyExternalSessionToken(legacy.body.token)).toMatchObject({
+      userId: 'u1',
+      teamId: 't1',
+      role: 'member',
+    })
+    expect(userSessionServiceMock.createUserSession).not.toHaveBeenCalled()
   })
 })

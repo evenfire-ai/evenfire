@@ -20,6 +20,10 @@ type InvitationPasswordAuth = {
   sessionToken: string
 }
 
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
+
 function sendAcceptInvitationError(
   res: Response,
   error: 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
@@ -93,7 +97,7 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
     return { status: 401, body: { error: 'Unauthorized' } }
   }
 
-  const accepted = await acceptInvitation(token, email)
+  const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
   if (accepted.error) {
     const response = {
       invalid: { status: 400, body: { error: 'Invalid invitation' } },
@@ -219,7 +223,7 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const result = await acceptInvitation(token, email)
+      const result = await acceptInvitation(token, email, requestedSessionContract(req))
       if (result.error) {
         sendAcceptInvitationError(res, result.error)
         return

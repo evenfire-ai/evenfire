@@ -7,7 +7,10 @@ import { externalUserSessionEventsTotal } from '../../observability/metrics.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import { authenticateExternalSessionToken } from '../../services/auth/externalSessionAuthentication.js'
 import {
-  createUserSession,
+  issueExternalUserSession,
+  requestedExternalSessionContract,
+} from '../../services/auth/externalSessionIssuance.js'
+import {
   renewUserSessionToken,
   revokeAllUserSessions,
   revokeUserSession,
@@ -45,14 +48,21 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         picture: google.picture,
       })
       const role = login.membership.role
-      const { token } = await createUserSession({
+      const issued = await issueExternalUserSession({
+        contract: requestedExternalSessionContract(req.body?.sessionContract),
         userId: login.user.id,
         email: google.email,
+        teamId: login.membership.team_id,
+        role,
         authenticationMethods: ['google'],
       })
-      externalUserSessionEventsTotal.inc({ event: 'issue', contract: 'v2', result: 'success' }, 1)
+      externalUserSessionEventsTotal.inc(
+        { event: 'issue', contract: issued.contract, result: 'success' },
+        1
+      )
       return res.status(200).json({
-        token,
+        token: issued.token,
+        sessionContract: issued.contract,
         me: {
           id: login.user.id,
           email: google.email,
@@ -91,14 +101,21 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       }
 
       const role = login.membership.role
-      const { token } = await createUserSession({
+      const issued = await issueExternalUserSession({
+        contract: requestedExternalSessionContract(req.body?.sessionContract),
         userId: login.user.id,
         email: login.user.email,
+        teamId: login.membership.team_id || null,
+        role,
         authenticationMethods: ['pwd'],
       })
-      externalUserSessionEventsTotal.inc({ event: 'issue', contract: 'v2', result: 'success' }, 1)
+      externalUserSessionEventsTotal.inc(
+        { event: 'issue', contract: issued.contract, result: 'success' },
+        1
+      )
       return res.status(200).json({
-        token,
+        token: issued.token,
+        sessionContract: issued.contract,
         me: {
           id: login.user.id,
           email: login.user.email,

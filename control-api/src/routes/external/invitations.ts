@@ -6,7 +6,10 @@ import {
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import { createUserSession } from '../../services/auth/userSessionService.js'
+import {
+  issueExternalUserSession,
+  requestedExternalSessionContract,
+} from '../../services/auth/externalSessionIssuance.js'
 import {
   acceptInvitationForEmail,
   getInvitationByToken,
@@ -124,15 +127,19 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
-        const { token: sessionToken } = await createUserSession({
+        const issued = await issueExternalUserSession({
+          contract: requestedExternalSessionContract(req.body?.sessionContract),
           userId,
           email: result.data.email,
+          teamId: result.data.teamId,
+          role: result.data.role,
           authenticationMethods: ['invitation'],
         })
 
         return res.status(200).json({
           ...result.data,
-          token: sessionToken,
+          token: issued.token,
+          sessionContract: issued.contract,
         })
       } catch (error) {
         return next(error)
@@ -268,15 +275,19 @@ export function createExternalInvitationsRouter(): Router {
         return res.status(400).json({ error: 'not_pending' })
       }
 
-      const { token: sessionToken } = await createUserSession({
+      const issued = await issueExternalUserSession({
+        contract: requestedExternalSessionContract(req.body?.sessionContract),
         userId: result.data.userId,
         email: result.data.email,
+        teamId: result.data.teamId,
+        role: result.data.role,
         authenticationMethods: ['invitation'],
       })
 
       return res.status(200).json({
         ...result.data,
-        token: sessionToken,
+        token: issued.token,
+        sessionContract: issued.contract,
       })
     } catch (error) {
       return next(error)

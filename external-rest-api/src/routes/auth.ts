@@ -55,6 +55,10 @@ function shouldExposeBearerToken(req: { header: (name: string) => string | undef
   return !origin && !fetchSite
 }
 
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
+
 function sendLoginResponse(req: Request, res: Response, result: LoginResponse): void {
   setProfileSessionCookie(req, res, result.token)
   const body = shouldExposeBearerToken(req)
@@ -94,7 +98,10 @@ export function createAuthRouter(): Router {
       }
 
       await verifyGoogleToken(idToken)
-      const result = await loginWithGoogle({ idToken })
+      const result = await loginWithGoogle({
+        idToken,
+        ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
+      })
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (isControlApiStatus(error, 404)) {
@@ -120,7 +127,7 @@ export function createAuthRouter(): Router {
         return
       }
 
-      const result = await loginWithPassword(email, password)
+      const result = await loginWithPassword(email, password, requestedSessionContract(req))
       sendLoginResponse(req, res, result)
     } catch (error) {
       const message = error instanceof Error ? error.message : ''

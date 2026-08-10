@@ -49,6 +49,7 @@ describe('routes/invitations', () => {
 
     const res = await request(makeApp())
       .post('/invitations/password')
+      .set('x-evenfire-session-contract', 'v2')
       .send({
         token: 'invitation-link-token',
         email: 'invitee@example.com',
@@ -68,7 +69,8 @@ describe('routes/invitations', () => {
     expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
     expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledWith(
       'invitation-link-token',
-      'invitee@example.com'
+      'invitee@example.com',
+      'v2'
     )
     expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
       {

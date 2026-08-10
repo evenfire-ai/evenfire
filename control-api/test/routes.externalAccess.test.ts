@@ -4,9 +4,13 @@ import request from 'supertest'
 import { createExternalAccessRouter } from '../src/routes/external/access.js'
 
 const token = vi.hoisted(() => ({ verify: vi.fn() }))
+const sessions = vi.hoisted(() => ({ validate: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: token.verify,
+}))
+vi.mock('../src/services/auth/userSessionService.js', () => ({
+  validateUserSessionClaims: sessions.validate,
 }))
 
 function app() {
@@ -17,7 +21,18 @@ function app() {
 }
 
 describe('external aggregate access routes', () => {
-  beforeEach(() => token.verify.mockReset())
+  beforeEach(() => {
+    token.verify.mockReset()
+    sessions.validate.mockReset()
+    sessions.validate.mockResolvedValue({
+      status: 'valid',
+      identity: {
+        email: 'user@example.com',
+        jti: '00000000-0000-4000-8000-000000000200',
+        sessionVersion: 1,
+      },
+    })
+  })
 
   it('uses the frozen public error envelope for an invalid session', async () => {
     const response = await request(app()).get('/external/access/catalog')
@@ -47,9 +62,14 @@ describe('external aggregate access routes', () => {
 
     expect(manifest.status).toBe(200)
     expect(manifest.body).toMatchObject({
-      session: { v2Accepted: true, v2Issued: true, currentContract: 'v1' },
-      aggregateCatalog: { shadow: false, served: true, contractVersion: '2' },
-      actionContext: { v2: true },
+      session: {
+        v2Accepted: true,
+        v2Issued: false,
+        issuanceMode: 'client_negotiated',
+        currentContract: 'v1',
+      },
+      aggregateCatalog: { shadow: false, served: false, contractVersion: '2' },
+      actionContext: { v2: false },
       rpcDelegation: { v2: false },
       clientModes: { desktopV2: false, profileV2: false },
       compatibility: {
@@ -59,9 +79,28 @@ describe('external aggregate access routes', () => {
       },
     })
 
-    const invalid = await request(app())
+    const legacyCatalog = await request(app())
       .get('/external/access/catalog?types=unknown')
       .set('x-user-session-token', 'legacy-session')
+    expect(legacyCatalog.status).toBe(409)
+
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      iat: 1_999_996_400,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+    })
+    const invalid = await request(app())
+      .get('/external/access/catalog?types=unknown')
+      .set('x-user-session-token', 'v2-session')
     expect(invalid.status).toBe(400)
     expect(invalid.body.error.code).toBe('invalid_request')
   })
@@ -73,7 +112,13 @@ describe('external aggregate access routes', () => {
       teamId: null,
       role: 'member',
       exp: 2_000_000_000,
-      sessionContract: 'v1',
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
     })
 
     const response = await request(app())
@@ -99,7 +144,13 @@ describe('external aggregate access routes', () => {
       teamId: null,
       role: 'member',
       exp: 2_000_000_000,
-      sessionContract: 'v1',
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
     })
 
     const response = await request(app())

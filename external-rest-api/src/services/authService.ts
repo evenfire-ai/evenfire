@@ -3,6 +3,7 @@ import { TeamRole } from '../types.js'
 
 export type GoogleLoginInput = {
   idToken: string
+  sessionContract?: 'v2'
 }
 
 type LoginResult = {
@@ -28,13 +29,14 @@ export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginRe
 
 export async function loginWithPassword(
   email: string,
-  password: string
+  password: string,
+  sessionContract?: 'v2'
 ): Promise<Omit<LoginResult, 'isNewUser'>> {
   const payload = await controlApiRequest<Omit<LoginResult, 'isNewUser'>>(
     'POST',
     '/external/auth/password-login',
     {
-      body: { email, password },
+      body: { email, password, ...(sessionContract ? { sessionContract } : {}) },
     }
   )
   return payload

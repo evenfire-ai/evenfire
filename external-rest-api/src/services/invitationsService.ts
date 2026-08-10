@@ -35,7 +35,8 @@ export async function listPendingInvitations(email: string, sessionToken: string
 
 export async function acceptInvitation(
   token: string,
-  email: string
+  email: string,
+  sessionContract?: 'v2'
 ): Promise<{
   error?: 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
   data?: {
@@ -63,6 +64,7 @@ export async function acceptInvitation(
       body: {
         email,
         token,
+        ...(sessionContract ? { sessionContract } : {}),
       },
     })
     return { data }

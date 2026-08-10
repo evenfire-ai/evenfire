@@ -56,15 +56,17 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
   router.get('/external/access/capabilities', (req: ExternalAuthedRequest, res) => {
     aggregateAccessRequestsTotal.inc({ operation: 'capabilities', result: 'success' }, 1)
     const claims = req.externalAuth!
+    const currentV2 = claims.sessionContract === 'v2'
     res.status(200).json({
       contractVersion: '2',
       session: {
         v2Accepted: true,
-        v2Issued: true,
-        currentContract: claims.sessionContract === 'v2' ? 'v2' : 'v1',
+        v2Issued: currentV2,
+        issuanceMode: 'client_negotiated',
+        currentContract: currentV2 ? 'v2' : 'v1',
       },
-      aggregateCatalog: { shadow: false, served: true, contractVersion: '2' },
-      actionContext: { v2: true },
+      aggregateCatalog: { shadow: false, served: currentV2, contractVersion: '2' },
+      actionContext: { v2: currentV2 },
       rpcDelegation: { v2: false },
       clientModes: { desktopV2: false, profileV2: false },
       compatibility: {
@@ -76,8 +78,27 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     })
   })
 
+  const requireV2AccessContract = (
+    req: ExternalAuthedRequest,
+    res: Parameters<typeof sendPublicApiError>[1],
+    next: () => void
+  ) => {
+    if (req.externalAuth?.sessionContract !== 'v2') {
+      sendPublicApiError(
+        req,
+        res,
+        409,
+        'invalid_request',
+        'A user-session v2 login is required for this access contract.'
+      )
+      return
+    }
+    next()
+  }
+
   router.get(
     '/external/access/catalog',
+    requireV2AccessContract,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const types = catalogTypes(req.query.types)
       const limit = pageLimit(req.query.limit)
@@ -144,6 +165,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/access/resolve',
+    requireV2AccessContract,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const body = req.body as Record<string, unknown> | undefined
       const resource = body?.resource as Record<string, unknown> | undefined

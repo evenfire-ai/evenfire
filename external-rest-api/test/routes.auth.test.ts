@@ -99,6 +99,30 @@ describe('routes/auth password-login', () => {
     expect(res.body.token).toBe('desktop-session-jwt')
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+    expect(authServiceMock.loginWithPassword).toHaveBeenCalledWith(
+      'user@example.invalid',
+      'correct-password',
+      undefined
+    )
+  })
+
+  it('opts into v2 issuance only when the client requests that contract', async () => {
+    authServiceMock.loginWithPassword.mockResolvedValueOnce({
+      token: 'v2-session-jwt',
+      me: { id: 'user-1', email: 'user@example.invalid', role: 'member' },
+    })
+
+    await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .set('x-evenfire-session-contract', 'v2')
+      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .expect(200)
+
+    expect(authServiceMock.loginWithPassword).toHaveBeenCalledWith(
+      'user@example.invalid',
+      'correct-password',
+      'v2'
+    )
   })
 
   it('rotates the browser cookie without exposing the renewed bearer', async () => {
