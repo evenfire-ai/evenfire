@@ -229,7 +229,7 @@ export function resourceAuthorizationRevision(input: {
         input.resource.environmentId,
         input.resource.type,
         input.resource.logicalId,
-        input.resourceRevision,
+        String(input.resourceRevision),
         [...input.candidates]
           .sort((left, right) =>
             JSON.stringify([left.kind, left.teamId ?? '', left.grantId]).localeCompare(

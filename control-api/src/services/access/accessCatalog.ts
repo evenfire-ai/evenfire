@@ -17,12 +17,12 @@ export const ACCESS_CATALOG_CONTRACT_VERSION = '2' as const
 export const ACCESS_CATALOG_DEFAULT_PAGE_SIZE = 50
 export const ACCESS_CATALOG_MAX_PAGE_SIZE = 100
 
-type CatalogRelationship = {
+export type CatalogRelationship = {
   type: string
   targetResourceId: string
 }
 
-type CatalogPathSeed = {
+export type CatalogPathSeed = {
   kind: 'direct' | 'team'
   grantId: string
   teamId?: string
@@ -31,7 +31,7 @@ type CatalogPathSeed = {
   behavior: AccessPathBehavior
 }
 
-type CatalogSeed = {
+export type CatalogSeed = {
   resource: CanonicalResourceIdentity
   relationships: CatalogRelationship[]
   pathSeeds: CatalogPathSeed[]
@@ -548,8 +548,55 @@ function pathSeedKey(path: CatalogPathSeed): string {
   return JSON.stringify([path.kind, path.teamId ?? '', path.grantId])
 }
 
+function pathSeedProjection(path: CatalogPathSeed): string {
+  return JSON.stringify([
+    pathSeedKey(path),
+    path.teamName ?? null,
+    path.currentRole ?? null,
+    normalizeCapabilities(path.behavior.capabilities),
+    path.behavior.budgetRef,
+    path.behavior.credentialPolicyRef,
+    path.behavior.approvalPolicyRef,
+    path.behavior.filesystemScopeRef,
+    path.behavior.runtimeRef,
+    path.behavior.providerModelPolicyRef,
+    path.behavior.auditSubject,
+  ])
+}
+
 function relationshipKey(relationship: CatalogRelationship): string {
   return JSON.stringify([relationship.type, relationship.targetResourceId])
+}
+
+const AUTHORIZATION_REVISION_SET_PREFIX = 'ars1.'
+
+function revisionComponents(value: number | string): string[] {
+  const text = String(value)
+  if (!text.startsWith(AUTHORIZATION_REVISION_SET_PREFIX)) return [text]
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(text.slice(AUTHORIZATION_REVISION_SET_PREFIX.length), 'base64url').toString(
+        'utf8'
+      )
+    ) as unknown
+    return Array.isArray(decoded) && decoded.every(item => typeof item === 'string')
+      ? decoded
+      : [text]
+  } catch {
+    return [text]
+  }
+}
+
+export function mergeAuthorizationRevisionValues(values: readonly (number | string)[]): string {
+  const normalized = [...new Set(values.flatMap(revisionComponents))].sort()
+  if (normalized.length === 1) return normalized[0]!
+  return `${AUTHORIZATION_REVISION_SET_PREFIX}${Buffer.from(JSON.stringify(normalized)).toString(
+    'base64url'
+  )}`
+}
+
+function canonicalOptional(values: readonly (string | undefined)[]): string | undefined {
+  return values.filter((value): value is string => Boolean(value)).sort()[0]
 }
 
 export function mergeCatalogSeeds(seeds: readonly CatalogSeed[]): CatalogSeed[] {
@@ -560,8 +607,12 @@ export function mergeCatalogSeeds(seeds: readonly CatalogSeed[]): CatalogSeed[] 
     if (!current) {
       merged.set(key, {
         ...seed,
+        resource: { ...seed.resource },
         relationships: [...seed.relationships],
         pathSeeds: [...seed.pathSeeds],
+        authorizationResourceRevision: mergeAuthorizationRevisionValues([
+          seed.authorizationResourceRevision,
+        ]),
       })
       continue
     }
@@ -570,17 +621,32 @@ export function mergeCatalogSeeds(seeds: readonly CatalogSeed[]): CatalogSeed[] 
       relationships.set(relationshipKey(relationship), relationship)
     }
     const paths = new Map(current.pathSeeds.map(item => [pathSeedKey(item), item]))
-    for (const path of seed.pathSeeds) paths.set(pathSeedKey(path), path)
+    for (const path of seed.pathSeeds) {
+      const pathKey = pathSeedKey(path)
+      const existing = paths.get(pathKey)
+      if (!existing || pathSeedProjection(path) < pathSeedProjection(existing)) {
+        paths.set(pathKey, path)
+      }
+    }
     current.relationships = [...relationships.values()].sort((a, b) =>
       relationshipKey(a).localeCompare(relationshipKey(b))
     )
     current.pathSeeds = [...paths.values()].sort((a, b) =>
       pathSeedKey(a).localeCompare(pathSeedKey(b))
     )
-    if (seed.resourceRevision) current.resourceRevision = seed.resourceRevision
-    current.authorizationResourceRevision = seed.authorizationResourceRevision
-    if (seed.resource.providerUid) current.resource.providerUid = seed.resource.providerUid
-    current.resource.displayName = seed.resource.displayName
+    current.resourceRevision = canonicalOptional([current.resourceRevision, seed.resourceRevision])
+    current.authorizationResourceRevision = mergeAuthorizationRevisionValues([
+      current.authorizationResourceRevision,
+      seed.authorizationResourceRevision,
+    ])
+    current.resource.providerUid = canonicalOptional([
+      current.resource.providerUid,
+      seed.resource.providerUid,
+    ])
+    current.resource.displayName = [
+      current.resource.displayName,
+      seed.resource.displayName,
+    ].sort()[0]!
   }
   return [...merged.values()].sort((a, b) =>
     resourceIdentityKey(a.resource).localeCompare(resourceIdentityKey(b.resource))
