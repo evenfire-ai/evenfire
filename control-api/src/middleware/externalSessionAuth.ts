@@ -199,3 +199,14 @@ export function requireExternalRole(allowedRoles: TeamRole[]) {
     next()
   }
 }
+
+export function requireExternalRoleWithPublicErrors(allowedRoles: TeamRole[]) {
+  return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
+    const role = req.externalTeamAuth?.role
+    if (!role || !allowedRoles.includes(role)) {
+      sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
+      return
+    }
+    next()
+  }
+}

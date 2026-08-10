@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import {
   type ExternalAuthedRequest,
+  requireExternalRoleWithPublicErrors,
   requireExternalTeamParamMatchWithPublicErrors,
   requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
@@ -19,6 +20,7 @@ export function createExternalDirectoryRouter(): Router {
   router.get(
     '/external/directory/search',
     requireExternalTeamParamMatchWithPublicErrors(),
+    requireExternalRoleWithPublicErrors(['admin', 'inviter']),
     rateLimitMiddleware({
       bucketType: 'external_directory_search',
       maxPerMinute: 30,
