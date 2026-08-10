@@ -5,6 +5,7 @@ import { ensureDefaultTeamAndGrants } from '../src/services/directory/adminProvi
 
 const dbMocks = vi.hoisted(() => ({ txQuery: vi.fn() }))
 const traceMocks = vi.hoisted(() => ({ appendPermissionEvents: vi.fn() }))
+const userSessionMocks = vi.hoisted(() => ({ revokeAll: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
   withTransaction: async (work: (db: { query: typeof dbMocks.txQuery }) => Promise<unknown>) =>
@@ -12,6 +13,9 @@ vi.mock('../src/db.js', () => ({
 }))
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: traceMocks.appendPermissionEvents,
+}))
+vi.mock('../src/services/auth/userSessionService.js', () => ({
+  revokeAllUserSessions: userSessionMocks.revokeAll,
 }))
 
 describe('ensureDefaultTeamAndGrants', () => {
@@ -68,7 +72,11 @@ describe('ensureDefaultTeamAndGrants', () => {
 })
 
 describe('provisionAdminDesktopWorkspace', () => {
-  beforeEach(() => dbMocks.txQuery.mockReset())
+  beforeEach(() => {
+    dbMocks.txQuery.mockReset()
+    userSessionMocks.revokeAll.mockReset()
+    userSessionMocks.revokeAll.mockResolvedValue(1)
+  })
 
   it('creates user, sets password, and provisions team + grants for a new email', async () => {
     dbMocks.txQuery
@@ -101,6 +109,7 @@ describe('provisionAdminDesktopWorkspace', () => {
       expect.stringContaining('INSERT INTO team_agents'),
       ['team-1', 'chatllm']
     )
+    expect(userSessionMocks.revokeAll).not.toHaveBeenCalled()
   })
 
   it('reuses an existing user (no INSERT INTO users) and still sets the password', async () => {
@@ -128,6 +137,11 @@ describe('provisionAdminDesktopWorkspace', () => {
       'user-9',
       'H',
     ])
+    expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
+      'user-9',
+      'password_changed',
+      expect.objectContaining({ query: dbMocks.txQuery })
+    )
   })
 
   it('seedPassword:false leaves an existing user password untouched', async () => {
@@ -188,6 +202,8 @@ describe('provisionMemberFromAdmin', () => {
     dbMocks.txQuery.mockReset()
     traceMocks.appendPermissionEvents.mockReset()
     traceMocks.appendPermissionEvents.mockResolvedValue(null)
+    userSessionMocks.revokeAll.mockReset()
+    userSessionMocks.revokeAll.mockResolvedValue(1)
   })
 
   it('creates a password-seeded member without creating a team when no teams are selected', async () => {
@@ -244,6 +260,42 @@ describe('provisionMemberFromAdmin', () => {
           }),
         ],
       })
+    )
+    expect(userSessionMocks.revokeAll).not.toHaveBeenCalled()
+  })
+
+  it('revokes existing member sessions in the password-write transaction', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'admin-1',
+            username: 'ada',
+            email: 'ada@example.com',
+            password_hash: 'HASH',
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-1', email: 'ada@example.com', name: 'ada' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    const mod = await import('../src/services/directory/adminProvisioning.js')
+    await mod.provisionMemberFromAdmin({
+      adminId: 'admin-1',
+      operatorSub: 'operator-admin-1',
+      teamAssignments: [],
+      seedPassword: true,
+    })
+
+    expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
+      'user-1',
+      'password_changed',
+      expect.objectContaining({ query: dbMocks.txQuery })
     )
   })
 
