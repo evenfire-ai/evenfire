@@ -32,17 +32,17 @@ caller
 
 ## Environment Variables
 
-| Variable                 | Default      | Description                                         |
-| ------------------------ | ------------ | --------------------------------------------------- |
-| `STDIO_COMMAND`          | _(required)_ | Command to spawn (e.g., `node`, `npx`)              |
-| `STDIO_ARGS`             | `[]`         | JSON array of arguments (e.g., `["dist/index.js"]`) |
-| `BRIDGE_PORT`            | `3000`       | HTTP listen port                                    |
-| `BRIDGE_HEALTH_PATH`     | `/health`    | Health endpoint path                                |
-| `STDIO_RESTART_MAX`      | `3`          | Max auto-restart attempts                           |
-| `STDIO_RESTART_DELAY`    | `5000`       | Base restart delay (ms)                             |
-| `STDIO_INIT_TIMEOUT`     | `30000`      | Process init timeout (ms)                           |
-| `STDIO_SHUTDOWN_TIMEOUT` | `10000`      | Graceful shutdown timeout (ms)                      |
-| `LOG_LEVEL`              | `info`       | Log verbosity                                       |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STDIO_COMMAND` | *(required)* | Command to spawn (e.g., `node`, `npx`) |
+| `STDIO_ARGS` | `[]` | JSON array of arguments (e.g., `["dist/index.js"]`) |
+| `BRIDGE_PORT` | `3000` | HTTP listen port |
+| `BRIDGE_HEALTH_PATH` | `/health` | Health endpoint path |
+| `STDIO_RESTART_MAX` | `3` | Max auto-restart attempts |
+| `STDIO_RESTART_DELAY` | `5000` | Base restart delay (ms) |
+| `STDIO_INIT_TIMEOUT` | `30000` | Process init timeout (ms) |
+| `STDIO_SHUTDOWN_TIMEOUT` | `10000` | Graceful shutdown timeout (ms) |
+| `LOG_LEVEL` | `info` | Log verbosity |
 
 ## Local Development
 

@@ -1,5 +1,5 @@
-import { Channel } from '../interfaces'
-import { IncomingMessage, OutgoingResponse, StatusUpdate } from '../types'
+import { Channel } from "../interfaces";
+import { IncomingMessage, OutgoingResponse, StatusUpdate } from "../types";
 
 /**
  * Adapts the existing HTTP RPC interface to the spec's Channel interface.
@@ -12,8 +12,8 @@ import { IncomingMessage, OutgoingResponse, StatusUpdate } from '../types'
  * - sendStatus(): logs status (no channel forwarding yet)
  */
 export class RpcChannelAdapter implements Channel {
-  private messageQueue: IncomingMessage[] = []
-  private resolvers: ((msg: IncomingMessage) => void)[] = []
+  private messageQueue: IncomingMessage[] = [];
+  private resolvers: ((msg: IncomingMessage) => void)[] = [];
 
   /**
    * Push a message into the adapter (called by server.ts when
@@ -21,10 +21,10 @@ export class RpcChannelAdapter implements Channel {
    */
   pushMessage(msg: IncomingMessage): void {
     if (this.resolvers.length > 0) {
-      const resolver = this.resolvers.shift()!
-      resolver(msg)
+      const resolver = this.resolvers.shift()!;
+      resolver(msg);
     } else {
-      this.messageQueue.push(msg)
+      this.messageQueue.push(msg);
     }
   }
 
@@ -35,11 +35,11 @@ export class RpcChannelAdapter implements Channel {
   async *receive(): AsyncIterable<IncomingMessage> {
     while (true) {
       if (this.messageQueue.length > 0) {
-        yield this.messageQueue.shift()!
+        yield this.messageQueue.shift()!;
       } else {
-        yield new Promise<IncomingMessage>(resolve => {
-          this.resolvers.push(resolve)
-        })
+        yield new Promise<IncomingMessage>((resolve) => {
+          this.resolvers.push(resolve);
+        });
       }
     }
   }
@@ -50,7 +50,10 @@ export class RpcChannelAdapter implements Channel {
    * which was set when the message was enqueued.
    * The actual response routing happens in the Agent Core.
    */
-  async respond(_original: IncomingMessage, _response: OutgoingResponse): Promise<void> {
+  async respond(
+    _original: IncomingMessage,
+    _response: OutgoingResponse,
+  ): Promise<void> {
     // Handled by Task.responseCallback in AgentStateMachine.
     // This method is a spec-compliance placeholder.
     // The actual response path is:
@@ -58,6 +61,8 @@ export class RpcChannelAdapter implements Channel {
   }
 
   sendStatus(status: StatusUpdate): void {
-    console.log(`[Channel] Status: ${status.type}${status.detail ? ` - ${status.detail}` : ''}`)
+    console.log(
+      `[Channel] Status: ${status.type}${status.detail ? ` - ${status.detail}` : ""}`,
+    );
   }
 }

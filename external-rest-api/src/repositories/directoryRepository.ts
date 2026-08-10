@@ -1,15 +1,12 @@
-import { pool } from '../db.js'
+import { pool } from "../db.js";
 
-export async function searchTeamDirectory(
-  teamId: string,
-  query: string
-): Promise<
+export async function searchTeamDirectory(teamId: string, query: string): Promise<
   Array<{
-    id: string
-    email: string
-    name: string | null
-    display_name: string | null
-    channels: unknown
+    id: string;
+    email: string;
+    name: string | null;
+    display_name: string | null;
+    channels: unknown;
   }>
 > {
   const rows = await pool.query(
@@ -27,12 +24,13 @@ export async function searchTeamDirectory(
    ORDER BY COALESCE(p.display_name, u.name, u.email) ASC
       LIMIT 25`,
     [teamId, `%${query}%`]
-  )
+  );
   return rows.rows as Array<{
-    id: string
-    email: string
-    name: string | null
-    display_name: string | null
-    channels: unknown
-  }>
+    id: string;
+    email: string;
+    name: string | null;
+    display_name: string | null;
+    channels: unknown;
+  }>;
 }
+

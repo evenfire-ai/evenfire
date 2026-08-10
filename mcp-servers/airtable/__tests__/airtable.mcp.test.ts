@@ -11,38 +11,39 @@
  * - Response formatting
  * - Error handling
  */
-import { beforeEach, describe, expect, it } from 'vitest'
-import { createMockAirtableClient } from './airtable.api.test'
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createMockAirtableClient } from './airtable.api.test';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 interface McpTool {
-  name: string
-  description: string
+  name: string;
+  description: string;
   inputSchema: {
-    type: 'object'
-    properties: Record<string, any>
-    required?: string[]
-  }
+    type: 'object';
+    properties: Record<string, any>;
+    required?: string[];
+  };
 }
 
 interface McpToolsListResponse {
-  tools: McpTool[]
+  tools: McpTool[];
 }
 
 interface McpToolCallRequest {
-  name: string
-  arguments?: Record<string, any>
+  name: string;
+  arguments?: Record<string, any>;
 }
 
 interface McpToolCallResponse {
   content: Array<{
-    type: string
-    text?: string
-  }>
-  isError?: boolean
+    type: string;
+    text?: string;
+  }>;
+  isError?: boolean;
 }
 
 // =============================================================================
@@ -50,10 +51,10 @@ interface McpToolCallResponse {
 // =============================================================================
 
 class MockAirtableMcpServer {
-  private airtableClient: ReturnType<typeof createMockAirtableClient>
+  private airtableClient: ReturnType<typeof createMockAirtableClient>;
 
   constructor() {
-    this.airtableClient = createMockAirtableClient()
+    this.airtableClient = createMockAirtableClient();
   }
 
   /**
@@ -178,7 +179,7 @@ class MockAirtableMcpServer {
           },
         },
       ],
-    }
+    };
   }
 
   /**
@@ -186,33 +187,33 @@ class MockAirtableMcpServer {
    * Execute an Airtable MCP tool
    */
   async toolsCall(request: McpToolCallRequest): Promise<McpToolCallResponse> {
-    const { name, arguments: args } = request
+    const { name, arguments: args } = request;
 
     try {
       switch (name) {
         case 'airtable_list_bases':
-          return await this.listBases()
+          return await this.listBases();
 
         case 'airtable_list_tables':
-          return await this.listTables(args!)
+          return await this.listTables(args!);
 
         case 'airtable_list_records':
-          return await this.listRecords(args!)
+          return await this.listRecords(args!);
 
         case 'airtable_get_record':
-          return await this.getRecord(args!)
+          return await this.getRecord(args!);
 
         case 'airtable_create_record':
-          return await this.createRecord(args!)
+          return await this.createRecord(args!);
 
         case 'airtable_update_record':
-          return await this.updateRecord(args!)
+          return await this.updateRecord(args!);
 
         case 'airtable_delete_record':
-          return await this.deleteRecord(args!)
+          return await this.deleteRecord(args!);
 
         case 'airtable_query_records':
-          return await this.queryRecords(args!)
+          return await this.queryRecords(args!);
 
         default:
           return {
@@ -223,7 +224,7 @@ class MockAirtableMcpServer {
               },
             ],
             isError: true,
-          }
+          };
       }
     } catch (error: any) {
       return {
@@ -234,7 +235,7 @@ class MockAirtableMcpServer {
           },
         ],
         isError: true,
-      }
+      };
     }
   }
 
@@ -247,7 +248,7 @@ class MockAirtableMcpServer {
     const bases = [
       { id: 'appBase123', name: 'Test Base 1' },
       { id: 'appBase456', name: 'Test Base 2' },
-    ]
+    ];
 
     return {
       content: [
@@ -256,21 +257,21 @@ class MockAirtableMcpServer {
           text: JSON.stringify(bases, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async listTables(args: any): Promise<McpToolCallResponse> {
-    const { baseId } = args
+    const { baseId } = args;
 
     if (!baseId) {
-      throw new Error('baseId is required')
+      throw new Error('baseId is required');
     }
 
     // Mock response
     const tables = [
       { id: 'tblTable1', name: 'Users' },
       { id: 'tblTable2', name: 'Products' },
-    ]
+    ];
 
     return {
       content: [
@@ -279,19 +280,19 @@ class MockAirtableMcpServer {
           text: JSON.stringify(tables, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async listRecords(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, limit } = args
+    const { baseId, tableId, limit } = args;
 
     if (!baseId || !tableId) {
-      throw new Error('baseId and tableId are required')
+      throw new Error('baseId and tableId are required');
     }
 
     const result = await this.airtableClient.listRecords(baseId, tableId, {
       limit,
-    })
+    });
 
     return {
       content: [
@@ -300,17 +301,17 @@ class MockAirtableMcpServer {
           text: JSON.stringify(result.records, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async getRecord(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, recordId } = args
+    const { baseId, tableId, recordId } = args;
 
     if (!baseId || !tableId || !recordId) {
-      throw new Error('baseId, tableId, and recordId are required')
+      throw new Error('baseId, tableId, and recordId are required');
     }
 
-    const record = await this.airtableClient.getRecord(baseId, tableId, recordId)
+    const record = await this.airtableClient.getRecord(baseId, tableId, recordId);
 
     return {
       content: [
@@ -319,17 +320,17 @@ class MockAirtableMcpServer {
           text: JSON.stringify(record, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async createRecord(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, fields } = args
+    const { baseId, tableId, fields } = args;
 
     if (!baseId || !tableId || !fields) {
-      throw new Error('baseId, tableId, and fields are required')
+      throw new Error('baseId, tableId, and fields are required');
     }
 
-    const record = await this.airtableClient.createRecord(baseId, tableId, fields)
+    const record = await this.airtableClient.createRecord(baseId, tableId, fields);
 
     return {
       content: [
@@ -338,17 +339,22 @@ class MockAirtableMcpServer {
           text: JSON.stringify(record, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async updateRecord(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, recordId, fields } = args
+    const { baseId, tableId, recordId, fields } = args;
 
     if (!baseId || !tableId || !recordId || !fields) {
-      throw new Error('baseId, tableId, recordId, and fields are required')
+      throw new Error('baseId, tableId, recordId, and fields are required');
     }
 
-    const record = await this.airtableClient.updateRecord(baseId, tableId, recordId, fields)
+    const record = await this.airtableClient.updateRecord(
+      baseId,
+      tableId,
+      recordId,
+      fields
+    );
 
     return {
       content: [
@@ -357,17 +363,21 @@ class MockAirtableMcpServer {
           text: JSON.stringify(record, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async deleteRecord(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, recordId } = args
+    const { baseId, tableId, recordId } = args;
 
     if (!baseId || !tableId || !recordId) {
-      throw new Error('baseId, tableId, and recordId are required')
+      throw new Error('baseId, tableId, and recordId are required');
     }
 
-    const result = await this.airtableClient.deleteRecord(baseId, tableId, recordId)
+    const result = await this.airtableClient.deleteRecord(
+      baseId,
+      tableId,
+      recordId
+    );
 
     return {
       content: [
@@ -376,21 +386,21 @@ class MockAirtableMcpServer {
           text: JSON.stringify(result, null, 2),
         },
       ],
-    }
+    };
   }
 
   private async queryRecords(args: any): Promise<McpToolCallResponse> {
-    const { baseId, tableId, filterByFormula, maxRecords } = args
+    const { baseId, tableId, filterByFormula, maxRecords } = args;
 
     if (!baseId || !tableId) {
-      throw new Error('baseId and tableId are required')
+      throw new Error('baseId and tableId are required');
     }
 
     // Mock query implementation
     // In real implementation, would use filterByFormula
     const result = await this.airtableClient.listRecords(baseId, tableId, {
       limit: maxRecords,
-    })
+    });
 
     return {
       content: [
@@ -399,7 +409,7 @@ class MockAirtableMcpServer {
           text: JSON.stringify(result.records, null, 2),
         },
       ],
-    }
+    };
   }
 
   // =============================================================================
@@ -418,9 +428,9 @@ class MockAirtableMcpServer {
         createdTime: '2024-01-02T00:00:00.000Z',
         fields: { Name: 'Bob', Email: 'bob@example.com' },
       },
-    ]
+    ];
 
-    ;(this.airtableClient as any).setMockData('appBase123', 'tblUsers', records)
+    (this.airtableClient as any).setMockData('appBase123', 'tblUsers', records);
   }
 }
 
@@ -429,60 +439,66 @@ class MockAirtableMcpServer {
 // =============================================================================
 
 describe('Airtable MCP Server - MCP Operations', () => {
-  let server: MockAirtableMcpServer
+  let server: MockAirtableMcpServer;
 
   beforeEach(() => {
-    server = new MockAirtableMcpServer()
-    server.setupMockData()
-  })
+    server = new MockAirtableMcpServer();
+    server.setupMockData();
+  });
 
   describe('tools/list', () => {
     it('should return all available Airtable tools', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      expect(response.tools).toBeDefined()
-      expect(response.tools.length).toBeGreaterThan(0)
-    })
+      expect(response.tools).toBeDefined();
+      expect(response.tools.length).toBeGreaterThan(0);
+    });
 
     it('should include airtable_list_records tool', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const listRecordsTool = response.tools.find(t => t.name === 'airtable_list_records')
-      expect(listRecordsTool).toBeDefined()
-      expect(listRecordsTool?.description).toContain('records')
-    })
+      const listRecordsTool = response.tools.find(
+        t => t.name === 'airtable_list_records'
+      );
+      expect(listRecordsTool).toBeDefined();
+      expect(listRecordsTool?.description).toContain('records');
+    });
 
     it('should have correct input schema for list_records', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const listRecordsTool = response.tools.find(t => t.name === 'airtable_list_records')
+      const listRecordsTool = response.tools.find(
+        t => t.name === 'airtable_list_records'
+      );
 
-      expect(listRecordsTool?.inputSchema.type).toBe('object')
-      expect(listRecordsTool?.inputSchema.properties).toHaveProperty('baseId')
-      expect(listRecordsTool?.inputSchema.properties).toHaveProperty('tableId')
-      expect(listRecordsTool?.inputSchema.required).toEqual(['baseId', 'tableId'])
-    })
+      expect(listRecordsTool?.inputSchema.type).toBe('object');
+      expect(listRecordsTool?.inputSchema.properties).toHaveProperty('baseId');
+      expect(listRecordsTool?.inputSchema.properties).toHaveProperty('tableId');
+      expect(listRecordsTool?.inputSchema.required).toEqual(['baseId', 'tableId']);
+    });
 
     it('should include CRUD operations tools', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const toolNames = response.tools.map(t => t.name)
+      const toolNames = response.tools.map(t => t.name);
 
-      expect(toolNames).toContain('airtable_create_record')
-      expect(toolNames).toContain('airtable_get_record')
-      expect(toolNames).toContain('airtable_update_record')
-      expect(toolNames).toContain('airtable_delete_record')
-    })
+      expect(toolNames).toContain('airtable_create_record');
+      expect(toolNames).toContain('airtable_get_record');
+      expect(toolNames).toContain('airtable_update_record');
+      expect(toolNames).toContain('airtable_delete_record');
+    });
 
     it('should include query operation tool', async () => {
-      const response = await server.toolsList()
+      const response = await server.toolsList();
 
-      const queryTool = response.tools.find(t => t.name === 'airtable_query_records')
+      const queryTool = response.tools.find(
+        t => t.name === 'airtable_query_records'
+      );
 
-      expect(queryTool).toBeDefined()
-      expect(queryTool?.inputSchema.properties).toHaveProperty('filterByFormula')
-    })
-  })
+      expect(queryTool).toBeDefined();
+      expect(queryTool?.inputSchema.properties).toHaveProperty('filterByFormula');
+    });
+  });
 
   describe('tools/call - airtable_list_records', () => {
     it('should list records successfully', async () => {
@@ -492,16 +508,16 @@ describe('Airtable MCP Server - MCP Operations', () => {
           baseId: 'appBase123',
           tableId: 'tblUsers',
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
-      expect(response.content).toHaveLength(1)
-      expect(response.content[0].type).toBe('text')
+      expect(response.isError).toBeUndefined();
+      expect(response.content).toHaveLength(1);
+      expect(response.content[0].type).toBe('text');
 
-      const records = JSON.parse(response.content[0].text!)
-      expect(records).toHaveLength(2)
-      expect(records[0].fields.Name).toBe('Alice')
-    })
+      const records = JSON.parse(response.content[0].text!);
+      expect(records).toHaveLength(2);
+      expect(records[0].fields.Name).toBe('Alice');
+    });
 
     it('should respect limit parameter', async () => {
       const response = await server.toolsCall({
@@ -511,11 +527,11 @@ describe('Airtable MCP Server - MCP Operations', () => {
           tableId: 'tblUsers',
           limit: 1,
         },
-      })
+      });
 
-      const records = JSON.parse(response.content[0].text!)
-      expect(records).toHaveLength(1)
-    })
+      const records = JSON.parse(response.content[0].text!);
+      expect(records).toHaveLength(1);
+    });
 
     it('should return error for missing baseId', async () => {
       const response = await server.toolsCall({
@@ -523,11 +539,11 @@ describe('Airtable MCP Server - MCP Operations', () => {
         arguments: {
           tableId: 'tblUsers',
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('baseId')
-    })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('baseId');
+    });
 
     it('should return error for missing tableId', async () => {
       const response = await server.toolsCall({
@@ -535,12 +551,12 @@ describe('Airtable MCP Server - MCP Operations', () => {
         arguments: {
           baseId: 'appBase123',
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('tableId')
-    })
-  })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('tableId');
+    });
+  });
 
   describe('tools/call - airtable_get_record', () => {
     it('should get a specific record', async () => {
@@ -551,14 +567,14 @@ describe('Airtable MCP Server - MCP Operations', () => {
           tableId: 'tblUsers',
           recordId: 'rec1',
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const record = JSON.parse(response.content[0].text!)
-      expect(record.id).toBe('rec1')
-      expect(record.fields.Name).toBe('Alice')
-    })
+      const record = JSON.parse(response.content[0].text!);
+      expect(record.id).toBe('rec1');
+      expect(record.fields.Name).toBe('Alice');
+    });
 
     it('should return error for non-existent record', async () => {
       const response = await server.toolsCall({
@@ -568,12 +584,12 @@ describe('Airtable MCP Server - MCP Operations', () => {
           tableId: 'tblUsers',
           recordId: 'recNonExistent',
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('NOT_FOUND')
-    })
-  })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('NOT_FOUND');
+    });
+  });
 
   describe('tools/call - airtable_create_record', () => {
     it('should create a new record', async () => {
@@ -587,14 +603,14 @@ describe('Airtable MCP Server - MCP Operations', () => {
             Email: 'charlie@example.com',
           },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const record = JSON.parse(response.content[0].text!)
-      expect(record.fields.Name).toBe('Charlie')
-      expect(record.id).toMatch(/^rec\d+$/)
-    })
+      const record = JSON.parse(response.content[0].text!);
+      expect(record.fields.Name).toBe('Charlie');
+      expect(record.id).toMatch(/^rec\d+$/);
+    });
 
     it('should return error for missing fields', async () => {
       const response = await server.toolsCall({
@@ -603,12 +619,12 @@ describe('Airtable MCP Server - MCP Operations', () => {
           baseId: 'appBase123',
           tableId: 'tblUsers',
         },
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('fields')
-    })
-  })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('fields');
+    });
+  });
 
   describe('tools/call - airtable_update_record', () => {
     it('should update an existing record', async () => {
@@ -622,15 +638,15 @@ describe('Airtable MCP Server - MCP Operations', () => {
             Email: 'alice.new@example.com',
           },
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const record = JSON.parse(response.content[0].text!)
-      expect(record.fields.Name).toBe('Alice') // Unchanged
-      expect(record.fields.Email).toBe('alice.new@example.com')
-    })
-  })
+      const record = JSON.parse(response.content[0].text!);
+      expect(record.fields.Name).toBe('Alice'); // Unchanged
+      expect(record.fields.Email).toBe('alice.new@example.com');
+    });
+  });
 
   describe('tools/call - airtable_delete_record', () => {
     it('should delete a record', async () => {
@@ -641,27 +657,27 @@ describe('Airtable MCP Server - MCP Operations', () => {
           tableId: 'tblUsers',
           recordId: 'rec1',
         },
-      })
+      });
 
-      expect(response.isError).toBeUndefined()
+      expect(response.isError).toBeUndefined();
 
-      const result = JSON.parse(response.content[0].text!)
-      expect(result.deleted).toBe(true)
-      expect(result.id).toBe('rec1')
-    })
-  })
+      const result = JSON.parse(response.content[0].text!);
+      expect(result.deleted).toBe(true);
+      expect(result.id).toBe('rec1');
+    });
+  });
 
   describe('tools/call - unknown tool', () => {
     it('should return error for unknown tool', async () => {
       const response = await server.toolsCall({
         name: 'unknown_tool',
         arguments: {},
-      })
+      });
 
-      expect(response.isError).toBe(true)
-      expect(response.content[0].text).toContain('Unknown tool')
-    })
-  })
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('Unknown tool');
+    });
+  });
 
   describe('Response Format', () => {
     it('should return content array', async () => {
@@ -671,10 +687,10 @@ describe('Airtable MCP Server - MCP Operations', () => {
           baseId: 'appBase123',
           tableId: 'tblUsers',
         },
-      })
+      });
 
-      expect(Array.isArray(response.content)).toBe(true)
-    })
+      expect(Array.isArray(response.content)).toBe(true);
+    });
 
     it('should include text type in content', async () => {
       const response = await server.toolsCall({
@@ -683,11 +699,11 @@ describe('Airtable MCP Server - MCP Operations', () => {
           baseId: 'appBase123',
           tableId: 'tblUsers',
         },
-      })
+      });
 
-      expect(response.content[0].type).toBe('text')
-      expect(response.content[0].text).toBeDefined()
-    })
+      expect(response.content[0].type).toBe('text');
+      expect(response.content[0].text).toBeDefined();
+    });
 
     it('should return valid JSON in text field', async () => {
       const response = await server.toolsCall({
@@ -696,11 +712,11 @@ describe('Airtable MCP Server - MCP Operations', () => {
           baseId: 'appBase123',
           tableId: 'tblUsers',
         },
-      })
+      });
 
       expect(() => {
-        JSON.parse(response.content[0].text!)
-      }).not.toThrow()
-    })
-  })
-})
+        JSON.parse(response.content[0].text!);
+      }).not.toThrow();
+    });
+  });
+});

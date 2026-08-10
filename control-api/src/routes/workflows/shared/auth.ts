@@ -7,8 +7,8 @@ import {
   type McpHostControlScope,
   verifyMcpHostControlJwt,
 } from '../../../utils/auth/mcpHostJwtToken.js'
-import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
+import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 
 function getUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()

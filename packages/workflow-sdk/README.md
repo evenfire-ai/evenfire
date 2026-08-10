@@ -82,7 +82,7 @@ stubbed in — replace `runStep` with your own logic).
 
 ```ts
 // coordinator.ts
-import { type StepSpec, WorkflowSDK, emitLog } from '@clerum/workflow-sdk'
+import { WorkflowSDK, emitLog, type StepSpec } from '@clerum/workflow-sdk'
 
 async function runStep(step: StepSpec): Promise<unknown> {
   // Your deterministic business logic, or delegate agentic work to
@@ -158,28 +158,28 @@ if (result.status === 'failed') {
 
 ## Public API reference
 
-| Export                                                                                              | Kind             | Purpose                                                                                                                             |
-| --------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `WorkflowSDK`                                                                                       | class            | Top-level façade; `static fromEnvironment()` builds and wires everything.                                                           |
-| `WorkflowSDK.fromEnvironment()`                                                                     | static method    | `Promise<WorkflowSDK>` — the single init call.                                                                                      |
-| `sdk.config` (`ConfigLoader`)                                                                       | class            | Loads config from env; `getConfig()`, `getSpec()`.                                                                                  |
-| `sdk.coordinator` (`StepCoordinator`)                                                               | class            | `resolveOrder()`, `injectSignal()`, `runWorkflow()`.                                                                                |
-| `sdk.status` (`StatusReporter`)                                                                     | class            | `reportStepStatus()`, `reportWorkflowStatus()`, `getWorkflowStatus()`.                                                              |
-| `sdk.signals` (`SignalPoller`)                                                                      | class            | `pollSignals()`, `pushSignal()`, `hasSignal()`, `consumeSignal()`, `stop()`.                                                        |
-| `sdk.mcpHost` / `requireMcpHost()` (`McpHostClient`)                                                | class            | `executeAgentStep()`, `healthCheck()`.                                                                                              |
-| `updatePhase()` / `updateStepState()` / `shutdown()`                                                | methods          | Mirror local REST state; graceful teardown.                                                                                         |
-| `renderPrompt()`                                                                                    | function         | Interpolates `{{...}}` placeholders in a prompt template.                                                                           |
-| `loadSoul()`                                                                                        | function         | Reads a `SOUL.md` artifact from `/etc/workflow/souls` (path-traversal guarded).                                                     |
-| `requestModelInjection()`                                                                           | function         | POSTs a `{stepId, provider, model}` model binding to WRC.                                                                           |
-| `createFileRuntimeTokenProvider()` / `createStaticRuntimeTokenProvider()` / `requireRuntimeToken()` | functions        | Build / resolve runtime token providers.                                                                                            |
-| `withRetry()` / `computeBackoff()`                                                                  | functions        | Retry helper and exponential backoff (capped at 300s).                                                                              |
-| `emitLog()` / `initLogger()`                                                                        | functions        | Structured JSON logging to stdout.                                                                                                  |
-| `createServer()` / `start()` / `stop()` / `safeEqual()`                                             | functions        | REST server helpers (health/status/signal routes; constant-time compare).                                                           |
-| `WorkflowSDKInitError` / `CycleDetectedError` / `McpHostNotConfiguredError`                         | error classes    | Init, DAG-cycle, and unconfigured-mcp-host failures.                                                                                |
-| `RegistryClient` and registry types                                                                 | interfaces/types | Registry connection contract (defined in this package).                                                                             |
-| Config/spec types                                                                                   | types            | `WorkflowConfig`, `WorkflowRecipeSpec`, `StepSpec`, `AgentSpec`, `ToolScope`, `PromptSpec`, `WorkflowPhase`, `StepPhase`, `Signal`. |
-| mcp-host types                                                                                      | types            | `AgentStepRequest`, `AgentStepResult`, `StepMcpServerRef`, `AllowedToolsConfig`.                                                    |
-| Misc types                                                                                          | types            | `StepContext`, `StepExecutor`, `WorkflowStateRef`, `RetryOptions`, `PromptContext`, `SignalCallback`, `RuntimeTokenProvider`.       |
+| Export | Kind | Purpose |
+| --- | --- | --- |
+| `WorkflowSDK` | class | Top-level façade; `static fromEnvironment()` builds and wires everything. |
+| `WorkflowSDK.fromEnvironment()` | static method | `Promise<WorkflowSDK>` — the single init call. |
+| `sdk.config` (`ConfigLoader`) | class | Loads config from env; `getConfig()`, `getSpec()`. |
+| `sdk.coordinator` (`StepCoordinator`) | class | `resolveOrder()`, `injectSignal()`, `runWorkflow()`. |
+| `sdk.status` (`StatusReporter`) | class | `reportStepStatus()`, `reportWorkflowStatus()`, `getWorkflowStatus()`. |
+| `sdk.signals` (`SignalPoller`) | class | `pollSignals()`, `pushSignal()`, `hasSignal()`, `consumeSignal()`, `stop()`. |
+| `sdk.mcpHost` / `requireMcpHost()` (`McpHostClient`) | class | `executeAgentStep()`, `healthCheck()`. |
+| `updatePhase()` / `updateStepState()` / `shutdown()` | methods | Mirror local REST state; graceful teardown. |
+| `renderPrompt()` | function | Interpolates `{{...}}` placeholders in a prompt template. |
+| `loadSoul()` | function | Reads a `SOUL.md` artifact from `/etc/workflow/souls` (path-traversal guarded). |
+| `requestModelInjection()` | function | POSTs a `{stepId, provider, model}` model binding to WRC. |
+| `createFileRuntimeTokenProvider()` / `createStaticRuntimeTokenProvider()` / `requireRuntimeToken()` | functions | Build / resolve runtime token providers. |
+| `withRetry()` / `computeBackoff()` | functions | Retry helper and exponential backoff (capped at 300s). |
+| `emitLog()` / `initLogger()` | functions | Structured JSON logging to stdout. |
+| `createServer()` / `start()` / `stop()` / `safeEqual()` | functions | REST server helpers (health/status/signal routes; constant-time compare). |
+| `WorkflowSDKInitError` / `CycleDetectedError` / `McpHostNotConfiguredError` | error classes | Init, DAG-cycle, and unconfigured-mcp-host failures. |
+| `RegistryClient` and registry types | interfaces/types | Registry connection contract (defined in this package). |
+| Config/spec types | types | `WorkflowConfig`, `WorkflowRecipeSpec`, `StepSpec`, `AgentSpec`, `ToolScope`, `PromptSpec`, `WorkflowPhase`, `StepPhase`, `Signal`. |
+| mcp-host types | types | `AgentStepRequest`, `AgentStepResult`, `StepMcpServerRef`, `AllowedToolsConfig`. |
+| Misc types | types | `StepContext`, `StepExecutor`, `WorkflowStateRef`, `RetryOptions`, `PromptContext`, `SignalCallback`, `RuntimeTokenProvider`. |
 
 ## Building a coordinator image
 
