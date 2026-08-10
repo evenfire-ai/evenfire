@@ -6,9 +6,10 @@ import * as api from '../../lib/api'
 
 const replace = vi.fn()
 const push = vi.fn()
+let activeTab = 'context'
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: 'search', tab: 'context' }),
+  useParams: () => ({ name: 'search', tab: activeTab }),
   useRouter: () => ({ push, replace }),
 }))
 
@@ -22,6 +23,14 @@ vi.mock('@components/DashboardLayout', () => ({
 
 vi.mock('@components/Toast', () => ({
   useToast: () => ({ showToast: vi.fn() }),
+}))
+
+vi.mock('@components/UpdateConnectorCredentials', () => ({
+  UpdateConnectorCredentials: () => <button type="button">Rotate credential</button>,
+}))
+
+vi.mock('@components/EgressEditor', () => ({
+  EgressEditor: () => <input aria-label="Egress rules" />,
 }))
 
 vi.mock('../../lib/api', async importOriginal => {
@@ -40,6 +49,7 @@ vi.mock('../../lib/api', async importOriginal => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  activeTab = 'context'
 })
 
 describe('connector edit Context access', () => {
@@ -65,5 +75,29 @@ describe('connector edit Context access', () => {
     expect(api.getContextUsers).not.toHaveBeenCalled()
     expect(api.getContextTeams).not.toHaveBeenCalled()
     expect(api.getHosts).not.toHaveBeenCalled()
+  })
+
+  it('keeps credentials and egress usable when the Context list is unavailable', async () => {
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      metadata: { name: 'search' },
+      spec: { image: 'example/search:latest' },
+    })
+    vi.mocked(api.getContexts).mockRejectedValue(new Error('Context service unavailable'))
+
+    const { rerender } = render(<EditMcpServerPage />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Context access data is unavailable. Try again later.'
+    )
+
+    activeTab = 'credentials'
+    rerender(<EditMcpServerPage />)
+    expect(screen.getByRole('button', { name: 'Rotate credential' })).toBeEnabled()
+
+    activeTab = 'egress'
+    rerender(<EditMcpServerPage />)
+    expect(screen.getByRole('textbox', { name: 'Egress rules' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Save egress' })).toBeEnabled()
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
   })
 })

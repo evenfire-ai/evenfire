@@ -114,6 +114,8 @@ export default function EditMcpServerPage() {
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
   const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
   const [contextNames, setContextNames] = useState<string[]>([])
+  const [loadingContexts, setLoadingContexts] = useState(true)
+  const [contextListError, setContextListError] = useState('')
   const [contextAccessError, setContextAccessError] = useState('')
   const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
@@ -143,12 +145,9 @@ export default function EditMcpServerPage() {
       setLoading(true)
       setLoadError('')
       try {
-        const [result, contextsResult] = await Promise.all([getMcpServer(name), getContexts()])
+        const result = await getMcpServer(name)
         if (cancelled) return
         setServer(result)
-        setContextNames(
-          contextNamesForConnector((contextsResult.items ?? []) as ContextResource[], name)
-        )
         setEgressBindings((result.spec?.egressBindings as EgressBinding[] | undefined) ?? undefined)
       } catch (error) {
         if (!cancelled) {
@@ -159,6 +158,30 @@ export default function EditMcpServerPage() {
       }
     }
     if (name) void load()
+    return () => {
+      cancelled = true
+    }
+  }, [name])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadContexts() {
+      setLoadingContexts(true)
+      setContextListError('')
+      try {
+        const result = await getContexts()
+        if (cancelled) return
+        setContextNames(contextNamesForConnector((result.items ?? []) as ContextResource[], name))
+      } catch {
+        if (!cancelled) {
+          setContextNames([])
+          setContextListError('Context access data is unavailable. Try again later.')
+        }
+      } finally {
+        if (!cancelled) setLoadingContexts(false)
+      }
+    }
+    if (name) void loadContexts()
     return () => {
       cancelled = true
     }
@@ -354,12 +377,22 @@ export default function EditMcpServerPage() {
                     </p>
                   </div>
 
-                  <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
-                    Contexts:{' '}
-                    <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
-                  </p>
+                  {loadingContexts ? (
+                    <p className="cu-muted" role="status">
+                      Loading contexts…
+                    </p>
+                  ) : contextListError ? (
+                    <div className="cu-banner cu-banner--warn" role="alert">
+                      {contextListError}
+                    </div>
+                  ) : (
+                    <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
+                      Contexts:{' '}
+                      <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
+                    </p>
+                  )}
 
-                  {contextNames.length > 0 ? (
+                  {!loadingContexts && !contextListError && contextNames.length > 0 ? (
                     loadingContextAccess ? (
                       <p className="cu-muted">Loading context access…</p>
                     ) : (
@@ -412,7 +445,14 @@ export default function EditMcpServerPage() {
                     <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
                   </div>
                   <div>
-                    <strong>Contexts:</strong> <code>{contextNames.join(', ') || '-'}</code>
+                    <strong>Contexts:</strong>{' '}
+                    <code>
+                      {loadingContexts
+                        ? 'Loading…'
+                        : contextListError
+                          ? 'Unavailable'
+                          : contextNames.join(', ') || '-'}
+                    </code>
                   </div>
                 </div>
 
