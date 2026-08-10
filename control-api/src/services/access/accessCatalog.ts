@@ -171,7 +171,7 @@ export class AccessCatalogInvalidSessionError extends Error {
   }
 }
 
-function canonicalEnvironmentId(): string {
+export function canonicalEnvironmentId(): string {
   const environment = process.env.TRACING_ENVIRONMENT?.trim() || 'development'
   const cluster =
     process.env.TRACING_CLUSTER_NAME?.trim() ||

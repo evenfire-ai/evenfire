@@ -12,6 +12,7 @@ import {
   AccessCatalogCursorError,
   AccessCatalogInvalidSessionError,
   buildAccessCatalog,
+  canonicalEnvironmentId,
 } from '../../services/access/accessCatalog.js'
 import { CAPABILITIES } from '../../services/access/capabilityRegistry.js'
 import {
@@ -159,7 +160,13 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         typeof body?.requiredCapability === 'string' ? body.requiredCapability.trim() : ''
       const requestedAccessPathId =
         typeof body?.accessPathId === 'string' ? body.accessPathId.trim() : undefined
-      if (!environmentId || !resourceTypes.has(type) || !logicalId || !requiredCapability) {
+      if (
+        !environmentId ||
+        environmentId !== canonicalEnvironmentId() ||
+        !resourceTypes.has(type) ||
+        !logicalId ||
+        !requiredCapability
+      ) {
         sendPublicApiError(req, res, 400, 'invalid_request', 'Invalid authorization request.')
         return
       }

@@ -65,4 +65,30 @@ describe('external aggregate access routes', () => {
     expect(invalid.status).toBe(400)
     expect(invalid.body.error.code).toBe('invalid_request')
   })
+
+  it('rejects a caller-selected foreign environment before resolving authority', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v1',
+    })
+
+    const response = await request(app())
+      .post('/external/access/resolve')
+      .set('x-user-session-token', 'legacy-session')
+      .send({
+        requiredCapability: 'host.read',
+        resource: {
+          environmentId: 'production:foreign-cluster',
+          type: 'host',
+          logicalId: 'mcp-host/agent-a',
+        },
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error.code).toBe('invalid_request')
+  })
 })
