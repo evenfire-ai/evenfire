@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle.js'
 import { SseProgressReporter } from '../sseProgressReporter.js'
+import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
 import type { ProgressEvent, TerminalEvent } from '../types.js'
 
 describe('SseProgressReporter TaskLifecycle subscription', () => {

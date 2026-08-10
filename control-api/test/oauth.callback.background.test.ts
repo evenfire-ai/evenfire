@@ -1,21 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { handleOAuthCallback } from '../src/oauth/callback.js'
+import { renderSuccessHtml } from '../src/routes/external/oauthCallback.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import * as store from '../src/oauth/store.js'
-import { renderSuccessHtml } from '../src/routes/external/oauthCallback.js'
 
 const SECRET = 'x'.repeat(40)
 const recipe = {
-  spec: {
-    oauthClients: [
-      {
-        id: 'google-gmail',
-        provider: 'google',
-        clientIdRef: { name: 's', key: 'client-id' },
-        clientSecretRef: { name: 's', key: 'client-secret' },
-      },
-    ],
-  },
+  spec: { oauthClients: [
+    { id: 'google-gmail', provider: 'google',
+      clientIdRef: { name: 's', key: 'client-id' },
+      clientSecretRef: { name: 's', key: 'client-secret' } },
+  ] },
 }
 function deps(tokenJson: object) {
   return {
@@ -29,15 +24,10 @@ function deps(tokenJson: object) {
 }
 const input = (background: boolean) => ({
   oauthClientId: 'google-gmail',
-  code: 'code',
-  redirectUri: 'https://api/cb',
+  code: 'code', redirectUri: 'https://api/cb',
   state: signOAuthState(SECRET, {
-    recipeNamespace: 'sandbox-recipes',
-    recipeName: 'leadforge',
-    userId: 'user-1',
-    oauthClientId: 'google-gmail',
-    grantKind: 'user',
-    background,
+    recipeNamespace: 'sandbox-recipes', recipeName: 'leadforge', userId: 'user-1',
+    oauthClientId: 'google-gmail', grantKind: 'user', background,
   }),
 })
 
@@ -45,20 +35,14 @@ describe('handleOAuthCallback background', () => {
   it('sets background=true when consented AND a refresh token is returned', async () => {
     const spy = vi.spyOn(store, 'setUserGrantBackground').mockResolvedValue()
     vi.spyOn(store, 'upsertOAuthGrant').mockResolvedValue()
-    const res = await handleOAuthCallback(
-      input(true),
-      deps({ access_token: 'a', refresh_token: 'r', expires_in: 3600 })
-    )
+    const res = await handleOAuthCallback(input(true), deps({ access_token: 'a', refresh_token: 'r', expires_in: 3600 }))
     expect(res.kind).toBe('ok')
     if (res.kind === 'ok') {
       expect(res.backgroundRequested).toBe(true)
       expect(res.backgroundEnabled).toBe(true)
     }
-    expect(spy).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ userId: 'user-1', oauthClientId: 'google-gmail' }),
-      true
-    )
+    expect(spy).toHaveBeenCalledWith(expect.anything(),
+      expect.objectContaining({ userId: 'user-1', oauthClientId: 'google-gmail' }), true)
     spy.mockRestore()
   })
 
@@ -78,10 +62,7 @@ describe('handleOAuthCallback background', () => {
   it('never sets background for a non-background (plain) connect', async () => {
     const spy = vi.spyOn(store, 'setUserGrantBackground').mockResolvedValue()
     vi.spyOn(store, 'upsertOAuthGrant').mockResolvedValue()
-    const res = await handleOAuthCallback(
-      input(false),
-      deps({ access_token: 'a', refresh_token: 'r' })
-    )
+    const res = await handleOAuthCallback(input(false), deps({ access_token: 'a', refresh_token: 'r' }))
     expect(res.kind).toBe('ok')
     if (res.kind === 'ok') {
       expect(res.backgroundRequested).toBe(false)

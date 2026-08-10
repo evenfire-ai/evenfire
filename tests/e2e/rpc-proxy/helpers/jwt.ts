@@ -1,5 +1,5 @@
-import jwt from 'jsonwebtoken'
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync } from "node:crypto";
+import jwt from "jsonwebtoken";
 
 export const TEST_JWT_PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCsIhgYd6Ew+kYp
@@ -28,7 +28,7 @@ NULFwlycLyM8zKKDg6Y9uzo/JgEuHsQlezqLjsECgYAboHrpwXg/SBatigtBvj0E
 1ccXGGLgN2dhDbAlZoSKDITOxGiOw48bOX1lT25c06muru+2mCNrsN2lMs07VGk8
 PSRsIuFZis/4vrRtjoxUB4OQ29+mfVgqGsABPugCmi/r22gWrvl1aqEEqstg3m7x
 sKRpFxViv5P5TmnxLggnhw==
------END PRIVATE KEY-----`
+-----END PRIVATE KEY-----`;
 
 export const TEST_JWT_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCIYGHehMPpGKePxaKQa
@@ -38,50 +38,50 @@ QkEabepekZTMQyExmCIn/dHJ15B+4A9tiiephYOQNr3GcnW9eDomMt6NJLypikbr
 xJO6O7Ar0G+raTbflth8EQzWnGF+WgQW4iiM3wsFhpaE0mUlEbMGDGTMAZy1KfxA
 RRu+QZm3Lo+5AiCaHkijDCglHsXLhqsYi2AdRiavD1Gk9LKP/ztKw7q/D6fYFzmO
 QwIDAQAB
------END PUBLIC KEY-----`
+-----END PUBLIC KEY-----`;
 
 type RpcJwtOptions = {
-  sub?: string
-  typ?: 'user' | 'service'
-  teamId?: string
-  scopes?: string[]
-  hostRefs?: string[]
-  iss?: string
-  aud?: string
-  expiresInSeconds?: number
-  now?: number
-  privateKey?: string
-  jti?: string
-}
+  sub?: string;
+  typ?: "user" | "service";
+  teamId?: string;
+  scopes?: string[];
+  hostRefs?: string[];
+  iss?: string;
+  aud?: string;
+  expiresInSeconds?: number;
+  now?: number;
+  privateKey?: string;
+  jti?: string;
+};
 
 export function signRpcJwt(opts: RpcJwtOptions = {}): string {
-  const now = opts.now ?? Math.floor(Date.now() / 1000)
-  const exp = now + (opts.expiresInSeconds ?? 300)
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  const exp = now + (opts.expiresInSeconds ?? 300);
   return jwt.sign(
     {
-      sub: opts.sub ?? 'e2e-user',
-      typ: opts.typ ?? 'user',
-      teamId: opts.teamId ?? 'e2e-team',
-      scopes: opts.scopes ?? ['mcp:servers:list', 'mcp:server:invoke'],
-      hostRefs: opts.hostRefs ?? ['agent2'],
+      sub: opts.sub ?? "e2e-user",
+      typ: opts.typ ?? "user",
+      teamId: opts.teamId ?? "e2e-team",
+      scopes: opts.scopes ?? ["mcp:servers:list", "mcp:server:invoke"],
+      hostRefs: opts.hostRefs ?? ["agent2"],
       jti: opts.jti ?? `e2e-${now}`,
       iat: now,
-      exp,
+      exp
     },
     opts.privateKey ?? TEST_JWT_PRIVATE_KEY,
     {
-      algorithm: 'RS256',
-      issuer: opts.iss ?? 'control-api',
-      audience: opts.aud ?? 'rpc-proxy',
+      algorithm: "RS256",
+      issuer: opts.iss ?? "control-api",
+      audience: opts.aud ?? "rpc-proxy"
     }
-  )
+  );
 }
 
-export function signWithWrongKey(opts: Omit<RpcJwtOptions, 'privateKey'> = {}): string {
-  const { privateKey } = generateKeyPairSync('rsa', {
+export function signWithWrongKey(opts: Omit<RpcJwtOptions, "privateKey"> = {}): string {
+  const { privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
-    privateKeyEncoding: { format: 'pem', type: 'pkcs8' },
-    publicKeyEncoding: { format: 'pem', type: 'spki' },
-  })
-  return signRpcJwt({ ...opts, privateKey })
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" }
+  });
+  return signRpcJwt({ ...opts, privateKey });
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import * as client from '../../controlApiClient.js'
 
 describe('oauth grants proxy', () => {
@@ -6,9 +6,7 @@ describe('oauth grants proxy', () => {
     const spy = vi.spyOn(client, 'controlApiRequest').mockResolvedValue({ grants: [] } as never)
     const { listOauthGrants } = await import('../../services/oauthGrantsService.js')
     await listOauthGrants('SESSION_JWT')
-    expect(spy).toHaveBeenCalledWith('GET', '/external/oauth/grants', {
-      userSessionToken: 'SESSION_JWT',
-    })
+    expect(spy).toHaveBeenCalledWith('GET', '/external/oauth/grants', { userSessionToken: 'SESSION_JWT' })
     spy.mockRestore()
   })
 

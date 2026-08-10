@@ -122,7 +122,10 @@ describe('BasicSafety', () => {
       const s = new BasicSafety(() => [
         { name: 'OPENAI_API_KEY', value: 'totally-not-a-pattern-match-12345' },
       ])
-      const result = s.sanitizeOutput('shell_exec', 'echoed key totally-not-a-pattern-match-12345')
+      const result = s.sanitizeOutput(
+        'shell_exec',
+        'echoed key totally-not-a-pattern-match-12345'
+      )
 
       expect(result.content).toContain('[REDACTED:OPENAI_API_KEY]')
       expect(result.content).not.toContain('totally-not-a-pattern-match-12345')
@@ -159,7 +162,9 @@ describe('BasicSafety', () => {
     })
 
     it('reads from the provider on every call (hot reload)', () => {
-      let entries: Array<{ name: string; value: string }> = [{ name: 'TOK', value: 'rev-1-secret' }]
+      let entries: Array<{ name: string; value: string }> = [
+        { name: 'TOK', value: 'rev-1-secret' },
+      ]
       const s = new BasicSafety(() => entries)
 
       const r1 = s.sanitizeOutput('shell_exec', 'echo rev-1-secret here')

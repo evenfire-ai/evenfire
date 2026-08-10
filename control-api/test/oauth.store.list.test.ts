@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import type { DbClient } from '../src/db.js'
-import { listUserGrantsForClient, listUserOAuthGrants } from '../src/oauth/store.js'
+import { listUserOAuthGrants, listUserGrantsForClient } from '../src/oauth/store.js'
 
 function fakeDb(rows: unknown[]): { db: DbClient; calls: { text: string; values: unknown[] }[] } {
   const calls: { text: string; values: unknown[] }[] = []
@@ -39,9 +39,7 @@ describe('store list', () => {
   })
 
   it('listUserGrantsForClient scopes to recipe+client and returns userId+background', async () => {
-    const { db, calls } = fakeDb([
-      { user_id: 'a', background: true, updated_at: new Date('2026-06-02') },
-    ])
+    const { db, calls } = fakeDb([{ user_id: 'a', background: true, updated_at: new Date('2026-06-02') }])
     const out = await listUserGrantsForClient(db, {
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'leadforge',

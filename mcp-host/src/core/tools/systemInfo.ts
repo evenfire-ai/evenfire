@@ -1,29 +1,29 @@
-import * as os from 'os'
-import { Tool } from '../interfaces'
-import { ToolOutput } from '../types'
+import { Tool } from "../interfaces";
+import { ToolOutput } from "../types";
+import * as os from "os";
 
 export class SystemInfoTool implements Tool {
   name() {
-    return 'system_info'
+    return "system_info";
   }
   description() {
     return (
-      'Get current system information: date, time, timezone, ' +
-      'platform, hostname, and Node.js version.'
-    )
+      "Get current system information: date, time, timezone, " +
+      "platform, hostname, and Node.js version."
+    );
   }
   parametersSchema() {
-    return { type: 'object', properties: {} }
+    return { type: "object", properties: {} };
   }
   requiresSanitization() {
-    return false
+    return false;
   }
   requiresApproval() {
-    return false
+    return false;
   }
 
   async execute(): Promise<ToolOutput> {
-    const startTime = Date.now()
+    const startTime = Date.now();
     const info = {
       datetime: new Date().toISOString(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -32,11 +32,11 @@ export class SystemInfoTool implements Tool {
       hostname: os.hostname(),
       nodeVersion: process.version,
       uptime: `${Math.floor(process.uptime())}s`,
-    }
+    };
     return {
       content: JSON.stringify(info, null, 2),
       duration_ms: Date.now() - startTime,
       is_error: false,
-    }
+    };
   }
 }
