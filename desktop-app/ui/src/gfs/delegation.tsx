@@ -96,8 +96,6 @@ export function GfsDelegationPanel({
     }
   }
 
-  const canCreateShare = Boolean(onCreateShare) && affordances.canCreateShare && !hasHost
-
   return (
     <div className="da-gfs-delegation">
       <div className="da-gfs-delegation__composer">
