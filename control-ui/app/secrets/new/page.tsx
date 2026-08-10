@@ -25,13 +25,17 @@ import {
   getRegistryCredentialSchema,
 } from '@lib/api'
 import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
+import {
+  areRequiredCredentialRowsComplete,
+  reconcileCredentialRows,
+} from '@lib/registryCredentialDraft'
+import type { CredentialDraftRow } from '@lib/registryCredentialDraft.types'
 
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
 const MCP_SECRET_NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 
 type SecretScope = 'llm' | 'mcp' | 'recipe'
-type SecretDraftRow = { id: string; secretKey: string; value: string; label?: string }
 
 const STEPS = ['Secret', 'Values'] as const
 
@@ -48,7 +52,12 @@ const STEP_DETAILS = [
   },
 ] as const
 
-function createSecretDraftRow(id: string, secretKey = '', value = '', label?: string): SecretDraftRow {
+function createSecretDraftRow(
+  id: string,
+  secretKey = '',
+  value = '',
+  label?: string
+): CredentialDraftRow {
   return { id, secretKey, value, label }
 }
 
@@ -78,7 +87,7 @@ function CreateSecretPageContent() {
   const registryEntryVersion =
     scope === 'mcp' ? (searchParams.get('registryVersion') ?? '').trim() : ''
   const [mcpName, setMcpName] = useState(prefillMcpName)
-  const [mcpRows, setMcpRows] = useState<SecretDraftRow[]>(() => [
+  const [mcpRows, setMcpRows] = useState<CredentialDraftRow[]>(() => [
     createSecretDraftRow('mcp-secret-row-0'),
   ])
   const mcpNextRowId = useRef(1)
@@ -98,7 +107,7 @@ function CreateSecretPageContent() {
   }, [scope, searchParams])
 
   const [recipeName, setRecipeName] = useState(prefillRecipeName)
-  const [recipeRows, setRecipeRows] = useState<SecretDraftRow[]>(
+  const [recipeRows, setRecipeRows] = useState<CredentialDraftRow[]>(
     prefillRecipeKeys.length > 0
       ? prefillRecipeKeys.map((key, index) =>
           createSecretDraftRow(`recipe-secret-row-${index}`, key)
@@ -159,12 +168,7 @@ function CreateSecretPageContent() {
         if (cancelled) return
         setMcpCredentialSchema(schema)
         if (schema.keys.length === 0) return
-        setMcpRows(current => {
-          if (current.some(row => row.secretKey.trim() || row.value.trim())) return current
-          return schema.keys.map((key, index) =>
-            createSecretDraftRow(`mcp-schema-row-${index}`, key.name, '', key.label || key.name)
-          )
-        })
+        setMcpRows(current => reconcileCredentialRows(current, schema.keys))
       })
       .catch(() => {
         if (!cancelled) setMcpCredentialSchema(null)
@@ -191,8 +195,7 @@ function CreateSecretPageContent() {
     )
     const schemaComplete =
       !mcpCredentialSchema?.required ||
-      mcpRows.length === mcpCredentialSchema.keys.length &&
-        mcpRows.every(row => row.secretKey.trim().length > 0 && row.value.trim().length > 0)
+      areRequiredCredentialRowsComplete(mcpRows, mcpCredentialSchema.keys)
     return hasValues && schemaComplete && !saving
   }, [mcpCredentialSchema, mcpName, mcpRows, saving])
 
@@ -507,8 +510,13 @@ function CreateSecretPageContent() {
                     ) : mcpCredentialSchema?.keys.length ? (
                       <div className="cu-form-stack">
                         {mcpRows.map((row, index) => (
-                          <Field key={row.id} label={row.label || row.secretKey}>
+                          <Field
+                            key={row.id}
+                            htmlFor={`${row.id}-value`}
+                            label={row.label || row.secretKey}
+                          >
                             <TextInput
+                              id={`${row.id}-value`}
                               value={row.value}
                               onChange={event =>
                                 updateMcpDraftRow(index, 'value', event.target.value)

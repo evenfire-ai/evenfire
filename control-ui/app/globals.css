@@ -46,6 +46,7 @@
   --cu-selection-text: #ffffff;
   --cu-radius: 12px;
   --cu-radius-sm: 8px;
+  --cu-radius-pill: 999px;
   --cu-space-1: 0.35rem;
   --cu-space-2: 0.5rem;
   --cu-space-3: 0.75rem;
@@ -267,7 +268,7 @@ body.cu-body {
 
 .cu-connector-credentials-form {
   display: grid;
-  gap: 0.75rem;
+  gap: var(--cu-space-3);
 }
 
 .cu-form-grid {
@@ -1468,7 +1469,7 @@ textarea.cu-input {
   right: auto;
   z-index: 60;
   width: max-content;
-  max-width: calc(100vw - 1rem);
+  max-width: calc(100vw - var(--cu-space-4));
 }
 
 .cu-kebab__item {
@@ -1679,7 +1680,7 @@ textarea.cu-input {
 }
 
 .cu-marketplace-tabs {
-  margin-inline-start: 1rem;
+  margin-inline-start: var(--cu-space-4);
 }
 
 .cu-table-wrap {
@@ -1954,9 +1955,9 @@ textarea.cu-input {
 }
 
 .cu-connector-detail .cu-expandable-detail__fields {
-  flex: 0 1 45rem;
+  flex: 1 1 auto;
   width: 100%;
-  max-width: 45rem;
+  max-width: none;
 }
 
 .cu-connector-detail .cu-expandable-detail__description {
@@ -1973,7 +1974,72 @@ textarea.cu-input {
 
 .cu-connector-detail .cu-expandable-field > .cu-link {
   max-width: 100%;
-  overflow-wrap: anywhere;
+}
+
+.cu-connector-detail__metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  flex: 0 0 100%;
+  gap: var(--cu-space-4);
+  min-width: 0;
+}
+
+.cu-connector-copyable-value {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-connector-copyable-value > .cu-expandable-field__code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-copyable-value__button {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+}
+
+.cu-connector-access-field {
+  gap: var(--cu-space-2);
+}
+
+.cu-connector-access-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.cu-connector-context-access__list li {
+  align-items: center;
+}
+
+.cu-connector-context-access__name {
+  flex: 1 1 auto;
+}
+
+.cu-connector-context-access__name > .cu-link {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-context-access__remove {
+  width: var(--cu-space-5);
+  height: var(--cu-space-5);
+  flex: 0 0 auto;
+}
+
+.cu-connector-context-access__add {
+  width: 100%;
+  margin-top: auto;
 }
 
 .cu-expandable-detail__fields {
@@ -2057,8 +2123,8 @@ textarea.cu-input {
 }
 
 .cu-context-connector-bindings__tag .cu-btn--icon {
-  width: 1.25rem;
-  height: 1.25rem;
+  width: var(--cu-space-5);
+  height: var(--cu-space-5);
 }
 
 .cu-context-connector-bindings__hint {
@@ -2511,6 +2577,20 @@ textarea.cu-input {
   max-width: 100%;
 }
 
+.cu-registry-install-entry-heading {
+  justify-content: flex-start;
+}
+
+.cu-registry-install-entry-description,
+.cu-registry-install-egress-detail {
+  margin-top: var(--cu-space-2);
+}
+
+.cu-registry-install-validation-list {
+  margin: var(--cu-space-2) 0 0;
+  padding-left: var(--cu-space-5);
+}
+
 .cu-registry-context-access {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
@@ -2523,7 +2603,7 @@ textarea.cu-input {
 
 .cu-registry-context-access__intro {
   display: grid;
-  gap: 0.15rem;
+  gap: calc(var(--cu-space-1) / 2);
   margin-top: var(--cu-space-1);
 }
 
@@ -2553,8 +2633,7 @@ textarea.cu-input {
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background:
-    linear-gradient(145deg, rgba(var(--cu-accent-rgb), 0.09), transparent 52%),
-    var(--cu-surface);
+    linear-gradient(145deg, rgba(var(--cu-accent-rgb), 0.09), transparent 52%), var(--cu-surface);
   overflow: hidden;
 }
 
@@ -2570,8 +2649,7 @@ textarea.cu-input {
 
 .cu-registry-context-access__group[data-kind='teams'] {
   background:
-    linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%),
-    var(--cu-surface);
+    linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
 .cu-registry-context-access__group[data-kind='teams']::before {
@@ -2580,8 +2658,7 @@ textarea.cu-input {
 
 .cu-registry-context-access__group[data-kind='agents'] {
   background:
-    linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%),
-    var(--cu-surface);
+    linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
 .cu-registry-context-access__group[data-kind='agents']::before {
@@ -2607,11 +2684,11 @@ textarea.cu-input {
 .cu-registry-context-access__heading span {
   display: inline-grid;
   place-items: center;
-  min-width: 1.5rem;
-  min-height: 1.5rem;
-  padding: 0.1rem 0.4rem;
+  min-width: calc(var(--cu-space-3) * 2);
+  min-height: calc(var(--cu-space-3) * 2);
+  padding: calc(var(--cu-space-1) / 3) var(--cu-space-1);
   border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
-  border-radius: 999px;
+  border-radius: var(--cu-radius-pill);
   background: rgba(var(--cu-accent-rgb), 0.14);
   color: var(--cu-text-muted);
   font-size: 0.75rem;
@@ -2643,15 +2720,15 @@ textarea.cu-input {
 .cu-registry-context-access__list li {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: var(--cu-space-2);
   min-width: 0;
 }
 
 .cu-registry-context-access__list li::before {
-  width: 0.35rem;
-  height: 0.35rem;
+  width: var(--cu-space-1);
+  height: var(--cu-space-1);
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: var(--cu-radius-pill);
   background: rgba(var(--cu-accent-rgb), 0.75);
   content: '';
 }
@@ -2660,7 +2737,9 @@ textarea.cu-input {
   background: rgba(var(--cu-success-rgb), 0.8);
 }
 
-.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__list li::before {
+.cu-registry-context-access__group[data-kind='agents']
+  .cu-registry-context-access__list
+  li::before {
   background: rgba(var(--cu-warning-rgb), 0.8);
 }
 
@@ -2683,7 +2762,7 @@ textarea.cu-input {
   display: grid;
   grid-template-columns: minmax(7rem, 10rem) minmax(0, 1fr);
   gap: var(--cu-space-3);
-  padding: 0.65rem 0;
+  padding: var(--cu-space-3) 0;
   border-top: 1px solid var(--cu-border-subtle);
   color: var(--cu-text-soft);
   font-size: 0.875rem;
@@ -2706,17 +2785,17 @@ textarea.cu-input {
 .cu-modal-panel--install-success {
   width: min(27rem, calc(100vw - (var(--cu-space-4) * 2)));
   justify-items: center;
-  padding: 1.6rem;
+  padding: calc(var(--cu-space-5) + var(--cu-space-1));
   text-align: center;
 }
 
 .cu-registry-install-success__icon {
   display: grid;
   place-items: center;
-  width: 3.25rem;
-  height: 3.25rem;
+  width: calc((var(--cu-space-4) * 2) + var(--cu-space-5));
+  height: calc((var(--cu-space-4) * 2) + var(--cu-space-5));
   border: 1px solid rgba(var(--cu-success-rgb), 0.48);
-  border-radius: 999px;
+  border-radius: var(--cu-radius-pill);
   background: rgba(var(--cu-success-rgb), 0.14);
   color: var(--cu-success);
 }
@@ -7425,18 +7504,18 @@ textarea.cu-input {
 .cu-llm-config__block-toggle:focus-visible {
   outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
   outline-offset: 3px;
-  border-radius: 4px;
+  border-radius: calc(var(--cu-radius-sm) / 2);
 }
 
 .cu-llm-config__block-toggle-title {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: var(--cu-space-1);
 }
 
 .cu-llm-config__block-toggle svg {
   color: var(--cu-text-muted);
-  transition: transform 150ms ease;
+  transition: transform var(--cu-control-transition) ease;
 }
 
 .cu-llm-config__block-toggle svg.is-expanded {
@@ -10116,12 +10195,12 @@ textarea.cu-input {
 
 .cu-discovery-bar > .cu-tabs {
   flex: 0 1 auto;
-  margin: 1.25rem 0 1rem;
+  margin: var(--cu-space-5) 0 var(--cu-space-4);
 }
 
 .cu-discovery-bar > .cu-discovery-status {
-  margin-top: 1.25rem;
-  margin-bottom: 1rem;
+  margin-top: var(--cu-space-5);
+  margin-bottom: var(--cu-space-4);
 }
 
 .cu-discovery-status {
@@ -10131,7 +10210,7 @@ textarea.cu-input {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--cu-space-2);
-  padding: 0 1rem;
+  padding: 0 var(--cu-space-4);
   font-size: 0.8125rem;
   color: var(--cu-text-muted);
 }

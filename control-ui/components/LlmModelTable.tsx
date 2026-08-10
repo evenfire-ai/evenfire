@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import type { LlmAllowedModel } from '@lib/api'
 import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
+import { type SortDirection, TableSortHeader, compareNullsLast, toggleSort } from '@lib/tableSort'
 import { FilterSelect } from './FilterSelect'
 import type { LlmModelTableProps } from './LlmModelTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
@@ -18,7 +19,6 @@ import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
 import { SelectInput } from './ui'
 
 type ModelSortKey = 'model' | 'vendor' | 'displayName' | 'contextWindow'
-type SortDirection = 'asc' | 'desc'
 
 // Natural default direction per column: numeric columns read best descending
 // (largest context window first); text columns read best ascending.
@@ -42,19 +42,6 @@ function compareModelByKey(key: ModelSortKey) {
         return (a.context_window_tokens ?? 0) - (b.context_window_tokens ?? 0)
     }
   }
-}
-
-// Null / undefined values always trail known values regardless of sort
-// direction. They represent missing data, not a value at either extreme, so
-// flipping asc/desc must not move them.
-function compareNullsLast(
-  aValue: number | null | undefined,
-  bValue: number | null | undefined
-): number | null {
-  if (aValue == null && bValue == null) return 0
-  if (aValue == null) return 1
-  if (bValue == null) return -1
-  return null
 }
 
 function compareModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
@@ -214,39 +201,18 @@ export function LlmModelTable({
     })
   }
 
-  function toggleSort(key: ModelSortKey) {
-    if (sortKey === key) {
-      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setSortKey(key)
-    setSortDir(MODEL_SORT_DEFAULT_DIR[key])
-  }
-
-  function renderSortHeader(key: ModelSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDir === 'asc' ? '↑' : '↓') : ''
-    const nextDirectionLabel = isActive
-      ? sortDir === 'asc'
-        ? 'descending'
-        : 'ascending'
-      : MODEL_SORT_DEFAULT_DIR[key] === 'asc'
-        ? 'ascending'
-        : 'descending'
-    const buttonLabel = `${label}${indicator ? ` ${indicator}` : ''}`
-    const ariaLabel = `Sort by ${label.toLowerCase()} ${nextDirectionLabel}`
-    return (
-      <button
-        type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={ariaLabel}
-        aria-pressed={isActive}
-      >
-        {buttonLabel}
-      </button>
-    )
-  }
+  const renderSortHeader = (key: ModelSortKey, label: string) => (
+    <TableSortHeader
+      activeKey={sortKey}
+      defaultDirections={MODEL_SORT_DEFAULT_DIR}
+      direction={sortDir}
+      label={label}
+      onSort={nextKey =>
+        toggleSort(nextKey, sortKey, MODEL_SORT_DEFAULT_DIR, setSortKey, setSortDir)
+      }
+      sortKey={key}
+    />
+  )
 
   const modelColumns: TableHeaderColumn[] = [
     { key: 'model', label: renderSortHeader('model', 'Model'), minWidth: '15rem' },

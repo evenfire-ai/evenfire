@@ -1,17 +1,8 @@
-// control-ui/components/CreateApiKeyModal.tsx
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CreateRegistryApiKeyInput } from '../lib/api'
 import { Button, CheckboxField, Field, TextInput } from './ui'
-
-// control-ui/components/CreateApiKeyModal.tsx
-
-// control-ui/components/CreateApiKeyModal.tsx
-
-// control-ui/components/CreateApiKeyModal.tsx
-
-// control-ui/components/CreateApiKeyModal.tsx
 
 const SCOPES: { id: string; label: string; help: string; danger?: boolean }[] = [
   { id: 'registry:read', label: 'read', help: 'View org entries' },

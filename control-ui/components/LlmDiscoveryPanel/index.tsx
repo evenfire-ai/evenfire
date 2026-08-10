@@ -19,6 +19,7 @@ import {
   updateLlmModel,
 } from '@lib/api'
 import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import { type SortDirection, TableSortHeader, compareNullsLast, toggleSort } from '@lib/tableSort'
 import type { LlmDiscoveryPanelProps } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -35,7 +36,6 @@ type ProviderGroupRowProps = {
 }
 
 type ReviewSortKey = 'model' | 'vendor' | 'contextWindow'
-type SortDirection = 'asc' | 'desc'
 
 // Numeric columns lead descending (largest context window first); text columns
 // lead ascending (alphabetical). Picking a different column resets to that
@@ -57,19 +57,6 @@ function compareReviewByKey(key: ReviewSortKey) {
         return (a.context_window_tokens ?? 0) - (b.context_window_tokens ?? 0)
     }
   }
-}
-
-// Null / undefined values always trail known values regardless of sort
-// direction. They represent missing data, not a value at either extreme, so
-// flipping asc/desc must not move them.
-function compareNullsLast(
-  aValue: number | null | undefined,
-  bValue: number | null | undefined
-): number | null {
-  if (aValue == null && bValue == null) return 0
-  if (aValue == null) return 1
-  if (bValue == null) return -1
-  return null
 }
 
 function compareReviewModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
@@ -357,39 +344,18 @@ export function LlmDiscoveryPanel({
     showToast(message, { tone: 'error' })
   }
 
-  function toggleSort(key: ReviewSortKey) {
-    if (sortKey === key) {
-      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setSortKey(key)
-    setSortDir(REVIEW_SORT_DEFAULT_DIR[key])
-  }
-
-  function renderSortHeader(key: ReviewSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDir === 'asc' ? '↑' : '↓') : ''
-    const nextDirectionLabel = isActive
-      ? sortDir === 'asc'
-        ? 'descending'
-        : 'ascending'
-      : REVIEW_SORT_DEFAULT_DIR[key] === 'asc'
-        ? 'ascending'
-        : 'descending'
-    const buttonLabel = `${label}${indicator ? ` ${indicator}` : ''}`
-    const ariaLabel = `Sort by ${label.toLowerCase()} ${nextDirectionLabel}`
-    return (
-      <button
-        type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={ariaLabel}
-        aria-pressed={isActive}
-      >
-        {buttonLabel}
-      </button>
-    )
-  }
+  const renderSortHeader = (key: ReviewSortKey, label: string) => (
+    <TableSortHeader
+      activeKey={sortKey}
+      defaultDirections={REVIEW_SORT_DEFAULT_DIR}
+      direction={sortDir}
+      label={label}
+      onSort={nextKey =>
+        toggleSort(nextKey, sortKey, REVIEW_SORT_DEFAULT_DIR, setSortKey, setSortDir)
+      }
+      sortKey={key}
+    />
+  )
 
   const reviewColumns: TableHeaderColumn[] = [
     {

@@ -391,7 +391,7 @@ export function HostWizard({
             meta: `${secret.metadata?.namespace || HOST_NAMESPACE} · ${providerSummary}`,
           }
         })
-        .filter((option): option is WizardSelectOption => option !== null)
+        .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
     [existingSecrets]
   )

@@ -1,13 +1,14 @@
 'use client'
 
 import React, { Fragment, useMemo, useState } from 'react'
+import { copyTextToClipboard } from '../lib/clipboard'
 import type {
   ConnectorAccessSummary,
   ConnectorContextBinding,
   McpServerStatus,
   McpServerTableProps,
 } from './McpServerTable.types'
-import { type RowAction, RowActionsMenu } from './RowActionsMenu'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { SelectionDropdown } from './SelectionDropdown'
 import { IconCable } from './Sidebar/icons'
@@ -15,7 +16,7 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
+import { IconChevronRight, IconCopy, IconPencil, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
 type ConnectorSortKey = 'name' | 'enabled' | 'status'
@@ -87,30 +88,182 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
   )
 }
 
+function middleEllipsis(value: string, maxLength = 26): string {
+  if (value.length <= maxLength) return value
+  const visibleLength = maxLength - 3
+  const startLength = Math.ceil(visibleLength * 0.56)
+  return `${value.slice(0, startLength)}...${value.slice(-(visibleLength - startLength))}`
+}
+
 function AccessSummary({ summary }: { summary?: ConnectorAccessSummary }) {
   const groups = [
-    { label: 'Agent', items: summary?.agents ?? [] },
-    { label: 'User', items: summary?.users ?? [] },
-    { label: 'Team', items: summary?.teams ?? [] },
+    { key: 'agents', label: 'Agents', items: summary?.agents ?? [] },
+    { key: 'teams', label: 'Teams', items: summary?.teams ?? [] },
+    { key: 'users', label: 'Users', items: summary?.users ?? [] },
   ]
-  const hasAccess = groups.some(group => group.items.length > 0)
-
-  if (!hasAccess) return <span className="cu-muted">No access assigned</span>
 
   return (
-    <div className="cu-expandable-tags">
-      {groups.flatMap(group =>
-        group.items.map(principal => (
-          <span
-            key={`${group.label}-${principal.id}`}
-            className="cu-registry-tag"
-            title={`${group.label}: ${principal.label}`}
-          >
-            {principal.label}
-          </span>
-        ))
+    <>
+      {groups.map(group => (
+        <section
+          className="cu-registry-context-access__group"
+          data-kind={group.key}
+          key={group.key}
+        >
+          <div className="cu-registry-context-access__heading">
+            <h4>{group.label}</h4>
+            <span>{group.items.length}</span>
+          </div>
+          {group.items.length > 0 ? (
+            <ul className="cu-registry-context-access__list">
+              {group.items.map(principal => (
+                <li key={principal.id} title={principal.label}>
+                  <span>{principal.label}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cu-muted">No {group.label.toLowerCase()} have access.</p>
+          )}
+        </section>
+      ))}
+    </>
+  )
+}
+
+function ConnectorContexts({
+  connectorName,
+  namespace,
+  contextRef,
+  contexts,
+  busy,
+  onOpenContext,
+  onAdd,
+  onRemove,
+}: {
+  connectorName: string
+  namespace: string
+  contextRef: string
+  contexts: ConnectorContextBinding[]
+  busy: boolean
+  onOpenContext?: (contextName: string) => void
+  onAdd?: () => void
+  onRemove?: McpServerTableProps['onRemoveFromContext']
+}) {
+  const assignedNames = new Set(contexts.map(context => context.name))
+  const linkedContexts = [
+    ...(contextRef
+      ? [
+          {
+            name: contextRef,
+            removable: assignedNames.has(contextRef),
+          },
+        ]
+      : []),
+    ...contexts
+      .filter(context => context.name !== contextRef)
+      .map(context => ({ name: context.name, removable: true })),
+  ]
+
+  return (
+    <section className="cu-registry-context-access__group" data-kind="contexts">
+      <div className="cu-registry-context-access__heading">
+        <h4>Contexts</h4>
+        <span>{linkedContexts.length}</span>
+      </div>
+      {linkedContexts.length > 0 ? (
+        <ul className="cu-registry-context-access__list cu-connector-context-access__list">
+          {linkedContexts.map(context => (
+            <li key={context.name}>
+              <span className="cu-connector-context-access__name" title={context.name}>
+                {onOpenContext ? (
+                  <button
+                    type="button"
+                    className="cu-link"
+                    onClick={() => onOpenContext(context.name)}
+                  >
+                    {context.name}
+                  </button>
+                ) : (
+                  context.name
+                )}
+              </span>
+              {context.removable && onRemove ? (
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--danger-icon cu-connector-context-access__remove"
+                  disabled={busy}
+                  aria-label={`Remove connector ${connectorName} from context ${context.name}`}
+                  title={`Remove from ${context.name}`}
+                  onClick={() => void onRemove({ namespace, name: connectorName }, context.name)}
+                >
+                  <IconX width={14} height={14} />
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="cu-muted">No contexts linked.</p>
       )}
-    </div>
+      {onAdd ? (
+        <button
+          type="button"
+          className="cu-btn cu-btn--secondary cu-btn--sm cu-connector-context-access__add"
+          disabled={busy}
+          onClick={onAdd}
+        >
+          Add contexts
+        </button>
+      ) : null}
+    </section>
+  )
+}
+
+function CopyableValue({
+  copyKey,
+  copyLabel,
+  value,
+  copied,
+  onCopy,
+  href,
+}: {
+  copyKey: string
+  copyLabel: string
+  value: string
+  copied: boolean
+  onCopy: (copyKey: string, value: string) => void
+  href?: string
+}) {
+  if (!value) return <span className="cu-muted">—</span>
+
+  return (
+    <span className="cu-connector-copyable-value">
+      {href ? (
+        <a
+          className="cu-link cu-expandable-field__code"
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          title={value}
+        >
+          {middleEllipsis(value)}
+        </a>
+      ) : (
+        <span className="cu-expandable-field__code" title={value}>
+          {middleEllipsis(value)}
+        </span>
+      )}
+      <button
+        type="button"
+        className="cu-btn cu-btn--icon cu-btn--ghost cu-connector-copyable-value__button"
+        onClick={() => onCopy(copyKey, value)}
+        aria-label={copied ? `${copyLabel} copied` : `Copy ${copyLabel}`}
+        title={copied ? 'Copied' : `Copy ${copyLabel}`}
+      >
+        <IconCopy width={14} height={14} />
+      </button>
+    </span>
   )
 }
 
@@ -138,6 +291,7 @@ export function McpServerTable({
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
+  const [copiedValueKey, setCopiedValueKey] = useState<string | null>(null)
   const rows = useMemo(
     () =>
       items.map(item => {
@@ -257,6 +411,10 @@ export function McpServerTable({
     if (updatingContextMembershipKey) return
     setSelectedContextNamesToAdd([])
     setServerKeyAddingContexts(null)
+  }
+
+  async function copyValue(copyKey: string, value: string) {
+    if (await copyTextToClipboard(value)) setCopiedValueKey(copyKey)
   }
 
   const isInitialLoad = loading && items.length === 0
@@ -437,108 +595,55 @@ export function McpServerTable({
                               <p className="cu-expandable-detail__description">
                                 {spec.description || 'No description provided.'}
                               </p>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Image</span>
-                                <span className="cu-expandable-field__code">
-                                  {spec.image || '—'}
-                                </span>
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Transport</span>
-                                <TransportBadge type={spec.transport?.type} />
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Default context</span>
-                                {contextRef && onOpenContext ? (
-                                  <button
-                                    type="button"
-                                    className="cu-link"
-                                    onClick={() => onOpenContext(contextRef)}
-                                  >
-                                    {contextRef}
-                                  </button>
-                                ) : (
-                                  <span className="cu-muted">{contextRef || '—'}</span>
-                                )}
-                              </div>
-                              {onAddToContexts && onRemoveFromContext ? (
-                                <div className="cu-expandable-field cu-expandable-field--wide">
-                                  <span className="cu-expandable-field__label">
-                                    Available in contexts
-                                  </span>
-                                  <div className="cu-context-connector-bindings">
-                                    {assignedContexts.length === 0 ? (
-                                      <span className="cu-muted">No contexts assigned</span>
-                                    ) : (
-                                      <div className="cu-expandable-tags">
-                                        {assignedContexts.map(context => (
-                                          <span
-                                            className="cu-registry-tag cu-context-connector-bindings__tag"
-                                            key={context.name}
-                                          >
-                                            {onOpenContext ? (
-                                              <button
-                                                type="button"
-                                                className="cu-link"
-                                                onClick={() => onOpenContext(context.name)}
-                                              >
-                                                {context.name}
-                                              </button>
-                                            ) : (
-                                              context.name
-                                            )}
-                                            <button
-                                              type="button"
-                                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                              disabled={contextMembershipBusy}
-                                              aria-label={`Remove connector ${name} from context ${context.name}`}
-                                              title={`Remove from ${context.name}`}
-                                              onClick={() =>
-                                                void onRemoveFromContext(
-                                                  { namespace, name },
-                                                  context.name
-                                                )
-                                              }
-                                            >
-                                              <IconX width={14} height={14} />
-                                            </button>
-                                          </span>
-                                        ))}
-                                      </div>
-                                    )}
-                                    <button
-                                      type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm"
-                                      disabled={contextMembershipBusy}
-                                      onClick={() => openAddContexts(key)}
-                                    >
-                                      Add contexts
-                                    </button>
-                                  </div>
+                              <div className="cu-connector-detail__metadata">
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">URL</span>
+                                  <CopyableValue
+                                    copyKey={`${key}/url`}
+                                    copyLabel="URL"
+                                    value={spec.transport?.url || ''}
+                                    href={spec.transport?.url}
+                                    copied={copiedValueKey === `${key}/url`}
+                                    onCopy={(copyKey, value) => void copyValue(copyKey, value)}
+                                  />
                                 </div>
-                              ) : null}
-                              <div className="cu-expandable-field cu-expandable-field--wide">
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Image</span>
+                                  <CopyableValue
+                                    copyKey={`${key}/image`}
+                                    copyLabel="image URL"
+                                    value={spec.image || ''}
+                                    copied={copiedValueKey === `${key}/image`}
+                                    onCopy={(copyKey, value) => void copyValue(copyKey, value)}
+                                  />
+                                </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Transport</span>
+                                  <TransportBadge type={spec.transport?.type} />
+                                </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Managed</span>
+                                  <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
+                                </div>
+                              </div>
+                              <div className="cu-expandable-field cu-expandable-field--wide cu-connector-access-field">
                                 <span className="cu-expandable-field__label">Access</span>
-                                <AccessSummary summary={accessByConnectorKey?.[key]} />
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Managed</span>
-                                <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
-                              </div>
-                              <div className="cu-expandable-field cu-expandable-field--wide">
-                                <span className="cu-expandable-field__label">URL</span>
-                                {spec.transport?.url ? (
-                                  <a
-                                    className="cu-link cu-expandable-field__code"
-                                    href={spec.transport.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    {spec.transport.url}
-                                  </a>
-                                ) : (
-                                  <span className="cu-muted">—</span>
-                                )}
+                                <section
+                                  className="cu-registry-context-access cu-connector-access-grid"
+                                  aria-label="Connector access"
+                                >
+                                  <ConnectorContexts
+                                    connectorName={name}
+                                    namespace={namespace}
+                                    contextRef={contextRef}
+                                    contexts={assignedContexts}
+                                    busy={contextMembershipBusy}
+                                    onOpenContext={onOpenContext}
+                                    onAdd={onAddToContexts ? () => openAddContexts(key) : undefined}
+                                    onRemove={onRemoveFromContext}
+                                  />
+                                  <AccessSummary summary={accessByConnectorKey?.[key]} />
+                                </section>
                               </div>
                             </div>
                           </div>
@@ -569,16 +674,7 @@ export function McpServerTable({
             const busy = updatingContextMembershipKey === row.key
             return (
               <div
-                style={{
-                  position: 'fixed',
-                  inset: 0,
-                  background: 'rgba(0, 0, 0, 0.6)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  zIndex: 1000,
-                  padding: '1rem',
-                }}
+                className="cu-modal-backdrop"
                 role="presentation"
                 onClick={event => {
                   if (event.target === event.currentTarget && !busy) closeAddContexts()
@@ -587,16 +683,14 @@ export function McpServerTable({
                 <div
                   className="cu-modal-panel cu-modal-panel--selection"
                   role="dialog"
+                  aria-modal="true"
                   aria-labelledby="add-connector-context-title"
                   onClick={event => event.stopPropagation()}
                 >
                   <div className="cu-modal-panel__head">
-                    <strong
-                      id="add-connector-context-title"
-                      style={{ fontSize: '1rem', lineHeight: 1.35 }}
-                    >
+                    <h3 id="add-connector-context-title" className="cu-modal-panel__title">
                       Add connector to contexts
-                    </strong>
+                    </h3>
                     <button
                       type="button"
                       className="cu-btn cu-btn--icon cu-btn--ghost"

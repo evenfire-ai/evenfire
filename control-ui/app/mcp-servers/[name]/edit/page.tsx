@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
@@ -62,7 +62,9 @@ function resolveRegistryCredentialSource(
 ): { name: string; version: string } | undefined {
   const labels = (metadata?.labels ?? {}) as Record<string, unknown>
   const annotations = (metadata?.annotations ?? {}) as Record<string, unknown>
-  const name = String(annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? '').trim()
+  const name = String(
+    annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? ''
+  ).trim()
   const version = String(
     annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version'] ?? ''
   ).trim()
@@ -190,7 +192,9 @@ export default function EditMcpServerPage() {
             : [],
       })
       setContextAccessError(
-        failed ? 'Some access information could not be loaded. The lists below may be incomplete.' : ''
+        failed
+          ? 'Some access information could not be loaded. The lists below may be incomplete.'
+          : ''
       )
       setLoadingContextAccess(false)
     })()
@@ -225,7 +229,10 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
-  const registryCredentialSource = resolveRegistryCredentialSource(server?.metadata)
+  const registryCredentialSource = useMemo(
+    () => resolveRegistryCredentialSource(server?.metadata),
+    [server?.metadata]
+  )
 
   return (
     <AuthGate>

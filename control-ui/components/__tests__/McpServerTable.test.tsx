@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { McpServerTable } from '../McpServerTable'
 
 afterEach(() => {
@@ -230,7 +230,7 @@ describe('McpServerTable — connector access summaries', () => {
     ).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('renders full principal names as chips in the expanded details', () => {
+  it('renders agents, teams, and users in marketplace-style access groups', () => {
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
@@ -254,6 +254,11 @@ describe('McpServerTable — connector access summaries', () => {
 
     fireEvent.click(screen.getByText('airtable-server').closest('tr')!)
 
+    const access = screen.getByRole('region', { name: 'Connector access' })
+    expect(access).toHaveTextContent('Agents')
+    expect(access).toHaveTextContent('Teams')
+    expect(access).toHaveTextContent('Users')
+
     for (const label of [
       'agent-alpha',
       'bravo',
@@ -273,7 +278,46 @@ describe('McpServerTable — connector access summaries', () => {
     render(<McpServerTable items={items} />)
 
     fireEvent.click(screen.getByText('unused-server').closest('tr')!)
-    expect(screen.getByText('No access assigned')).toBeInTheDocument()
+    expect(screen.getByText('No agents have access.')).toBeInTheDocument()
+    expect(screen.getByText('No teams have access.')).toBeInTheDocument()
+    expect(screen.getByText('No users have access.')).toBeInTheDocument()
+  })
+
+  it('orders URL, image, transport, and managed together and copies both full URLs', async () => {
+    const image =
+      'us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-3cbdf33'
+    const url = 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+
+    const metadata = document.querySelector('.cu-connector-detail__metadata')
+    expect(metadata).not.toBeNull()
+    const labels = Array.from(metadata!.querySelectorAll('.cu-expandable-field__label')).map(
+      label => label.textContent
+    )
+    expect(labels).toEqual(['URL', 'Image', 'Transport', 'Managed'])
+    expect(metadata).not.toHaveTextContent('Default context')
+
+    const compactUrl = screen.getByTitle(url)
+    expect(compactUrl.textContent).toContain('...')
+    expect(compactUrl).toHaveAttribute('href', url)
+    const compactImage = screen.getByTitle(image)
+    expect(compactImage.textContent).toContain('...')
+    expect(compactImage.textContent).not.toBe(image)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy image URL' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(image))
+    expect(screen.getByRole('button', { name: 'image URL copied' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy URL' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(url))
+    expect(screen.getByRole('button', { name: 'URL copied' })).toBeInTheDocument()
   })
 
   it('filters rows by agent, user, and team access labels', () => {
@@ -333,7 +377,8 @@ describe('McpServerTable — context membership', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
 
-    expect(screen.getByText('Available in contexts')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Contexts' })).toBeInTheDocument()
+    expect(screen.queryByText('Default', { exact: true })).not.toBeInTheDocument()
     expect(screen.getByText('research')).toBeInTheDocument()
     fireEvent.click(
       screen.getByRole('button', {
@@ -347,7 +392,8 @@ describe('McpServerTable — context membership', () => {
     )
   })
 
-  it('uses the Context detail selection modal to add the connector to more contexts', () => {
+  it('uses the Context detail selection modal to add the connector to more contexts', async () => {
+    const onAddToContexts = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
@@ -356,7 +402,7 @@ describe('McpServerTable — context membership', () => {
           { name: 'research', mcpServers: ['airtable-server'] },
           { name: 'sales', description: 'Sales tools', mcpServers: [] },
         ]}
-        onAddToContexts={vi.fn().mockResolvedValue(undefined)}
+        onAddToContexts={onAddToContexts}
         onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}
       />
     )
@@ -364,8 +410,21 @@ describe('McpServerTable — context membership', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add contexts' }))
 
-    expect(screen.getByRole('dialog', { name: 'Add connector to contexts' })).toBeInTheDocument()
-    expect(screen.getByText('Contexts')).toBeInTheDocument()
-    expect(screen.getByText('No available contexts.')).not.toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'Add connector to contexts' })
+    expect(dialog).toBeInTheDocument()
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog.parentElement).toHaveClass('cu-modal-backdrop')
+    expect(screen.getByLabelText('Contexts')).toBeInTheDocument()
+    expect(screen.queryByText('No available contexts.')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('option', { name: 'sales' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to context' }))
+
+    await waitFor(() =>
+      expect(onAddToContexts).toHaveBeenCalledWith(
+        { namespace: 'mcp-server', name: 'airtable-server' },
+        ['sales']
+      )
+    )
   })
 })
