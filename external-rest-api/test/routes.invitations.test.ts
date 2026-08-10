@@ -31,7 +31,7 @@ describe('routes/invitations', () => {
     return app
   }
 
-  it('sets invitation password by minting an invitation session from the link token', async () => {
+  it('clears the revoked invitation session after setting the password', async () => {
     invitationsServiceMock.acceptInvitation.mockResolvedValue({
       data: {
         accepted: true,
@@ -57,8 +57,13 @@ describe('routes/invitations', () => {
       })
       .expect(200)
 
-    expect(res.body).toEqual({ id: 'inv-1', passwordUpdated: true })
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=invited-session-token')
+    expect(res.body).toEqual({
+      id: 'inv-1',
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(String(res.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(res.headers['set-cookie'])).not.toContain('invited-session-token')
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
     expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledWith(

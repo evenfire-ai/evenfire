@@ -9,7 +9,7 @@ import {
   listPendingInvitations,
   setupInvitationPassword,
 } from '../services/invitationsService.js'
-import { setProfileSessionCookie } from '../sessionCookie.js'
+import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
 
 const tokenLookupRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 })
 const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
@@ -162,8 +162,8 @@ export function createInvitationsRouter(): Router {
         sendInvitationPasswordError(res, result.error)
         return
       }
-      setProfileSessionCookie(req, res, authResult.auth.sessionToken)
-      res.status(200).json(result.data)
+      clearProfileSessionCookie(req, res)
+      res.status(200).json({ ...result.data, reauthenticationRequired: true })
     } catch (error) {
       next(error)
     }
