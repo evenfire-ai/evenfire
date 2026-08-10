@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
 import { ControlApiError } from '../controlApiClient.js'
+import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
   const app = express()
@@ -60,5 +61,51 @@ describe('External REST public error contract', () => {
       retryable: true,
     })
     expect(JSON.stringify(response.body)).not.toContain('bucket-key')
+  })
+
+  it('rebuilds every forwarded route class from a bounded typed envelope', () => {
+    const sentinel = 'postgres://secret@internal/var/run/service.sock'
+    for (const status of [400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504]) {
+      const sanitized = sanitizeControlApiPublicError(
+        new ControlApiError(sentinel, status, {
+          error: {
+            code: status === 409 ? 'access_path_required' : 'made_up_internal_code',
+            message: sentinel,
+            correlationId: `bad/${sentinel}`,
+            details: { sql: sentinel, path: sentinel, secret: sentinel },
+          },
+        }),
+        new Set([status])
+      )
+
+      expect(sanitized?.status).toBe(status)
+      expect(JSON.stringify(sanitized?.body)).not.toContain(sentinel)
+      expect(JSON.stringify(sanitized?.body)).not.toContain('made_up_internal_code')
+    }
+  })
+
+  it('preserves only bounded access-path descriptors for an ambiguity response', () => {
+    const pathId = `ap1_${'a'.repeat(43)}`
+    const sanitized = sanitizeControlApiPublicError(
+      new ControlApiError('raw', 409, {
+        error: {
+          code: 'access_path_required',
+          message: 'raw',
+          details: {
+            paths: [{ id: pathId, kind: 'team', teamId: 'team-safe' }],
+            sql: 'SELECT secret',
+          },
+        },
+      }),
+      new Set([409])
+    )
+
+    expect(sanitized?.body).toMatchObject({
+      error: {
+        code: 'access_path_required',
+        details: { paths: [{ id: pathId, kind: 'team', teamId: 'team-safe' }] },
+      },
+    })
+    expect(JSON.stringify(sanitized?.body)).not.toContain('SELECT secret')
   })
 })

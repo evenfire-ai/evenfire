@@ -55,4 +55,26 @@ describe('aggregate access forwarding', () => {
     })
     expect(JSON.stringify(mocks.controlApiRequest.mock.calls)).not.toContain('teamId')
   })
+
+  it('does not forward arbitrary upstream error fields from the access route', async () => {
+    const { ControlApiError } = await import('../controlApiClient.js')
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('raw', 503, {
+        error: {
+          code: 'authority_unavailable',
+          message: 'postgres://secret@internal',
+          details: { path: '/var/run/internal' },
+        },
+      })
+    )
+
+    const response = await request(app())
+      .get('/me/access/catalog')
+      .set('authorization', 'Bearer user-session')
+
+    expect(response.status).toBe(503)
+    expect(response.body.error.code).toBe('authority_unavailable')
+    expect(JSON.stringify(response.body)).not.toContain('postgres')
+    expect(JSON.stringify(response.body)).not.toContain('/var/run/internal')
+  })
 })

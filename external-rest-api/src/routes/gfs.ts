@@ -2,7 +2,8 @@ import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -23,10 +24,9 @@ const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 50
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
+  const sanitized = sanitizeControlApiPublicError(error, PROPAGATED)
+  if (sanitized) {
+    res.status(sanitized.status).json(sanitized.body)
     return
   }
   next(error)

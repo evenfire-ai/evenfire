@@ -1,22 +1,16 @@
 import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import { controlApiRequest } from '../controlApiClient.js'
+import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 function forwardAccessError(error: unknown, res: Response, next: NextFunction): void {
-  if (
-    error instanceof ControlApiError &&
-    [400, 401, 403, 404, 409, 429, 503].includes(error.status)
-  ) {
-    res
-      .status(error.status)
-      .json(
-        error.body && typeof error.body === 'object'
-          ? error.body
-          : {
-              error: { code: 'authority_unavailable', message: 'Request failed.', retryable: true },
-            }
-      )
+  const sanitized = sanitizeControlApiPublicError(
+    error,
+    new Set([400, 401, 403, 404, 409, 429, 503])
+  )
+  if (sanitized) {
+    res.status(sanitized.status).json(sanitized.body)
     return
   }
   next(error)

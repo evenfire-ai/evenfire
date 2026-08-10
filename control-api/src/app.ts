@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
+import { sendPublicApiError } from './http/publicApiError.js'
 import { K8sGateway } from './k8s.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from './middleware/controlUIAuth.js'
 import { correlationIdMiddleware } from './middleware/correlationId.js'
@@ -290,6 +291,31 @@ export function createApp(gateway: K8sGateway) {
         },
         'forwarded client error from upstream'
       )
+      if (req.originalUrl.startsWith('/api/v1/external')) {
+        const publicCode =
+          errStatus === 401
+            ? 'invalid_session'
+            : errStatus === 403
+              ? 'forbidden'
+              : errStatus === 404
+                ? 'not_found'
+                : errStatus === 429
+                  ? 'rate_limited'
+                  : 'invalid_request'
+        sendPublicApiError(
+          req,
+          res,
+          errStatus as number,
+          publicCode,
+          errStatus === 404
+            ? 'The resource was not found.'
+            : errStatus === 429
+              ? 'Too many requests; retry later.'
+              : 'The request could not be completed.',
+          errStatus === 429
+        )
+        return
+      }
       res.status(errStatus as number).json({
         error: err instanceof Error ? err.message : 'Bad Request',
         correlationId,
