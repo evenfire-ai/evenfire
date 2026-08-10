@@ -77,6 +77,8 @@ import {
 // requested scopes against the caller's grants before issuance, so requesting
 // the wake scope never widens a caller who was not granted it.
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
+const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
+  'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   const value = rawValue.trim()
@@ -93,6 +95,17 @@ function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   if (url.pathname !== '/' || url.search) return null
   url.hash = ''
   return url.toString().replace(/\/$/, '')
+}
+
+function requireProfileUiBaseUrlForBrowserAction(): string {
+  if (!config.desktopProfileUiBaseUrlExplicit) {
+    return config.desktopProfileUiBaseUrl
+  }
+  const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+  if (!explicitBaseUrl) {
+    throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
+  }
+  return explicitBaseUrl
 }
 
 /**
@@ -814,10 +827,8 @@ export class AppService {
 
   async openForgotPassword(email: string): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    const profileUiUrl = new URL(
-      '/forgot-password',
-      `${config.desktopProfileUiBaseUrl.replace(/\/+$/, '')}/`
-    )
+    const profileUiBaseUrl = requireProfileUiBaseUrlForBrowserAction()
+    const profileUiUrl = new URL('/forgot-password', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (normalizedEmail) profileUiUrl.searchParams.set('email', normalizedEmail)
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
@@ -853,7 +864,7 @@ export class AppService {
     if (config.desktopProfileUiBaseUrlExplicit) {
       const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
       if (!explicitBaseUrl) {
-        throw new Error('Cannot resolve the configured Profile UI URL for this desktop session')
+        throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
       }
       return explicitBaseUrl
     }

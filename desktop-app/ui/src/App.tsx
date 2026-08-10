@@ -33,6 +33,7 @@ import {
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
+  findPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   removePendingSandboxUiDeepLink,
@@ -67,6 +68,61 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+}
+
+const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
+  'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'Unknown error')
+}
+
+function errorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return ''
+  const record = error as { code?: unknown; cause?: { code?: unknown } }
+  return String(record.code || record.cause?.code || '').toUpperCase()
+}
+
+function isTransientSandboxUiTeamContextError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase()
+  if (
+    /\b(400|401|403|404)\b/.test(message) ||
+    message.includes('access denied') ||
+    message.includes('authenticat') ||
+    message.includes('forbidden') ||
+    message.includes('not a member') ||
+    message.includes('permission') ||
+    message.includes('select a team') ||
+    message.includes('teamid is required') ||
+    message.includes('validation')
+  ) {
+    return false
+  }
+
+  const code = errorCode(error)
+  if (TRANSIENT_TEAM_CONTEXT_ERROR_CODES.has(code)) return true
+
+  return (
+    message.includes('connection refused') ||
+    message.includes('connection reset') ||
+    message.includes('fetch failed') ||
+    message.includes('network error') ||
+    message.includes('socket hang up') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('timed out') ||
+    message.includes('timeout')
+  )
 }
 
 function getInitialThemeMode(): ThemeMode {
@@ -177,6 +233,7 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
@@ -275,6 +332,7 @@ export function App() {
     setPendingSandboxUiDeepLinks([])
     processingSandboxUiDeepLinkIdRef.current = null
     launchingSandboxUiDeepLinkRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -406,6 +464,7 @@ export function App() {
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -416,7 +475,11 @@ export function App() {
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
-    (pending: PendingSandboxUiDeepLink, message: string, tone: 'info' | 'error' = 'error') => {
+    (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      tone: 'info' | 'error' = 'error'
+    ): boolean => {
       clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
@@ -426,7 +489,7 @@ export function App() {
         )
         setPendingSandboxUiDeepLinkState(next)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
-        return
+        return true
       }
       const next = deferPendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
@@ -435,6 +498,7 @@ export function App() {
       )
       setPendingSandboxUiDeepLinkState(next)
       vm.pushToast(message, tone)
+      return false
     },
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
@@ -467,6 +531,20 @@ export function App() {
       }
     },
     [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+  )
+
+  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+    async (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      launchContext: PendingSandboxUiDeepLinkLaunch,
+      tone: 'info' | 'error' = 'error'
+    ) => {
+      if (deferSandboxUiDeepLink(pending, message, tone)) {
+        await restoreSandboxUiDeepLinkTeam(launchContext)
+      }
+    },
+    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
@@ -530,21 +608,73 @@ export function App() {
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
-      const originalTeamId = vm.getCurrentTeamId()
-      let switchedTeam = false
+      const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
+      const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      let switchedTeam = Boolean(
+        restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
+      )
+      const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
+        if (
+          restoreTeamId &&
+          pending.retryCount &&
+          pending.link.teamId &&
+          currentTeamId !== pending.link.teamId
+        ) {
+          sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          clearSandboxUiDeepLinkProcessing(pending.link.id)
+          const next = failPendingSandboxUiDeepLink(
+            pendingSandboxUiDeepLinksRef.current,
+            pending.link.id,
+            SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE
+          )
+          setPendingSandboxUiDeepLinkState(next)
+          vm.pushToast(
+            `Could not open app link: ${SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE}`,
+            'error'
+          )
+          return
+        }
+        if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
-            switchedTeam = await vm.handleEnsureTeamContext({
+            const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
             })
+            switchedTeam = switchedTeam || didSwitchTeam
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
           } catch (error) {
             switchedTeam =
-              originalTeamId !== pending.link.teamId &&
-              vm.getCurrentTeamId() === pending.link.teamId
+              switchedTeam ||
+              (originalTeamId !== pending.link.teamId &&
+                vm.getCurrentTeamId() === pending.link.teamId)
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
+            if (isTransientSandboxUiTeamContextError(error)) {
+              const launchContext: PendingSandboxUiDeepLinkLaunch = {
+                linkId: pending.link.id,
+                requestId: 0,
+                generation: processingGeneration,
+                originalTeamId,
+                linkTeamId: pending.link.teamId,
+                switchedTeam,
+                conversationOrigin: pending.conversationOrigin,
+              }
+              await deferSandboxUiDeepLinkUntilTerminal(
+                pending,
+                `Could not switch to the linked team yet: ${errorMessage(
+                  error
+                )}. This link will retry shortly.`,
+                launchContext,
+                'info'
+              )
+              return
+            }
             throw error
           }
         }
@@ -567,10 +697,10 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
           }
-          await restoreSandboxUiDeepLinkTeam(launchContext)
-          deferSandboxUiDeepLink(
+          await deferSandboxUiDeepLinkUntilTerminal(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
+            launchContext,
             'info'
           )
           return
@@ -617,7 +747,8 @@ export function App() {
     activeSandboxUiApp,
     bootSplashLoading,
     closeActiveSandboxUiEmbedForHandoff,
-    deferSandboxUiDeepLink,
+    clearSandboxUiDeepLinkProcessing,
+    deferSandboxUiDeepLinkUntilTerminal,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
@@ -628,6 +759,7 @@ export function App() {
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
     vm.pushToast,
+    setPendingSandboxUiDeepLinkState,
   ])
 
   React.useEffect(() => {
@@ -662,14 +794,16 @@ export function App() {
         await acknowledgeSandboxUiDeepLink(launch.linkId)
         return
       }
-      await restoreSandboxUiDeepLinkTeam(launch)
-      deferSandboxUiDeepLink(pending, result.message || 'The native app view did not mount')
+      await deferSandboxUiDeepLinkUntilTerminal(
+        pending,
+        result.message || 'The native app view did not mount',
+        launch
+      )
     },
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLink,
-      restoreSandboxUiDeepLinkTeam,
+      deferSandboxUiDeepLinkUntilTerminal,
     ]
   )
 
@@ -707,19 +841,20 @@ export function App() {
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }`
 
-  const pendingSandboxUiConfirmation = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item =>
-        isPendingSandboxUiDeepLinkAwaitingConfirmation(item, vm.authenticatedPrincipalIdentity)
-      )
-    : null
+  const pendingSandboxUiConfirmation =
+    findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinks,
+      vm.authenticatedPrincipalIdentity
+    ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
     : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!identity || !pending) return
     const next = confirmPendingSandboxUiDeepLink(
@@ -732,8 +867,9 @@ export function App() {
 
   const handleDismissSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!pending) return
     void acknowledgeSandboxUiDeepLink(pending.link.id)
