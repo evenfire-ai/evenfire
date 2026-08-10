@@ -466,7 +466,11 @@ export function accessCatalogGrantSql(): string {
  LEFT JOIN authorization_resource_revisions arr
         ON arr.environment_id = $2
        AND arr.resource_type = cp.resource_type
-       AND arr.resource_id = cp.logical_id`
+       AND arr.resource_id = CASE cp.resource_type
+         WHEN 'host' THEN $3::text || '/' || cp.logical_id
+         WHEN 'context' THEN $4::text || '/' || cp.logical_id
+         ELSE cp.logical_id
+       END`
 }
 
 function permissionsToCapabilities(values: unknown): Capability[] {
@@ -894,12 +898,10 @@ function hydrateOperationalSeeds(
 function revisionFor(snapshot: AuthoritySnapshot, seeds: readonly CatalogSeed[]): string {
   const projected = seeds.map(seed => [
     resourceIdentityKey(seed.resource),
-    seed.resource.displayName,
-    seed.resourceRevision ?? null,
+    seed.authorizationResourceRevision,
     seed.relationships.map(relationshipKey).sort(),
     seed.pathSeeds.map(path => [
       pathSeedKey(path),
-      path.teamName ?? null,
       path.currentRole ?? null,
       normalizeCapabilities(path.behavior.capabilities),
       path.behavior.budgetRef,
@@ -1101,7 +1103,12 @@ export async function buildAccessCatalog(
       await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
       snapshot = await loadAuthoritySnapshot(db, claims)
       if (!snapshot) return
-      const grants = await db.query(accessCatalogGrantSql(), [claims.userId, environmentId])
+      const grants = await db.query(accessCatalogGrantSql(), [
+        claims.userId,
+        environmentId,
+        config.hostsNamespace,
+        config.contextsNamespace,
+      ])
       rows = grants.rows as DbSeedRow[]
     })
   } catch {

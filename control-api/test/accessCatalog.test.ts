@@ -90,6 +90,7 @@ function row(overrides: Record<string, unknown> = {}) {
     filesystem_scope_ref: null,
     runtime_ref: null,
     provider_model_policy_ref: null,
+    authorization_resource_revision: 1,
     ...overrides,
   }
 }
@@ -256,6 +257,35 @@ describe('aggregate access catalog', () => {
         code: 'access_path_stale',
       })
     )
+  })
+
+  it('invalidates a cursor when only the canonical resource authorization revision changes', async () => {
+    state.rows = [row({ authorization_resource_revision: 7 })]
+    const first = await buildAccessCatalog(claims, gateway() as never, { limit: 1 })
+    expect(first.nextCursor).toMatch(/^ac2\./)
+
+    state.rows = [row({ authorization_resource_revision: 8 })]
+    await expect(
+      buildAccessCatalog(claims, gateway() as never, { limit: 1, cursor: first.nextCursor })
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<AccessCatalogCursorError>>({
+        code: 'access_path_stale',
+      })
+    )
+  })
+
+  it('does not invalidate a cursor for display-only or content-only changes', async () => {
+    state.rows = [row(), row({ logical_id: 'agent-b', grant_id: 'user-1:agent-b' })]
+    const first = await buildAccessCatalog(claims, gateway() as never, { limit: 1 })
+    expect(first.nextCursor).toMatch(/^ac2\./)
+
+    state.rows = [
+      row({ display_name: 'Renamed host', resource_revision: 'content-99' }),
+      row({ logical_id: 'agent-b', grant_id: 'user-1:agent-b' }),
+    ]
+    await expect(
+      buildAccessCatalog(claims, gateway() as never, { limit: 1, cursor: first.nextCursor })
+    ).resolves.toEqual(expect.objectContaining({ contractVersion: '2' }))
   })
 
   it('emits a path handle that the live resolver accepts for the same current grant', async () => {

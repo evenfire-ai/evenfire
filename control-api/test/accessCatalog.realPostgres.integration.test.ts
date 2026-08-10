@@ -70,7 +70,12 @@ describeRealPostgres('aggregate access catalog real PostgreSQL producer', () => 
   })
 
   it('returns one direct and every active team path in one set-based query with an executable plan', async () => {
-    const result = await dbPool.query(accessCatalogGrantSql(), [userId, 'test:postgres'])
+    const result = await dbPool.query(accessCatalogGrantSql(), [
+      userId,
+      'test:postgres',
+      'mcp-host',
+      'mcp-server',
+    ])
     const hostPaths = result.rows.filter(
       row => row.resource_type === 'host' && row.logical_id === 'shared-host'
     )
@@ -81,7 +86,7 @@ describeRealPostgres('aggregate access catalog real PostgreSQL producer', () => 
 
     const explain = await dbPool.query(
       `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${accessCatalogGrantSql()}`,
-      [userId, 'test:postgres']
+      [userId, 'test:postgres', 'mcp-host', 'mcp-server']
     )
     expect(explain.rows[0]?.['QUERY PLAN']).toBeDefined()
   })
