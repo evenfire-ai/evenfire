@@ -48,6 +48,14 @@ const goodPayload = {
   pathBindings: [{ path: "/org", permissions: ["read"] }],
 };
 
+const DESKTOP_USER_ID = "11111111-1111-4111-8111-111111111111";
+const CONTROL_ADMIN_ID = "22222222-2222-4222-8222-222222222222";
+const linkedAdminAuthority = {
+  desktopUserId: DESKTOP_USER_ID,
+  controlAdminId: CONTROL_ADMIN_ID,
+  authoritySource: "linked-admin",
+};
+
 describe("loadVerificationKey", () => {
   it("FAILS CLOSED when the public key is absent", () => {
     expect(() => loadVerificationKey("")).toThrow(KeyConfigError);
@@ -126,6 +134,62 @@ describe("verifyGfsToken", () => {
 
   it("REJECTS a garbage token string", () => {
     expect(() => verifyGfsToken("not-a-jwt", { key, audience: AUD })).toThrow(GfsAuthError);
+  });
+
+  it("accepts a complete signed linked-admin broker claim without conflating token subject and actor", () => {
+    const claims = verifyGfsToken(
+      sign({
+        ...goodPayload,
+        sub: CONTROL_ADMIN_ID,
+        principalType: "control-admin",
+        brokeredAuthority: linkedAdminAuthority,
+      }),
+      { key, audience: AUD }
+    );
+
+    expect(claims.sub).toBe(CONTROL_ADMIN_ID);
+    expect(claims.brokeredAuthority).toEqual(linkedAdminAuthority);
+  });
+
+  it.each([
+    { desktopUserId: DESKTOP_USER_ID, controlAdminId: CONTROL_ADMIN_ID },
+    { ...linkedAdminAuthority, authoritySource: "user-session" },
+    { ...linkedAdminAuthority, desktopUserId: "not-a-uuid" },
+    { ...linkedAdminAuthority, controlAdminId: "not-a-uuid" },
+  ])("rejects malformed brokered authority metadata: %j", brokeredAuthority => {
+    const token = sign({ ...goodPayload, sub: CONTROL_ADMIN_ID, brokeredAuthority });
+    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(GfsAuthError);
+  });
+
+  it("rejects broker metadata whose effective admin differs from the signed token subject", () => {
+    const token = sign({
+      ...goodPayload,
+      sub: DESKTOP_USER_ID,
+      principalType: "control-admin",
+      brokeredAuthority: linkedAdminAuthority,
+    });
+    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(GfsAuthError);
+  });
+
+  it("rejects broker metadata without explicit control-admin provenance", () => {
+    const token = sign({
+      ...goodPayload,
+      sub: CONTROL_ADMIN_ID,
+      brokeredAuthority: linkedAdminAuthority,
+    });
+    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(
+      /requires control-admin principalType/
+    );
+  });
+
+  it("accepts the signed user principal marker and rejects unknown markers", () => {
+    expect(
+      verifyGfsToken(sign({ ...goodPayload, principalType: "user" }), { key, audience: AUD })
+        .principalType
+    ).toBe("user");
+    expect(() =>
+      verifyGfsToken(sign({ ...goodPayload, principalType: "operator" }), { key, audience: AUD })
+    ).toThrow(/invalid principalType/);
   });
 });
 

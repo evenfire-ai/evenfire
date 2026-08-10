@@ -20,6 +20,10 @@ and not held back:
   production on any Kubernetes cluster.
 - **All three UIs** — Control UI, Desktop App, Profile UI — plus `electron-forge`
   packaging to ship the desktop app to your users.
+- **Self-hosted initial-admin GFS parity** — the Desktop identity created for
+  the first Control Admin during setup is linked directly for GFS operator
+  access, and that link can be revoked from Control UI without changing the
+  admin account or its credentials.
 - The **registry client**: connect to a registry to install and publish
   connectors and recipes.
 - The **cluster E2E suites**.

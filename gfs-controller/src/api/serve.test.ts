@@ -370,6 +370,66 @@ function writeDeps(over: Partial<ServingDeps> = {}): { d: ServingDeps; calls: Ar
 }
 
 describe("GfsServingHandler — write routes (governed mutation)", () => {
+  it("keeps linked actor, effective admin, token subject, and request id distinct through publication", async () => {
+    const desktopUserId = "11111111-1111-4111-8111-111111111111";
+    const controlAdminId = "22222222-2222-4222-8222-222222222222";
+    const requestId = "33333333-3333-4333-8333-333333333333";
+    const brokeredAuthority = {
+      desktopUserId,
+      controlAdminId,
+      authoritySource: "linked-admin" as const,
+    };
+    const linkedClaims: GfsVerifiedClaims = {
+      ...USER_WRITE_CLAIMS,
+      sub: controlAdminId,
+      principalType: "control-admin",
+      brokeredAuthority,
+    };
+    const linkedContext: AuthzContext = {
+      drive: "main",
+      subjects: ["operator:"],
+      isOperator: true,
+      primarySubject: controlAdminId,
+      effectiveControlAdminId: controlAdminId,
+      desktopUserId,
+      authoritySource: "linked-admin",
+      requestId,
+    };
+    const { d, calls } = writeDeps({
+      verifyToken: () => linkedClaims,
+      resolveContext: async (claims, resolvedRequestId) => {
+        expect(claims).toEqual({
+          sub: controlAdminId,
+          drive: "main",
+          principalType: "control-admin",
+          brokeredAuthority,
+        });
+        expect(resolvedRequestId).toBe(requestId);
+        return linkedContext;
+      },
+    });
+    const request = reqBody(`/v1/resources/${RID}/children`, {
+      method: "POST",
+      auth: "Bearer t",
+      body: { name: "linked.txt", content: "hi" },
+    });
+    request.headers["x-request-id"] = requestId;
+
+    const res = new FakeRes();
+    await run(d, request, res);
+
+    expect(res.statusCode).toBe(201);
+    expect(calls[0].input).toMatchObject({
+      mutation: {
+        subject: controlAdminId,
+        requestId,
+        actorOnBehalfOf: controlAdminId,
+        desktopUserId,
+        authoritySource: "linked-admin",
+      },
+    });
+  });
+
   it("does not expose internal blob keys or physical paths in a failure response", async () => {
     const res = new FakeRes();
     const { d } = writeDeps({

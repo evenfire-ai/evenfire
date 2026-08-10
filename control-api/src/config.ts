@@ -28,6 +28,7 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopProfileUiBaseUrl: string
   desktopAppName: string
+  desktopGfsOperatorLinkingEnabled: boolean
   controlUiBaseUrl: string
   controlUiAppName: string
   sessionJwtPrivateKey: string
@@ -339,6 +340,13 @@ function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
 }
 
+function failClosedBooleanFromEnv(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'false') return false
+  if (raw === 'true') return true
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
+}
+
 function publicKeyFromPrivateKey(privateKey: string): string {
   return createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
 }
@@ -549,6 +557,11 @@ export const config: Config = {
   desktopProfileUiBaseUrl:
     process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL || 'http://127.0.0.1:3001',
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
+  // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
+  // this must not inherit registry, password-seeding, or generic deploy mode.
+  desktopGfsOperatorLinkingEnabled: failClosedBooleanFromEnv(
+    'CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED'
+  ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
   sessionJwtPrivateKey: normalizePem(

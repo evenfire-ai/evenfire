@@ -63,11 +63,86 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
   it("grants intrinsic operator authority when sub is in control_admin_users", async () => {
     const opId = "11111111-1111-1111-1111-111111111111";
     const db = fakeDb({ operators: new Set([opId]) });
-    const ctx = await resolveAuthzContext(db, { sub: opId, drive: "main" });
+    const ctx = await resolveAuthzContext(db, {
+      sub: opId,
+      drive: "main",
+      principalType: "control-admin",
+    });
     expect(ctx.isOperator).toBe(true);
     expect(ctx.subjects).toEqual(["operator:"]);
     expect(ctx.primarySubject).toBe(opId);
     // Resolution stops at the operator probe — no team lookup needed.
+    expect(db.calls.some((q) => q.includes("team_members"))).toBe(false);
+  });
+
+  it("keeps an unmarked colliding UUID on the conservative user path", async () => {
+    const collidingId = "88888888-8888-4888-8888-888888888888";
+    const db = fakeDb({ operators: new Set([collidingId]) });
+    const ctx = await resolveAuthzContext(db, { sub: collidingId, drive: "main" });
+    expect(ctx.isOperator).toBe(false);
+    expect(ctx.subjects).toEqual([`user:${collidingId}`]);
+    expect(db.calls.some(query => query.includes("control_admin_users"))).toBe(false);
+  });
+
+  it("never elevates a signed user principal whose UUID also exists in the admin table", async () => {
+    const collidingId = "99999999-9999-4999-8999-999999999999";
+    const db = fakeDb({
+      operators: new Set([collidingId]),
+      teamsByUser: { [collidingId]: ["team-user"] },
+    });
+
+    const ctx = await resolveAuthzContext(db, {
+      sub: collidingId,
+      drive: "main",
+      principalType: "user",
+    });
+
+    expect(ctx.isOperator).toBe(false);
+    expect(ctx.subjects).toEqual([`user:${collidingId}`, "team:team-user"]);
+    expect(ctx.authoritySource).toBe("user-session");
+    expect(db.calls.some(query => query.includes("control_admin_users"))).toBe(false);
+  });
+
+  it("preserves linked Desktop actor, effective admin, source, token subject, and request id", async () => {
+    const desktopUserId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const controlAdminId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const db = fakeDb({ operators: new Set([controlAdminId]) });
+
+    const ctx = await resolveAuthzContext(db, {
+      sub: controlAdminId,
+      drive: "main",
+      brokeredAuthority: {
+        desktopUserId,
+        controlAdminId,
+        authoritySource: "linked-admin",
+      },
+    }, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+
+    expect(ctx).toEqual({
+      drive: "main",
+      subjects: ["operator:"],
+      isOperator: true,
+      primarySubject: controlAdminId,
+      effectiveControlAdminId: controlAdminId,
+      desktopUserId,
+      authoritySource: "linked-admin",
+      requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+  });
+
+  it("fails closed when a signed linked-admin claim names an inactive or missing admin", async () => {
+    const controlAdminId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const db = fakeDb({});
+
+    await expect(resolveAuthzContext(db, {
+      sub: controlAdminId,
+      drive: "main",
+      brokeredAuthority: {
+        desktopUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        controlAdminId,
+        authoritySource: "linked-admin",
+      },
+    })).rejects.toThrow("linked admin is not active");
     expect(db.calls.some((q) => q.includes("team_members"))).toBe(false);
   });
 
@@ -85,6 +160,9 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
     const db = fakeDb({});
     const ctx = await resolveAuthzContext(db, { sub: userId, drive: "main" });
     expect(ctx.subjects).toEqual([`user:${userId}`]);
+    expect(ctx.desktopUserId).toBe(userId);
+    expect(ctx.authoritySource).toBe("user-session");
+    expect(ctx.effectiveControlAdminId).toBeUndefined();
   });
 
   it("propagates a store error (fail-closed — never a silent allow)", async () => {

@@ -547,6 +547,14 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'error'
+  } | null
+  gfsOperatorLinkStatus?: 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -633,6 +641,23 @@ export async function cancelControlAdminInvitation(invitationId: string): Promis
 export async function deleteControlAdmin(adminId: string): Promise<{ deleted: true }> {
   return apiSend('DELETE', `/api/v1/admin/control-admins/${adminId}`) as Promise<{
     deleted: true
+  }>
+}
+
+export async function revokeControlAdminGfsOperatorLink(adminId: string): Promise<{
+  revoked: boolean
+  gfsOperatorLinkStatus: 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+}> {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`
+  ) as Promise<{
+    revoked: boolean
+    gfsOperatorLinkStatus: 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
   }>
 }
 

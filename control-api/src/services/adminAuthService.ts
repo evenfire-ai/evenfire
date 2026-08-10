@@ -648,11 +648,17 @@ export async function listControlAdmins(): Promise<{
               a.username,
               a.email,
               u.id AS member_id,
+              gfs_link.user_id AS gfs_operator_user_id,
+              gfs_link.control_admin_id AS gfs_operator_admin_id,
+              gfs_link.source AS gfs_operator_source,
+              gfs_link.created_at AS gfs_operator_link_created_at,
               a.status,
               a.last_login_at,
               a.created_at
          FROM control_admin_users a
     LEFT JOIN users u ON lower(u.email) = lower(a.email)
+    LEFT JOIN gfs_desktop_operator_links gfs_link
+       ON gfs_link.control_admin_id = a.id
         ORDER BY a.created_at ASC`
     ),
     pool.query(
@@ -678,6 +684,10 @@ export async function listControlAdmins(): Promise<{
           username: string
           email: string | null
           member_id: string | null
+          gfs_operator_user_id: string | null
+          gfs_operator_admin_id: string | null
+          gfs_operator_source: 'initial_setup' | null
+          gfs_operator_link_created_at: Date | null
           status: 'active' | 'disabled'
           last_login_at: Date | null
           created_at: Date
@@ -687,6 +697,31 @@ export async function listControlAdmins(): Promise<{
           username: record.username,
           email: record.email || null,
           memberId: record.member_id || null,
+          gfsOperatorLink: record.gfs_operator_user_id
+            ? {
+                desktopUserId: record.gfs_operator_user_id,
+                controlAdminId: record.gfs_operator_admin_id || 'unknown',
+                source:
+                  record.gfs_operator_source === 'initial_setup' ? 'initial_setup' : 'unknown',
+                createdAt: record.gfs_operator_link_created_at
+                  ? record.gfs_operator_link_created_at.toISOString()
+                  : null,
+                status:
+                  record.gfs_operator_source === 'initial_setup' &&
+                  record.gfs_operator_link_created_at
+                    ? record.status === 'active'
+                      ? 'active'
+                      : 'inactive_admin'
+                    : 'error',
+              }
+            : null,
+          gfsOperatorLinkStatus: record.gfs_operator_user_id
+            ? record.gfs_operator_source === 'initial_setup' && record.gfs_operator_link_created_at
+              ? record.status === 'active'
+                ? 'active'
+                : 'inactive_admin'
+              : 'error'
+            : 'revoked',
           status: record.status,
           lastLoginAt: record.last_login_at ? record.last_login_at.toISOString() : null,
           createdAt: record.created_at.toISOString(),

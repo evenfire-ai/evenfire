@@ -1,4 +1,5 @@
 import { type NextFunction, Router } from 'express'
+import { randomUUID } from 'node:crypto'
 import {
   GFS_DELETE_SCOPE,
   GFS_READ_SCOPE,
@@ -7,8 +8,21 @@ import {
 } from '../../auth/gfsToken.js'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
+import {
+  type ExternalGfsAuthority,
+  type RequestWithExternalGfsAuthority,
+  attachExternalGfsAuthority,
+} from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
-import { GfsTreeError, clampLimit, decodeCursor, encodeCursor } from '../../gfs/tree.js'
+import { DbResolveStore } from '../../gfs/resolve.js'
+import {
+  DbChildrenStore,
+  GfsTreeError,
+  clampLimit,
+  decodeCursor,
+  encodeCursor,
+  listChildrenPaged,
+} from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
   type ExternalAuthedRequest,
@@ -29,7 +43,7 @@ import {
   sendGfsGrantError,
 } from '../gfs/grants.js'
 import { handlePatch } from '../gfs/resources.js'
-import { handleShareDelete, handleShareWrite } from '../gfs/shares.js'
+import { handleShareDelete, handleShareListForCaller, handleShareWrite } from '../gfs/shares.js'
 import { GFS_DEFAULT_DRIVE, parseRequestedGfsScopes } from '../gfs/token.js'
 
 // A gfs:// URI is `gfs://<drive>/<path-or-rid>`; cap it so an oversized value is
@@ -39,6 +53,31 @@ const ACCESSIBLE_RESOURCE_DEFAULT_LIMIT = 100
 
 type ExternalGfsRequest = ExternalAuthedRequest & {
   gfsSubjectKeys?: string[]
+  gfsRequestId?: string
+  gfsAuthority?: ExternalGfsAuthority
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function attachExternalGfsRequestId(
+  req: import('express').Request,
+  res: import('express').Response,
+  next: NextFunction
+): void {
+  const raw = req.header('x-request-id')?.trim()
+  const requestId =
+    raw && UUID_ANY_RE.test(raw)
+      ? raw.toLowerCase()
+      : ((req as { correlationId?: string }).correlationId ?? randomUUID())
+  ;(req as ExternalGfsRequest).gfsRequestId = requestId
+  res.setHeader('x-request-id', requestId)
+  next()
+}
+
+function authorityOf(req: ExternalGfsRequest): ExternalGfsAuthority {
+  const authority = req.gfsAuthority
+  if (!authority) throw new GfsGrantError(401, 'unauthenticated')
+  return authority
 }
 
 function ridOf(resourceId: string): string {
@@ -58,6 +97,8 @@ function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[]
 }
 
 async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<string>> {
+  const authority = authorityOf(req as ExternalGfsRequest)
+  if (authority.kind === 'linked-admin') return new Set(['operator:'])
   const claims = req.externalAuth!
   const subjects = new Set<string>([`user:${claims.userId}`])
   if (claims.teamId) subjects.add(`team:${claims.teamId}`)
@@ -119,6 +160,10 @@ async function assertHostTargetsWithinCallerAgents(
   next: NextFunction
 ): Promise<void> {
   const externalReq = req as ExternalGfsRequest
+  if (authorityOf(externalReq).kind === 'linked-admin') {
+    next()
+    return
+  }
   const body = (externalReq.body ?? {}) as Record<string, unknown>
   const plural = Array.isArray(body.subjects)
   const values = plural
@@ -173,6 +218,7 @@ export function createExternalGfsRouter(): Router {
   // Every gfs user route is on the Session-JWT plane: the user session token
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
+  router.use('/external/gfs', attachExternalGfsRequestId)
 
   // Per-user token bucket on the DELEGATION plane only (grants + shares),
   // mirroring the admin plane's grantsRateLimit but in a DISTINCT bucket so the
@@ -187,8 +233,14 @@ export function createExternalGfsRouter(): Router {
     bucketType: 'gfs_grants_external',
     maxPerMinute: 30,
     getBucketKey: req => {
-      const userId = (req as ExternalAuthedRequest).externalAuth?.userId
-      return userId ? `gfsgrants-ext:${userId}` : 'gfsgrants-ext:__no_user__'
+      const authority = (req as RequestWithExternalGfsAuthority).gfsAuthority
+      if (authority?.kind === 'linked-admin') {
+        return `gfsgrants-ext:linked-admin:${authority.controlAdminId}`
+      }
+      if (authority?.kind === 'user-session') {
+        return `gfsgrants-ext:user:${authority.desktopUserId}`
+      }
+      return 'gfsgrants-ext:__no_authority__'
     },
   })
 
@@ -212,10 +264,15 @@ export function createExternalGfsRouter(): Router {
         drive,
         scopes,
         pathBindings: [],
+        principalType: 'user',
       })
       res.status(200).json({ token, expiresInSeconds })
     })
   )
+
+  // Public token mint above is deliberately user-only. Effective linked-admin
+  // authority is resolved only for the internal broker routes below.
+  router.use('/external/gfs', asyncHandler(attachExternalGfsAuthority))
 
   // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
@@ -248,6 +305,12 @@ export function createExternalGfsRouter(): Router {
     externalGrantsRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareWrite)
+  )
+  router.get(
+    '/external/gfs/shares',
+    externalGrantsRateLimit,
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleShareListForCaller)
   )
   router.delete(
     '/external/gfs/shares/:id',
@@ -343,6 +406,34 @@ export function createExternalGfsRouter(): Router {
     '/external/gfs/resources',
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const drive = driveOf(req.query.drive)
+      const authority = authorityOf(req as ExternalGfsRequest)
+      if (authority.kind === 'linked-admin') {
+        const root = await new DbResolveStore(pool).getByPath(drive, '/')
+        if (!root) {
+          res.status(404).json({
+            ok: false,
+            error: { code: 'drive_not_seeded', message: 'drive root is not seeded' },
+          })
+          return
+        }
+        try {
+          const page = await listChildrenPaged(new DbChildrenStore(pool), drive, root.resourceId, {
+            limit: req.query.limit,
+            cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+          })
+          res.status(200).json({
+            ok: true,
+            data: { ...page, rootResourceId: root.resourceId, view: 'operator' },
+          })
+        } catch (error) {
+          if (error instanceof GfsTreeError) {
+            res.status(400).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        return
+      }
       const subjects = await externalCallerSubjects(req)
       const { types, ids } = subjectColumns(subjects)
       if (types.length === 0) {
@@ -520,11 +611,21 @@ async function proxyReadToGfsc(
   drive: string,
   gfscPath: string
 ): Promise<void> {
-  const claims = req.externalAuth!
+  const authority = authorityOf(req as ExternalGfsRequest)
   const { token } = signGfsToken({
-    subject: claims.userId,
+    subject: authority.tokenSubject,
     drive,
     scopes: [GFS_READ_SCOPE],
+    principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
+    ...(authority.kind === 'linked-admin'
+      ? {
+          brokeredAuthority: {
+            desktopUserId: authority.desktopUserId,
+            controlAdminId: authority.controlAdminId,
+            authoritySource: authority.authoritySource,
+          },
+        }
+      : {}),
   })
   const target = `${config.gfscBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   let upstream: Response
@@ -536,7 +637,10 @@ async function proxyReadToGfsc(
   try {
     upstream = await fetch(target, {
       method: 'GET',
-      headers: { authorization: `Bearer ${token}` },
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-request-id': (req as ExternalGfsRequest).gfsRequestId!,
+      },
       signal: readDeadline.signal,
     })
   } catch (err) {
@@ -604,15 +708,26 @@ async function proxyMutationToGfsc(
   gfscPath: string,
   scope: typeof GFS_WRITE_SCOPE | typeof GFS_DELETE_SCOPE
 ): Promise<void> {
-  const claims = req.externalAuth!
+  const authority = authorityOf(req as ExternalGfsRequest)
   const { token } = signGfsToken({
-    subject: claims.userId,
+    subject: authority.tokenSubject,
     drive,
     scopes: [scope],
+    principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
+    ...(authority.kind === 'linked-admin'
+      ? {
+          brokeredAuthority: {
+            desktopUserId: authority.desktopUserId,
+            controlAdminId: authority.controlAdminId,
+            authoritySource: authority.authoritySource,
+          },
+        }
+      : {}),
   })
   const target = `${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   headers['author' + 'ization'] = ['Bearer', token].join(' ')
+  headers['x-request-id'] = (req as ExternalGfsRequest).gfsRequestId!
   let upstream: Response
   // A TOTAL deadline (not the header-only one the streaming read proxies use):
   // a mutation response is a small JSON body, so bounding the whole fetch+read

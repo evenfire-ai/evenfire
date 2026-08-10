@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
+import type { Request } from 'express'
+import { randomUUID } from 'node:crypto'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
@@ -21,6 +23,39 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
 // client (a wedged gfsc looks identical to an internal bug).
 const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
+type GfsRequestOptions = {
+  query?: Record<string, string | undefined>
+  body?: unknown
+  userSessionToken?: string
+  extraHeaders?: Record<string, string>
+}
+
+function attachGfsRequestId(req: Request, res: Response, next: NextFunction): void {
+  const raw = req.header('x-request-id')?.trim()
+  const requestId = raw && UUID_ANY_RE.test(raw) ? raw.toLowerCase() : randomUUID()
+  ;(req as GfsAuthedRequest).gfsRequestId = requestId
+  res.setHeader('x-request-id', requestId)
+  next()
+}
+
+function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): GfsRequestOptions {
+  return {
+    ...options,
+    extraHeaders: { ...options.extraHeaders, 'x-request-id': req.gfsRequestId! },
+  }
+}
+
+function gfsControlApiRequest<T>(
+  req: GfsAuthedRequest,
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  options: GfsRequestOptions
+): Promise<T> {
+  return controlApiRequest<T>(method, path, withGfsRequestId(req, options))
+}
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
@@ -35,11 +70,11 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
 export function createGfsRouter(): Router {
   const router = Router()
 
-  router.use('/me/gfs', requireAuth)
+  router.use('/me/gfs', attachGfsRequestId, requireAuth)
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('POST', '/external/gfs/token', {
+      const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/token', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -51,7 +86,7 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resolve', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/resolve', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resolve', {
         userSessionToken: extractAuthToken(req),
         query: { uri: typeof req.query.uri === 'string' ? req.query.uri : undefined },
       })
@@ -63,7 +98,7 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/resources', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resources', {
         userSessionToken: extractAuthToken(req),
         query: {
           drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
@@ -79,7 +114,8 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources/:id/children', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'GET',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/children`,
         {
@@ -99,7 +135,8 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources/:id/affordances', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'GET',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/affordances`,
         {
@@ -115,7 +152,8 @@ export function createGfsRouter(): Router {
 
   router.patch('/me/gfs/resources/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'PATCH',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}`,
         {
@@ -132,7 +170,8 @@ export function createGfsRouter(): Router {
 
   router.post('/me/gfs/resources/:id/children', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'POST',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/children`,
         {
@@ -149,7 +188,8 @@ export function createGfsRouter(): Router {
 
   router.put('/me/gfs/resources/:id/content', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'PUT',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/content`,
         {
@@ -166,7 +206,8 @@ export function createGfsRouter(): Router {
 
   router.delete('/me/gfs/resources/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}`,
         {
@@ -186,10 +227,10 @@ export function createGfsRouter(): Router {
       const upstream = await controlApiStreamRequest(
         'GET',
         `/external/gfs/proxy/${encodeURIComponent(req.params.rid)}`,
-        {
+        withGfsRequestId(req, {
           userSessionToken: extractAuthToken(req),
           query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
-        }
+        })
       )
       res.status(upstream.status)
       for (const header of STREAM_HEADERS) {
@@ -218,7 +259,7 @@ export function createGfsRouter(): Router {
   // powers per-row revoke in the Manage modal.
   router.get('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/grants', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/grants', {
         userSessionToken: extractAuthToken(req),
         query: {
           drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
@@ -233,7 +274,7 @@ export function createGfsRouter(): Router {
 
   router.put('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('PUT', '/external/gfs/grants', {
+      const data = await gfsControlApiRequest(req, 'PUT', '/external/gfs/grants', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -245,7 +286,8 @@ export function createGfsRouter(): Router {
 
   router.delete('/me/gfs/grants/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/grants/${encodeURIComponent(req.params.id)}`,
         { userSessionToken: extractAuthToken(req) }
@@ -258,7 +300,7 @@ export function createGfsRouter(): Router {
 
   router.post('/me/gfs/shares', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('POST', '/external/gfs/shares', {
+      const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/shares', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -268,9 +310,25 @@ export function createGfsRouter(): Router {
     }
   })
 
+  router.get('/me/gfs/shares', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/shares', {
+        userSessionToken: extractAuthToken(req),
+        query: {
+          drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+          resourceId: typeof req.query.resourceId === 'string' ? req.query.resourceId : undefined,
+        },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
   router.delete('/me/gfs/shares/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/shares/${encodeURIComponent(req.params.id)}`,
         { userSessionToken: extractAuthToken(req) }

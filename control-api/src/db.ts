@@ -2601,6 +2601,52 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
   `)
 }
 
+async function applyGfsDesktopOperatorLinksSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Current-state, one-to-one identity link. Revocation is represented by
+    -- deleting this row only after its governed lifecycle event is appended.
+    -- Deliberately no email backfill: link creation always requires both exact
+    -- server-known UUIDs.
+    CREATE TABLE IF NOT EXISTS gfs_desktop_operator_links (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      control_admin_id UUID NOT NULL UNIQUE REFERENCES control_admin_users(id) ON DELETE CASCADE,
+      source TEXT NOT NULL CHECK (source IN ('initial_setup')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    REVOKE ALL ON TABLE gfs_desktop_operator_links FROM PUBLIC;
+    GRANT SELECT, INSERT, DELETE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+  `)
+}
+
+async function applyGfsAuditActorCorrelationSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_audit
+      ADD COLUMN IF NOT EXISTS desktop_user_id UUID NULL,
+      ADD COLUMN IF NOT EXISTS authority_source TEXT NULL;
+
+    DO $$ BEGIN
+      ALTER TABLE gfs_audit
+        ADD CONSTRAINT gfs_audit_actor_correlation_valid
+        CHECK (
+          (desktop_user_id IS NULL AND authority_source IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'user-session'
+            AND actor_on_behalf_of IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'linked-admin'
+            AND actor_on_behalf_of IS NOT NULL)
+        );
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS gfs_audit_desktop_user_time_idx
+      ON gfs_audit (desktop_user_id, event_time);
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5462,6 +5508,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
     apply: reconcilePluginWorkloadSdkRuntimeContracts,
+  },
+  {
+    version: '0091_gfs_desktop_operator_links',
+    apply: applyGfsDesktopOperatorLinksSchema,
+  },
+  {
+    version: '0092_gfs_audit_actor_correlation',
+    apply: applyGfsAuditActorCorrelationSchema,
   },
 ]
 

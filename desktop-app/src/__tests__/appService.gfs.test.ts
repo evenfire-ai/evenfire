@@ -15,6 +15,8 @@ function gfsService() {
     gfsClient: {
       grant: ReturnType<typeof vi.fn>
       createShare: ReturnType<typeof vi.fn>
+      listShares: ReturnType<typeof vi.fn>
+      revokeShare: ReturnType<typeof vi.fn>
     }
     grantGfs: (
       resourceId: string,
@@ -24,16 +26,34 @@ function gfsService() {
       inherit?: boolean
     ) => Promise<void>
     createGfsShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
+    listGfsShares: (resourceId: string, drive?: string) => Promise<unknown[]>
+    revokeGfsShare: (shareId: string) => Promise<void>
   }
   service.sessionToken = 'session-token'
   service.gfsClient = {
     grant: vi.fn().mockResolvedValue(undefined),
     createShare: vi.fn().mockResolvedValue(undefined),
+    listShares: vi.fn().mockResolvedValue([]),
+    revokeShare: vi.fn().mockResolvedValue(undefined),
   }
   return service
 }
 
 describe('AppService GFS delegation subject boundary', () => {
+  it('forwards share list and revoke through the in-memory session token only', async () => {
+    const service = gfsService()
+    const shareId = '22222222-2222-4222-8222-222222222222'
+
+    await service.listGfsShares(RESOURCE_ID, 'main')
+    await service.revokeGfsShare(shareId)
+
+    expect(service.gfsClient.listShares).toHaveBeenCalledWith(
+      { resourceId: RESOURCE_ID, drive: 'main' },
+      'session-token'
+    )
+    expect(service.gfsClient.revokeShare).toHaveBeenCalledWith(shareId, 'session-token')
+  })
+
   it('passes only user/team grant subjects as ONE bulk subjects[] array', async () => {
     const service = gfsService()
 

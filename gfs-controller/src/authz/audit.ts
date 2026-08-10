@@ -29,6 +29,12 @@ export type AuthorizationEvidence =
 
 interface AuditEventBase {
   subject: string;
+  /** Effective Control Admin for linked-admin brokerage; null otherwise. */
+  actorOnBehalfOf?: string | null;
+  /** Authenticated Desktop actor for user-session and linked-admin requests. */
+  desktopUserId?: string;
+  /** Request authority provenance, distinct from permission-store evidence. */
+  authoritySource?: "user-session" | "linked-admin";
   op: string;
   resourceId: string;
   drive: string;
@@ -72,6 +78,9 @@ export class DbAuditSink implements AuditSink {
       .update(
         JSON.stringify([
           event.subject,
+          event.actorOnBehalfOf ?? null,
+          event.desktopUserId ?? null,
+          event.authoritySource ?? null,
           event.op,
           gfsUri,
           event.outcome,
@@ -88,12 +97,13 @@ export class DbAuditSink implements AuditSink {
 
     const append = (target: Queryable) => target.query(
       `INSERT INTO gfs_audit
-        (subject, op, gfs_uri, outcome, request_id, row_hash, record_type,
+        (subject, actor_on_behalf_of, op, gfs_uri, outcome, request_id, row_hash, record_type,
          matched_subject, authorization_source, cached_authorization_source,
-         mutation_outcome)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         mutation_outcome, desktop_user_id, authority_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid, $14)`,
       [
         event.subject,
+        event.actorOnBehalfOf ?? null,
         event.op,
         gfsUri,
         event.outcome,
@@ -104,6 +114,8 @@ export class DbAuditSink implements AuditSink {
         event.authorizationSource,
         event.cachedAuthorizationSource,
         event.mutationOutcome,
+        event.desktopUserId ?? null,
+        event.authoritySource ?? null,
       ]
     );
 

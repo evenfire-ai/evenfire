@@ -61,6 +61,7 @@ export function registerGfsTokenRoute(router: Router): void {
         drive,
         scopes,
         pathBindings: [],
+        principalType: 'control-admin',
       })
       res.status(200).json({ token, expiresInSeconds })
     })

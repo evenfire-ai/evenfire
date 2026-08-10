@@ -14,12 +14,17 @@ const hookMock = vi.hoisted(() => ({
   useGfsBrowserController: vi.fn(),
 }))
 
-vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+vi.mock('@hooks/domain/useGfsBrowserController', async importOriginal => ({
+  ...(await importOriginal<typeof import('@hooks/domain/useGfsBrowserController')>()),
+  ...hookMock,
+}))
 
 function baseController() {
   return {
     current: null,
     crumbs: [],
+    view: 'shared' as const,
+    isOperatorRoot: false,
     accessibleResources: [],
     items: [],
     affordances: null,
@@ -49,6 +54,12 @@ function baseController() {
     refreshGrants: vi.fn(),
     revokeGrant: vi.fn(),
     revoking: false,
+    shares: [],
+    sharesError: null,
+    loadingShares: false,
+    refreshShares: vi.fn(),
+    revokeShare: vi.fn(),
+    revokingShare: false,
     createShare: vi.fn(),
     createFolder: vi.fn(),
     createFile: vi.fn(),
@@ -124,6 +135,154 @@ describe('FilesPage', () => {
     expect(screen.queryByText(/Automatic GFS discovery is not available/i)).toBeNull()
     expect(screen.queryByText(/Error invoking remote method/i)).toBeNull()
   })
+
+  it('renders the real operator root with visible root create and upload actions', async () => {
+    const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    const createFolder = vi.fn(async () => undefined)
+    const createFile = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      view: 'operator',
+      isOperatorRoot: true,
+      current: {
+        resourceId: rootResourceId,
+        gfsUri: 'gfs://main/11111111111111111111111111111111',
+        name: 'Global File System',
+        kind: 'directory',
+        version: 0,
+        bytes: 0,
+        isDriveRoot: true,
+      },
+      crumbs: [
+        {
+          resourceId: rootResourceId,
+          gfsUri: 'gfs://main/11111111111111111111111111111111',
+          name: 'Global File System',
+          kind: 'directory',
+          version: 0,
+          bytes: 0,
+          isDriveRoot: true,
+        },
+      ],
+      affordances: {
+        held: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        canDelegate: true,
+        grantableBits: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        canCreateShare: true,
+      },
+      createFolder,
+      createFile,
+    })
+
+    renderFilesPage(pushToast)
+
+    expect(screen.getByTestId('gfs-view-operator')).toBeTruthy()
+    expect(screen.getByTestId('gfs-root-operator').textContent).toBe('Global File System')
+    expect(screen.getByTestId('gfs-root-operator').getAttribute('data-resource-id')).toBe(
+      rootResourceId
+    )
+    expect(screen.getByTestId('gfs-empty-operator').textContent).toContain(
+      'Global File System is empty'
+    )
+    expect(screen.getByTestId('gfs-manage-access-action').textContent).toBe('Manage access')
+
+    fireEvent.click(screen.getByTestId('gfs-create-folder-action'))
+    const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
+    fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'Root docs' } })
+    fireEvent.click(createFolderForm.querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(createFolder).toHaveBeenCalledWith('Root docs'))
+
+    fireEvent.change(screen.getByTestId('gfs-upload-input'), {
+      target: { files: [new File(['root upload'], 'root.md', { type: 'text/markdown' })] },
+    })
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith(rootResourceId, 'root.md', 'cm9vdCB1cGxvYWQ=')
+    )
+  })
+
+  it.each(['401 Unauthorized', '403 Forbidden'])(
+    'fails closed with a stable alert after a %s root mutation denial',
+    async status => {
+      const rootResourceId = '11111111-1111-1111-1111-111111111111'
+      const createFolder = vi.fn(async () => {
+        throw new Error(`${status}: gfs_operator_link_invalid`)
+      })
+      const pushToast = vi.fn()
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        view: 'operator',
+        isOperatorRoot: true,
+        current: {
+          resourceId: rootResourceId,
+          gfsUri: 'gfs://main/11111111111111111111111111111111',
+          name: 'Global File System',
+          kind: 'directory',
+          version: 0,
+          bytes: 0,
+          isDriveRoot: true,
+        },
+        crumbs: [
+          {
+            resourceId: rootResourceId,
+            gfsUri: 'gfs://main/11111111111111111111111111111111',
+            name: 'Global File System',
+            kind: 'directory',
+            version: 0,
+            bytes: 0,
+            isDriveRoot: true,
+          },
+        ],
+        affordances: {
+          held: ['read', 'write', 'delete', 'manage_acl', 'share'],
+          canDelegate: true,
+          grantableBits: ['read', 'write', 'delete', 'manage_acl', 'share'],
+          canCreateShare: true,
+        },
+        createFolder,
+      })
+
+      renderFilesPage(pushToast)
+      fireEvent.click(screen.getByTestId('gfs-create-folder-action'))
+      const form = screen.getByRole('form', { name: 'Create folder' })
+      fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'Denied' } })
+      fireEvent.click(form.querySelector('button[type="submit"]')!)
+
+      const alert = await screen.findByTestId('gfs-mutation-error-unauthorized')
+      expect(alert.getAttribute('role')).toBe('alert')
+      expect(alert.textContent).toContain('File access is not authorized')
+      expect(screen.queryByTestId('gfs-create-folder-action')).toBeNull()
+      expect(screen.queryByTestId('gfs-upload-action')).toBeNull()
+      expect(pushToast).toHaveBeenCalledWith(
+        'Your current Desktop session cannot access this location. Sign in again or contact an administrator.',
+        'error'
+      )
+    }
+  )
+
+  it.each([
+    ['unauthorized', '403 Forbidden: operator_link_inactive', 'File access is not authorized'],
+    ['upstream', '502 Bad Gateway: gfsc_unreachable', 'Global File System is unavailable'],
+    [
+      'uninitialized',
+      'operator_root_missing: missing rootResourceId',
+      'Global File System is not initialized',
+    ],
+  ] as const)(
+    'renders an explicit %s root state without a misleading empty result',
+    (kind, error, title) => {
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        accessibleError: error,
+      })
+
+      renderFilesPage()
+
+      expect(screen.getByTestId(`gfs-error-${kind}`).textContent).toContain(title)
+      expect(screen.queryByText('No shared files yet')).toBeNull()
+      expect(screen.queryByTestId('gfs-empty-shared')).toBeNull()
+    }
+  )
 
   it.each([
     ['initial GFS discovery', { loadingAccessible: true }],
@@ -1022,6 +1181,68 @@ describe('FilesPage', () => {
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Access revoked for chatllm', 'success')
     )
+  })
+
+  it('lists and revokes a direct share from the combined access surface', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                members: [],
+                contextIds: [],
+                agentNames: [],
+              },
+            ],
+          })),
+        },
+      },
+    })
+    const revokeShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'manage_acl', 'share'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: true,
+      },
+      shares: [
+        {
+          id: 'share-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'team', id: 'team-1' },
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+      revokeShare,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+
+    const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
+    expect(within(shareRow).getByText('Share · team')).toBeTruthy()
+    fireEvent.click(
+      within(shareRow).getByRole('button', { name: 'Revoke shared access for Core Team' })
+    )
+
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
+    expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Core Team', 'success')
   })
 
   it('refreshes server affordances whenever the manage dialog opens', async () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GfsMetrics } from "../metrics";
-import type { AuthzContext } from "../authz/permissionClient";
+import { auditAttribution, type AuthzContext } from "../authz/permissionClient";
 import type { AuditSink } from "../authz/audit";
 import type { AccessibleResourcePage } from "../authz/accessibleStore";
 import type { GfsPermission } from "../authz/resolve";
@@ -68,7 +68,7 @@ export function sanitizeForLog(value: string): string {
 export interface ServingDeps {
   verifyToken: (token: string) => GfsVerifiedClaims;
   resolveContext: (
-    claims: { sub: string; drive: string },
+    claims: Pick<GfsVerifiedClaims, "sub" | "drive" | "brokeredAuthority" | "principalType">,
     requestId?: string
   ) => Promise<AuthzContext>;
   /** Permission-store authorization (the source of truth). */
@@ -354,7 +354,12 @@ export class GfsServingHandler {
   private async authContext(claims: GfsVerifiedClaims, req: IncomingMessage, admittedRequestId?: string): Promise<AuthzContext> {
     const requestId = admittedRequestId ?? headerValue(req, "x-request-id");
     try {
-      return await this.deps.resolveContext({ sub: claims.sub, drive: claims.drive }, requestId);
+      return await this.deps.resolveContext({
+        sub: claims.sub,
+        drive: claims.drive,
+        ...(claims.brokeredAuthority ? { brokeredAuthority: claims.brokeredAuthority } : {}),
+        ...(claims.principalType ? { principalType: claims.principalType } : {}),
+      }, requestId);
     } catch (err) {
       throw new GfsError(
         "not_mounted",
@@ -539,7 +544,12 @@ export class GfsServingHandler {
 
     const created = await this.deps.writeService!.create({
       drive: claims.drive, parentId, name, kind, content,
-      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+      mutation: {
+        subject: ctx.primarySubject,
+        requestId,
+        audit: this.deps.audit!,
+        ...auditAttribution(ctx),
+      },
     });
     sendJson(res, 201, ok(toView(created)));
   }
@@ -563,7 +573,12 @@ export class GfsServingHandler {
 
     const updated = await this.deps.writeService!.replace({
       drive: claims.drive, resourceId, ifMatch, content,
-      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+      mutation: {
+        subject: ctx.primarySubject,
+        requestId,
+        audit: this.deps.audit!,
+        ...auditAttribution(ctx),
+      },
     });
     sendJson(res, 200, ok(toView(updated)));
   }

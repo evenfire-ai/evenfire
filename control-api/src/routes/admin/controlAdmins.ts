@@ -28,6 +28,10 @@ import {
   revokePendingInvitation,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+import {
+  GfsDesktopOperatorLinkError,
+  gfsDesktopOperatorLinkService,
+} from '../../services/gfsDesktopOperatorLinkService.js'
 
 function readString(value: unknown): string {
   return String(value || '').trim()
@@ -376,6 +380,72 @@ export function createAdminControlAdminsRouter(): Router {
       next(error)
     }
   })
+
+  router.delete(
+    '/admin/control-admins/:adminId/gfs-operator-link',
+    async (req: UiAuthedRequest, res, next) => {
+      try {
+        const operatorSub = req.adminAuth?.sub
+        if (!operatorSub) {
+          res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
+
+        const adminId = readString(req.params.adminId)
+        if (!adminId) {
+          res.status(400).json({ error: 'adminId is required' })
+          return
+        }
+
+        const targetAdmin = await findAdminById(adminId)
+        if (!targetAdmin) {
+          res.status(404).json({ error: 'not_found' })
+          return
+        }
+
+        // Resolve the exact persisted pair server-side. The caller cannot
+        // choose a Desktop user or ask the endpoint to create/reassign one.
+        const link = await gfsDesktopOperatorLinkService.getLinkForControlAdmin(adminId)
+        if (!link) {
+          res.status(200).json({
+            revoked: false,
+            gfsOperatorLinkStatus: 'revoked',
+            controlAdminId: adminId,
+            desktopUserId: null,
+          })
+          return
+        }
+
+        const result = await gfsDesktopOperatorLinkService.unlink({
+          desktopUserId: link.desktopUserId,
+          controlAdminId: link.controlAdminId,
+          operatorSub,
+        })
+        res.status(200).json({
+          revoked: result.unlinked,
+          gfsOperatorLinkStatus: 'revoked',
+          controlAdminId: adminId,
+          desktopUserId: link.desktopUserId,
+        })
+      } catch (error) {
+        if (error instanceof GfsDesktopOperatorLinkError) {
+          if (error.code === 'invalid_input') {
+            res.status(400).json({ error: error.code })
+            return
+          }
+          if (error.code === 'control_admin_not_found') {
+            res.status(404).json({ error: error.code })
+            return
+          }
+          if (error.code === 'link_conflict' || error.code === 'malformed_link') {
+            res.status(409).json({ error: error.code })
+            return
+          }
+        }
+        next(error)
+      }
+    }
+  )
 
   router.post('/admin/control-admins/:adminId/member', async (req: UiAuthedRequest, res, next) => {
     try {

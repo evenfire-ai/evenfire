@@ -173,12 +173,14 @@ export function createAdminAuthRouter(): Router {
       // already created.
       try {
         await provisionAdminDesktopWorkspace({
+          controlAdminId: created.id,
           email,
           displayName: username,
           passwordHash,
           agentNames: config.adminDefaultAgentNames,
           contextIds: config.adminDefaultContextIds,
           seedPassword: seedDesktopPassword,
+          linkDesktopOperator: config.desktopGfsOperatorLinkingEnabled,
         })
       } catch (err) {
         // Intentionally logs only err + email — never passwordHash.

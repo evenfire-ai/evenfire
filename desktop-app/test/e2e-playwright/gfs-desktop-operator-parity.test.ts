@@ -1,0 +1,539 @@
+import type { Locator, Page } from '@playwright/test'
+import { UUID_RE } from '../../../tests/e2e/gfsFixtureCore'
+import { type GfsResourceRow, expect, test } from './helpers/gfsDesktopOperatorParityFixtures'
+
+async function expectToast(page: Page, message: string): Promise<void> {
+  await expect(page.getByRole('status', { name: message, exact: true })).toBeVisible({
+    timeout: 30_000,
+  })
+}
+
+function resourceRow(page: Page, resource: GfsResourceRow): Locator {
+  return page.getByTestId(`gfs-resource-row-${resource.resourceId}`)
+}
+
+async function openResourceManage(page: Page, resource: GfsResourceRow): Promise<Locator> {
+  const row = resourceRow(page, resource)
+  await expect(row).toBeVisible({ timeout: 30_000 })
+  await row.getByRole('button', { name: `Options for ${resource.name}` }).click()
+  await page.getByRole('menuitem', { name: 'Manage', exact: true }).click()
+  const dialog = page.getByRole('dialog', {
+    name: `Manage ${resource.kind === 'directory' ? 'folder' : 'file'} ${resource.name}`,
+  })
+  await expect(dialog).toBeVisible()
+  return dialog
+}
+
+async function closeManageDialog(page: Page): Promise<void> {
+  const close = page.getByRole('button', { name: 'Close manage dialog' })
+  if ((await close.count()) > 0) await close.click()
+}
+
+async function uploadVisibleFile(
+  page: Page,
+  trigger: Locator,
+  file: { name: string; mimeType: string; buffer: Buffer }
+): Promise<void> {
+  const chooserPromise = page.waitForEvent('filechooser')
+  await trigger.click()
+  const chooser = await chooserPromise
+  await chooser.setFiles(file)
+}
+
+async function createRootFolder(
+  page: Page,
+  name: string,
+  readResource: () => GfsResourceRow | null
+): Promise<GfsResourceRow> {
+  await page.getByTestId('gfs-create-folder-action').click()
+  const form = page.getByRole('form', { name: 'Create folder' })
+  await expect(form).toBeVisible()
+  await form.getByLabel('Folder name').fill(name)
+  await form.getByRole('button', { name: 'Create folder' }).click()
+  await expectToast(page, `Folder ${name} created`)
+  await expect.poll(readResource, { timeout: 30_000, intervals: [250, 500, 1_000] }).toMatchObject({
+    name,
+    kind: 'directory',
+    deleted: false,
+  })
+  const resource = readResource()
+  if (!resource) throw new Error(`folder ${name} was not persisted`)
+  await closeManageDialog(page)
+  await expect(resourceRow(page, resource)).toBeVisible({ timeout: 30_000 })
+  return resource
+}
+
+async function selectOrdinarySubject(page: Page, ordinaryEmail: string): Promise<void> {
+  const picker = page.getByRole('combobox', { name: 'Add people or teams' })
+  await expect(picker).toBeVisible({ timeout: 30_000 })
+  await picker.fill(ordinaryEmail)
+  const listbox = page.getByRole('listbox', { name: 'Available people and teams' })
+  await expect(listbox).toBeVisible()
+  await listbox.getByRole('option').filter({ hasText: ordinaryEmail }).click()
+}
+
+test.describe.serial('GFS Desktop linked-operator parity', () => {
+  test('@gfs-operator/setup-linked-operator setup creates the exact link before visible Desktop login', async ({
+    operatorJourney,
+  }) => {
+    const setup = await operatorJourney.bootstrapInitialAdmin()
+    await expect
+      .poll(() => operatorJourney.readOperatorLink(), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+        message: 'waiting for /admin/auth/setup to persist its exact Desktop operator link',
+      })
+      .toMatchObject({ controlAdminId: setup.controlAdminId, source: 'initial_setup' })
+
+    operatorJourney.operatorLink = operatorJourney.readOperatorLink()
+    expect(operatorJourney.operatorLink).not.toBeNull()
+    expect(operatorJourney.operatorLink?.controlAdminId).toBe(setup.controlAdminId)
+    operatorJourney.createOrdinaryUserFixture()
+    const rootResourceId = operatorJourney.readRootResourceId()
+
+    const controlPage = await operatorJourney.loginControlUi()
+    await operatorJourney.openControlAdmins()
+    const linkStatus = controlPage.getByTestId(`gfs-operator-link-${setup.controlAdminId}`)
+    await expect(linkStatus).toContainText('Active')
+    await expect(linkStatus).toContainText(operatorJourney.operatorLink!.desktopUserId)
+    await expect(linkStatus).toContainText(setup.controlAdminId)
+    await expect(linkStatus).toContainText('initial_setup')
+    await expect(
+      controlPage.getByRole('button', {
+        name: `Revoke Desktop GFS operator access for ${operatorJourney.operatorUsername} (${operatorJourney.operatorEmail})`,
+      })
+    ).toBeVisible()
+
+    const desktopPage = await operatorJourney.launchOperatorDesktop()
+    await operatorJourney.openFiles(desktopPage)
+    await expect(desktopPage.getByTestId('gfs-view-operator')).toBeVisible()
+    const root = desktopPage.getByTestId('gfs-root-operator')
+    await expect(root).toHaveText('Global File System')
+    await expect(root).toHaveAttribute('data-resource-id', rootResourceId)
+    await expect(desktopPage.getByTestId('gfs-manage-access-action')).toBeVisible()
+  })
+
+  test('@gfs-operator/operator-root-crud root create/upload and nested CRUD use visible Desktop actions', async ({
+    operatorJourney,
+  }, testInfo) => {
+    const page = operatorJourney.operatorPage!
+    const rootId = operatorJourney.rootResourceId!
+    expect(operatorJourney.operatorSubjectGrantCount()).toBe(0)
+    await expect(page.getByTestId('gfs-view-operator')).toBeVisible()
+    await expect(page.getByTestId('gfs-root-operator')).toHaveAttribute('data-resource-id', rootId)
+
+    const crudFolder = await createRootFolder(page, operatorJourney.names.crudFolder, () =>
+      operatorJourney.readResource(rootId, operatorJourney.names.crudFolder)
+    )
+    operatorJourney.resources.set('crudFolder', crudFolder)
+
+    await uploadVisibleFile(page, page.getByTestId('gfs-upload-action'), {
+      name: operatorJourney.names.rootFile,
+      mimeType: 'text/markdown',
+      buffer: Buffer.from('# root upload\n', 'utf8'),
+    })
+    await expectToast(page, `Uploaded ${operatorJourney.names.rootFile}`)
+    await expect
+      .poll(() => operatorJourney.readResource(rootId, operatorJourney.names.rootFile), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toMatchObject({ kind: 'file', deleted: false })
+    const rootFile = operatorJourney.readResource(rootId, operatorJourney.names.rootFile)!
+    operatorJourney.resources.set('rootFile', rootFile)
+
+    let dialog = await openResourceManage(page, crudFolder)
+    await dialog.getByRole('button', { name: `Options for ${crudFolder.name}` }).click()
+    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+    const renameForm = dialog.getByRole('form', { name: 'Rename resource' })
+    await renameForm.getByLabel('New name').fill(operatorJourney.names.renamedFolder)
+    await renameForm.getByRole('button', { name: 'Save' }).click()
+    await expectToast(page, `Renamed to ${operatorJourney.names.renamedFolder}`)
+    await closeManageDialog(page)
+    await expect
+      .poll(() => operatorJourney.readResource(rootId, operatorJourney.names.renamedFolder), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toMatchObject({ resourceId: crudFolder.resourceId, deleted: false })
+    const renamedFolder = operatorJourney.readResource(rootId, operatorJourney.names.renamedFolder)!
+    operatorJourney.resources.set('renamedFolder', renamedFolder)
+
+    await resourceRow(page, renamedFolder)
+      .getByRole('button', { name: renamedFolder.name, exact: true })
+      .click()
+    await expect(page.getByRole('navigation', { name: 'File location' })).toContainText(
+      renamedFolder.name
+    )
+    await expect(page.getByTestId('gfs-root-operator')).toHaveAttribute('data-resource-id', rootId)
+
+    await uploadVisibleFile(page, page.getByTestId('gfs-upload-action'), {
+      name: operatorJourney.names.nestedFile,
+      mimeType: 'text/markdown',
+      buffer: Buffer.from('# nested version one\n', 'utf8'),
+    })
+    await expectToast(page, `Uploaded ${operatorJourney.names.nestedFile}`)
+    await expect
+      .poll(
+        () =>
+          operatorJourney.readResource(renamedFolder.resourceId, operatorJourney.names.nestedFile),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toMatchObject({ kind: 'file', deleted: false })
+    let nestedFile = operatorJourney.readResource(
+      renamedFolder.resourceId,
+      operatorJourney.names.nestedFile
+    )!
+
+    await resourceRow(page, nestedFile)
+      .getByRole('button', { name: nestedFile.name, exact: true })
+      .click()
+    const preview = page.getByRole('dialog', { name: nestedFile.name })
+    await expect(preview).toBeVisible()
+    await expect(
+      page.getByRole('article', { name: `Markdown preview of ${nestedFile.name}` })
+    ).toContainText('nested version one')
+    await page.getByRole('button', { name: 'Close Markdown preview' }).click()
+
+    dialog = await openResourceManage(page, nestedFile)
+    await dialog.getByRole('button', { name: `Options for ${nestedFile.name}` }).click()
+    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+    await dialog
+      .getByRole('form', { name: 'Rename resource' })
+      .getByLabel('New name')
+      .fill(operatorJourney.names.renamedFile)
+    await dialog
+      .getByRole('form', { name: 'Rename resource' })
+      .getByRole('button', { name: 'Save' })
+      .click()
+    await expectToast(page, `Renamed to ${operatorJourney.names.renamedFile}`)
+    await expect
+      .poll(
+        () =>
+          operatorJourney.readResource(renamedFolder.resourceId, operatorJourney.names.renamedFile),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toMatchObject({ resourceId: nestedFile.resourceId, deleted: false })
+    nestedFile = operatorJourney.readResource(
+      renamedFolder.resourceId,
+      operatorJourney.names.renamedFile
+    )!
+    dialog = page.getByRole('dialog', {
+      name: `Manage file ${operatorJourney.names.renamedFile}`,
+    })
+    await expect(dialog).toBeVisible()
+
+    await uploadVisibleFile(page, dialog.getByRole('button', { name: 'Replace file' }), {
+      name: operatorJourney.names.renamedFile,
+      mimeType: 'text/markdown',
+      buffer: Buffer.from('# nested version two\n', 'utf8'),
+    })
+    await expectToast(page, `Replaced ${operatorJourney.names.renamedFile}`)
+    await expect
+      .poll(
+        () =>
+          operatorJourney.readResource(renamedFolder.resourceId, operatorJourney.names.renamedFile),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toMatchObject({ version: nestedFile.version + 1, deleted: false })
+
+    await dialog
+      .getByRole('button', { name: `Options for ${operatorJourney.names.renamedFile}` })
+      .click()
+    const downloadPromise = page.waitForEvent('download')
+    await page.getByRole('menuitem', { name: 'Download', exact: true }).click()
+    const download = await downloadPromise
+    expect(download.suggestedFilename()).toBe(operatorJourney.names.renamedFile)
+    await download.saveAs(testInfo.outputPath(operatorJourney.names.renamedFile))
+    await expectToast(page, `Downloaded ${operatorJourney.names.renamedFile}`)
+
+    await dialog
+      .getByRole('button', { name: `Options for ${operatorJourney.names.renamedFile}` })
+      .click()
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+    const deleteDialog = page.getByRole('alertdialog', { name: 'Delete resource' })
+    await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expectToast(page, `Deleted ${operatorJourney.names.renamedFile}`)
+    await expect
+      .poll(
+        () =>
+          operatorJourney.readResource(renamedFolder.resourceId, operatorJourney.names.renamedFile),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toMatchObject({ deleted: true })
+
+    await page.getByTestId('gfs-root-operator').click()
+    const renamedFolderAfterChildDelete = operatorJourney.readResource(
+      rootId,
+      operatorJourney.names.renamedFolder
+    )!
+    dialog = await openResourceManage(page, renamedFolderAfterChildDelete)
+    await dialog
+      .getByRole('button', { name: `Options for ${operatorJourney.names.renamedFolder}` })
+      .click()
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+    await page
+      .getByRole('alertdialog', { name: 'Delete resource' })
+      .getByRole('button', { name: 'Delete', exact: true })
+      .click()
+    await expectToast(page, `Deleted ${operatorJourney.names.renamedFolder}`)
+
+    operatorJourney.successfulCreateAuditFloor = operatorJourney.auditFloor()
+    for (const [key, name] of [
+      ['grantFolder', operatorJourney.names.grantFolder],
+      ['shareFolder', operatorJourney.names.shareFolder],
+      ['ordinaryFolder', operatorJourney.names.ordinaryFolder],
+    ] as const) {
+      const folder = await createRootFolder(page, name, () =>
+        operatorJourney.readResource(rootId, name)
+      )
+      operatorJourney.resources.set(key, folder)
+    }
+  })
+
+  test('@gfs-operator/ordinary-unlinked-regression unlinked Desktop remains grant-scoped Shared with me', async ({
+    operatorJourney,
+  }, testInfo) => {
+    const ordinaryFolder = operatorJourney.resources.get('ordinaryFolder')!
+    const fixtureGrantId = operatorJourney.seedOrdinaryReadGrant(ordinaryFolder.resourceId)
+    const ordinary = await operatorJourney.launchOrdinaryDesktop(testInfo)
+    try {
+      await operatorJourney.openFiles(ordinary.page)
+      await expect(ordinary.page.getByTestId('gfs-view-shared')).toBeVisible()
+      await expect(ordinary.page.getByTestId('gfs-root-shared')).toHaveText('Shared with me')
+      await expect(resourceRow(ordinary.page, ordinaryFolder)).toBeVisible()
+      await expect(ordinary.page.getByTestId('gfs-create-folder-action')).toHaveCount(0)
+      await expect(ordinary.page.getByTestId('gfs-upload-action')).toHaveCount(0)
+      await expect(ordinary.page.getByTestId('gfs-manage-access-action')).toHaveCount(0)
+      expect(operatorJourney.findGrant(ordinaryFolder.resourceId)?.id).toBe(fixtureGrantId)
+    } finally {
+      await ordinary.close()
+      operatorJourney.removeFixtureGrant(fixtureGrantId)
+    }
+    await expect.poll(() => operatorJourney.findGrant(ordinaryFolder.resourceId)).toBeNull()
+  })
+
+  test('@gfs-operator/grant-share-lifecycle visible Desktop grant/share create, list, revoke removes recipient access', async ({
+    operatorJourney,
+  }, testInfo) => {
+    const page = operatorJourney.operatorPage!
+    const grantFolder = operatorJourney.resources.get('grantFolder')!
+    const shareFolder = operatorJourney.resources.get('shareFolder')!
+    const auditFloor = operatorJourney.auditFloor()
+
+    let dialog = await openResourceManage(page, grantFolder)
+    await selectOrdinarySubject(page, operatorJourney.ordinaryEmail)
+    await dialog.getByRole('button', { name: 'Grant access', exact: true }).click()
+    await expectToast(page, 'Access granted to 1 subject')
+    await expect
+      .poll(() => operatorJourney.findGrant(grantFolder.resourceId), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .not.toBeNull()
+    const grant = operatorJourney.findGrant(grantFolder.resourceId)!
+    await expect(page.getByTestId(`gfs-access-row-grant-${grant.id}`)).toContainText(
+      operatorJourney.ordinaryName
+    )
+    await closeManageDialog(page)
+
+    dialog = await openResourceManage(page, shareFolder)
+    await selectOrdinarySubject(page, operatorJourney.ordinaryEmail)
+    await dialog.getByRole('button', { name: 'Create share', exact: true }).click()
+    await expectToast(page, '1 share created')
+    await expect
+      .poll(() => operatorJourney.findShare(shareFolder.resourceId), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .not.toBeNull()
+    const share = operatorJourney.findShare(shareFolder.resourceId)!
+    await expect(page.getByTestId(`gfs-access-row-share-${share.id}`)).toContainText(
+      operatorJourney.ordinaryName
+    )
+    await closeManageDialog(page)
+
+    const ordinary = await operatorJourney.launchOrdinaryDesktop(testInfo)
+    try {
+      await operatorJourney.openFiles(ordinary.page)
+      await expect(ordinary.page.getByTestId('gfs-view-shared')).toBeVisible()
+      await expect(resourceRow(ordinary.page, grantFolder)).toBeVisible()
+      await expect(resourceRow(ordinary.page, shareFolder)).toBeVisible()
+
+      dialog = await openResourceManage(page, grantFolder)
+      await page.getByTestId(`gfs-revoke-grant-${grant.id}`).click()
+      await expectToast(page, `Access revoked for ${operatorJourney.ordinaryName}`)
+      await expect.poll(() => operatorJourney.findGrant(grantFolder.resourceId)).toBeNull()
+      await closeManageDialog(page)
+
+      dialog = await openResourceManage(page, shareFolder)
+      await page.getByTestId(`gfs-revoke-share-${share.id}`).click()
+      await expectToast(page, `Shared access revoked for ${operatorJourney.ordinaryName}`)
+      await expect.poll(() => operatorJourney.findShare(shareFolder.resourceId)).toBeNull()
+      await closeManageDialog(page)
+
+      await ordinary.page.getByTestId('nav-chat').click()
+      await operatorJourney.openFiles(ordinary.page)
+      await expect(resourceRow(ordinary.page, grantFolder)).toHaveCount(0)
+      await expect(resourceRow(ordinary.page, shareFolder)).toHaveCount(0)
+      await expect(ordinary.page.getByTestId('gfs-empty-shared')).toBeVisible()
+    } finally {
+      await ordinary.close()
+    }
+
+    await expect
+      .poll(
+        () =>
+          operatorJourney
+            .auditRowsAfter(auditFloor, operatorJourney.operatorLink!.desktopUserId)
+            .filter(
+              row => row.authoritySource === 'linked-admin' && /^(grant|share)\./.test(row.op)
+            )
+            .map(row => row.op),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toEqual(
+        expect.arrayContaining([
+          'grant.put[read]',
+          'grant.delete',
+          'share.create[read]',
+          'share.delete',
+        ])
+      )
+  })
+
+  test('@gfs-operator/live-control-ui-unlink visible Control UI revoke immediately denies same Electron session', async ({
+    operatorJourney,
+  }) => {
+    const controlPage = operatorJourney.controlPage!
+    const page = operatorJourney.operatorPage!
+    const link = operatorJourney.operatorLink!
+    await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
+    const revoke = controlPage.getByRole('button', {
+      name: `Revoke Desktop GFS operator access for ${operatorJourney.operatorUsername} (${operatorJourney.operatorEmail})`,
+    })
+    await expect(revoke).toBeVisible()
+    await revoke.click()
+    const confirm = controlPage.getByRole('alertdialog', {
+      name: 'Revoke Desktop GFS operator access',
+    })
+    await expect(confirm).toBeVisible()
+    await confirm.getByRole('button', { name: 'Revoke access', exact: true }).click()
+    await expect(
+      controlPage.getByText('Desktop GFS operator access revoked.', { exact: true })
+    ).toBeVisible({ timeout: 30_000 })
+    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
+      'Revoked'
+    )
+    await expect.poll(() => operatorJourney.operatorLinkCount()).toBe(0)
+
+    operatorJourney.deniedAuditFloor = operatorJourney.auditFloor()
+    await page.getByTestId('gfs-create-folder-action').click()
+    const form = page.getByRole('form', { name: 'Create folder' })
+    await form.getByLabel('Folder name').fill(operatorJourney.names.deniedFolder)
+    await form.getByRole('button', { name: 'Create folder' }).click()
+    const denial = page.getByTestId('gfs-mutation-error-unauthorized')
+    await expect(denial).toBeVisible({ timeout: 30_000 })
+    await expect(denial).toHaveAttribute('aria-label', 'File access is not authorized')
+    await expect(denial).toContainText(
+      'Your current Desktop session cannot access this location. Sign in again or contact an administrator.'
+    )
+    await expect(page.getByTestId('gfs-create-folder-action')).toHaveCount(0)
+    await expect(page.getByTestId('gfs-upload-action')).toHaveCount(0)
+    await expect
+      .poll(() =>
+        operatorJourney.readResource(
+          operatorJourney.rootResourceId!,
+          operatorJourney.names.deniedFolder
+        )
+      )
+      .toBeNull()
+  })
+
+  test('@gfs-operator/audit-correlation successful and denied Desktop requests preserve exact actor and request IDs', async ({
+    operatorJourney,
+  }) => {
+    const link = operatorJourney.operatorLink!
+    const page = operatorJourney.operatorPage!
+    const controlPage = operatorJourney.controlPage!
+    await expect(page.getByTestId('gfs-mutation-error-unauthorized')).toBeVisible()
+    await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
+    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
+      'Revoked'
+    )
+
+    await expect
+      .poll(
+        () => {
+          const rows = operatorJourney.auditRowsAfter(
+            operatorJourney.successfulCreateAuditFloor,
+            link.desktopUserId
+          )
+          const decisions = rows.filter(
+            row =>
+              row.subject === link.controlAdminId &&
+              row.actorOnBehalfOf === link.controlAdminId &&
+              row.authoritySource === 'linked-admin' &&
+              row.op === 'write' &&
+              row.outcome === 'allow' &&
+              row.recordType === 'authorization_decision' &&
+              row.mutationOutcome === null &&
+              UUID_RE.test(row.requestId ?? '')
+          )
+          return decisions.some(decision =>
+            rows.some(
+              mutation =>
+                mutation.requestId === decision.requestId &&
+                mutation.subject === link.controlAdminId &&
+                mutation.actorOnBehalfOf === link.controlAdminId &&
+                mutation.desktopUserId === link.desktopUserId &&
+                mutation.authoritySource === 'linked-admin' &&
+                mutation.op === 'create' &&
+                mutation.outcome === 'allow' &&
+                mutation.recordType === 'mutation_outcome' &&
+                mutation.mutationOutcome === 'succeeded'
+            )
+          )
+        },
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toBe(true)
+
+    await expect
+      .poll(
+        () =>
+          operatorJourney
+            .auditRowsAfter(operatorJourney.deniedAuditFloor, link.desktopUserId)
+            .some(
+              row =>
+                row.subject === link.desktopUserId &&
+                row.actorOnBehalfOf === null &&
+                row.desktopUserId === link.desktopUserId &&
+                row.authoritySource === 'user-session' &&
+                row.op === 'write' &&
+                row.outcome === 'deny' &&
+                row.recordType === 'authorization_decision' &&
+                row.mutationOutcome === null &&
+                UUID_RE.test(row.requestId ?? '')
+            ),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toBe(true)
+
+    const deniedRows = operatorJourney.auditRowsAfter(
+      operatorJourney.deniedAuditFloor,
+      link.desktopUserId
+    )
+    expect(
+      deniedRows.filter(row => row.requestId && row.op === 'create' && row.mutationOutcome)
+    ).toHaveLength(0)
+    const lifecycle = operatorJourney.readUnlinkLifecycleEvent()
+    expect(lifecycle).toMatchObject({
+      operatorSub: link.controlAdminId,
+      targetRef: `gfs_desktop_operator_link:${link.desktopUserId}:${link.controlAdminId}`,
+    })
+    expect(lifecycle?.detailRef).toContain(`desktop_user_id:${link.desktopUserId}`)
+    expect(lifecycle?.detailRef).toContain(`control_admin_id:${link.controlAdminId}`)
+    expect(lifecycle?.detailRef).toContain('source:initial_setup')
+  })
+})

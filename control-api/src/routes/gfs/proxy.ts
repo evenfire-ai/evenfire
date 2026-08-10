@@ -52,7 +52,12 @@ export function registerGfsProxyRoute(router: Router): void {
 
       const subPath = req.url === '/' ? '' : req.url
       const target = `${gfscBaseUrlFor(req.method).replace(/\/+$/, '')}${subPath}`
-      const { token } = signGfsToken({ subject, drive: DEFAULT_DRIVE, scopes: [scope] })
+      const { token } = signGfsToken({
+        subject,
+        drive: DEFAULT_DRIVE,
+        scopes: [scope],
+        principalType: 'control-admin',
+      })
       const headers: Record<string, string> = {}
       headers['author' + 'ization'] = ['Bearer', token].join(' ')
       if (req.method !== 'GET' && req.method !== 'HEAD') {

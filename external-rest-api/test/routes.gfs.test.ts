@@ -27,6 +27,8 @@ vi.mock('../src/controlApiClient.js', () => ({
 const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
 vi.mock('../src/authToken.js', () => authTokenMock)
 
+const REQUEST_ID = '11111111-2222-4333-8444-555555555555'
+
 function buildApp() {
   const app = express()
   app.use(express.json())
@@ -53,13 +55,16 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .post('/me/gfs/token')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send({ scopes: ['gfs.read'] })
     expect(res.status).toBe(200)
     expect(res.body.token).toBe('gfs-tok')
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('POST', '/external/gfs/token', {
       userSessionToken: 'sess-xyz',
       body: { scopes: ['gfs.read'] },
+      extraHeaders: { 'x-request-id': REQUEST_ID },
     })
+    expect(res.headers['x-request-id']).toBe(REQUEST_ID)
   })
 
   it('forwards a user delegation grant to /external/gfs/grants', async () => {
@@ -73,11 +78,13 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .put('/me/gfs/grants')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send(body)
     expect(res.status).toBe(200)
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('PUT', '/external/gfs/grants', {
       userSessionToken: 'sess-xyz',
       body,
+      extraHeaders: { 'x-request-id': REQUEST_ID },
     })
   })
 
@@ -89,11 +96,13 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .get('/me/gfs/resources?drive=main&limit=25&cursor=cursor-1')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
     expect(res.status).toBe(200)
     expect(res.body.data.nextCursor).toBe('next-page')
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/resources', {
       userSessionToken: 'sess-xyz',
       query: { drive: 'main', limit: '25', cursor: 'cursor-1' },
+      extraHeaders: { 'x-request-id': REQUEST_ID },
     })
   })
 
@@ -145,13 +154,18 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .get('/me/gfs/proxy/abc?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
     expect(res.status).toBe(200)
     const bytes = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.text ?? '')
     expect(bytes.toString('utf8')).toBe('hello')
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
       '/external/gfs/proxy/abc',
-      { userSessionToken: 'sess-xyz', query: { drive: 'main' } }
+      {
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'main' },
+        extraHeaders: { 'x-request-id': REQUEST_ID },
+      }
     )
   })
 
@@ -160,21 +174,25 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     await request(buildApp())
       .patch('/me/gfs/resources/abc?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send({ newName: 'renamed.md', ifMatch: 1 })
       .expect(200)
     await request(buildApp())
       .post('/me/gfs/resources/abc/children?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send({ name: 'docs', kind: 'directory' })
       .expect(201)
     await request(buildApp())
       .put('/me/gfs/resources/abc/content?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send({ content: 'hello', ifMatch: 2 })
       .expect(200)
     await request(buildApp())
       .delete('/me/gfs/resources/abc?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
       .send({ ifMatch: 3 })
       .expect(200)
 
@@ -186,6 +204,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { newName: 'renamed.md', ifMatch: 1 },
+        extraHeaders: { 'x-request-id': REQUEST_ID },
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -196,6 +215,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { name: 'docs', kind: 'directory' },
+        extraHeaders: { 'x-request-id': REQUEST_ID },
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -206,6 +226,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { content: 'hello', ifMatch: 2 },
+        extraHeaders: { 'x-request-id': REQUEST_ID },
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -216,6 +237,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { ifMatch: 3 },
+        extraHeaders: { 'x-request-id': REQUEST_ID },
       }
     )
   })
@@ -224,6 +246,9 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     authTokenMock.verifyToken.mockReturnValue(null)
     const res = await request(buildApp()).post('/me/gfs/token').send({})
     expect(res.status).toBe(401)
+    expect(res.headers['x-request-id']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
   })
 })
 
@@ -243,11 +268,13 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
     const res = await request(buildApp())
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ items })
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/grants', {
       userSessionToken: 'sess-xyz',
       query: { drive: 'main', resourceId: '11111111-1111-1111-1111-111111111111' },
+      extraHeaders: { 'x-request-id': REQUEST_ID },
     })
   })
 
@@ -274,5 +301,58 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(429)
     expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
+  })
+})
+
+describe('GET /me/gfs/shares (delegation list passthrough)', () => {
+  it('forwards drive, resource, session, and request id without exposing an admin route', async () => {
+    const items = [
+      {
+        id: 'aaaaaaaa-0000-4000-8000-000000000001',
+        drive: 'main',
+        resourceId: '11111111-1111-1111-1111-111111111111',
+        subject: { type: 'user', id: '22222222-2222-4222-8222-222222222222' },
+        permissions: ['read'],
+        includeDescendants: true,
+      },
+    ]
+    clientMock.controlApiRequest.mockResolvedValue({ items })
+
+    const res = await request(buildApp())
+      .get('/me/gfs/shares?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ items })
+    expect(res.headers['x-request-id']).toBe(REQUEST_ID)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/shares', {
+      userSessionToken: 'sess-xyz',
+      query: { drive: 'main', resourceId: '11111111-1111-1111-1111-111111111111' },
+      extraHeaders: { 'x-request-id': REQUEST_ID },
+    })
+
+    clientMock.controlApiRequest.mockClear()
+    await request(buildApp())
+      .get('/me/gfs/admin/shares')
+      .set('authorization', 'Bearer sess-xyz')
+      .expect(404)
+    expect(clientMock.controlApiRequest).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [401, 'unauthorized'],
+    [403, 'manage_acl_required'],
+    [503, 'gfs_authority_unavailable'],
+  ] as const)('propagates %s %s verbatim with the same request id', async (status, error) => {
+    clientMock.controlApiRequest.mockRejectedValue(new ControlApiError(error, status, { error }))
+    const res = await request(buildApp())
+      .get('/me/gfs/shares?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+
+    expect(res.status).toBe(status)
+    expect(res.body).toEqual({ error })
+    expect(res.headers['x-request-id']).toBe(REQUEST_ID)
   })
 })

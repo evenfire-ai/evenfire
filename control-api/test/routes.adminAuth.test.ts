@@ -70,6 +70,7 @@ describe('routes/adminAuth', () => {
     Object.values(rateLimit).forEach(fn => fn.mockClear())
     adminSvc.isValidAdminEmail.mockReturnValue(true)
     adminSvc.isValidAdminUsername.mockReturnValue(true)
+    config.desktopGfsOperatorLinkingEnabled = false
     adminToken.signAdminToken.mockReturnValue('admin-jwt')
     uiAuth.requireAuthForControlUI.mockImplementation((req: any, _res: any, next: any) => {
       req.adminAuth = { sub: 'admin-id', role: 'admin', jti: 'j1', exp: 9999999999, typ: 'user' }
@@ -192,11 +193,43 @@ describe('routes/adminAuth', () => {
     expect(res.status).toBe(200)
     expect(directorySvc.provisionAdminDesktopWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({
+        controlAdminId: 'admin-1',
         email: 'new@example.com',
         displayName: 'newadmin',
         passwordHash: expect.any(String),
         agentNames: expect.any(Array),
         contextIds: expect.any(Array),
+        linkDesktopOperator: false,
+      })
+    )
+  })
+
+  it('requests the exact initial-setup link only when the narrow self-hosted flag is enabled', async () => {
+    config.desktopGfsOperatorLinkingEnabled = true
+    adminSvc.setupInitialAdminCredentials.mockResolvedValue({
+      id: 'admin-1',
+      username: 'newadmin',
+      email: 'new@example.com',
+      role: 'admin',
+      status: 'active',
+      failedAttempts: 0,
+      lockedUntil: null,
+    })
+    directorySvc.provisionAdminDesktopWorkspace.mockResolvedValue({ userId: 'user-1' })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminAuthRouter())
+
+    await request(app)
+      .post('/admin/auth/setup')
+      .send({ email: 'new@example.com', username: 'newadmin', password: 'secret123' })
+      .expect(200)
+
+    expect(directorySvc.provisionAdminDesktopWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controlAdminId: 'admin-1',
+        linkDesktopOperator: true,
       })
     )
   })
@@ -276,6 +309,7 @@ describe('routes/adminAuth', () => {
   })
 
   it('still returns 200 when desktop provisioning throws', async () => {
+    config.desktopGfsOperatorLinkingEnabled = true
     adminSvc.setupInitialAdminCredentials.mockResolvedValue({
       id: 'admin-1',
       username: 'newadmin',
@@ -299,6 +333,12 @@ describe('routes/adminAuth', () => {
     expect(res.body.token).toBeUndefined()
     expect(String(res.headers['set-cookie'])).toContain('control_ui_admin_session=admin-jwt')
     expect(res.body.me).toMatchObject({ email: 'new@example.com', username: 'newadmin' })
+    expect(directorySvc.provisionAdminDesktopWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controlAdminId: 'admin-1',
+        linkDesktopOperator: true,
+      })
+    )
   })
 
   it('returns me and supports logout', async () => {

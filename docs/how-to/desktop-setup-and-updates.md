@@ -15,6 +15,17 @@ For packaging and shipping the build itself, see
 - You distribute a **packaged** build and want users to know when a new release
   requires them to update.
 
+### Self-hosted first administrator
+
+The first Control Admin created by the self-hosted `/admin/auth/setup` bootstrap
+is a separate setup path from invitation onboarding. The Desktop identity
+provisioned for that admin is linked directly for GFS operator access when the
+self-hosted deployment enables the operator-link setting. Control UI displays
+the exact pair and provides **Revoke/disable Desktop GFS operator access**;
+revoking it removes only GFS authority and preserves the admin account,
+passwords, identities, and unrelated permissions. Invitations and ordinary
+member provisioning do not create or repair this link.
+
 ## The environment model
 
 You save only the **External REST API URL** for an instance. The app then asks
