@@ -443,7 +443,7 @@ runtime_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|upsert|append|read|none)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -583,11 +583,13 @@ verify_runtime_access_contract() {
          FROM expected_access expected
          JOIN actual_relations actual USING (relation_name)
          CROSS JOIN LATERAL (
+           -- link_lifecycle deliberately permits only the explicit create/revoke
+           -- operations for current-state identity links; UPDATE stays denied.
            VALUES
              ('SELECT', expected.access_profile != 'none'),
-             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append')),
+             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle')),
              ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert')),
-             ('DELETE', expected.access_profile = 'legacy_dml'),
+             ('DELETE', expected.access_profile IN ('legacy_dml', 'link_lifecycle')),
              ('TRUNCATE', false),
              ('REFERENCES', false),
              ('TRIGGER', false)

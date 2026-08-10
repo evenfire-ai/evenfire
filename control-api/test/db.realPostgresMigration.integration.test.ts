@@ -386,6 +386,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
+      'gfs_desktop_operator_links',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -402,6 +403,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
+      gfs_desktop_operator_links: ['DELETE', 'INSERT', 'SELECT'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -410,6 +412,90 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
     }
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
+
+    const linkUserId = randomUUID()
+    const linkAdminId = randomUUID()
+    const linkRuntimeClient = await dbPool.connect()
+    try {
+      await linkRuntimeClient.query('BEGIN')
+      await linkRuntimeClient.query(
+        `INSERT INTO users (id, email, name)
+         VALUES ($1, $2, 'GFS desktop operator privilege test')`,
+        [linkUserId, `gfs-link-${linkUserId}@example.test`]
+      )
+      await linkRuntimeClient.query(
+        `INSERT INTO control_admin_users (
+           id, username, password_hash, role, status
+         ) VALUES ($1, $2, 'gfs-link-test-hash', 'admin', 'active')`,
+        [linkAdminId, `gfs-link-${linkAdminId}`]
+      )
+
+      const privilegeState = await linkRuntimeClient.query<{
+        privilege_name: string
+        allowed: boolean
+      }>(
+        `SELECT privilege.privilege_name,
+                has_table_privilege(
+                  'control_api_runtime',
+                  'public.gfs_desktop_operator_links',
+                  privilege.privilege_name
+                ) AS allowed
+           FROM (VALUES
+             ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+             ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+           ) privilege(privilege_name)
+          ORDER BY privilege.privilege_name`
+      )
+      expect(privilegeState.rows).toEqual([
+        { privilege_name: 'DELETE', allowed: true },
+        { privilege_name: 'INSERT', allowed: true },
+        { privilege_name: 'REFERENCES', allowed: false },
+        { privilege_name: 'SELECT', allowed: true },
+        { privilege_name: 'TRIGGER', allowed: false },
+        { privilege_name: 'TRUNCATE', allowed: false },
+        { privilege_name: 'UPDATE', allowed: false },
+      ])
+
+      await linkRuntimeClient.query('SET LOCAL ROLE control_api_runtime')
+      await linkRuntimeClient.query(
+        `INSERT INTO gfs_desktop_operator_links (user_id, control_admin_id, source)
+         VALUES ($1, $2, 'initial_setup')`,
+        [linkUserId, linkAdminId]
+      )
+      const linked = await linkRuntimeClient.query<{ user_id: string; control_admin_id: string }>(
+        `SELECT user_id::text, control_admin_id::text
+           FROM gfs_desktop_operator_links
+          WHERE user_id = $1`,
+        [linkUserId]
+      )
+      expect(linked.rows).toEqual([{ user_id: linkUserId, control_admin_id: linkAdminId }])
+
+      await linkRuntimeClient.query('SAVEPOINT deny_link_update')
+      await expect(
+        linkRuntimeClient.query(
+          `UPDATE gfs_desktop_operator_links
+              SET source = 'initial_setup'
+            WHERE user_id = $1`,
+          [linkUserId]
+        )
+      ).rejects.toThrow(/permission denied/)
+      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_update')
+
+      await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')
+      await expect(
+        linkRuntimeClient.query('TRUNCATE TABLE gfs_desktop_operator_links')
+      ).rejects.toThrow(/permission denied/)
+      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_truncate')
+
+      await linkRuntimeClient.query(
+        `DELETE FROM gfs_desktop_operator_links
+          WHERE user_id = $1`,
+        [linkUserId]
+      )
+    } finally {
+      await linkRuntimeClient.query('ROLLBACK')
+      linkRuntimeClient.release()
+    }
 
     const maintenanceRelations = await relationPrivileges(dbPool, 'trace_maintenance_runtime')
     const expectedMaintenanceRelations: Record<string, string[]> = {
