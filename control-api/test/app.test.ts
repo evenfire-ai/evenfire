@@ -4,6 +4,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
@@ -179,14 +180,20 @@ describe('app router wiring', () => {
       .expect(401)
 
     vi.spyOn(pool, 'query').mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
+    const currentSession = signExternalSessionToken(payload)
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')
       .set('authorization', 'Bearer dev-external-rest-api-token')
       .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', currentSession)
       .send(payload)
       .expect(200)
-    expect(res.body.token).toBeTruthy()
+    expect(res.body).toMatchObject({
+      token: currentSession,
+      deprecated: true,
+      sessionContract: 'v1',
+    })
   })
 
   it('enforces UI auth for control-ui routes', async () => {

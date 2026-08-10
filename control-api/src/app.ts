@@ -290,9 +290,8 @@ export function createApp(gateway: K8sGateway) {
         },
         'forwarded client error from upstream'
       )
-      const status = errStatus as number
-      res.status(status).json({
-        error: status === 404 ? 'Not Found' : 'Bad Request',
+      res.status(errStatus as number).json({
+        error: err instanceof Error ? err.message : 'Bad Request',
         correlationId,
       })
       return
