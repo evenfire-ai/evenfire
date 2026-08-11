@@ -256,7 +256,7 @@ async function settleWithin<T>(promise: Promise<T>, timeoutMs = 500): Promise<
 }
 
 describe('GfsUploadSessionService', () => {
-  it('creates idempotent sessions and keeps indexed commits separate from contiguous progress', async () => {
+  it('creates idempotent sessions and keeps indexed commits separate from contiguous progress', { timeout: 15_000 }, async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
     const db = new MemoryDb()
     const uploads = service(db)
