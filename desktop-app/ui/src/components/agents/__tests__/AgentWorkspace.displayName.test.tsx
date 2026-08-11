@@ -99,6 +99,19 @@ describe('AgentWorkspace context rows — visible name (UT-11)', () => {
     // Branch WITHOUT display: renders the id (metadata.name) — single fallback.
     expect(screen.getByText('ctx-plain')).toBeTruthy()
   })
+
+  it('falls back to the id when the context display is blank/whitespace-only', () => {
+    // An out-of-band write (e.g. kubectl bypassing control-api validation) can
+    // leave a whitespace-only spec.displayName. The row must render the stable
+    // id, never a blank context label (same class as R4-M1 GfsAgentAccessSection).
+    contextsMock.contextIds = ['ctx-blank']
+    contextsMock.contextDisplayById = { 'ctx-blank': '   ' }
+
+    render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
+
+    // Observable text is the id, not the whitespace-only display.
+    expect(screen.getByText('ctx-blank')).toBeTruthy()
+  })
 })
 
 // R1-M3 (desktop-app): the workspace hero title must show the agent DISPLAY name

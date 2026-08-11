@@ -106,6 +106,25 @@ describe('GfsAgentAccessSection', () => {
     ).toBe('true')
   })
 
+  it('falls back to the identifier when displayName is blank/whitespace-only', () => {
+    // An out-of-band write (e.g. kubectl bypassing control-api validation) can
+    // leave a whitespace-only displayName. The option must render the stable
+    // identifier, never a selectable option with an empty visible label.
+    render(
+      <GfsAgentAccessSection
+        agents={[
+          { id: '1st:mcp-host/blankname', name: 'blankname', displayName: '   ' },
+          { id: '1st:mcp-host/emptyname', name: 'emptyname', displayName: '' },
+        ]}
+        isDirectory
+        onGrantAgents={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'blankname' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'emptyname' })).toBeTruthy()
+  })
+
   it('renders an empty notice when the caller has no grantable agents', () => {
     render(<GfsAgentAccessSection agents={[]} isDirectory onGrantAgents={vi.fn()} />)
 

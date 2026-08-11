@@ -81,8 +81,10 @@ export function GfsAgentAccessSection({
                 size="sm"
               >
                 {/* Visible agent name (spec.host); the id-based `name` is the
-                    last-resort label for entries without a display source. */}
-                {agent.displayName ?? agent.name}
+                    last-resort label for entries with no display source OR a
+                    blank/whitespace-only displayName (an out-of-band write must
+                    never render a selectable option with an empty label). */}
+                {(agent.displayName ?? '').trim() || agent.name}
               </SelectableOption>
             ))}
           </div>

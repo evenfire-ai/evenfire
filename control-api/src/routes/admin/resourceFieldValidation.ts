@@ -79,6 +79,9 @@ export function validateDisplayField(value: unknown, field: string): FieldIssue 
       message: `${field} must not contain control or bidirectional formatting characters`,
     }
   }
+  if (value.trim().length === 0) {
+    return { field, message: `${field} must not be empty or whitespace-only` }
+  }
   if (value.trim().length > DISPLAY_FIELD_MAX_LENGTH) {
     return {
       field,

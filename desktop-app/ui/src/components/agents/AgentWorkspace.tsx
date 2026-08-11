@@ -394,9 +394,11 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                             title={contextId}
                             aria-label={`Open context ${contextId}`}
                           >
-                            {/* Visible context name (spec.displayName); single
-                                fallback to the id (Decision #6). */}
-                            {contextDisplayById[contextId] ?? contextId}
+                            {/* Visible context name (spec.displayName); fall back
+                                to the id (Decision #6) when no display exists OR
+                                the display is blank/whitespace-only (an out-of-band
+                                write must never render an empty context label). */}
+                            {(contextDisplayById[contextId] ?? '').trim() || contextId}
                           </ReferenceTag>
                         </td>
                         <td className="da-table__cell">

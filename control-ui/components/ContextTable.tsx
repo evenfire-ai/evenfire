@@ -46,8 +46,10 @@ export function ContextTable({
       items.map(item => {
         const name = item.metadata?.name || 'unknown'
         // Visible name is the optional spec.displayName; fall back to the slug
-        // (metadata.name) when it is absent — the single justified fallback.
-        const displayName = item.spec?.displayName ?? name
+        // (metadata.name) when it is absent OR blank-after-trim — a displayName
+        // written out-of-band (e.g. kubectl) as '' or '   ' must not render a
+        // blank label. Mirrors HostTable.tsx (`.trim() || name`).
+        const displayName = (item.spec?.displayName ?? '').trim() || name
         const key = name
         const mcpServers = Array.isArray(item.spec?.mcpServers) ? item.spec?.mcpServers : []
         return { key, name, displayName, item, mcpServers }

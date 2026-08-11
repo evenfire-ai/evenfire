@@ -403,9 +403,10 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, details]) => ({
         key: value,
         value,
-        // Visible name = context `spec.displayName`; single sanctioned fallback
-        // to the id (spec Decision #6). Empty today until the source lands (§8).
-        display: contextDisplayById[value] ?? value,
+        // Visible name = context `spec.displayName`; fall back to the id (spec
+        // Decision #6) when no display exists OR the display is blank/whitespace-
+        // only (an out-of-band write must never render an empty context label).
+        display: (contextDisplayById[value] ?? '').trim() || value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: false,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
