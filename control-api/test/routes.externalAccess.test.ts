@@ -18,10 +18,10 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: rateLimits.check,
 }))
 
-function app() {
+function app(gateway: Record<string, unknown> = {}) {
   const value = express()
   value.use(express.json())
-  value.use(createExternalAccessRouter({} as never))
+  value.use(createExternalAccessRouter(gateway as never))
   return value
 }
 
@@ -238,5 +238,87 @@ describe('external aggregate access routes', () => {
       retryable: true,
       details: { retryAfterSeconds: expect.any(Number) },
     })
+  })
+
+  it('rate limits live resolution before any operational gateway fan-out', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
+    })
+    rateLimits.check.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30_000,
+      count: 11,
+    })
+    const gateway = { getResource: vi.fn(), listResource: vi.fn() }
+
+    const response = await request(app(gateway))
+      .post('/external/access/resolve')
+      .set('x-user-session-token', 'v2-session')
+      .send({
+        requiredCapability: 'mcp_server.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'mcp_server',
+          logicalId: 'mcp-server/example',
+        },
+      })
+
+    expect(response.status).toBe(429)
+    expect(response.body.error).toMatchObject({ code: 'rate_limited', retryable: true })
+    expect(gateway.getResource).not.toHaveBeenCalled()
+    expect(gateway.listResource).not.toHaveBeenCalled()
+  })
+
+  it('rejects nested and capability-inapplicable operation targets before resolution', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
+    })
+    const gateway = { getResource: vi.fn(), listResource: vi.fn() }
+
+    for (const operationTarget of [
+      { teamId: { nested: 'team-a' } },
+      { teamId: 'team-a', role: 'admin' },
+      { teamId: 'x'.repeat(129) },
+    ]) {
+      const response = await request(app(gateway))
+        .post('/external/access/resolve')
+        .set('x-user-session-token', 'v2-session')
+        .send({
+          requiredCapability: 'host.read',
+          resource: {
+            environmentId: 'development:local-cluster',
+            type: 'host',
+            logicalId: 'mcp-host/example',
+          },
+          operationTarget,
+        })
+      expect(response.status).toBe(400)
+      expect(response.body.error.code).toBe('invalid_request')
+    }
+    expect(gateway.getResource).not.toHaveBeenCalled()
+    expect(gateway.listResource).not.toHaveBeenCalled()
   })
 })

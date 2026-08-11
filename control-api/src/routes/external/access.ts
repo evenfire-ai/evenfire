@@ -31,6 +31,7 @@ import {
 const resourceTypes = new Set<string>(RESOURCE_TYPES)
 const catalogResourceTypes = new Set<string>(ACCESS_CATALOG_RESOURCE_TYPES)
 const ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE = 10
+const ACCESS_RESOLVE_RATE_LIMIT_PER_MINUTE = 10
 
 function catalogTypes(value: unknown): ResourceType[] | null {
   if (value === undefined) return []
@@ -52,6 +53,36 @@ function pageLimit(value: unknown): number | null | undefined {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 100 ? parsed : null
+}
+
+function boundedOperationTarget(
+  value: unknown,
+  requiredCapability: string
+): Record<string, string> | null | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record)
+  if (keys.length === 0 || keys.length > 3) return null
+  const allowedKeys = new Set(['teamId'])
+  if (['team.member.read', 'team.member.manage'].includes(requiredCapability)) {
+    allowedKeys.add('userId')
+  }
+  if (['team.member.invite', 'team.member.manage'].includes(requiredCapability)) {
+    allowedKeys.add('role')
+  }
+  if (keys.some(key => !allowedKeys.has(key))) return null
+
+  const normalized: Record<string, string> = {}
+  for (const key of keys) {
+    const item = record[key]
+    if (typeof item !== 'string') return null
+    const text = item.trim()
+    if (!text || text.length > 128) return null
+    normalized[key] = text
+  }
+  if (normalized.role && !['admin', 'inviter', 'member'].includes(normalized.role)) return null
+  return normalized
 }
 
 export function createExternalAccessRouter(gateway: K8sGateway): Router {
@@ -198,6 +229,25 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/access/resolve',
     requireV2AccessContract,
+    rateLimitMiddleware({
+      bucketType: 'external_access_resolve',
+      maxPerMinute: ACCESS_RESOLVE_RATE_LIMIT_PER_MINUTE,
+      getBucketKey: req => {
+        const userId = (req as ExternalAuthedRequest).externalAuth?.userId
+        return userId ? `external_access_resolve:${userId}` : 'external_access_resolve:unknown'
+      },
+      onLimited: (req, res, retryAfterSeconds) => {
+        sendPublicApiError(
+          req,
+          res,
+          429,
+          'rate_limited',
+          'Too many authorization requests; retry later.',
+          true,
+          { retryAfterSeconds }
+        )
+      },
+    }),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const body = req.body as Record<string, unknown> | undefined
       const resource = body?.resource as Record<string, unknown> | undefined
@@ -218,12 +268,14 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         typeof body?.requiredCapability === 'string' ? body.requiredCapability.trim() : ''
       const requestedAccessPathId =
         typeof body?.accessPathId === 'string' ? body.accessPathId.trim() : undefined
+      const operationTarget = boundedOperationTarget(body?.operationTarget, requiredCapability)
       if (
         !environmentId ||
         environmentId !== canonicalEnvironmentId() ||
         !resourceTypes.has(type) ||
         !logicalId ||
-        !requiredCapability
+        !requiredCapability ||
+        operationTarget === null
       ) {
         sendPublicApiError(req, res, 400, 'invalid_request', 'Invalid authorization request.')
         return
@@ -240,9 +292,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
             displayName: logicalId,
           }),
           ...(requestedAccessPathId ? { requestedAccessPathId } : {}),
-          ...(body?.operationTarget && typeof body.operationTarget === 'object'
-            ? { operationTarget: body.operationTarget as Record<string, unknown> }
-            : {}),
+          ...(operationTarget ? { operationTarget } : {}),
         },
         { correlationId: req.correlationId, gateway }
       )
