@@ -1,4 +1,5 @@
 import type { DbClient } from '../../db.js'
+import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import {
@@ -27,15 +28,7 @@ export async function catalogQuery(
   text: string,
   values: unknown[]
 ) {
-  return budget.runProducer(async () => {
-    budget.assertActive()
-    const result = await db.query(text, values)
-    if (result.rows.length > 0) {
-      budget.charge({ kind: 'dbRowsReturned', amount: result.rows.length })
-    }
-    budget.assertActive()
-    return result
-  })
+  return runAccessDatabaseQuery(db, budget, text, values)
 }
 
 export type BoundedKeyArm = Readonly<{
