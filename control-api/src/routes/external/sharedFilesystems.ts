@@ -7,6 +7,7 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import {
   listActiveContextIds,
   partitionAccessValues,
@@ -58,6 +59,14 @@ class ContextAccessReconciliationError extends Error {
   }
 }
 
+class ContextAuthorizationUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('Context authorization is unavailable')
+    this.name = 'ContextAuthorizationUnavailableError'
+    this.cause = cause
+  }
+}
+
 async function loadAccessibleContextIds(
   gateway: K8sGateway,
   userId: string,
@@ -77,10 +86,19 @@ async function loadAccessibleContextIds(
     accessible.add(id)
   }
   if (teamId && teamId.trim()) {
-    const teamCtx = await getTeamContexts(teamId.trim())
-    const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
-    for (const id of teamContextIds) {
-      accessible.add(id)
+    const compatibilityTeamId = teamId.trim()
+    let membership
+    try {
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId)
+    } catch (err) {
+      throw new ContextAuthorizationUnavailableError(err)
+    }
+    if (membership) {
+      const teamCtx = await getTeamContexts(compatibilityTeamId)
+      const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
+      for (const id of teamContextIds) {
+        accessible.add(id)
+      }
     }
   }
   return accessible
@@ -115,8 +133,12 @@ async function resolveAccessibleContextIdsForRequest(
   try {
     return await loadAccessibleContextIdsForRequest(gateway, req, res)
   } catch (err) {
-    if (!(err instanceof ContextAccessReconciliationError)) throw err
-    res.status(503).json({ error: 'context_reconciliation_unavailable' })
+    if (err instanceof ContextAccessReconciliationError) {
+      res.status(503).json({ error: 'context_reconciliation_unavailable' })
+      return null
+    }
+    if (!(err instanceof ContextAuthorizationUnavailableError)) throw err
+    res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
 }
