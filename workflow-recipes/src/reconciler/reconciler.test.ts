@@ -3946,9 +3946,13 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   // R1-M3 (zach88): the no-op gate must hold when the LIVE policy is apiserver-
-  // shaped — keys reordered ({ports,to} not {to,ports}) and protocol defaulted to
-  // TCP — which is exactly what the canonicalize/egressSignature fix motivates but
-  // R.8.24 (which feeds the builder's own output back) never exercised.
+  // shaped — each rule's keys reordered ({ports,to} not {to,ports}) and each
+  // port's keys reordered ({protocol,port} not {port,protocol}) — which is
+  // exactly what the canonicalize/egressSignature fix motivates but R.8.24
+  // (which feeds the builder's own output back verbatim) never exercised. The
+  // builder already emits protocol:'TCP' on every port, so this exercises key
+  // ORDER only; egressSignature deliberately treats an absent protocol as
+  // distinct from 'TCP', a shape that cannot arise for builder-written policies.
   it('R1-M3: external egress is a no-op against an apiserver-normalized live policy', async () => {
     const kc = new k8s.KubeConfig()
     const rec = new WorkflowRecipeReconciler(kc, undefined, {
@@ -3970,12 +3974,14 @@ describe('WorkflowRecipeReconciler', () => {
       .find(b => b?.metadata?.name === 'ui-egress-test-recipe')
     expect(p1).toBeTruthy()
 
-    // Reshape p1 the way the apiserver returns it: reorder each rule's keys and
-    // inject protocol:'TCP' on ports. The state annotation is preserved.
+    // Reshape p1 the way the apiserver returns it: reorder each rule's keys
+    // ({ports,to}) and each port's keys ({protocol,port}). The builder already
+    // set protocol:'TCP', so this preserves the value and only changes key
+    // order. The state annotation is preserved.
     const live = JSON.parse(JSON.stringify(p1))
     live.spec.egress = (live.spec.egress ?? []).map((rule: Record<string, unknown>) => ({
       ports: ((rule.ports as Array<Record<string, unknown>>) ?? []).map(pt => ({
-        protocol: pt.protocol ?? 'TCP',
+        protocol: pt.protocol,
         port: pt.port,
       })),
       to: (rule.to as Array<Record<string, unknown>>) ?? [],

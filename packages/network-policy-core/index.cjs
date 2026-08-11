@@ -231,10 +231,15 @@ function reconcileEgressState(previous, observations, now, config) {
     // Per-entry contribution to BOTH annotations (R1-M1): the STATE array element
     // and the TARGETS `fqdn=ip/32` fragment. serializeState (below) is the source
     // of truth for both shapes.
+    // Charge UTF-8 BYTES, not UTF-16 code units: the apiserver caps total
+    // annotation size by Go len() (bytes), and MAX_ANNOTATION_BYTES is a byte
+    // budget. A multi-byte FQDN (e.g. 'ü' = 1 code unit, 2 bytes) would make a
+    // .length meter under-count and clear a policy the apiserver then 422s.
     const sizeOf = new Map(
       entries.map(e => [
         e,
-        JSON.stringify(stateEntryView(e)).length + `${e.fqdn}=${e.ip}/32`.length,
+        Buffer.byteLength(JSON.stringify(stateEntryView(e)), 'utf8') +
+          Buffer.byteLength(`${e.fqdn}=${e.ip}/32`, 'utf8'),
       ])
     )
     const byNewest = [...entries].sort(

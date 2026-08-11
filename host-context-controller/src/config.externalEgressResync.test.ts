@@ -23,10 +23,11 @@ afterEach(() => {
 })
 
 describe('external egress sliding-window config (issue #299)', () => {
-  it('applies plan defaults: interval below overlap, floor 5, cap 128', async () => {
+  it('applies plan defaults: interval <= overlap/2, floor 5, cap 128', async () => {
     const { config } = await loadConfig({})
-    // Default resync MUST sit below the overlap so entries never expire between
-    // refreshes (the #299 gap). It is lowered from the legacy 300 to 60.
+    // Default resync MUST sit at or below half the overlap so entries never
+    // expire between refreshes (the #299 gap). It is lowered from the legacy
+    // 300 to 60.
     expect(config.externalEgressResyncIntervalSec).toBe(60)
     expect(config.externalEgressOverlapSec).toBe(300)
     expect(config.externalEgressRefreshFloorSec).toBe(5)

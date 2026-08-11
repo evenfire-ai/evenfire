@@ -429,8 +429,33 @@ test('R1-M1 byte cap: STATE + TARGETS together never exceed the 256KB apiserver 
   const ips = Array.from({ length: 900 }, (_, i) => `10.${Math.floor(i / 256)}.${i % 256}.1`)
   const out = core.reconcileEgressState(core.emptyState(), [obsOk(longFqdn, ips, TTL, 443)], 1000, bigCfg)
   const ann = core.serializeState(out.state)
-  const total = ann[core.STATE_ANNOTATION].length + ann[core.TARGETS_ANNOTATION].length
+  // The apiserver caps total annotation size by UTF-8 BYTES (Go len()), so the
+  // budget and this assertion must both measure bytes, never UTF-16 .length.
+  const total =
+    Buffer.byteLength(ann[core.STATE_ANNOTATION], 'utf8') +
+    Buffer.byteLength(ann[core.TARGETS_ANNOTATION], 'utf8')
   assert.ok(total <= 262144, `STATE+TARGETS = ${total} bytes, must be <= 262144 (256KB)`)
+  assert.ok(out.entries.length > 0, 'not everything was evicted')
+  assert.ok(out.entries.length < 900, 'byte-budget eviction dropped the overflow')
+  assert.equal(out.overCap, true, 'overCap flags the eviction for the alarm/metric')
+})
+
+// R2-M1 (zach88 round-2): the byte budget must charge UTF-8 bytes, not UTF-16
+// code units. A multi-byte FQDN ('ü' = 1 code unit but 2 UTF-8 bytes) makes a
+// .length-based meter under-count, so serializeState can emit an annotation that
+// clears the flawed budget yet exceeds the apiserver's real 256KB byte cap —
+// the exact 422 reconcile loop the guard exists to prevent. Fails red on a
+// .length meter; green once sizeOf measures Buffer.byteLength(...,'utf8').
+test('R2-M1 byte cap: multi-byte FQDN is bounded by UTF-8 bytes, not UTF-16 length', () => {
+  const longFqdn = `${'ü'.repeat(120)}.example.com` // .length ~132, utf8 ~252 bytes
+  const bigCfg = { overlapMs: 300_000, maxEntries: 4096 } // count cap won't bite first
+  const ips = Array.from({ length: 900 }, (_, i) => `10.${Math.floor(i / 256)}.${i % 256}.1`)
+  const out = core.reconcileEgressState(core.emptyState(), [obsOk(longFqdn, ips, TTL, 443)], 1000, bigCfg)
+  const ann = core.serializeState(out.state)
+  const total =
+    Buffer.byteLength(ann[core.STATE_ANNOTATION], 'utf8') +
+    Buffer.byteLength(ann[core.TARGETS_ANNOTATION], 'utf8')
+  assert.ok(total <= 262144, `STATE+TARGETS = ${total} utf8 bytes, must be <= 262144 (256KB)`)
   assert.ok(out.entries.length > 0, 'not everything was evicted')
   assert.ok(out.entries.length < 900, 'byte-budget eviction dropped the overflow')
   assert.equal(out.overCap, true, 'overCap flags the eviction for the alarm/metric')
