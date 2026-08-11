@@ -146,7 +146,7 @@ describe('routes/notifications', () => {
     )
   })
 
-  it('propagates partial preference PUT validation errors from control-api', async () => {
+  it('sanitizes partial preference PUT validation errors from control-api', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
       new controlApiClientMock.ControlApiError('invalid_channel_fallback_enabled', 400, {
@@ -160,7 +160,14 @@ describe('routes/notifications', () => {
       .send({ preferredMedium: 'telegram' })
       .expect(400)
 
-    expect(response.body).toEqual({ error: 'invalid_channel_fallback_enabled' })
+    expect(response.body).toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'The request is not valid.',
+        correlationId: expect.any(String),
+        retryable: false,
+      },
+    })
     expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledWith(
       'PUT',
       '/external/me/notification-preferences',
