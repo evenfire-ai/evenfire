@@ -2845,6 +2845,38 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
 
     await request(app).delete('/admin/registry/uninstall/INVALID').expect(400)
   })
+
+  it('uninstalling an McpServer preserves spec.displayName on referencing contexts (R4-B5)', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('mcpservers', {
+      metadata: { name: 'srv-target' },
+      spec: { image: 'test:1.0' },
+    })
+    // Context references the server being uninstalled AND carries displayName —
+    // the additive field the allowlist-pruning rebuild must not drop.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: {
+        contextId: 'ctx-keep',
+        mcpServers: ['srv-target', 'srv-other'],
+        displayName: 'Keep Me',
+      },
+    })
+    // Suppress makeApp's default installed-srv/ctx1 seed so the store holds only
+    // the fixtures this assertion cares about.
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const { app } = makeApp(gw)
+
+    await request(app).delete('/admin/registry/uninstall/srv-target').expect(200)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and only the uninstalled server left the allowlist.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other'])
+  })
 })
 
 // ── Upgrade flow (§9.4) ─────────────────────────────────────────────────────

@@ -1642,7 +1642,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           try {
             const ctxList = (await gateway.listResource('contexts', namespace)) as Array<{
               metadata?: { name?: string }
-              spec?: { contextId?: string; description?: string; mcpServers?: string[] }
+              spec?: Record<string, unknown> & {
+                contextId?: string
+                description?: string
+                mcpServers?: string[]
+              }
             }>
             for (const ctx of ctxList) {
               const name = ctx.metadata?.name
@@ -1653,8 +1657,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                   name,
                   {
                     spec: {
+                      ...ctx.spec,
                       contextId: ctx.spec?.contextId ?? name,
-                      description: ctx.spec?.description,
                       mcpServers: servers.filter(s => s !== resourceName),
                     } as Record<string, unknown>,
                   },
