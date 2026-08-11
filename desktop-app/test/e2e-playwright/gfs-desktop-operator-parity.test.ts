@@ -9,7 +9,11 @@ import {
 } from './helpers/gfsDesktopOperatorParityFixtures'
 
 async function expectToast(page: Page, message: string): Promise<void> {
-  await expect(page.getByRole('status', { name: message, exact: true })).toBeVisible({
+  // ToastStack exposes the status role on the container, while its decorative
+  // icon is intentionally aria-hidden. Match the user-visible message inside
+  // that container instead of requiring an exact accessible-name calculation
+  // that differs between Chromium and Electron.
+  await expect(page.getByRole('status').filter({ hasText: message })).toBeVisible({
     timeout: 30_000,
   })
 }
