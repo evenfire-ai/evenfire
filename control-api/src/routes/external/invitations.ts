@@ -229,10 +229,10 @@ export function createExternalInvitationsRouter(): Router {
     requireValidExternalSessionToken,
     async (req, res, next) => {
       try {
-        const email = String(req.query.email || '')
+        const email = String((req as ExternalAuthedRequest).externalAuth?.email || '')
           .trim()
           .toLowerCase()
-        if (!email) return res.status(400).json({ error: 'email is required' })
+        if (!email) return res.status(401).json({ error: 'Unauthorized' })
         return res.status(200).json({ items: await listPendingInvitations(email) })
       } catch (error) {
         return next(error)
