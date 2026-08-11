@@ -245,7 +245,7 @@ function behavior(input: {
   })
 }
 
-function candidate(input: {
+export function authorityCandidate(input: {
   userId: string
   kind: 'direct' | 'team'
   grantId: string
@@ -272,7 +272,7 @@ function candidate(input: {
   })
 }
 
-function candidateFromGrantRow(input: {
+export function authorityCandidateFromGrantRow(input: {
   row: Record<string, unknown>
   userId: string
   capabilities: readonly AccessCapability[]
@@ -291,7 +291,7 @@ function candidateFromGrantRow(input: {
   if (kind === 'team' && (!teamId || !['admin', 'inviter', 'member'].includes(currentRole!))) {
     return null
   }
-  return candidate({
+  return authorityCandidate({
     userId: input.userId,
     kind,
     grantId,
@@ -428,7 +428,7 @@ async function loadSimpleOperationalGrantCandidates(input: {
       : input.graph.resource.providerUid
   if (!bindingProviderUid) return []
   return (result.rows as Record<string, unknown>[]).flatMap(row => {
-    const value = candidateFromGrantRow({
+    const value = authorityCandidateFromGrantRow({
       row,
       userId: input.userId,
       capabilities,
@@ -539,7 +539,7 @@ async function loadDerivedOperationalCandidates(input: {
                 readOnly: true,
               })
             : undefined
-        const value = candidateFromGrantRow({
+        const value = authorityCandidateFromGrantRow({
           row: {
             ...row,
             grant_id: `${String(row.grant_id)}:${edge.relationshipInstanceId}`,
@@ -581,7 +581,7 @@ async function loadDerivedOperationalCandidates(input: {
     for (const hostEdge of hostEdges.filter(value => value.sourceId === hostId)) {
       const contextEdge = directEdges.find(value => value.sourceId === hostEdge.targetId)
       if (!contextEdge) continue
-      const value = candidateFromGrantRow({
+      const value = authorityCandidateFromGrantRow({
         row: {
           ...row,
           grant_id: `${String(row.grant_id)}:${hostEdge.relationshipInstanceId}:${contextEdge.relationshipInstanceId}`,
@@ -643,7 +643,7 @@ async function loadDatabaseCandidates(input: {
       exists: owns,
       candidates: owns
         ? [
-            candidate({
+            authorityCandidate({
               userId: snapshot.userId,
               kind: 'direct',
               grantId: `users:${snapshot.userId}`,
@@ -661,7 +661,7 @@ async function loadDatabaseCandidates(input: {
       exists: Boolean(membership),
       candidates: membership
         ? [
-            candidate({
+            authorityCandidate({
               userId: snapshot.userId,
               kind: 'team',
               grantId: `team_members:${membership.teamId}:${snapshot.userId}`,
@@ -797,7 +797,7 @@ async function loadDatabaseCandidates(input: {
           : type === 'gfs_resource'
             ? gfsPermissionsToCapabilities(row.permissions)
             : ['notification.read']
-    const value = candidateFromGrantRow({
+    const value = authorityCandidateFromGrantRow({
       row,
       userId: snapshot.userId,
       capabilities,
