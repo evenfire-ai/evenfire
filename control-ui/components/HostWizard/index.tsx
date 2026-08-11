@@ -21,6 +21,7 @@ import {
 import { cn } from '@/lib/cn'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '@/lib/hostWorkflowControl'
+import { DNS_SUBDOMAIN_MAX_LENGTH, isValidDNSSubdomain } from '@/lib/k8sValidation'
 import {
   type HostAllowedModel,
   type LlmPolicy,
@@ -220,6 +221,21 @@ function slugConstraintMessage(rawName: string): string | null {
   return null
 }
 
+// Human-readable reason a derived SECRET slug fails the server constraint, or
+// null when valid/empty (empty is surfaced by the "set a name" message). The
+// server validates a K8s Secret name as an RFC1123 DNS SUBDOMAIN (≤253) via
+// `isValidDNSSubdomain`, NOT the ≤63 DNS label used for host/context/channel.
+// The secret gate must mirror subdomain, or a name the server would accept —
+// e.g. the auto-derived `${slug}-llm` from a 60-char host name (64 chars) — is
+// wrongly blocked client-side with a bogus length error the user never caused.
+function secretSlugConstraintMessage(rawName: string): string | null {
+  const slug = toKebabCase(rawName)
+  if (slug.length === 0) return null
+  if (slug.length > DNS_SUBDOMAIN_MAX_LENGTH) return 'Secret name must be at most 253 characters.'
+  if (!isValidDNSSubdomain(slug)) return 'Secret name must be a valid RFC1123 identifier.'
+  return null
+}
+
 function isStepValid(
   stepIndex: number,
   state: {
@@ -283,7 +299,12 @@ function isStepValid(
     const hasValidSecret =
       state.secretMode === 'existing'
         ? state.existingSecret.trim().length > 0
-        : isValidResourceSlug(state.newSecretName) &&
+        : // Secret names are DNS SUBDOMAINS server-side (≤253), not ≤63 labels —
+          // mirror `isValidDNSSubdomain` so the gate is never stricter than the
+          // server. (Host/context/channel keep isValidResourceSlug: those the
+          // server validates as ≤63 DNS labels.) isValidDNSSubdomain('') is
+          // false, so an empty derived name still blocks here.
+          isValidDNSSubdomain(toKebabCase(state.newSecretName)) &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
     return hasValidSecret && state.modelName.trim().length > 0
@@ -557,9 +578,22 @@ export function HostWizard({
             spec?: Record<string, unknown>
           }>
         }>,
-        apiGet('/api/v1/admin/hosts') as Promise<{
-          items?: Array<{ metadata?: { name?: string } }>
-        }>,
+        // Best-effort: the existing-host collision guard is a nicety layered on
+        // top of the wizard, not a hard dependency of it. Isolate this fetch's
+        // failure (403 RBAC / timeout / 500) so it can NOT reject the whole
+        // Promise.all and blank the context/channel/member/team selectors. On
+        // failure existingHostNames stays [] and the step-0 collision gate
+        // degrades FAIL-OPEN (permits create) — the pre-fix behavior (the wizard
+        // never loaded hosts at all), not worse. The submit-time upsert is still
+        // PUT-first, so a true collision could overwrite a spec when the
+        // directory is down; that exposure predates this guard and is unchanged.
+        // Do NOT make this fail-closed: blocking every create when hosts can't
+        // load is a strictly worse UX.
+        (
+          apiGet('/api/v1/admin/hosts') as Promise<{
+            items?: Array<{ metadata?: { name?: string } }>
+          }>
+        ).catch(() => ({ items: [] as Array<{ metadata?: { name?: string } }> })),
       ])
       if (!mountedRef.current) return
       setUsers(Array.isArray(usersData.items) ? usersData.items : [])
@@ -688,8 +722,8 @@ export function HostWizard({
     if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
       return 'For a new secret, set a name.'
     }
-    if (step === 2 && secretMode === 'new' && slugConstraintMessage(newSecretName))
-      return slugConstraintMessage(newSecretName)!
+    if (step === 2 && secretMode === 'new' && secretSlugConstraintMessage(newSecretName))
+      return secretSlugConstraintMessage(newSecretName)!
     if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
       return `Add the ${getProviderLabel(provider)} credential for the primary model.`
     }

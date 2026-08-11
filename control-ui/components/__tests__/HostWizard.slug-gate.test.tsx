@@ -196,3 +196,107 @@ describe('HostWizard — step 0 blocks a slug colliding with an existing host (R
     ;(api.apiGet as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [] })
   })
 })
+
+/**
+ * Regression guard for R4-M5: the step-2 SECRET gate must mirror the SERVER,
+ * which validates a K8s Secret name as an RFC1123 DNS SUBDOMAIN (≤253 chars,
+ * `isValidDNSSubdomain`), NOT the stricter ≤63 DNS label used for
+ * host/context/channel names. R4-H1's fix wrongly applied the ≤63-label
+ * validator (`isValidResourceSlug`) to the secret, making the client STRICTER
+ * than the server: a 60-char host name auto-derives a `${slug}-llm` secret of 64
+ * chars, which the server accepts (≤253) but the ≤63 gate blocked — freezing
+ * step 2 before the user ever touched the secret field.
+ *
+ * FAILS against the R4-H1 head (11d5beee), where the secret gate read
+ * `isValidResourceSlug(state.newSecretName)` / `slugConstraintMessage`.
+ */
+describe('HostWizard — step 2 secret gate mirrors the server DNS-subdomain limit (R4-M5)', () => {
+  it('enables Next on a 64-char derived secret name the server (≤253) accepts', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    // 60-char host name → 60-char slug (valid ≤63). The auto-derived secret
+    // default is `${slug}-llm` = 64 chars, a valid DNS subdomain the server
+    // accepts. The operator never touches the secret field.
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+      target: { value: 'a'.repeat(60) },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    // Step 1: a new context with just a valid name, advance to step 2.
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    // Step 2: fill the primary OpenAI key so the ONLY thing that could still
+    // block Next is the secret name length. Post-fix (subdomain ≤253), the
+    // 64-char default is valid → Next enabled and no length error shown.
+    fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
+
+    expect(screen.queryByText(/at most 63 characters/i)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+  })
+
+  it('still blocks a secret name longer than 253 characters', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'agent-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    // Step 2: make the primary credential valid so the secret length is the
+    // sole blocker, then overtype the secret with a 254-char name (> subdomain
+    // max). The gate must still block — the fix loosens the ceiling, not removes
+    // it.
+    fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
+    fireEvent.change(screen.getByPlaceholderText(/secret-name/i), {
+      target: { value: 'a'.repeat(254) },
+    })
+
+    expect(screen.getByText(/at most 253 characters/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+})
+
+/**
+ * Regression guard for R4-M6: R4-B1's fix added GET /admin/hosts INTO the same
+ * `Promise.all` as users/teams/contexts/channels. `Promise.all` rejects if ANY
+ * input rejects, so a 403/timeout/500 on the hosts fetch discarded every other
+ * selector and dropped the wizard into `directoryLoadError` — even though hosts
+ * only feeds a best-effort collision guard. The hosts fetch must be isolated so
+ * its failure leaves the rest of the directory loaded and `existingHostNames`
+ * empty (collision guard degrades fail-open, the pre-fix behavior).
+ *
+ * FAILS against the R4-B1 head (11d5beee), where the hosts fetch sat unguarded
+ * inside the `Promise.all`.
+ */
+describe('HostWizard — a failed GET /admin/hosts does not sink the directory load (R4-M6)', () => {
+  it('loads the wizard and degrades the collision guard fail-open when hosts fetch rejects', async () => {
+    ;(api.apiGet as unknown as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/hosts') {
+        return Promise.reject(new Error('403 forbidden'))
+      }
+      return Promise.resolve({ items: [] })
+    })
+
+    await renderWizard()
+    await waitFor(() => expect(api.apiGet).toHaveBeenCalledWith('/api/v1/admin/hosts'))
+
+    // The whole directory load did NOT fail: no error banner from Promise.all.
+    expect(screen.queryByText(/Failed to load users\/teams\/contexts/i)).not.toBeInTheDocument()
+
+    // Collision guard degraded fail-open: existingHostNames is empty, so a name
+    // that would collide had the directory loaded is NOT blocked, and no
+    // "already in use" message appears.
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'My Agent' } })
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    expect(screen.queryByText(/Identifier already in use/i)).not.toBeInTheDocument()
+
+    // Restore the default apiGet stub so no implementation leaks past this test.
+    ;(api.apiGet as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [] })
+  })
+})

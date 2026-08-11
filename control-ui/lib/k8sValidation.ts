@@ -13,6 +13,27 @@ export function isValidK8sName(name: string): boolean {
   return K8S_NAME_RE.test(name) && name.length <= RFC1123_MAX_LENGTH
 }
 
+// RFC1123 DNS-SUBDOMAIN max length. K8s Secret names are validated as DNS
+// subdomains (≤253), NOT the stricter ≤63 DNS label used for hosts/contexts/
+// channels. Mirrors the server's `isValidDNSSubdomain`
+// (control-api/src/http/rfc1123.ts).
+export const DNS_SUBDOMAIN_MAX_LENGTH = 253
+
+// Same charset as a DNS label but up to 253 chars. Regex mirrors the server's
+// DNS_SUBDOMAIN_RE (control-api/src/http/rfc1123.ts) exactly.
+const DNS_SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,251}[a-z0-9])?$/
+
+/**
+ * Validate a name as an RFC1123 DNS subdomain (lowercase alphanumeric + interior
+ * hyphens, ≤253 chars, no leading/trailing hyphen). Client-side mirror of the
+ * control-api `isValidDNSSubdomain` used to validate K8s Secret names. Returns
+ * false for the empty string. Use this — not `isValidK8sName` — for Secret
+ * names, which the server accepts up to 253 chars.
+ */
+export function isValidDNSSubdomain(name: string): boolean {
+  return DNS_SUBDOMAIN_RE.test(name)
+}
+
 /**
  * Sanitize an arbitrary string into a valid RFC 1123 DNS label for use as a
  * default K8s resource name: lowercase, runs of non-`[a-z0-9-]` collapsed to a
