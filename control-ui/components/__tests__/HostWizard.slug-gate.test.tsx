@@ -131,3 +131,68 @@ describe('HostWizard — step 1 new-context gate on the derived slug (R1-B1 sibl
     expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
   })
 })
+
+/**
+ * Regression guard for R4-H1: the step-0 gate must mirror the SERVER validation
+ * (RFC1123 DNS-label ≤63 chars), not just "derives a non-empty slug". A 64-char
+ * name derives a valid-but-too-long slug that passes `toKebabCase(x).length > 0`
+ * yet is rejected server-side (`invalid_name`), orphaning the siblings created
+ * before the host. FAILS against the pre-fix head where the gate was
+ * `toKebabCase(state.hostName).length > 0`.
+ */
+describe('HostWizard — step 0 gates on the RFC1123 length limit (R4-H1)', () => {
+  it('keeps Next DISABLED when the derived slug exceeds 63 characters', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+      target: { value: 'a'.repeat(64) },
+    })
+
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getAllByText(/at most 63 characters/i).length).toBeGreaterThan(0)
+  })
+
+  it('enables Next for a 63-character derived slug (boundary)', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+      target: { value: 'a'.repeat(63) },
+    })
+
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+  })
+})
+
+/**
+ * Regression guard for R4-B1: create is a PUT-first upsert, so a slug that
+ * collides with an existing host would silently OVERWRITE that agent's spec and
+ * report "created". The step-0 gate must block a colliding derived slug BEFORE
+ * any sibling (secret/context/channel) is created — no create request escapes.
+ * FAILS against the pre-fix head, which never loaded the host directory.
+ */
+describe('HostWizard — step 0 blocks a slug colliding with an existing host (R4-B1)', () => {
+  it('keeps Next DISABLED and fires no create request when the slug matches an existing host', async () => {
+    ;(api.apiGet as unknown as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/hosts') {
+        return Promise.resolve({ items: [{ metadata: { name: 'my-agent' } }] })
+      }
+      return Promise.resolve({ items: [] })
+    })
+
+    await renderWizard()
+    await waitFor(() => expect(api.apiGet).toHaveBeenCalledWith('/api/v1/admin/hosts'))
+
+    // "My Agent" derives to the slug "my-agent", which already exists.
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'My Agent' } })
+
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getByText(/Identifier already in use/i)).toBeInTheDocument()
+    // No create request (POST/PUT via apiSend) escapes for a colliding slug.
+    expect(api.apiSend).not.toHaveBeenCalled()
+
+    // Restore the default apiGet stub so no implementation leaks past this test.
+    ;(api.apiGet as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [] })
+  })
+})

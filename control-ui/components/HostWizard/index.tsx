@@ -35,7 +35,7 @@ import {
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
-import { toKebabCase, toKebabInput } from '@/lib/string'
+import { RFC1123_MAX_LENGTH, isValidResourceSlug, toKebabCase, toKebabInput } from '@/lib/string'
 import {
   HOST_NAMESPACE,
   HOST_SECRET_LABEL_KEY,
@@ -209,6 +209,17 @@ function WizardSelect({
   )
 }
 
+// Human-readable reason a derived slug fails the server RFC1123 constraint, or
+// null when it is valid (or empty — the empty case is surfaced by each field's
+// own "must contain letters or numbers" message).
+function slugConstraintMessage(rawName: string): string | null {
+  const slug = toKebabCase(rawName)
+  if (slug.length === 0) return null
+  if (slug.length > RFC1123_MAX_LENGTH) return 'Identifier must be at most 63 characters.'
+  if (!isValidResourceSlug(rawName)) return 'Identifier must be a valid RFC1123 identifier.'
+  return null
+}
+
 function isStepValid(
   stepIndex: number,
   state: {
@@ -233,19 +244,29 @@ function isStepValid(
     selectedUserIds: string[]
     selectedTeamIds: string[]
     directoryLoadFailed: boolean
+    existingHostNames: string[]
   }
 ): boolean {
-  // Gate on the DERIVED slug, not the raw text: a name with no ASCII
-  // alphanumerics ("!!!", "日本語", "---", whitespace) trims to a non-empty
-  // string but toKebabCase()s to "", which would send metadata.name: "" — and
-  // because the secret/context are created BEFORE the host in submit(), a
-  // failed host create would orphan those siblings.
-  if (stepIndex === 0) return toKebabCase(state.hostName).length > 0
+  // Gate on the DERIVED slug against the FULL server constraint, not just
+  // "non-empty": a name with no ASCII alphanumerics ("!!!", "日本語", "---",
+  // whitespace) slugs to "", and a 70-char name slugs to a >63 label the server
+  // rejects (`invalid_name`, RFC1123 DNS-label). Either way the secret/context
+  // are created BEFORE the host in submit(), so a rejected host create orphans
+  // those siblings. isValidResourceSlug mirrors the server rule client-side.
+  if (stepIndex === 0) {
+    if (!isValidResourceSlug(state.hostName)) return false
+    // Block a slug that collides with an existing host: create's PUT-first
+    // upsert (submitAll → upsertResource('admin/hosts', …)) would otherwise
+    // overwrite that agent's entire spec and still report "created". Gating here
+    // stops the collision BEFORE any sibling (secret/context/channel) is created.
+    if (state.existingHostNames.includes(toKebabCase(state.hostName))) return false
+    return true
+  }
   if (stepIndex === 1) {
     if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
     // Same slug-derivation gate: the new context upsert runs before the host
-    // create, so an empty derived name here has the same orphan risk.
-    return toKebabCase(state.contextName).length > 0
+    // create, so an invalid/over-long derived name here has the same orphan risk.
+    return isValidResourceSlug(state.contextName)
   }
   if (stepIndex === 2) {
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
@@ -262,7 +283,7 @@ function isStepValid(
     const hasValidSecret =
       state.secretMode === 'existing'
         ? state.existingSecret.trim().length > 0
-        : toKebabCase(state.newSecretName).length > 0 &&
+        : isValidResourceSlug(state.newSecretName) &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
     return hasValidSecret && state.modelName.trim().length > 0
@@ -273,7 +294,7 @@ function isStepValid(
   if (stepIndex === 4) {
     if (state.channelMode === 'skip') return true
     if (state.channelMode === 'existing') return state.selectedExistingChannel.trim().length > 0
-    if (!toKebabCase(state.channelName)) return false
+    if (!isValidResourceSlug(state.channelName)) return false
     if (!hasRequiredChannelCredential(state.channelProvider, state.pendingCredentials)) return false
     if (
       state.channelProvider === 'telegram' &&
@@ -314,6 +335,10 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
+  // Existing host slugs (metadata.name), loaded up front so the step-0 gate can
+  // block a colliding name BEFORE any sibling is created. Without this, create's
+  // PUT-first upsert would silently overwrite an existing agent's whole spec.
+  const [existingHostNames, setExistingHostNames] = useState<string[]>([])
 
   const [contextName, setContextName] = useState('')
   const [contextMode, setContextMode] = useState<'existing' | 'new'>('existing')
@@ -484,6 +509,7 @@ export function HostWizard({
       selectedUserIds,
       selectedTeamIds,
       directoryLoadFailed: directoryLoadError.length > 0,
+      existingHostNames,
     })
   }, [
     step,
@@ -508,6 +534,7 @@ export function HostWizard({
     selectedUserIds,
     selectedTeamIds,
     directoryLoadError,
+    existingHostNames,
   ])
 
   const loadDirectory = useCallback(async () => {
@@ -515,7 +542,7 @@ export function HostWizard({
     setDirectoryLoadError('')
     setError('')
     try {
-      const [usersData, teamsData, contextsData, channelsData] = await Promise.all([
+      const [usersData, teamsData, contextsData, channelsData, hostsData] = await Promise.all([
         getAdminUsers(''),
         getAdminTeams(),
         apiGet('/api/v1/admin/contexts') as Promise<{
@@ -529,6 +556,9 @@ export function HostWizard({
             metadata?: { name?: string; namespace?: string }
             spec?: Record<string, unknown>
           }>
+        }>,
+        apiGet('/api/v1/admin/hosts') as Promise<{
+          items?: Array<{ metadata?: { name?: string } }>
         }>,
       ])
       if (!mountedRef.current) return
@@ -558,6 +588,10 @@ export function HostWizard({
         .filter(channel => channel.name)
         .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
       setExistingChannels(channelOptions)
+      const hostNames = (hostsData.items || [])
+        .map(host => String(host.metadata?.name || '').trim())
+        .filter(Boolean)
+      setExistingHostNames(hostNames)
     } catch (e) {
       if (!mountedRef.current) return
       const message =
@@ -602,6 +636,7 @@ export function HostWizard({
             selectedUserIds,
             selectedTeamIds,
             directoryLoadFailed: directoryLoadError.length > 0,
+            existingHostNames,
           })
         ) {
           return false
@@ -632,21 +667,29 @@ export function HostWizard({
       selectedUserIds,
       selectedTeamIds,
       directoryLoadError,
+      existingHostNames,
     ]
   )
 
   const validationMessage = useMemo(() => {
     if (step === 0 && !toKebabCase(hostName)) return 'Agent name must contain letters or numbers.'
+    if (step === 0 && slugConstraintMessage(hostName)) return slugConstraintMessage(hostName)!
+    if (step === 0 && existingHostNames.includes(toKebabCase(hostName)))
+      return 'Identifier already in use — choose another name.'
     if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
       return 'Select an existing context.'
     if (step === 1 && contextMode === 'new' && !toKebabCase(contextName))
       return 'Context name must contain letters or numbers.'
+    if (step === 1 && contextMode === 'new' && slugConstraintMessage(contextName))
+      return slugConstraintMessage(contextName)!
     if (step === 2 && !modelName.trim()) return 'Model name is required.'
     if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
       return 'Select an existing secret.'
     if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
       return 'For a new secret, set a name.'
     }
+    if (step === 2 && secretMode === 'new' && slugConstraintMessage(newSecretName))
+      return slugConstraintMessage(newSecretName)!
     if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
       return `Add the ${getProviderLabel(provider)} credential for the primary model.`
     }
@@ -662,6 +705,8 @@ export function HostWizard({
       return 'Select an existing channel or skip channel setup.'
     if (step === 4 && channelMode === 'new' && !toKebabCase(channelName))
       return 'CommunicationChannel name is required, or skip channel setup.'
+    if (step === 4 && channelMode === 'new' && slugConstraintMessage(channelName))
+      return slugConstraintMessage(channelName)!
     if (
       step === 4 &&
       channelMode === 'new' &&
@@ -705,6 +750,7 @@ export function HostWizard({
     modelName,
     selectedUserIds,
     selectedTeamIds,
+    existingHostNames,
   ])
 
   async function upsertResource(
@@ -787,6 +833,12 @@ export function HostWizard({
     try {
       const shouldSkipChannels = options.skipChannels || channelMode === 'skip'
       const normalizedHostName = toKebabCase(hostName)
+      // Collision guard, mirrored from the step-0 gate: create's PUT-first
+      // upsert would overwrite an existing agent's spec. Throw BEFORE creating
+      // any sibling (secret/context/channel) so a collision never orphans them.
+      if (existingHostNames.includes(normalizedHostName)) {
+        throw new Error('Identifier already in use — choose another name.')
+      }
       const normalizedContextName = toKebabCase(contextName)
       const resolvedContextName =
         contextMode === 'existing' ? selectedContextOption?.contextId || '' : normalizedContextName
@@ -1014,6 +1066,9 @@ export function HostWizard({
                 <span className="cu-field__hint">
                   Identifier: <code>{toKebabCase(hostName)}</code>
                 </span>
+              ) : null}
+              {slugConstraintMessage(hostName) ? (
+                <span className="cu-field__error">{slugConstraintMessage(hostName)}</span>
               ) : null}
             </Field>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>

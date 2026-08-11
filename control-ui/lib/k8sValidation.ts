@@ -6,8 +6,11 @@
 
 const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
 
+// RFC1123 DNS-label max length, mirrored by the server (`invalid_name`).
+export const RFC1123_MAX_LENGTH = 63
+
 export function isValidK8sName(name: string): boolean {
-  return K8S_NAME_RE.test(name) && name.length <= 63
+  return K8S_NAME_RE.test(name) && name.length <= RFC1123_MAX_LENGTH
 }
 
 /**
