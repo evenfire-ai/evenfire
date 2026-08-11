@@ -34,6 +34,7 @@ const TARGET_USER_ID = '11111111-1111-4111-8111-111111111111'
 
 function makeApp() {
   const app = express()
+  app.set('trust proxy', 1)
   app.use(express.json())
   app.use(createMembersRouter())
   return app
@@ -133,6 +134,7 @@ describe('routes/members', () => {
       await request(makeApp())
         .delete(`/members/${TARGET_USER_ID}`)
         .set('authorization', 'Bearer good-token')
+        .set('x-forwarded-for', '198.51.100.10')
         .set('Idempotency-Key', `retire-attempt-${attempt}`)
         .send({ reason: `retirement attempt ${attempt}` })
         .expect(200)
@@ -141,6 +143,7 @@ describe('routes/members', () => {
     await request(makeApp())
       .delete(`/members/${TARGET_USER_ID}`)
       .set('authorization', 'Bearer good-token')
+      .set('x-forwarded-for', '198.51.100.10')
       .set('Idempotency-Key', 'retire-attempt-31')
       .set('x-correlation-id', '22222222-2222-4222-8222-222222222222')
       .send({ reason: 'changed reason cannot bypass the verified-actor bucket' })

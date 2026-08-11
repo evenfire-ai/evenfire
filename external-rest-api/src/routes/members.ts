@@ -1,5 +1,5 @@
 import { type NextFunction, type Response, Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
 import { ControlApiError } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
@@ -21,21 +21,35 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const MEMBER_RETIREMENT_RATE_LIMIT_PER_MINUTE = 30
+const MEMBER_RETIREMENT_EDGE_RATE_LIMIT_PER_MINUTE = 30
+const MEMBER_RETIREMENT_SUBJECT_RATE_LIMIT_PER_MINUTE = 30
 const MAX_RETIREMENT_REASON_LENGTH = 512
 const MAX_RETIREMENT_IDEMPOTENCY_KEY_LENGTH = 256
 
-// Retirement is an authenticated destructive operation. Keep the guard at
-// the public route boundary so CodeQL and deployed edge instrumentation both
-// see a concrete limiter before the downstream authorization/service call.
-const memberRetirementRateLimit = rateLimit({
+// The IP backstop runs before authentication, so an unauthenticated flood
+// cannot consume authorization or Control API work. It is only a coarse edge
+// guard; the verified-subject bucket below owns authenticated fairness.
+const memberRetirementEdgeRateLimit = rateLimit({
   windowMs: 60_000,
-  limit: MEMBER_RETIREMENT_RATE_LIMIT_PER_MINUTE,
+  limit: MEMBER_RETIREMENT_EDGE_RATE_LIMIT_PER_MINUTE,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  identifier: 'external-member-retirement',
+  identifier: 'external-member-retirement-edge',
+  keyGenerator: req => `member-retirement-ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+})
+
+// This second bucket is deliberately after requireAuth: only the verified
+// session subject can select its key, never a request body/query/header value.
+const memberRetirementSubjectRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: MEMBER_RETIREMENT_SUBJECT_RATE_LIMIT_PER_MINUTE,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  identifier: 'external-member-retirement-subject',
   keyGenerator: req => {
     const userId = (req as AuthedRequest).auth?.userId
+    // The middleware is ordered after requireAuth. Keep a fail-closed key for
+    // an impossible wiring regression rather than accepting a client value.
     return userId ? `member-retirement:${userId}` : 'member-retirement:unauthenticated'
   },
 })
@@ -282,8 +296,9 @@ export function createMembersRouter(): Router {
 
   router.delete(
     '/members/:userId',
+    memberRetirementEdgeRateLimit,
     requireAuth,
-    memberRetirementRateLimit,
+    memberRetirementSubjectRateLimit,
     validateMemberRetirementRequest,
     async (req, res, next) => {
       try {
