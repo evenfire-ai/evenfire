@@ -30,9 +30,7 @@ function summary(item: CommunicationChannelItem): string {
 const COMMUNICATION_CHANNEL_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'agent', label: 'Agent', width: '18%' },
-  { key: 'telegram', label: 'Telegram', width: '10%' },
-  { key: 'slack', label: 'Slack', width: '10%' },
-  { key: 'teams', label: 'Teams', width: '10%' },
+  { key: 'type', label: 'Type', width: '18%' },
   { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
@@ -238,9 +236,10 @@ export function CommunicationChannelsTable({
                 {filteredRows.map(({ key, item }) => {
                   const name = item.metadata?.name || '-'
                   const spec = item.spec || {}
-                  const telegramCount = Array.isArray(spec.telegram) ? spec.telegram.length : 0
-                  const slackCount = Array.isArray(spec.slack) ? spec.slack.length : 0
-                  const teamsCount = Array.isArray(spec.teams) ? spec.teams.length : 0
+                  const configuredProviderTypes = configuredProviders(item)
+                  const providerTypes = COMMUNICATION_CHANNEL_PROVIDERS.filter(provider =>
+                    configuredProviderTypes.has(provider)
+                  )
                   return (
                     <React.Fragment key={key}>
                       <tr>
@@ -257,9 +256,9 @@ export function CommunicationChannelsTable({
                         <td>
                           <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
                         </td>
-                        <td>{telegramCount}</td>
-                        <td>{slackCount}</td>
-                        <td>{teamsCount}</td>
+                        <td>
+                          {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
+                        </td>
                         <td>
                           <div className="cu-table-actions">
                             <CopyChannelMenu

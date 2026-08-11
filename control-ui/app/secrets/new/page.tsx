@@ -16,20 +16,26 @@ import { Button, Field, FormSection, SelectInput, TextInput } from '@components/
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
+  type CredentialSchema,
   type RecipeSecretOwnership,
   apiSend,
   createMcpSecret,
   createRecipeSecret,
   getRecipes,
+  getRegistryCredentialSchema,
 } from '@lib/api'
 import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
+import {
+  areRequiredCredentialRowsComplete,
+  reconcileCredentialRows,
+} from '@lib/registryCredentialDraft'
+import type { CredentialDraftRow } from '@lib/registryCredentialDraft.types'
 
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
 const MCP_SECRET_NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 
 type SecretScope = 'llm' | 'mcp' | 'recipe'
-type SecretDraftRow = { id: string; secretKey: string; value: string }
 
 const STEPS = ['Secret', 'Values'] as const
 
@@ -46,8 +52,13 @@ const STEP_DETAILS = [
   },
 ] as const
 
-function createSecretDraftRow(id: string, secretKey = '', value = ''): SecretDraftRow {
-  return { id, secretKey, value }
+function createSecretDraftRow(
+  id: string,
+  secretKey = '',
+  value = '',
+  label?: string
+): CredentialDraftRow {
+  return { id, secretKey, value, label }
 }
 
 function CreateSecretPageContent() {
@@ -72,11 +83,16 @@ function CreateSecretPageContent() {
   const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
 
   const prefillMcpName = scope === 'mcp' ? (searchParams.get('name') ?? '').trim() : ''
+  const registryEntryName = scope === 'mcp' ? (searchParams.get('registryEntry') ?? '').trim() : ''
+  const registryEntryVersion =
+    scope === 'mcp' ? (searchParams.get('registryVersion') ?? '').trim() : ''
   const [mcpName, setMcpName] = useState(prefillMcpName)
-  const [mcpRows, setMcpRows] = useState<SecretDraftRow[]>(() => [
+  const [mcpRows, setMcpRows] = useState<CredentialDraftRow[]>(() => [
     createSecretDraftRow('mcp-secret-row-0'),
   ])
   const mcpNextRowId = useRef(1)
+  const [mcpCredentialSchema, setMcpCredentialSchema] = useState<CredentialSchema | null>(null)
+  const [mcpCredentialSchemaLoading, setMcpCredentialSchemaLoading] = useState(false)
 
   const prefillRecipeName = scope === 'recipe' ? (searchParams.get('name') ?? '').trim() : ''
   const prefillRecipeNamespace =
@@ -91,7 +107,7 @@ function CreateSecretPageContent() {
   }, [scope, searchParams])
 
   const [recipeName, setRecipeName] = useState(prefillRecipeName)
-  const [recipeRows, setRecipeRows] = useState<SecretDraftRow[]>(
+  const [recipeRows, setRecipeRows] = useState<CredentialDraftRow[]>(
     prefillRecipeKeys.length > 0
       ? prefillRecipeKeys.map((key, index) =>
           createSecretDraftRow(`recipe-secret-row-${index}`, key)
@@ -138,6 +154,34 @@ function CreateSecretPageContent() {
     }
   }, [scope, prefillOwnerRecipe])
 
+  useEffect(() => {
+    if (!registryEntryName || !registryEntryVersion) {
+      setMcpCredentialSchema(null)
+      setMcpCredentialSchemaLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setMcpCredentialSchemaLoading(true)
+    void getRegistryCredentialSchema(registryEntryName, registryEntryVersion)
+      .then(schema => {
+        if (cancelled) return
+        setMcpCredentialSchema(schema)
+        if (schema.keys.length === 0) return
+        setMcpRows(current => reconcileCredentialRows(current, schema.keys))
+      })
+      .catch(() => {
+        if (!cancelled) setMcpCredentialSchema(null)
+      })
+      .finally(() => {
+        if (!cancelled) setMcpCredentialSchemaLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [registryEntryName, registryEntryVersion])
+
   const llmCanSubmit = useMemo(() => {
     if (!llmName.trim()) return false
     return Object.values(llmKeyDraft).some(value => value.trim().length > 0) && !saving
@@ -146,10 +190,14 @@ function CreateSecretPageContent() {
   const mcpCanSubmit = useMemo(() => {
     if (!mcpName.trim()) return false
     if (!MCP_SECRET_NAME_PATTERN.test(mcpName.trim()) || mcpName.trim().length > 253) return false
-    return (
-      mcpRows.some(row => row.secretKey.trim().length > 0 && row.value.trim().length > 0) && !saving
+    const hasValues = mcpRows.some(
+      row => row.secretKey.trim().length > 0 && row.value.trim().length > 0
     )
-  }, [mcpName, mcpRows, saving])
+    const schemaComplete =
+      !mcpCredentialSchema?.required ||
+      areRequiredCredentialRowsComplete(mcpRows, mcpCredentialSchema.keys)
+    return hasValues && schemaComplete && !saving
+  }, [mcpCredentialSchema, mcpName, mcpRows, saving])
 
   const recipeCanSubmit = useMemo(() => {
     if (!recipeName.trim()) return false
@@ -457,46 +505,74 @@ function CreateSecretPageContent() {
               {step === 1 && scope === 'mcp' ? (
                 <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
                   <FormSection title="Secret values">
-                    <div className="cu-form-grid">
-                      {mcpRows.map((row, index) => (
-                        <div className="cu-form-inline" key={row.id}>
-                          <TextInput
-                            monospace
-                            value={row.secretKey}
-                            onChange={event =>
-                              updateMcpDraftRow(index, 'secretKey', event.target.value)
-                            }
-                            placeholder="API_KEY"
-                            disabled={saving}
-                          />
-                          <TextInput
-                            monospace
-                            value={row.value}
-                            onChange={event =>
-                              updateMcpDraftRow(index, 'value', event.target.value)
-                            }
-                            placeholder="secret value"
-                            type="password"
-                            autoComplete="off"
-                            disabled={saving}
-                          />
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => removeMcpDraftRow(index)}
-                            disabled={saving || mcpRows.length === 1}
-                            aria-label={`Remove MCP secret key row ${index + 1}`}
-                            title={`Remove MCP secret key row ${index + 1}`}
+                    {mcpCredentialSchemaLoading ? (
+                      <p className="cu-muted">Loading connector credential fields…</p>
+                    ) : mcpCredentialSchema?.keys.length ? (
+                      <div className="cu-form-stack">
+                        {mcpRows.map((row, index) => (
+                          <Field
+                            key={row.id}
+                            htmlFor={`${row.id}-value`}
+                            label={row.label || row.secretKey}
                           >
-                            <IconX width={16} height={16} />
-                          </button>
+                            <TextInput
+                              id={`${row.id}-value`}
+                              value={row.value}
+                              onChange={event =>
+                                updateMcpDraftRow(index, 'value', event.target.value)
+                              }
+                              placeholder={row.label || 'Credential value'}
+                              type="password"
+                              autoComplete="off"
+                              disabled={saving}
+                            />
+                          </Field>
+                        ))}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="cu-form-grid">
+                          {mcpRows.map((row, index) => (
+                            <div className="cu-form-inline" key={row.id}>
+                              <TextInput
+                                monospace
+                                value={row.secretKey}
+                                onChange={event =>
+                                  updateMcpDraftRow(index, 'secretKey', event.target.value)
+                                }
+                                placeholder="API_KEY"
+                                disabled={saving}
+                              />
+                              <TextInput
+                                monospace
+                                value={row.value}
+                                onChange={event =>
+                                  updateMcpDraftRow(index, 'value', event.target.value)
+                                }
+                                placeholder="secret value"
+                                type="password"
+                                autoComplete="off"
+                                disabled={saving}
+                              />
+                              <button
+                                type="button"
+                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                                onClick={() => removeMcpDraftRow(index)}
+                                disabled={saving || mcpRows.length === 1}
+                                aria-label={`Remove MCP secret key row ${index + 1}`}
+                                title={`Remove MCP secret key row ${index + 1}`}
+                              >
+                                <IconX width={16} height={16} />
+                              </button>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
 
-                    <Button type="button" size="sm" onClick={addMcpDraftRow} disabled={saving}>
-                      Add key
-                    </Button>
+                        <Button type="button" size="sm" onClick={addMcpDraftRow} disabled={saving}>
+                          Add key
+                        </Button>
+                      </>
+                    )}
                   </FormSection>
                 </div>
               ) : null}
