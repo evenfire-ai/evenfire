@@ -329,7 +329,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     })
     await expect(dialog).toBeVisible()
 
-    await uploadVisibleFile(page, dialog.getByRole('button', { name: 'Replace file' }), {
+    await uploadVisibleFile(page, dialog.locator('button').filter({ hasText: 'Replace file' }), {
       name: operatorJourney.names.renamedFile,
       mimeType: 'text/markdown',
       buffer: Buffer.from('# nested version two\n', 'utf8'),
