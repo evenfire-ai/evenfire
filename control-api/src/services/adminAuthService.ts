@@ -331,9 +331,10 @@ export async function setupInitialAdminCredentials(
   bootstrapUsername: string,
   email: string,
   username: string,
-  passwordHash: string
+  passwordHash: string,
+  db: Pick<DbClient, 'query'> = pool
 ): Promise<AdminUserRecord | null> {
-  const result = await pool.query(
+  const result = await db.query(
     `UPDATE control_admin_users
         SET email = $2,
             username = $3,
