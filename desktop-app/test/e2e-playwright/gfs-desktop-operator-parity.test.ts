@@ -394,7 +394,12 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       )
       .toMatchObject({ deleted: true })
 
-    await page.getByTestId('gfs-root-operator').click()
+    // Deleting the current file returns the visible browser to the operator
+    // root. The root breadcrumb is intentionally disabled because it is
+    // already the active location; assert that state instead of clicking a
+    // non-actionable control.
+    await expect(page.getByTestId('gfs-root-operator')).toBeDisabled()
+    await expect(page.getByTestId('gfs-view-operator')).toBeVisible()
     const renamedFolderAfterChildDelete = operatorJourney.readResource(
       rootId,
       operatorJourney.names.renamedFolder
