@@ -196,30 +196,36 @@ expect_diff_success 'generated deploy YAML output is explicitly excluded' \
 
 # A moving PR base must not pull target-branch-only formatting debt into the check.
 fixture="$(new_repo)"
+printf 'export const legacy={answer:42}\n' > "$fixture/control-api/src/legacy-base.ts"
+commit_all "$fixture" 'seed legacy formatting debt'
 branch_point="$(sha_of "$fixture")"
 git -C "$fixture" switch -qc feature
 printf 'export const feature = 1\n' > "$fixture/control-api/src/feature.ts"
 commit_all "$fixture" 'add feature file'
 feature_head="$(sha_of "$fixture")"
 git -C "$fixture" switch -q main
-mkdir -p "$fixture/control-api/src"
-printf 'export const baseOnly={answer:42}\n' > "$fixture/control-api/src/base-only.ts"
-commit_all "$fixture" 'advance base'
+printf 'export const legacy = { answer: 42 }\n' > "$fixture/control-api/src/legacy-base.ts"
+commit_all "$fixture" 'format legacy debt on advanced base'
 advanced_base="$(sha_of "$fixture")"
 git -C "$fixture" switch -q feature
 expect_diff_success 'PR mode checks merge-base..head when the base advances' \
   "$fixture" "$advanced_base" "$feature_head" merge-base
+expect_diff_failure 'two-dot PR mutation sees the legacy file moving backward' \
+  "$fixture" "$advanced_base" "$feature_head" direct
 
 # A push range spans every commit between the previous and new branch tips.
 fixture="$(new_repo)"
 base="$(sha_of "$fixture")"
-printf 'export const first = 1\n' > "$fixture/control-api/src/multi.ts"
-commit_all "$fixture" 'first push commit'
-printf 'export const first={answer:42}\n' > "$fixture/control-api/src/multi.ts"
-commit_all "$fixture" 'second push commit'
+printf 'export const early={answer:42}\n' > "$fixture/control-api/src/early.ts"
+commit_all "$fixture" 'add unformatted file in first push commit'
+last_commit_base="$(sha_of "$fixture")"
+printf 'export const final = 1\n' > "$fixture/control-api/src/final.ts"
+commit_all "$fixture" 'add different formatted file in final push commit'
 head="$(sha_of "$fixture")"
 expect_diff_failure 'direct push mode checks a multi-commit before..after range' \
   "$fixture" "$base" "$head" direct
+expect_diff_success 'last-commit-only mutation misses earlier unformatted file' \
+  "$fixture" "$last_commit_base" "$head" direct
 
 # Bounded ranges fail closed when the lower endpoint is zero or unavailable.
 fixture="$(new_repo)"
