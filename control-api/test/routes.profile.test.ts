@@ -53,6 +53,10 @@ const rateLimitMock = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
 }))
 
+const liveTeamAuthorizationMock = vi.hoisted(() => ({
+  getLiveTeamMembership: vi.fn(),
+}))
+
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 vi.mock(
@@ -68,6 +72,7 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 })
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
+vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
 
 describe('routes/profile', () => {
   const token = 'dev-external-rest-api-token'
@@ -106,6 +111,11 @@ describe('routes/profile', () => {
     Object.values(googleAuthMock).forEach(fn => fn.mockReset())
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
     Object.values(invitationFlowRegistrationMock).forEach(fn => fn.mockReset())
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockReset()
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockImplementation(
+      async (_userId: string, teamId: string) =>
+        teamId === 't1' ? { teamId: 't1', role: 'member' } : null
+    )
     rateLimitMock.checkAndIncrement.mockReset()
     rateLimitMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
@@ -366,6 +376,56 @@ describe('routes/profile', () => {
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/teams/t2/agents')
     ).expect(403)
+  })
+
+  it('does not allow an ordinary team member to rename a team', async () => {
+    svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
+
+    expect(svc.renameTeam).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the member directory to an ordinary member', async () => {
+    svc.listMembers.mockResolvedValue([{ id: 'u2', email: 'peer@example.com', role: 'member' }])
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/teams/t1/members')
+    ).expect(403)
+
+    expect(svc.listMembers).not.toHaveBeenCalled()
+  })
+
+  it('does not allow an inviter to create an admin invitation', async () => {
+    const inviterToken = signExternalSessionToken({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: 't1',
+      role: 'inviter',
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'inviter',
+    })
+    svc.createInvitation.mockResolvedValue({ id: 'invitation-1' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuth(request(app).post('/external/teams/t1/invitations'))
+      .set('x-user-session-token', inviterToken)
+      .send({ email: 'target@example.com', role: 'admin' })
+      .expect(403)
+
+    expect(svc.createInvitation).not.toHaveBeenCalled()
   })
 
   it('allows membership lookup for another team when user claim matches', async () => {

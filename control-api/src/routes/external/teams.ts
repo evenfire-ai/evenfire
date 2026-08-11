@@ -72,6 +72,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.put(
     '/external/teams/:teamId/name',
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
@@ -89,6 +90,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members',
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         return res.status(200).json({ items: await listMembers(req.params.teamId) })
@@ -166,6 +168,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members/:userId/role',
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         const role = await findMemberRole(req.params.teamId, req.params.userId)
@@ -216,6 +219,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!email || !role) {
           return res.status(400).json({ error: 'invalid invitation payload' })
+        }
+        if (role === 'admin' && (req as ExternalAuthedRequest).externalTeamAuth?.role !== 'admin') {
+          return res.status(403).json({ error: 'Forbidden' })
         }
         const fallbackName = email.split('@')[0] || email
         return res

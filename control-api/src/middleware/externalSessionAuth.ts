@@ -1,9 +1,14 @@
 import { NextFunction, Request, Response } from 'express'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
+import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
+  externalTeamAuth?: {
+    teamId: string
+    role: TeamRole
+  }
 }
 
 function extractUserSessionToken(req: Request): string {
@@ -44,14 +49,24 @@ export function requireExternalUserParamMatch(paramName = 'userId') {
 }
 
 export function requireExternalTeamParamMatch(paramName = 'teamId') {
-  return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
+  return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const claims = req.externalAuth
-    const requestedTeamId = String(req.params?.[paramName] || '').trim()
-    if (!claims || !requestedTeamId || claims.teamId !== requestedTeamId) {
+    const requestedTeamId = String(req.params?.[paramName] || req.query?.[paramName] || '').trim()
+    if (!claims || !requestedTeamId) {
       res.status(403).json({ error: 'Forbidden' })
       return
     }
-    next()
+    try {
+      const membership = await getLiveTeamMembership(claims.userId, requestedTeamId)
+      if (!membership) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      req.externalTeamAuth = membership
+      next()
+    } catch {
+      res.status(503).json({ error: 'authority_unavailable' })
+    }
   }
 }
 
@@ -71,7 +86,7 @@ export function rejectBodyUserTeamMismatch(
   const bodyTeamId = String((body as { teamId?: unknown }).teamId || '').trim()
   if (
     (bodyUserId && bodyUserId !== claims.userId) ||
-    (bodyTeamId && bodyTeamId !== claims.teamId)
+    (bodyTeamId && (!req.externalTeamAuth || bodyTeamId !== req.externalTeamAuth.teamId))
   ) {
     res.status(403).json({ error: 'Forbidden' })
     return
@@ -81,7 +96,7 @@ export function rejectBodyUserTeamMismatch(
 
 export function requireExternalRole(allowedRoles: TeamRole[]) {
   return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
-    const role = req.externalAuth?.role
+    const role = req.externalTeamAuth?.role
     if (!role || !allowedRoles.includes(role)) {
       res.status(403).json({ error: 'Forbidden' })
       return
