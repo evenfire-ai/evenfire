@@ -22,6 +22,79 @@ function permutations<T>(values: readonly T[]): T[][] {
   )
 }
 
+function randomFor(seed: number): () => number {
+  let state = seed >>> 0
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0
+    return state / 0x1_0000_0000
+  }
+}
+
+function pick<T>(random: () => number, values: readonly T[]): T {
+  return values[Math.floor(random() * values.length)]!
+}
+
+function shuffled<T>(random: () => number, values: readonly T[]): T[] {
+  const result = [...values]
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1))
+    ;[result[index], result[target]] = [result[target]!, result[index]!]
+  }
+  return result
+}
+
+function arbitraryCatalogSeeds(seed: number): CatalogSeed[] {
+  const random = randomFor(seed)
+  const count = 1 + Math.floor(random() * 30)
+  const nullable = (label: string) =>
+    random() < 0.45 ? null : `${label}-${Math.floor(random() * 4)}`
+  return Array.from({ length: count }, (_, index) => {
+    const resourceNumber = Math.floor(random() * 8)
+    const team = random() < 0.5 ? null : `team-${Math.floor(random() * 4)}`
+    const duplicateGrantSlot = Math.floor(index / 3)
+    return {
+      resource: canonicalResourceIdentity({
+        environmentId: pick(random, ['env:a', 'env:b']),
+        type: pick(random, ['host', 'context', 'workflow_recipe']),
+        logicalId: `resource-${resourceNumber}`,
+        displayName: `Shared label ${Math.floor(random() * 3)}`,
+      }),
+      relationships:
+        random() < 0.5
+          ? []
+          : [
+              {
+                type: pick(random, ['context', 'host', 'recipe']),
+                targetResourceId: `target:${Math.floor(random() * 5)}`,
+              },
+            ],
+      pathSeeds: [
+        {
+          kind: team ? 'team' : 'direct',
+          grantId: `grant-${duplicateGrantSlot}`,
+          ...(team
+            ? { teamId: team, teamName: `Team ${team}`, currentRole: 'member' as const }
+            : {}),
+          behavior: {
+            capabilities: shuffled(random, ['host.read', 'context.read'] as const).slice(
+              0,
+              1 + Math.floor(random() * 2)
+            ),
+            budgetRef: nullable('budget'),
+            credentialPolicyRef: nullable('credential'),
+            approvalPolicyRef: nullable('approval'),
+            filesystemScopeRef: nullable('filesystem'),
+            runtimeRef: nullable('runtime'),
+            providerModelPolicyRef: nullable('provider'),
+            auditSubject: team ? `team:${team}` : `user:user-${Math.floor(random() * 3)}`,
+          },
+        },
+      ],
+      authorizationResourceRevision: 1 + Math.floor(random() * 20),
+    }
+  })
+}
+
 function catalogSeed(input: {
   id: string
   displayName?: string
@@ -69,6 +142,57 @@ function catalogSeed(input: {
 }
 
 describe('access contract properties', () => {
+  it('preserves merge invariants across generated identities, nulls, and path behavior', () => {
+    for (let seed = 1; seed <= 250; seed += 1) {
+      const seeds = arbitraryCatalogSeeds(seed)
+      const before = structuredClone(seeds)
+      const canonical = mergeCatalogSeeds(seeds)
+      const random = randomFor(seed ^ 0x9e3779b9)
+
+      for (let iteration = 0; iteration < 5; iteration += 1) {
+        expect(mergeCatalogSeeds(shuffled(random, seeds))).toEqual(canonical)
+      }
+      const split = Math.floor(random() * (seeds.length + 1))
+      expect(
+        mergeCatalogSeeds([
+          ...mergeCatalogSeeds(seeds.slice(0, split)),
+          ...mergeCatalogSeeds(seeds.slice(split)),
+        ])
+      ).toEqual(canonical)
+      expect(mergeCatalogSeeds([...canonical, ...canonical])).toEqual(canonical)
+      expect(new Set(canonical.map(item => resourceIdentityKey(item.resource))).size).toBe(
+        canonical.length
+      )
+      expect(seeds).toEqual(before)
+    }
+  })
+
+  it('keeps same grant provenance separate when any behavior dimension differs', () => {
+    const base = catalogSeed({
+      id: 'shared-filesystem',
+      kind: 'direct',
+      grantId: 'user_contexts:user-1:context-a',
+    })
+    const variants = [
+      'budgetRef',
+      'credentialPolicyRef',
+      'approvalPolicyRef',
+      'filesystemScopeRef',
+      'runtimeRef',
+      'providerModelPolicyRef',
+      'auditSubject',
+    ] as const
+    const seeds = variants.map((field, index) => {
+      const value = structuredClone(base)
+      Object.assign(value.pathSeeds[0]!.behavior, { [field]: `${field}-${index}` })
+      return value
+    })
+
+    const merged = mergeCatalogSeeds([...seeds, structuredClone(seeds[0]!)])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]!.pathSeeds).toHaveLength(variants.length)
+  })
+
   it('exhaustively preserves catalog identity and paths across order and composition', () => {
     const seeds = [
       catalogSeed({
@@ -185,12 +309,13 @@ describe('access contract properties', () => {
         behavior,
       }),
     ]
+    const before = structuredClone(paths)
 
     for (const ordered of permutations(paths)) {
       expect(selectEquivalentAccessPath(ordered)?.id).toBe(paths[1]!.id)
       expect(ordered.every(path => accessPathsAreEquivalent(paths[0]!, path))).toBe(true)
     }
-    expect(paths.map(path => path.id)).toEqual([...paths.map(path => path.id)])
+    expect(paths).toEqual(before)
     expect(new Set(paths.map(path => path.id)).size).toBe(3)
     expect(paths[0]!.id).toMatch(/^ap1_[A-Za-z0-9_-]{43}$/)
   })
