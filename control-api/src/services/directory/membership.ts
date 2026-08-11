@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
@@ -1094,6 +1095,7 @@ export async function setInvitationPasswordForUser(
         WHERE id = $1`,
       [user.id, passwordHash]
     )
+    await revokeAllUserSessions(user.id, 'password_changed', db)
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
       await db.query(
         `UPDATE invitations
@@ -1176,6 +1178,7 @@ export async function setInvitationPasswordForEmail(
         WHERE id = $1`,
       [user.id, passwordHash]
     )
+    await revokeAllUserSessions(user.id, 'password_changed', db)
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
       await db.query(
         `UPDATE invitations
@@ -1888,13 +1891,23 @@ export async function updateUserPassword(
     return { error: 'invalid_current_password' as const }
   }
 
-  await pool.query(
-    `UPDATE users
-        SET password_hash = $2,
-            password_set_at = NOW(),
-            updated_at = NOW()
-      WHERE id = $1`,
-    [normalizedUserId, await bcrypt.hash(nextPassword, 12)]
-  )
-  return { updated: true as const }
+  const nextPasswordHash = await bcrypt.hash(nextPassword, 12)
+  return withTransaction(async db => {
+    const updated = await db.query(
+      `UPDATE users
+          SET password_hash = $3,
+              password_set_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1
+          AND email = $2
+          AND password_hash = $4
+      RETURNING id`,
+      [normalizedUserId, normalizedEmail, nextPasswordHash, user.password_hash]
+    )
+    if ((updated.rowCount ?? 0) === 0) {
+      return { error: 'invalid_current_password' as const }
+    }
+    await revokeAllUserSessions(normalizedUserId, 'password_changed', db)
+    return { updated: true as const }
+  })
 }

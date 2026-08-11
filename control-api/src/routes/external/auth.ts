@@ -9,6 +9,7 @@ import {
   issueExternalUserSession,
   selectExternalSessionRepresentation,
 } from '../../services/auth/externalSessionIssuance.js'
+import { authenticatePasswordAndIssueSession } from '../../services/auth/passwordSessionAuthentication.js'
 import {
   revokeAllUserSessions,
   revokeLegacyUserSession,
@@ -18,7 +19,6 @@ import {
   getTeamAgents,
   getUserAgents,
   googleLoginData,
-  passwordLoginData,
   requestProfilePasswordReset,
 } from '../../services/directory/index.js'
 import { verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
@@ -112,7 +112,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(400).json({ error: 'email and password are required' })
       }
 
-      const login = await passwordLoginData({ email, password })
+      const selection = selectExternalSessionRepresentation(externalSessionClient(req))
+      if (selection.status !== 'selected') {
+        return res.status(426).json({ error: 'upgrade_required' })
+      }
+      const login = await authenticatePasswordAndIssueSession({
+        email,
+        password,
+        contract: selection.contract,
+      })
       if (!login) {
         return res.status(401).json({ error: 'Unauthorized' })
       }
@@ -124,18 +132,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       }
 
       const role = login.membership.role
-      const selection = selectExternalSessionRepresentation(externalSessionClient(req))
-      if (selection.status !== 'selected') {
-        return res.status(426).json({ error: 'upgrade_required' })
-      }
-      const issued = await issueExternalUserSession({
-        contract: selection.contract,
-        userId: login.user.id,
-        email: login.user.email,
-        teamId: login.membership.team_id || null,
-        role,
-        authenticationMethods: ['pwd'],
-      })
+      const issued = login.issued
       return res.status(200).json({
         token: issued.token,
         sessionContract: issued.contract,

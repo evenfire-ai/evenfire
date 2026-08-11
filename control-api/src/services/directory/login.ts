@@ -203,6 +203,7 @@ export async function passwordLoginData(input: { email: string; password: string
           picture: user.picture,
         },
         membership: teamlessMemberMembership(),
+        credentialHash: user.password_hash,
       }
     }
 
@@ -214,6 +215,7 @@ export async function passwordLoginData(input: { email: string; password: string
         picture: user.picture,
       },
       membership: membership.rows[0] as MembershipRow,
+      credentialHash: user.password_hash,
     }
   })
 }
