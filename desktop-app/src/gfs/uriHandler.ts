@@ -741,6 +741,7 @@ export function parseSubjectKey(key: string): GfsSubject {
  * on a 429 (middleware/rateLimitMiddleware.ts) — not inside the human message.
  */
 interface GfsGrantErrorFields {
+  reason?: string
   invalidIndexes?: number[]
   retryAfterSeconds?: number
 }
@@ -773,14 +774,33 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
     return {}
   }
   if (!parsed || typeof parsed !== 'object') return {}
-  const record = parsed as { invalidIndexes?: unknown; retryAfterSeconds?: unknown }
+  const record = parsed as {
+    error?: unknown
+    invalidIndexes?: unknown
+    retryAfterSeconds?: unknown
+  }
+  const envelope =
+    record.error && typeof record.error === 'object'
+      ? (record.error as { details?: unknown })
+      : undefined
+  const details =
+    envelope?.details && typeof envelope.details === 'object'
+      ? (envelope.details as {
+          reason?: unknown
+          invalidIndexes?: unknown
+          retryAfterSeconds?: unknown
+        })
+      : undefined
   const fields: GfsGrantErrorFields = {}
-  if (Array.isArray(record.invalidIndexes)) {
-    const indexes = record.invalidIndexes.filter(
+  if (typeof details?.reason === 'string') fields.reason = details.reason
+  const rawInvalidIndexes = details?.invalidIndexes ?? record.invalidIndexes
+  if (Array.isArray(rawInvalidIndexes)) {
+    const indexes = rawInvalidIndexes.filter(
       (value): value is number => Number.isInteger(value) && (value as number) >= 0
     )
     if (indexes.length > 0) fields.invalidIndexes = indexes
   }
+  const rawRetryAfterSeconds = details?.retryAfterSeconds ?? record.retryAfterSeconds
   // Same bound as `parseRetryAfterHeader`'s `\d{1,7}`, because the two feed the
   // same suffix and the renderer reads that suffix with `\d+$`. An integer is
   // not enough: `Number.isInteger(1e21)` is true and `${1e21}` is `1e+21`, so
@@ -790,11 +810,11 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
   // yields no window, which the renderer already states as "try again
   // shortly"; that is the same answer it gives for an unparseable header.
   if (
-    Number.isInteger(record.retryAfterSeconds) &&
-    (record.retryAfterSeconds as number) >= 0 &&
-    (record.retryAfterSeconds as number) <= MAX_EMITTED_RETRY_AFTER_SECONDS
+    Number.isInteger(rawRetryAfterSeconds) &&
+    (rawRetryAfterSeconds as number) >= 0 &&
+    (rawRetryAfterSeconds as number) <= MAX_EMITTED_RETRY_AFTER_SECONDS
   ) {
-    fields.retryAfterSeconds = record.retryAfterSeconds as number
+    fields.retryAfterSeconds = rawRetryAfterSeconds as number
   }
   return fields
 }
@@ -840,11 +860,13 @@ function surfaceGfsGrantError(error: unknown): unknown {
   if (!error || typeof error !== 'object') return error
   const transportError = error as { bodyText?: unknown; retryAfter?: unknown; status?: unknown }
   const bodyText = typeof transportError.bodyText === 'string' ? transportError.bodyText : ''
-  const fields = bodyText ? parseGfsGrantErrorFields(bodyText) : {}
+  const fields: GfsGrantErrorFields = bodyText ? parseGfsGrantErrorFields(bodyText) : {}
   const retryAfterSeconds =
     fields.retryAfterSeconds ?? parseRetryAfterHeader(transportError.retryAfter)
   const httpStatus = vettedHttpStatus(transportError.status)
   const parts: string[] = []
+  const rawMessage = error instanceof Error ? error.message : String(error)
+  if (fields.reason && !rawMessage.includes(fields.reason)) parts.push(fields.reason)
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
   // Before `retryAfterSeconds`, never after: the renderer anchors that field to
   // the END of the message so an earlier occurrence in the server's own text
@@ -853,7 +875,6 @@ function surfaceGfsGrantError(error: unknown): unknown {
   if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
   // `error` is a non-null object by the guard above, so it needs no nullish
   // coalescing here: a `?? ''` branch could never be taken.
-  const rawMessage = error instanceof Error ? error.message : String(error)
   const baseMessage = stripUnvettedRetryAfter(stripUnvettedHttpStatus(rawMessage))
   // Nothing vetted to append and nothing counterfeit to remove: the server's
   // own error is already exactly what the renderer should see.

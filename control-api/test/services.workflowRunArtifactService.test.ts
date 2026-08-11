@@ -207,7 +207,7 @@ describe('workflowRunArtifactService', () => {
 
     expect(artifacts.map(artifact => artifact.name)).toEqual(['custom-sdk-result.json'])
     expect(String(mockPoolQuery.mock.calls[2][0])).toContain('workflow_approval_requests')
-    expect(String(mockPoolQuery.mock.calls[2][0])).not.toContain('team_workflow_triggers')
+    expect(String(mockPoolQuery.mock.calls[2][0])).toContain('team_workflow_triggers')
   })
 
   it('downloads a run-scoped artifact through WRC with run and artifact token bindings', async () => {

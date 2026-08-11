@@ -16,6 +16,7 @@ import {
   updatePassword,
   updateProfile,
 } from '../services/meService.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
 
 const teamDirectoryRateLimit = createRateLimiter({
   windowMs: 60_000,
@@ -69,7 +70,9 @@ export function createMeRouter(): Router {
         res.status(403).json({ error: 'You are not a member of this team' })
         return
       }
-      res.status(200).json(result)
+      const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      if (browserRequest) setProfileSessionCookie(req, res, result.token)
+      res.status(200).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
     }
