@@ -53,5 +53,9 @@ export type LlmProviderConfigProps = {
   // credentialSlot dropdown's extra keys (e.g. `claude-api-key-fb1`).
   secretKeys?: string[]
 
+  // Creation keeps the optional fallback configuration out of the way until an
+  // operator explicitly opens it. Existing-agent editing stays expanded.
+  fallbackProvidersInitiallyCollapsed?: boolean
+
   disabled?: boolean
 }

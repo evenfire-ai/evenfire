@@ -106,7 +106,7 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await clickWizardNext(page)
 
       await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()
-      await page.getByLabel(/Reuse an existing Secret/i).check()
+      await page.getByLabel(/Use an existing Secret/i).check()
       await page.getByRole('button', { name: /select secret/i }).click()
       const secretOption = page.locator('.cu-agent-select__option').filter({ hasText: secretName })
       await expect(secretOption.first()).toBeVisible()
@@ -120,11 +120,9 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
         await expect(memberOption).toBeVisible()
         await memberOption.click()
       }
-      await clickWizardNext(page)
-
-      const skipChannels = page.getByRole('button', { name: /skip channel setup/i })
-      await expect(skipChannels).toBeEnabled()
-      await skipChannels.click()
+      const submitAgent = page.getByRole('button', { name: 'Create Agent', exact: true })
+      await expect(submitAgent).toBeEnabled()
+      await submitAgent.click()
 
       await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
       const created = await waitForAgent(sessionRequest, agentName)
