@@ -162,6 +162,28 @@ describe('GfsBrowser', () => {
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
   })
 
+  it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
+    mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const title = screen.getByText('Global File System').closest('.cu-panel-title')
+    expect(title?.querySelector('path')).toHaveAttribute(
+      'd',
+      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'
+    )
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(breadcrumb).queryByText('Drive', { exact: true })).toBeNull()
+    const rootCrumb = within(breadcrumb).getByRole('button', { name: 'main' })
+    expect(rootCrumb).toHaveAttribute('aria-current', 'page')
+
+    fireEvent.click(rootCrumb)
+
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    expect(mockApiGet).toHaveBeenCalledTimes(1)
+  })
+
   it('shows the subtle loader during initial load and folder navigation', async () => {
     let resolveRoot: ((value: unknown) => void) | undefined
     let resolveFolder: ((value: unknown) => void) | undefined
@@ -290,7 +312,7 @@ describe('GfsBrowser', () => {
     )
   })
 
-  it('uploads dropped images and Markdown files into the current folder', async () => {
+  it('uploads dropped files into the current folder', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
     mockApiGet.mockResolvedValue({
@@ -305,11 +327,12 @@ describe('GfsBrowser', () => {
     const browser = screen.getByRole('region', { name: 'Global File System browser' })
     const image = new File(['operator image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Operator notes'], 'notes.md', { type: 'text/markdown' })
-    const dataTransfer = { dropEffect: 'none', files: [image, markdown], types: ['Files'] }
+    const pdf = new File(['%PDF operator report'], 'report.pdf', { type: 'application/pdf' })
+    const dataTransfer = { dropEffect: 'none', files: [image, markdown, pdf], types: ['Files'] }
 
     fireEvent.dragEnter(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
     const dropStatus = screen.getByRole('status')
-    expect(dropStatus).toHaveTextContent('Drop images or Markdown files to upload to main')
+    expect(dropStatus).toHaveTextContent('Drop files to upload to main')
     expect(dropStatus).toHaveClass('cu-gfs-drop-overlay')
 
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
@@ -328,18 +351,32 @@ describe('GfsBrowser', () => {
         { timeoutMs: 300000 }
       )
     )
-    expect(mockApiSend).toHaveBeenCalledWith(
-      'POST',
-      `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
-      {
-        name: 'notes.md',
-        kind: 'file',
-        contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
-      },
-      {},
-      {},
-      { timeoutMs: 300000 }
-    )
+    await waitFor(() => {
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+        {
+          name: 'notes.md',
+          kind: 'file',
+          contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
+      )
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+        {
+          name: 'report.pdf',
+          kind: 'file',
+          contentBase64: 'JVBERiBvcGVyYXRvciByZXBvcnQ=',
+        },
+        {},
+        {},
+        { timeoutMs: 300000 }
+      )
+    })
   })
 
   it('rejects oversized dropped files before reading or uploading them', async () => {

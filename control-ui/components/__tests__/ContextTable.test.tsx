@@ -1,17 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
-import type { ContextResource } from '../../lib/api'
+import { buildContextResource } from '../../test/fixtures/contextResource'
 import { ContextTable } from '../ContextTable'
 
-const contexts: ContextResource[] = [
-  {
+const contexts = [
+  buildContextResource({
     metadata: { name: 'business' },
-    spec: {
-      contextId: 'business',
-      description: 'Business context',
-      mcpServers: ['server-a', 'server-b'],
-    },
-  },
+    spec: { description: 'Business context', mcpServers: ['server-a', 'server-b'] },
+  }),
 ]
 
 describe('ContextTable', () => {
@@ -38,6 +34,26 @@ describe('ContextTable', () => {
     onView.mockClear()
     fireEvent.keyDown(row, { key: 'Enter' })
     expect(onView).toHaveBeenCalledWith({ name: 'business' })
+  })
+
+  it('stacks a non-link context name and its description in one cell', () => {
+    const { container } = render(
+      <ContextTable
+        items={contexts}
+        onView={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreate={vi.fn()}
+        refreshing={false}
+      />
+    )
+
+    expect(screen.getByText('business')).toHaveClass('cu-expandable-row__name')
+    expect(screen.getByText('Business context')).toHaveClass('cu-registry-description')
+    expect(container.querySelectorAll('thead th')).toHaveLength(3)
+    expect(screen.queryByRole('button', { name: 'business' })).not.toBeInTheDocument()
   })
 
   it('does not open a context from row action buttons', () => {

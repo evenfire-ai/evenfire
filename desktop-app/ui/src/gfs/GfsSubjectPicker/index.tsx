@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconButton, MenuItem, TextInput } from '@components/Common'
-import { IconClose, IconTeams } from '@components/SidebarNav/icons'
+import { IconAgents, IconClose, IconTeams } from '@components/SidebarNav/icons'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { GfsDelegationSubjectOption } from '@/gfs/delegation.types'
 import type { GfsSubjectPickerProps } from './types'
@@ -9,10 +9,20 @@ function subjectKey(subject: GfsDelegationSubjectOption): string {
   return `${subject.type}:${subject.id}`
 }
 
+function subjectBadge(subject: GfsDelegationSubjectOption): string {
+  return subject.badge ?? subject.type
+}
+
+function avatarContent(subject: GfsDelegationSubjectOption): React.ReactNode {
+  if (subject.type === 'team') return <IconTeams />
+  if (subject.type === 'host') return <IconAgents />
+  return subject.label.charAt(0).toUpperCase()
+}
+
 function matchesQuery(subject: GfsDelegationSubjectOption, query: string): boolean {
   const normalized = query.trim().toLowerCase()
   if (!normalized) return true
-  return [subject.label, subject.description, subject.type].some(value =>
+  return [subject.label, subject.description, subject.type, subject.badge].some(value =>
     value?.toLowerCase().includes(normalized)
   )
 }
@@ -62,7 +72,7 @@ export function GfsSubjectPicker({
     <div className="da-gfs-subject-picker" ref={rootRef}>
       <div
         className={`da-gfs-subject-picker__field${open ? ' is-open' : ''}`}
-        aria-label="People and teams"
+        aria-label="People, teams, and agents"
       >
         {selectedOptions.map(subject => {
           const key = subjectKey(subject)
@@ -72,7 +82,7 @@ export function GfsSubjectPicker({
                 className={`da-gfs-subject-picker__avatar da-gfs-subject-picker__avatar--${subject.type}`}
                 aria-hidden="true"
               >
-                {subject.type === 'team' ? <IconTeams /> : subject.label.charAt(0).toUpperCase()}
+                {avatarContent(subject)}
               </span>
               <span className="da-gfs-subject-picker__chip-label">{subject.label}</span>
               <IconButton
@@ -92,7 +102,7 @@ export function GfsSubjectPicker({
           aria-autocomplete="list"
           aria-controls="gfs-subject-options"
           aria-expanded={open}
-          aria-label="Add people or teams"
+          aria-label="Add people, teams, or agents"
           autoComplete="off"
           className="da-gfs-subject-picker__input"
           disabled={disabled}
@@ -110,7 +120,7 @@ export function GfsSubjectPicker({
               removeSubject(value[value.length - 1] ?? '')
             }
           }}
-          placeholder={selectedOptions.length === 0 ? 'Add people or teams' : ''}
+          placeholder={selectedOptions.length === 0 ? 'Add people, teams, or agents' : ''}
           ref={inputRef}
           role="combobox"
           value={query}
@@ -122,16 +132,16 @@ export function GfsSubjectPicker({
           className="da-gfs-subject-picker__menu"
           id="gfs-subject-options"
           role="listbox"
-          aria-label="Available people and teams"
+          aria-label="Available people, teams, and agents"
           aria-multiselectable="true"
         >
           {loading ? (
-            <span className="da-gfs-subject-picker__empty">Loading people and teams…</span>
+            <span className="da-gfs-subject-picker__empty">Loading people, teams, and agents…</span>
           ) : availableOptions.length === 0 ? (
             <span className="da-gfs-subject-picker__empty">
               {options.length === selectedOptions.length
                 ? 'Everyone available is selected.'
-                : 'No people or teams found.'}
+                : 'No people, teams, or agents found.'}
             </span>
           ) : (
             availableOptions.map(subject => (
@@ -143,17 +153,15 @@ export function GfsSubjectPicker({
                     className={`da-gfs-subject-picker__avatar da-gfs-subject-picker__avatar--${subject.type}`}
                     aria-hidden="true"
                   >
-                    {subject.type === 'team' ? (
-                      <IconTeams />
-                    ) : (
-                      subject.label.charAt(0).toUpperCase()
-                    )}
+                    {avatarContent(subject)}
                   </span>
                 }
                 onClick={() => selectSubject(subject)}
                 role="option"
                 aria-selected="false"
-                trailingIcon={<span className="da-gfs-subject-picker__type">{subject.type}</span>}
+                trailingIcon={
+                  <span className="da-gfs-subject-picker__type">{subjectBadge(subject)}</span>
+                }
               >
                 <span className="da-gfs-subject-picker__option-copy">
                   <span>{subject.label}</span>
