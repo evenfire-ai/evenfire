@@ -119,7 +119,7 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   return messages.length > 0 ? messages.join(' · ') : null
 }
 
-export function FilesPage({ pushToast }: FilesPageProps) {
+export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
@@ -319,6 +319,18 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     if (typeof opened === 'object' && opened.kind === 'file') openFilePreview(opened)
     return true
   }
+
+  /**
+   * Open a link handed over from the app level (a plugin's `gfs://` click that
+   * this page handles better than the overlay). Cleared immediately so a
+   * re-render cannot reopen it, and failures surface the browser's own error.
+   */
+  useEffect(() => {
+    if (!pendingGfsUri) return
+    onPendingGfsUriHandled?.()
+    void handleOpenGfsLink(pendingGfsUri)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGfsUri])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()

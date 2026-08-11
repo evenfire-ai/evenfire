@@ -13,11 +13,15 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsImagePreview } from '@components/GfsImagePreview'
+import { PluginConsentModal } from '@components/PluginConsentModal'
+import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -268,6 +272,78 @@ export function App() {
   ])
   activeConversationOriginRef.current = activeConversationOrigin
 
+  /**
+   * Plugin permission prompts (spec §9). Main hides the plugin's
+   * `WebContentsView` before pushing the request and restores it once the user
+   * answers, so the plugin can neither fake the prompt nor paint over it. The
+   * prompt is centered over — and its backdrop scoped to — the plugin's embed
+   * rect, not the whole window; the rest of the trusted app chrome stays visible.
+   */
+  const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
+    null
+  )
+
+  React.useEffect(() => {
+    const offRequested = window.clerum.pluginSdk?.onConsentRequested?.(request => {
+      setPluginConsentPrompt(request)
+    })
+    const offCancelled = window.clerum.pluginSdk?.onConsentCancelled?.(({ promptId }) => {
+      // Main withdrew the prompt (timeout, or the plugin was closed under it).
+      setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    })
+    return () => {
+      offRequested?.()
+      offCancelled?.()
+    }
+  }, [])
+
+  /**
+   * A plugin asked to show a shared file — either through `clerum.gfs.open()` or
+   * by the user activating a `gfs://` link it rendered. Main has already
+   * resolved it with the user's session, so this only decides where it goes:
+   * images get a preview over the plugin, everything else hands off to Files.
+   */
+  const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
+    gfsUri: string
+    name: string
+    bytes: number
+    mimeType: string
+  } | null>(null)
+  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
+      const mimeType = resource.kind === 'file' ? gfsImagePreviewMimeType(resource.name) : null
+      if (mimeType) {
+        // The embed's WebContentsView paints above renderer DOM, so it has to be
+        // hidden for the overlay to be visible at all.
+        void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
+        setPluginGfsPreview({
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          bytes: resource.bytes ?? 0,
+          mimeType,
+        })
+        return
+      }
+      // Folders and non-previewable files belong in the full browser, where the
+      // user gets breadcrumbs, download, and sharing.
+      setPendingGfsUri(resource.gfsUri)
+      vm.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    return () => off?.()
+  }, [vm.handleNavSelect])
+
+  const closePluginGfsPreview = React.useCallback(() => {
+    setPluginGfsPreview(null)
+    void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
+  }, [])
+
+  const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
+    setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    void window.clerum.pluginSdk?.resolveConsent?.(promptId, allowed)?.catch?.(() => undefined)
+  }, [])
+
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
     try {
@@ -275,6 +351,11 @@ export function App() {
     } catch {
       // Ignore storage failures in restricted environments.
     }
+    // Mirror into the main process so `theme.read` and the `theme.changed`
+    // event can answer for plugin embeds, which have no access to this
+    // renderer's localStorage. The renderer stays the writer; main only keeps
+    // the last value it was told.
+    void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
   React.useEffect(() => {
@@ -1333,7 +1414,11 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
                               {vm.navItem === DESKTOP_ROUTES.files && (
-                                <FilesPage pushToast={vm.pushToast} />
+                                <FilesPage
+                                  pushToast={vm.pushToast}
+                                  pendingGfsUri={pendingGfsUri}
+                                  onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                               {vm.navItem === DESKTOP_ROUTES.contextDetails && (
@@ -1390,6 +1475,21 @@ export function App() {
                         {environmentSetupConfirmationDialog}
                         {environmentSetupSuccessDialog}
                         {sandboxUiDeepLinkDialog}
+                        {pluginConsentPrompt ? (
+                          <PluginConsentModal
+                            request={pluginConsentPrompt}
+                            onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
+                        {pluginGfsPreview ? (
+                          <GfsImagePreview
+                            byteLength={pluginGfsPreview.bytes}
+                            fileName={pluginGfsPreview.name}
+                            gfsUri={pluginGfsPreview.gfsUri}
+                            mimeType={pluginGfsPreview.mimeType}
+                            onClose={closePluginGfsPreview}
+                          />
+                        ) : null}
                       </DesktopStateProvider>
                     </McpRuntimeProvider>
                   </AgentChatProviders>
