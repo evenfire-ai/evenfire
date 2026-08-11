@@ -1,6 +1,6 @@
 {
   "name": "clerum-external-rest-api",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "description": "External REST API for profile, team management, and RPC token brokerage",
   "main": "dist/main.js",
   "engines": {
