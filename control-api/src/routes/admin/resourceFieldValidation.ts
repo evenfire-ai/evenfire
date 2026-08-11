@@ -23,6 +23,9 @@ export const DISPLAY_FIELD_MAX_LENGTH = 120
 // Characters rejected in display fields:
 //   - C0 range + DEL (\x00-\x1f, \x7f): newlines and tabs are control characters
 //     too — a display name is a single-line label.
+//   - C1 range (\x80-\x9f): the second control block. U+0085 (NEL) is a line
+//     terminator that breaks the "single-line label" invariant, and U+009B (CSI)
+//     opens an ANSI escape sequence — both must be rejected like C0/DEL.
 //   - Unicode bidirectional formatting: embeddings/overrides (U+202A–U+202E:
 //     LRE/RLE/PDF/LRO/RLO) and isolates (U+2066–U+2069: LRI/RLI/FSI/PDI). These
 //     reorder surrounding text and let an admin craft a spec.host/displayName
@@ -35,7 +38,7 @@ export const DISPLAY_FIELD_MAX_LENGTH = 120
 // legitimate in emoji sequences, so blanket-rejecting them would break valid
 // display names. Confusable/invisible-glyph spoofing is out of scope here.
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHAR_RE = /[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069\u2028\u2029]/
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\u2028\u2029]/
 
 export interface FieldIssue {
   field: string
