@@ -91,6 +91,12 @@ the canonical `sync-auth-key.sh --require-gfs` path. It must copy the non-empty
 `gfs-config.jwt-public-key` before GFS credentials are restored or either GFSC
 deployment is scaled up. Missing source or target resources abort recovery and
 retain the fail-closed replica state; no reset path patches the key ad hoc.
+The Minikube T2 profile separately enables Upload v2 through the committed HCC
+patch `deploy/overlays/minikube/patches/gfs-upload-v2.yaml`. The
+`GlobalFileSystem` instance remains declarative storage/layout input; HCC env is
+the sole owner of feature activation and the exact 200 MiB/part/concurrency
+contract passed into generated GFSC workloads. Public-base and production
+activation remain disabled and separate from this local profile contract.
 Any later convergence failure reasserts the Control API fence together with the
 other database-dependent controllers and waits for the Control API Pods to
 terminate before returning.
@@ -164,14 +170,14 @@ grants flips the pod NotReady within roughly a minute, visibly in
 
 `/readyz` reasons you may see:
 
-| Reason | Meaning |
-| --- | --- |
-| `storage volume not mounted …` | Drive PVC missing/unmounted (not a credential issue) |
-| `permission store unreachable: password authentication failed …` | DSN/password drift — re-run provisioning |
-| `permission store unreachable: … coherence check failed … gfs_resources … 0048` | Role exists but the SELECT grants/migration are missing — run control-api migrations, then provisioning |
-| `permission store unreachable: … coherence check failed … gfs_audit …` | Audit INSERT grant missing — every request would 503 (audit-write failures propagate); run migrations + provisioning |
-| `permission store unreachable: … timed out after Nms` | Black-hole partition (unreachable, not refusing) — the probe hard-bounds connect/query (default 5s) instead of dangling |
-| `permission store unreachable: connect ECONNREFUSED …` | PostgreSQL down/unreachable |
+| Reason                                                                          | Meaning                                                                                                                 |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `storage volume not mounted …`                                                  | Drive PVC missing/unmounted (not a credential issue)                                                                    |
+| `permission store unreachable: password authentication failed …`                | DSN/password drift — re-run provisioning                                                                                |
+| `permission store unreachable: … coherence check failed … gfs_resources … 0048` | Role exists but the SELECT grants/migration are missing — run control-api migrations, then provisioning                 |
+| `permission store unreachable: … coherence check failed … gfs_audit …`          | Audit INSERT grant missing — every request would 503 (audit-write failures propagate); run migrations + provisioning    |
+| `permission store unreachable: … timed out after Nms`                           | Black-hole partition (unreachable, not refusing) — the probe hard-bounds connect/query (default 5s) instead of dangling |
+| `permission store unreachable: connect ECONNREFUSED …`                          | PostgreSQL down/unreachable                                                                                             |
 
 ## Verification
 

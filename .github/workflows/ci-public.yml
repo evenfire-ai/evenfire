@@ -391,6 +391,9 @@ jobs:
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
+      - name: Test minikube GFS Upload v2 profile contract
+        run: bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
+
       # The NetworkPolicy probe runs on an E2E-only fixture that the default
       # (pulled) setup never acquires. This proves the target says so up front
       # instead of timing out on ErrImageNeverPull, and that it still builds

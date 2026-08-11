@@ -285,6 +285,28 @@ Desktop App
 | **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                                          |
 
+### GFS Upload v2 local/T2 profile
+
+The committed Minikube overlay enables GFS Upload v2 through
+`patches/gfs-upload-v2.yaml`. It patches the host-context-controller, which is
+the owner of generated GFSC workload configuration, with the exact release
+contract: 200 MiB files, preferred 8 MiB / maximum 16 MiB parts, four parts per
+session, sixteen global part streams, and the documented TTL, admission, and
+free-space limits. `minikube-ghcr`, `minikube-no-uis`, and
+`minikube-no-uis-ghcr` inherit the same patch from the base Minikube overlay.
+
+The `GlobalFileSystem` resource intentionally does not carry
+`uploadV2Enabled`. Feature activation and product limits are operator-owned HCC
+configuration; editing an HCC-generated `gfsc-writer` Deployment would be
+overwritten by reconciliation. The public deployment base remains disabled,
+and this local activation does not authorize enabling a production overlay.
+
+Validate the committed profile without touching a cluster:
+
+```bash
+bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
+```
+
 ### Required Configuration Per Service
 
 #### rpc-proxy-secrets (Secret, namespace: rpc-proxy)

@@ -51,14 +51,52 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.maxWriteBodyBytes).toBe('25165824')
   })
 
-  it('maps the private-infra upload prefix to writer-owned gfsc settings', () => {
-    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED = 'true'
-    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES = '209715200'
-    process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES = '8388608'
+  it('maps the exact private-infra upload profile to writer-owned gfsc settings', () => {
+    Object.assign(process.env, {
+      CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED: 'true',
+      CONTEXT_MAPPER_GFSC_UPLOAD_PROTOCOL_MAX_FILE_BYTES: '1073741824',
+      CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES: '209715200',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES: '209715200',
+      CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES: '8388608',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CHUNK_BYTES: '16777216',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MIN_PART_BYTES: '1048576',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_PART_COUNT: '1024',
+      CONTEXT_MAPPER_GFSC_UPLOAD_SESSION_TTL_MS: '86400000',
+      CONTEXT_MAPPER_GFSC_UPLOAD_COMPLETED_RECEIPT_TTL_MS: '86400000',
+      CONTEXT_MAPPER_GFSC_UPLOAD_STALE_PART_LEASE_MS: '600000',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_PER_SUBJECT: '2',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_GLOBAL: '8',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION: '4',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL: '16',
+      CONTEXT_MAPPER_GFSC_UPLOAD_INSTABILITY_FAILURE_THRESHOLD: '3',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_FINALIZATIONS: '1',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MIN_FREE_BYTES: '10737418240',
+      CONTEXT_MAPPER_GFSC_UPLOAD_PART_TIMEOUT_MS: '300000',
+      CONTEXT_MAPPER_GFSC_UPLOAD_FINALIZE_TIMEOUT_MS: '600000',
+    })
     const c = gfsDefaultFactoryConfig()
-    expect(c.uploadV2Enabled).toBe('true')
-    expect(c.uploadProductMaxFileBytes).toBe('209715200')
-    expect(c.uploadPreferredChunkBytes).toBe('8388608')
+    expect(c).toMatchObject({
+      uploadV2Enabled: 'true',
+      uploadProtocolMaxFileBytes: '1073741824',
+      uploadProductMaxFileBytes: '209715200',
+      uploadMaxFileBytes: '209715200',
+      uploadPreferredChunkBytes: '8388608',
+      uploadMaxChunkBytes: '16777216',
+      uploadMinPartBytes: '1048576',
+      uploadMaxPartCount: '1024',
+      uploadSessionTtlMs: '86400000',
+      uploadCompletedReceiptTtlMs: '86400000',
+      uploadStalePartLeaseMs: '600000',
+      uploadMaxActivePerSubject: '2',
+      uploadMaxActiveGlobal: '8',
+      uploadMaxConcurrentPartsPerSession: '4',
+      uploadMaxConcurrentPartStreamsGlobal: '16',
+      uploadInstabilityFailureThreshold: '3',
+      uploadMaxConcurrentFinalizations: '1',
+      uploadMinFreeBytes: '10737418240',
+      uploadPartTimeoutMs: '300000',
+      uploadFinalizeTimeoutMs: '600000',
+    })
   })
 
   it('fails loud on an invalid image pull policy (no silent default)', () => {
