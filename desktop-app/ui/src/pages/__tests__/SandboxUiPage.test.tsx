@@ -150,6 +150,7 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'sales-crm',
+        title: "Andy's Sales CRM",
         defaultPath: '/',
         bounds: {
           x: 16,
@@ -188,6 +189,9 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'task-board',
+        // Host-owned title: consent prompts and notification attribution read
+        // this, so it must come from the app list, never from the plugin.
+        title: 'Agentic Task Board',
         defaultPath: '/',
         routePath: '/tasks/task-42',
         bounds: {

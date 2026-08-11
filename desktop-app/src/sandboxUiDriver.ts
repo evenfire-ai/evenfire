@@ -87,6 +87,13 @@ export type MountSandboxUiArgs = {
    * rpc-proxy for the provider authorize URL and `shell.openExternal`s it.
    */
   onOauthAuthorize?: (oauthClientId: string, background: boolean) => void
+  /**
+   * Fired when the embed navigates to `gfs://<drive>/<resource>` — a plugin
+   * rendering a link to a shared file. The driver only forwards; the host
+   * resolves the URI with the USER's session and shows it in the Desktop's own
+   * viewer, so a click reveals nothing to the plugin.
+   */
+  onGfsOpen?: (uri: string) => void
 }
 
 type ActiveView = {
@@ -370,13 +377,14 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // else (links to other origins, target=_blank, window.open) goes to the
   // OS browser or is dropped. `clerum://oauth?clientId=…` is intercepted
   // and handed back to the AppService.
-  applySandboxUiNavigationPolicies(
-    view.webContents,
-    allowedNavigationPrefix,
-    (oauthClientId, background) => {
+  applySandboxUiNavigationPolicies(view.webContents, allowedNavigationPrefix, {
+    onOauthAuthorize: (oauthClientId, background) => {
       args.onOauthAuthorize?.(oauthClientId, background)
-    }
-  )
+    },
+    onGfsOpen: uri => {
+      args.onGfsOpen?.(uri)
+    },
+  })
 
   // The closed callback fires when the renderer gives up the view (parent
   // window closed, teardown via removeChildView, or the embed crashed).

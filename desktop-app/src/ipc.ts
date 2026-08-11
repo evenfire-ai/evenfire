@@ -13,6 +13,13 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
 import {
+  PLUGIN_SDK_CAPABILITIES_CHANNEL,
+  PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+  PLUGIN_SDK_PERMISSIONS_CHANNEL,
+  PLUGIN_SDK_PERMISSION_STATE_CHANNEL,
+  PLUGIN_SDK_REQUEST_CHANNEL,
+} from './pluginSdkProtocol.js'
+import {
   DesktopRuntimeConfig,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -1480,6 +1487,10 @@ export function registerIpcHandlers(service: AppService): void {
       await service.openSandboxUi({
         recipeNs,
         recipeName,
+        // Human title from the installed recipe, used verbatim in consent
+        // prompts and notification attribution. Comes from the trusted renderer's
+        // app list — NEVER from anything the plugin itself can set.
+        title: sanitizeString((payload as { title?: unknown })?.title) || undefined,
         defaultPath: typeof payload?.defaultPath === 'string' ? payload.defaultPath : undefined,
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
@@ -1541,5 +1552,95 @@ export function registerIpcHandlers(service: AppService): void {
   // map is dropped with an error.
   ipcMain.handle('clerum:sandbox-ui:request-refresh', async event => {
     await service.requestSandboxUiRefresh(event.sender.id)
+  })
+
+  // ── Plugin UI SDK ────────────────────────────────────────────────────
+  //
+  // Same trust model as the refresh IPC above and for the same reason: these
+  // four channels are reachable by untrusted plugin JS, so `assertTrustedSender`
+  // cannot be the gate (the embed's origin is rpc-proxy). Identity comes from
+  // the surface pinning map, and every other check — consent, rate limits,
+  // response minimization, audit — happens inside the broker. Nothing is
+  // enforced here; this layer only routes.
+
+  // Lazily imported: `pluginSdkRuntime` pulls in `config`, whose module-level
+  // profile load needs a real Electron `app`. Importing it at the top of this
+  // file would make merely registering IPC handlers depend on an initialized
+  // Electron runtime. Mirrors how `appService` defers `sandboxUiDriver`.
+  const pluginSdk = async () => (await import('./pluginSdkRuntime.js')).getPluginSdkRuntime()
+
+  ipcMain.handle(PLUGIN_SDK_CAPABILITIES_CHANNEL, async event =>
+    (await pluginSdk()).broker.listCapabilities(event.sender.id)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSION_STATE_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.permissionState(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSIONS_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.requestPermissions(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_REQUEST_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.request(event.sender.id, payload)
+  )
+
+  // ── Plugin SDK, trusted-renderer half ────────────────────────────────
+  //
+  // The consent resolve channel IS trusted-sender guarded. That is what stops
+  // an embed from answering its own permission prompt, and it pairs with the
+  // main-generated `promptId` nonce: a resolve for an unknown or already-
+  // answered prompt is dropped inside the gate (spec §9.4).
+
+  ipcMain.handle(
+    PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+    async (event, payload: { promptId?: unknown; allowed?: unknown }) => {
+      assertTrustedSender(event)
+      const promptId = sanitizeString(payload?.promptId)
+      if (!promptId) throw new Error('promptId is required')
+      const allowed = Array.isArray(payload?.allowed)
+        ? payload.allowed.filter((entry): entry is string => typeof entry === 'string')
+        : []
+      return (await pluginSdk()).resolveConsentPrompt(promptId, allowed)
+    }
+  )
+
+  ipcMain.handle('pluginSdk:listGrants', async event => {
+    assertTrustedSender(event)
+    return (await pluginSdk()).listGrants()
+  })
+
+  ipcMain.handle(
+    'pluginSdk:revoke',
+    async (event, payload: { pluginId?: unknown; capability?: unknown }) => {
+      assertTrustedSender(event)
+      const pluginId = sanitizeString(payload?.pluginId)
+      const capability = sanitizeString(payload?.capability)
+      if (!pluginId) throw new Error('pluginId is required')
+      const runtime = await pluginSdk()
+      if (capability) await runtime.revokeGrant(pluginId, capability)
+      else await runtime.revokeAllForPlugin(pluginId)
+    }
+  )
+
+  ipcMain.handle(
+    'pluginSdk:activity',
+    async (event, payload: { limit?: unknown; includeAmbient?: unknown }) => {
+      assertTrustedSender(event)
+      return (await pluginSdk()).readAudit({
+        limit: sanitizeOptionalInteger(payload?.limit),
+        includeAmbient: payload?.includeAmbient === true,
+      })
+    }
+  )
+
+  ipcMain.handle('pluginSdk:clearActivity', async event => {
+    assertTrustedSender(event)
+    await (await pluginSdk()).clearAudit()
+  })
+
+  ipcMain.handle('pluginSdk:setTheme', async (event, payload: { theme?: unknown }) => {
+    assertTrustedSender(event)
+    ;(await pluginSdk()).setTheme(payload?.theme)
   })
 }
