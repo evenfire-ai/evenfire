@@ -30,9 +30,14 @@ function boundedVersion(value: string | undefined): string | null {
  * dual-verification compatibility boundary defaults on.
  */
 export function loadUserAccessRollout(env: NodeJS.ProcessEnv): UserAccessRollout {
+  const sessionV2Acceptance = enabled(env, 'CONTROL_API_USER_SESSION_V2_ACCEPTANCE', true)
+  const sessionV2Issuance = enabled(env, 'CONTROL_API_USER_SESSION_V2_ISSUANCE', false)
+  if (sessionV2Issuance && !sessionV2Acceptance) {
+    throw new Error('CONTROL_API_USER_SESSION_V2_ISSUANCE requires v2 acceptance')
+  }
   return Object.freeze({
-    sessionV2Acceptance: enabled(env, 'CONTROL_API_USER_SESSION_V2_ACCEPTANCE', true),
-    sessionV2Issuance: enabled(env, 'CONTROL_API_USER_SESSION_V2_ISSUANCE', false),
+    sessionV2Acceptance,
+    sessionV2Issuance,
     aggregateCatalogShadowing: enabled(env, 'CONTROL_API_AGGREGATE_CATALOG_SHADOWING', false),
     aggregateCatalogServing: enabled(env, 'CONTROL_API_AGGREGATE_CATALOG_SERVING', false),
     actionContextV2: enabled(env, 'CONTROL_API_ACTION_CONTEXT_V2', false),

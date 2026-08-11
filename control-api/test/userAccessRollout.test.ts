@@ -20,9 +20,18 @@ describe('user access rollout controls', () => {
     })
   })
 
-  it('loads all eleven controls independently from explicit deployment input', () => {
+  it('rejects v2 issuance when v2 acceptance is disabled', () => {
+    expect(() =>
+      loadUserAccessRollout({
+        CONTROL_API_USER_SESSION_V2_ACCEPTANCE: 'false',
+        CONTROL_API_USER_SESSION_V2_ISSUANCE: 'true',
+      })
+    ).toThrow('CONTROL_API_USER_SESSION_V2_ISSUANCE requires v2 acceptance')
+  })
+
+  it('loads all eleven controls from explicit deployment input', () => {
     const userAccessRollout = loadUserAccessRollout({
-      CONTROL_API_USER_SESSION_V2_ACCEPTANCE: 'false',
+      CONTROL_API_USER_SESSION_V2_ACCEPTANCE: 'true',
       CONTROL_API_USER_SESSION_V2_ISSUANCE: 'true',
       CONTROL_API_AGGREGATE_CATALOG_SHADOWING: '1',
       CONTROL_API_AGGREGATE_CATALOG_SERVING: 'true',
@@ -36,7 +45,7 @@ describe('user access rollout controls', () => {
     })
 
     expect(userAccessRollout).toEqual({
-      sessionV2Acceptance: false,
+      sessionV2Acceptance: true,
       sessionV2Issuance: true,
       aggregateCatalogShadowing: true,
       aggregateCatalogServing: true,
