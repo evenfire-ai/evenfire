@@ -319,10 +319,15 @@ printf 'export const staged = 1\n' > "$fixture/control-api/src/staged.ts"
 commit_all "$fixture" 'seed staged formatter'
 printf 'export const staged={value:1}\n' > "$fixture/control-api/src/staged.ts"
 git -C "$fixture" add -- control-api/src/staged.ts
+expected_staged_blob="$(printf 'export const staged = { value: 1 }\n' \
+  | git -C "$fixture" hash-object --stdin)"
 if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
   && [ "$(git -C "$fixture" diff --name-only)" = '' ] \
   && [ "$(git -C "$fixture" diff --cached --name-only)" = 'control-api/src/staged.ts' ] \
-  && grep -Fq 'export const staged = { value: 1 }' "$fixture/control-api/src/staged.ts"; then
+  && [ "$(git -C "$fixture" hash-object control-api/src/staged.ts)" \
+    = "$expected_staged_blob" ] \
+  && [ "$(git -C "$fixture" rev-parse :control-api/src/staged.ts)" \
+    = "$expected_staged_blob" ]; then
   pass 'staged formatter still writes and restages exactly its eligible file'
 else
   fail 'staged formatter still writes and restages exactly its eligible file'
@@ -331,10 +336,11 @@ fi
 fixture="$(new_repo)"
 printf 'export const ciOnly={value:1}\n' > "$fixture/gfs-controller/src/ci-only.ts"
 git -C "$fixture" add -- gfs-controller/src/ci-only.ts
-before_blob="$(git -C "$fixture" show :gfs-controller/src/ci-only.ts)"
+before_blob="$(git -C "$fixture" rev-parse :gfs-controller/src/ci-only.ts)"
 if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
-  && [ "$(git -C "$fixture" show :gfs-controller/src/ci-only.ts)" = "$before_blob" ] \
-  && grep -Fq 'export const ciOnly={value:1}' "$fixture/gfs-controller/src/ci-only.ts"; then
+  && [ "$(git -C "$fixture" rev-parse :gfs-controller/src/ci-only.ts)" = "$before_blob" ] \
+  && [ "$(git -C "$fixture" hash-object gfs-controller/src/ci-only.ts)" = "$before_blob" ] \
+  && git -C "$fixture" diff --quiet -- gfs-controller/src/ci-only.ts; then
   pass 'CI-only roots do not expand the staged formatter scope'
 else
   fail 'CI-only roots do not expand the staged formatter scope'
