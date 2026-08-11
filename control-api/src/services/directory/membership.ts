@@ -1336,8 +1336,8 @@ export async function setInvitationPasswordForEmail(
       invitation.purpose === 'member_invitation' ||
       invitation.purpose === 'admin_desktop_access'
     ) {
-      if (invitation.status !== 'accepted' && !pendingMembershipSetup) {
-        return { error: 'not_accepted' as const }
+      if (!pendingMembershipSetup) {
+        return { error: 'not_pending' as const }
       }
     } else {
       return { error: 'not_found' as const }
@@ -1374,18 +1374,6 @@ export async function setInvitationPasswordForEmail(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (
-      invitation.purpose !== 'password_reset' &&
-      !pendingMembershipSetup &&
-      !invitation.accepted_user_id
-    ) {
-      await db.query(
-        `UPDATE invitations SET accepted_user_id = $2
-          WHERE id = $1 AND accepted_user_id IS NULL`,
-        [invitation.id, user.id]
-      )
-    }
-
     const refreshed = await getInvitationRecordById(db, invitation.id)
     if (!refreshed) {
       return { error: 'not_found' as const }

@@ -702,8 +702,40 @@ describe('directory privacy and atomic authorization', () => {
 
     await expect(
       setInvitationPasswordForEmail(invitation.email, invitation.id, 'another-password')
-    ).resolves.toEqual({ error: 'password_already_set' })
+    ).resolves.toEqual({ error: 'not_pending' })
     expect(membershipWrites).toBe(1)
+  })
+
+  it('rejects token-authenticated password setup after invitation acceptance', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Existing user',
+      email: 'existing@example.com',
+      role: 'member',
+      token: 'consumed-member-token',
+      status: 'accepted',
+      purpose: 'member_invitation',
+      created_at: new Date(),
+      expires_at: new Date(Date.now() + 60_000),
+      accepted_at: new Date(),
+      accepted_user_id: TARGET,
+      team_name: 'Team A',
+    }
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+        return { rows: [invitation], rowCount: 1 }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    await expect(
+      setInvitationPasswordForEmail(invitation.email, invitation.id, 'attacker-password')
+    ).resolves.toEqual({ error: 'not_pending' })
+    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(sql).toContain('FOR UPDATE OF i')
+    expect(sql).not.toContain('SET password_hash')
+    expect(sql).not.toContain('external_user_session_security_epochs')
   })
 
   it('sends a managed resend from a durable command without holding authority locks', async () => {

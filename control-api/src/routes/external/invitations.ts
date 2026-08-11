@@ -111,9 +111,6 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'forbidden') {
             return res.status(403).json({ error: 'forbidden' })
           }
-          if (result.error === 'not_accepted') {
-            return res.status(409).json({ error: 'invitation_not_accepted' })
-          }
           if (result.error === 'not_pending') {
             return res.status(409).json({ error: 'invitation_not_pending' })
           }
