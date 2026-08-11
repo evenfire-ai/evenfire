@@ -287,6 +287,30 @@ describe('indexed upload relay canonical drive', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('rejects malformed canonical drive values before admission or token minting', async () => {
+    auth()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const malformed = ['', ' archive', 'archive ', '\tarchive', 'archive\n']
+
+    for (const drive of malformed) {
+      const app = await buildApp()
+      const response = await request(app)
+        .get(`/external/gfs/capabilities?drive=${encodeURIComponent(drive)}`)
+        .set('x-user-session-token', 'sess')
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'drive_required' })
+    }
+
+    const arrayValue = await request(await buildApp())
+      .get('/external/gfs/capabilities?drive=archive&drive=main')
+      .set('x-user-session-token', 'sess')
+    expect(arrayValue.status).toBe(400)
+    expect(arrayValue.body).toEqual({ error: 'drive_required' })
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('signs and forwards every lifecycle request from one non-main canonical drive', async () => {
     auth()
     const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
