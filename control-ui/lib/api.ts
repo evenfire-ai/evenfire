@@ -1018,7 +1018,10 @@ export async function createContext(payload: { metadata: { name: string }; spec:
   return apiSend('POST', '/api/v1/admin/contexts', payload) as Promise<ContextResource>
 }
 
-export async function updateContext(name: string, payload: { spec: ContextSpec }) {
+export async function updateContext(
+  name: string,
+  payload: { metadata: { resourceVersion: string }; spec: ContextSpec }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/contexts/${encodeURIComponent(name)}`,

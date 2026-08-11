@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import type { LlmAllowedModel } from '@lib/api'
 import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
+import { type SortDirection, TableSortHeader, compareNullsLast, toggleSort } from '@lib/tableSort'
 import { FilterSelect } from './FilterSelect'
 import type { LlmModelTableProps } from './LlmModelTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
@@ -17,16 +18,35 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
 import { SelectInput } from './ui'
 
-const MODEL_COLUMNS: TableHeaderColumn[] = [
-  { key: 'model', label: 'Model', minWidth: '15rem' },
-  { key: 'vendor', label: 'Vendor', width: '10rem' },
-  { key: 'displayName', label: 'Display name', minWidth: '10rem' },
-  { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
-  { key: 'enabled', label: 'Enabled', width: '6rem' },
-  { key: 'source', label: 'Source', width: '7rem' },
-  { key: 'catalogStatus', label: 'Catalog status', width: '8rem' },
-  { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
-]
+type ModelSortKey = 'model' | 'vendor' | 'displayName' | 'contextWindow'
+
+// Natural default direction per column: numeric columns read best descending
+// (largest context window first); text columns read best ascending.
+const MODEL_SORT_DEFAULT_DIR: Record<ModelSortKey, SortDirection> = {
+  contextWindow: 'desc',
+  displayName: 'asc',
+  model: 'asc',
+  vendor: 'asc',
+}
+
+function compareModelByKey(key: ModelSortKey) {
+  return (a: LlmAllowedModel, b: LlmAllowedModel): number => {
+    switch (key) {
+      case 'model':
+        return a.model.localeCompare(b.model)
+      case 'vendor':
+        return (a.vendor ?? '').localeCompare(b.vendor ?? '')
+      case 'displayName':
+        return (a.display_name ?? '').localeCompare(b.display_name ?? '')
+      case 'contextWindow':
+        return (a.context_window_tokens ?? 0) - (b.context_window_tokens ?? 0)
+    }
+  }
+}
+
+function compareModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
+  return a.model.localeCompare(b.model)
+}
 
 const ALL_PROVIDERS = '__all__'
 
@@ -50,6 +70,8 @@ export function LlmModelTable({
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all')
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
+  const [sortKey, setSortKey] = useState<ModelSortKey | null>(null)
+  const [sortDir, setSortDir] = useState<SortDirection>('asc')
   const normalizedSearch = searchQuery.trim().toLowerCase()
 
   const providerOptions = useMemo(() => {
@@ -125,10 +147,24 @@ export function LlmModelTable({
       if (group) group.push(model)
       else groups.set(model.provider, [model])
     }
+    for (const group of groups.values()) {
+      if (!sortKey) continue
+      const direction = sortDir === 'asc' ? 1 : -1
+      const byKey = compareModelByKey(sortKey)
+      group.sort((a, b) => {
+        if (sortKey === 'contextWindow') {
+          const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
+          if (nullOrder !== null) return nullOrder
+        }
+        const diff = byKey(a, b) * direction
+        if (diff !== 0) return diff
+        return compareModel(a, b)
+      })
+    }
     return Array.from(groups.entries()).sort(([left], [right]) =>
       getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
     )
-  }, [filteredItems])
+  }, [filteredItems, sortDir, sortKey])
 
   // Search should reveal results without forcing the operator to open every
   // matching provider first. Keep those groups open after search is cleared so
@@ -165,13 +201,46 @@ export function LlmModelTable({
     })
   }
 
+  const renderSortHeader = (key: ModelSortKey, label: string) => (
+    <TableSortHeader
+      activeKey={sortKey}
+      defaultDirections={MODEL_SORT_DEFAULT_DIR}
+      direction={sortDir}
+      label={label}
+      onSort={nextKey =>
+        toggleSort(nextKey, sortKey, MODEL_SORT_DEFAULT_DIR, setSortKey, setSortDir)
+      }
+      sortKey={key}
+    />
+  )
+
+  const modelColumns: TableHeaderColumn[] = [
+    { key: 'model', label: renderSortHeader('model', 'Model'), minWidth: '15rem' },
+    { key: 'vendor', label: renderSortHeader('vendor', 'Vendor'), width: '10rem' },
+    {
+      key: 'displayName',
+      label: renderSortHeader('displayName', 'Display name'),
+      minWidth: '10rem',
+    },
+    {
+      key: 'contextWindow',
+      label: renderSortHeader('contextWindow', 'Context window'),
+      align: 'right',
+      width: '9rem',
+    },
+    { key: 'enabled', label: 'Enabled', width: '6rem' },
+    { key: 'source', label: 'Source', width: '7rem' },
+    { key: 'catalogStatus', label: 'Catalog status', width: '8rem' },
+    { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
+  ]
+
   return (
     <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
         title={
           <>
             <IconModels />
-            {isInitialLoad ? 'Model catalog' : `Model catalog (${filteredItems.length})`}
+            LLM Models
           </>
         }
         subtitle="The authoritative allowlist of manual and discovered models. Only enabled rows can be selected for agents and runtime."
@@ -243,10 +312,10 @@ export function LlmModelTable({
         <div className="cu-table-wrap cu-table-wrap--sticky-header">
           <table className="cu-table cu-table--header-band cu-llm-model-table">
             <thead>
-              <TableHeaderRow columns={MODEL_COLUMNS} />
+              <TableHeaderRow columns={modelColumns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={MODEL_COLUMNS.length} rows={4} />
+              <SkeletonTableRows columns={modelColumns.length} rows={4} />
             </tbody>
           </table>
         </div>
@@ -260,7 +329,7 @@ export function LlmModelTable({
         <div className="cu-table-wrap cu-table-wrap--sticky-header">
           <table className="cu-table cu-table--header-band cu-llm-model-table">
             <thead>
-              <TableHeaderRow columns={MODEL_COLUMNS} />
+              <TableHeaderRow columns={modelColumns} />
             </thead>
             {groupedItems.map(([provider, models]) => {
               const providerLabel = getProviderDisplayLabel(provider)
@@ -273,7 +342,7 @@ export function LlmModelTable({
               return (
                 <tbody key={provider} className="cu-llm-model-group">
                   <tr className="cu-llm-model-group__row">
-                    <td colSpan={MODEL_COLUMNS.length}>
+                    <td colSpan={modelColumns.length}>
                       <button
                         type="button"
                         className="cu-llm-model-group__toggle"

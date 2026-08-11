@@ -6,7 +6,10 @@ import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => [
-      { metadata: { name: 's1', namespace: 'ns1', labels: { 'clerum.io/host-secret': 'true' } } },
+      {
+        metadata: { name: 's1', namespace: 'ns1', labels: { 'clerum.io/host-secret': 'true' } },
+        keys: ['openai-api-key'],
+      },
       { metadata: { name: 's2', namespace: 'ns1', labels: {} } },
       { metadata: { name: 's3', namespace: 'ns1', labels: { 'clerum.io/host-secret': 'false' } } },
     ]),
@@ -31,8 +34,11 @@ describe('routes/secrets', () => {
     app.use(createAdminSecretsRouter(gateway as never))
 
     const filtered = await request(app).get('/admin/secrets').expect(200)
-    expect(filtered.body.items).toHaveLength(1)
-    expect(filtered.body.items[0].name).toBe('s1')
+    // Producer-backed contract consumed by control-ui listLlmHostSecrets/SecretsTable.
+    // Secret values and Kubernetes metadata must never cross this boundary.
+    expect(filtered.body).toEqual({
+      items: [{ name: 's1', keys: ['openai-api-key'] }],
+    })
     const filteredNames = (filtered.body.items || []).map((item: { name?: string }) => item.name)
     expect(filteredNames).not.toContain('s2')
     expect(filteredNames).not.toContain('s3')

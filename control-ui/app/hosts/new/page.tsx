@@ -69,7 +69,7 @@ export default function CreateHostPage() {
               <CreatePageHeader
                 icon={<IconRobot />}
                 title="Create agent"
-                subtitle="Provision a new agent with context, channels, and access."
+                subtitle="Provision a new agent with context, credentials, and access."
                 backLabel="Back to agents"
                 onBack={backToAgents}
               />

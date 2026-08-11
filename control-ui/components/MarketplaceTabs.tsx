@@ -26,12 +26,12 @@ export function MarketplaceTabs({ active }: { active: MarketplaceSection }) {
     <TabBar<MarketplaceSection>
       ariaLabel="Marketplace sections"
       activeValue={active}
-      className="cu-tabs--flush-top"
+      className="cu-marketplace-tabs"
       options={[
         {
           value: 'connectors',
           href: CONTROL_ROUTES.marketplace.connectors,
-          label: 'Marketplace',
+          label: 'Connectors',
         },
         {
           value: 'org',

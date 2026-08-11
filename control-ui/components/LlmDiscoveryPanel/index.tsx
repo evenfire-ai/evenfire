@@ -19,17 +19,11 @@ import {
   updateLlmModel,
 } from '@lib/api'
 import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import { type SortDirection, TableSortHeader, compareNullsLast, toggleSort } from '@lib/tableSort'
 import type { LlmDiscoveryPanelProps } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
   'Propagation to the cluster is delayed and will reconcile shortly.'
-
-const REVIEW_COLUMNS: TableHeaderColumn[] = [
-  { key: 'model', label: 'Model', minWidth: '12rem' },
-  { key: 'vendor', label: 'Vendor', width: '10rem' },
-  { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
-  { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
-]
 
 type ProviderModelGroup = [provider: string, models: LlmAllowedModel[]]
 
@@ -39,6 +33,34 @@ type ProviderGroupRowProps = {
   models: LlmAllowedModel[]
   onToggle: () => void
   provider: string
+}
+
+type ReviewSortKey = 'model' | 'vendor' | 'contextWindow'
+
+// Numeric columns lead descending (largest context window first); text columns
+// lead ascending (alphabetical). Picking a different column resets to that
+// column's natural default so the operator always sees the most useful order.
+const REVIEW_SORT_DEFAULT_DIR: Record<ReviewSortKey, SortDirection> = {
+  contextWindow: 'desc',
+  model: 'asc',
+  vendor: 'asc',
+}
+
+function compareReviewByKey(key: ReviewSortKey) {
+  return (a: LlmAllowedModel, b: LlmAllowedModel): number => {
+    switch (key) {
+      case 'model':
+        return a.model.localeCompare(b.model)
+      case 'vendor':
+        return (a.vendor ?? '').localeCompare(b.vendor ?? '')
+      case 'contextWindow':
+        return (a.context_window_tokens ?? 0) - (b.context_window_tokens ?? 0)
+    }
+  }
+}
+
+function compareReviewModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
+  return a.model.localeCompare(b.model)
 }
 
 function modelLabel(model: LlmAllowedModel): string {
@@ -51,12 +73,31 @@ function formatRunAt(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
-function groupByProvider(models: LlmAllowedModel[]): ProviderModelGroup[] {
+function groupByProvider(
+  models: LlmAllowedModel[],
+  sortKey: ReviewSortKey | null,
+  sortDir: SortDirection
+): ProviderModelGroup[] {
   const groups = new Map<string, LlmAllowedModel[]>()
   for (const model of models) {
     const group = groups.get(model.provider)
     if (group) group.push(model)
     else groups.set(model.provider, [model])
+  }
+  if (sortKey) {
+    const direction = sortDir === 'asc' ? 1 : -1
+    const byKey = compareReviewByKey(sortKey)
+    for (const group of groups.values()) {
+      group.sort((a, b) => {
+        if (sortKey === 'contextWindow') {
+          const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
+          if (nullOrder !== null) return nullOrder
+        }
+        const diff = byKey(a, b) * direction
+        if (diff !== 0) return diff
+        return compareReviewModel(a, b)
+      })
+    }
   }
   return Array.from(groups.entries()).sort(([left], [right]) =>
     getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
@@ -119,6 +160,8 @@ export function LlmDiscoveryPanel({
   const [bulkEnabling, setBulkEnabling] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
+  const [sortKey, setSortKey] = useState<ReviewSortKey | null>(null)
+  const [sortDir, setSortDir] = useState<SortDirection>('asc')
   const statusRequestGeneration = useRef(0)
 
   const isInitialLoad = loading && items.length === 0
@@ -126,7 +169,10 @@ export function LlmDiscoveryPanel({
     () => items.filter(model => model.source === 'discovery' && !model.enabled && !model.stale),
     [items]
   )
-  const reviewGroups = useMemo(() => groupByProvider(reviewQueue), [reviewQueue])
+  const reviewGroups = useMemo(
+    () => groupByProvider(reviewQueue, sortKey, sortDir),
+    [reviewQueue, sortDir, sortKey]
+  )
 
   const selectedCount = useMemo(
     () => reviewQueue.reduce((count, model) => (selectedIds.has(model.id) ? count + 1 : count), 0),
@@ -298,6 +344,19 @@ export function LlmDiscoveryPanel({
     showToast(message, { tone: 'error' })
   }
 
+  const renderSortHeader = (key: ReviewSortKey, label: string) => (
+    <TableSortHeader
+      activeKey={sortKey}
+      defaultDirections={REVIEW_SORT_DEFAULT_DIR}
+      direction={sortDir}
+      label={label}
+      onSort={nextKey =>
+        toggleSort(nextKey, sortKey, REVIEW_SORT_DEFAULT_DIR, setSortKey, setSortDir)
+      }
+      sortKey={key}
+    />
+  )
+
   const reviewColumns: TableHeaderColumn[] = [
     {
       key: 'select',
@@ -315,7 +374,15 @@ export function LlmDiscoveryPanel({
         />
       ),
     },
-    ...REVIEW_COLUMNS,
+    { key: 'model', label: renderSortHeader('model', 'Model'), minWidth: '12rem' },
+    { key: 'vendor', label: renderSortHeader('vendor', 'Vendor'), width: '10rem' },
+    {
+      key: 'contextWindow',
+      label: renderSortHeader('contextWindow', 'Context window'),
+      align: 'right',
+      width: '9rem',
+    },
+    { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
   ]
 
   return (
@@ -331,7 +398,7 @@ export function LlmDiscoveryPanel({
           title={
             <>
               <IconModels />
-              {isInitialLoad ? 'Discovery review' : `Discovery review (${reviewQueue.length})`}
+              LLM Models
             </>
           }
           subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
@@ -361,28 +428,29 @@ export function LlmDiscoveryPanel({
             </>
           }
         />
-        {navigation}
-
-        <div className="cu-discovery-status" role="status">
-          <span>
-            {status
-              ? `Last synced ${formatRunAt(status.ranAt)}`
-              : 'Not synced yet. Run a sync to pull the latest catalog.'}
-          </span>
-          {status ? (
-            <span className="cu-discovery-status__facts">
-              <span
-                className={`cu-px-badge ${
-                  status.source === 'live' ? 'cu-px-badge--info' : 'cu-px-badge--warn'
-                }`}
-              >
-                {status.source === 'live' ? 'Live catalog' : 'Vendored fallback'}
-              </span>
-              <span>+{status.added} new</span>
-              <span>{status.updated} refreshed</span>
-              <span>{status.staled} stale</span>
+        <div className="cu-discovery-bar">
+          {navigation}
+          <div className="cu-discovery-status" role="status">
+            <span>
+              {status
+                ? `Last synced ${formatRunAt(status.ranAt)}`
+                : 'Not synced yet. Run a sync to pull the latest catalog.'}
             </span>
-          ) : null}
+            {status ? (
+              <span className="cu-discovery-status__facts">
+                <span
+                  className={`cu-px-badge ${
+                    status.source === 'live' ? 'cu-px-badge--info' : 'cu-px-badge--warn'
+                  }`}
+                >
+                  {status.source === 'live' ? 'Live catalog' : 'Vendored fallback'}
+                </span>
+                <span>+{status.added} new</span>
+                <span>{status.updated} refreshed</span>
+                <span>{status.staled} stale</span>
+              </span>
+            ) : null}
+          </div>
         </div>
 
         {selectedCount > 0 ? (
