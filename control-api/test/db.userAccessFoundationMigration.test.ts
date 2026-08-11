@@ -33,6 +33,7 @@ describe('user-access foundation migration', () => {
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS authorization_user_revisions')
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS authorization_team_revisions')
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS authorization_resource_revisions')
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS authorization_catalog_revision')
     expect(sql).toContain('SECURITY DEFINER')
     expect(sql).toContain('authorization_bump_team_membership_revision')
     expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)
@@ -75,6 +76,8 @@ describe('user-access foundation migration', () => {
       'team_agents_agent_team_idx',
       'user_workflow_triggers_recipe_user_idx',
       'team_workflow_triggers_recipe_team_idx',
+      'user_workflow_triggers_catalog_key_idx',
+      'team_workflow_triggers_catalog_key_idx',
       'workflow_runs_actor_catalog_idx',
       'workflow_runs_team_catalog_idx',
       'workflow_runs_usage_team_catalog_idx',
@@ -104,6 +107,7 @@ describe('user-access foundation migration', () => {
     )
 
     const expected = new Map<string, string>([
+      ['authorization_catalog_revision', 'read'],
       ['authorization_resource_revisions', 'upsert'],
       ['authorization_team_revisions', 'upsert'],
       ['authorization_user_revisions', 'upsert'],
