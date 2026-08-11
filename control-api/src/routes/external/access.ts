@@ -21,10 +21,8 @@ import { CATALOG_FAMILIES, type CatalogFamily } from '../../services/access/cata
 import { resolveLiveAuthorization } from '../../services/access/liveAuthorizationResolver.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
-import {
-  effectiveUserAccessPolicy,
-  userAccessCapabilityManifest,
-} from '../../services/access/userAccessPolicy.js'
+import { userAccessCapabilityManifest } from '../../services/access/userAccessPolicy.js'
+import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 
 const CATALOG_RATE_LIMIT_PER_MINUTE = 10
 const RESOLVE_RATE_LIMIT_PER_MINUTE = 10
@@ -86,17 +84,19 @@ function operationTarget(
   return normalized
 }
 
-function requireEffectiveV2Contract(
+async function requireEffectiveV2Contract(
   feature: 'catalog' | 'action',
   req: ExternalAuthedRequest,
   res: Parameters<typeof sendPublicApiError>[1],
   next: () => void
-): void {
-  const enabled =
-    feature === 'catalog'
-      ? effectiveUserAccessPolicy.serveCatalog
-      : effectiveUserAccessPolicy.actionContextV2
-  if (req.externalAuth?.sessionContract !== 'v2' || !enabled) {
+): Promise<void> {
+  try {
+    const policy = await resolveEffectiveUserAccessPolicy()
+    const enabled = feature === 'catalog' ? policy.serveCatalog : policy.actionContextV2
+    if (req.externalAuth?.sessionContract === 'v2' && enabled) {
+      next()
+      return
+    }
     sendPublicApiError(
       req,
       res,
@@ -104,9 +104,16 @@ function requireEffectiveV2Contract(
       'invalid_request',
       'This access contract is not enabled for the current session.'
     )
-    return
+  } catch {
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      'authority_unavailable',
+      'Access capability state is temporarily unavailable.',
+      true
+    )
   }
-  next()
 }
 
 function sendCatalogError(
@@ -156,17 +163,32 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use('/external/access', requireValidExternalSessionTokenWithPublicErrors)
 
-  router.get('/external/access/capabilities', (req: ExternalAuthedRequest, res) => {
-    res.status(200).json({
-      contractVersion: '2',
-      currentSessionContract: req.externalAuth!.sessionContract ?? 'v1',
-      ...userAccessCapabilityManifest(effectiveUserAccessPolicy),
+  router.get(
+    '/external/access/capabilities',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      try {
+        const policy = await resolveEffectiveUserAccessPolicy()
+        res.status(200).json({
+          contractVersion: '2',
+          currentSessionContract: req.externalAuth!.sessionContract ?? 'v1',
+          ...userAccessCapabilityManifest(policy),
+        })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Access capability state is temporarily unavailable.',
+          true
+        )
+      }
     })
-  })
+  )
 
   router.get(
     '/external/access/catalog',
-    (req, res, next) => requireEffectiveV2Contract('catalog', req, res, next),
+    asyncHandler((req, res, next) => requireEffectiveV2Contract('catalog', req, res, next)),
     rateLimitMiddleware({
       bucketType: 'external_access_catalog',
       maxPerMinute: CATALOG_RATE_LIMIT_PER_MINUTE,
@@ -207,7 +229,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/access/resolve',
-    (req, res, next) => requireEffectiveV2Contract('action', req, res, next),
+    asyncHandler((req, res, next) => requireEffectiveV2Contract('action', req, res, next)),
     rateLimitMiddleware({
       bucketType: 'external_access_resolve',
       maxPerMinute: RESOLVE_RATE_LIMIT_PER_MINUTE,
