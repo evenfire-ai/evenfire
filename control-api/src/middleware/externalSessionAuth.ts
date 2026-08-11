@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
+import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
 import type { ExternalSessionAuthorityContext } from '../services/auth/externalSessionAuthentication.js'
@@ -8,6 +9,7 @@ import type { ExternalSessionAuthorityContext } from '../services/auth/externalS
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
   externalSessionAuthority?: ExternalSessionAuthorityContext
+  accessExecutionBudget?: AccessExecutionBudget
   externalTeamAuth?: {
     teamId: string
     role: TeamRole
@@ -38,6 +40,7 @@ async function validateExternalSessionToken(
     const authentication = await authenticateExternalUserSession(token, {
       purpose: 'protected',
       client: { version: req.header('x-evenfire-client-version') || undefined },
+      budget: req.accessExecutionBudget,
     })
     if (authentication.status === 'upgrade_required') {
       if (publicErrors) {

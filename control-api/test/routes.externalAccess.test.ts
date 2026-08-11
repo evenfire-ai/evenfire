@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { EventEmitter } from 'node:events'
 import request from 'supertest'
-import { createExternalAccessRouter } from '../src/routes/external/access.js'
+import {
+  attachAccessExecutionBudget,
+  createExternalAccessRouter,
+} from '../src/routes/external/access.js'
 
 const mocks = vi.hoisted(() => ({
   verifyV1: vi.fn(),
@@ -69,6 +73,34 @@ describe('external user-access contracts', () => {
         catalogFamilies: [],
       })
     )
+    expect(mocks.validateV1).toHaveBeenCalledWith(
+      'v1-session',
+      expect.any(Object),
+      expect.objectContaining({ budget: expect.any(Object) })
+    )
+  })
+
+  it('cancels and releases the shared request budget when the HTTP request aborts', () => {
+    const req = Object.assign(new EventEmitter(), {
+      method: 'GET',
+      path: '/external/access/catalog',
+    })
+    const res = Object.assign(new EventEmitter(), { writableEnded: false })
+    const next = vi.fn()
+
+    attachAccessExecutionBudget(req as never, res as never, next)
+
+    const budget = (req as { accessExecutionBudget?: { signal: AbortSignal } })
+      .accessExecutionBudget
+    expect(next).toHaveBeenCalledOnce()
+    expect(budget?.signal.aborted).toBe(false)
+    req.emit('aborted')
+    expect(budget?.signal.aborted).toBe(true)
+    expect(budget?.signal.reason).toBe('cancelled')
+    res.emit('close')
+    expect(req.listenerCount('aborted')).toBe(0)
+    expect(res.listenerCount('finish')).toBe(0)
+    expect(res.listenerCount('close')).toBe(0)
   })
 
   it.each([

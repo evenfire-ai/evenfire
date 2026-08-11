@@ -14,6 +14,7 @@ import {
 import { AccessCatalogCursorError } from '../../services/access/accessCatalogCursor.js'
 import {
   AccessBudgetExceededError,
+  AccessExecutionBudget,
   AccessExecutionCancelledError,
 } from '../../services/access/accessExecutionBudget.js'
 import { isAccessCapability } from '../../services/access/capabilityRegistry.js'
@@ -27,6 +28,40 @@ import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAcce
 const CATALOG_RATE_LIMIT_PER_MINUTE = 10
 const RESOLVE_RATE_LIMIT_PER_MINUTE = 10
 const ACCESS_PATH_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/
+
+export function attachAccessExecutionBudget(
+  req: ExternalAuthedRequest,
+  res: Parameters<typeof sendPublicApiError>[1],
+  next: () => void
+): void {
+  const kind = req.method === 'GET' && req.path.endsWith('/catalog') ? 'catalog' : 'action'
+  const budget = AccessExecutionBudget.create(kind)
+  req.accessExecutionBudget = budget
+  let settled = false
+  const detach = () => {
+    req.removeListener('aborted', onAborted)
+    res.removeListener('finish', onFinished)
+    res.removeListener('close', onClosed)
+  }
+  const onAborted = () => budget.cancel()
+  const onFinished = () => {
+    if (settled) return
+    settled = true
+    detach()
+    budget.close()
+  }
+  const onClosed = () => {
+    if (settled) return
+    settled = true
+    if (!res.writableEnded) budget.cancel()
+    detach()
+    budget.close()
+  }
+  req.once('aborted', onAborted)
+  res.once('finish', onFinished)
+  res.once('close', onClosed)
+  next()
+}
 
 function catalogFamilies(value: unknown): CatalogFamily[] | null | undefined {
   if (value === undefined) return undefined
@@ -91,7 +126,7 @@ async function requireEffectiveV2Contract(
   next: () => void
 ): Promise<void> {
   try {
-    const policy = await resolveEffectiveUserAccessPolicy()
+    const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })
     const enabled = feature === 'catalog' ? policy.serveCatalog : policy.actionContextV2
     if (req.externalAuth?.sessionContract === 'v2' && enabled) {
       next()
@@ -161,13 +196,14 @@ function sendCatalogError(
 
 export function createExternalAccessRouter(gateway: K8sGateway): Router {
   const router = Router()
+  router.use('/external/access', attachAccessExecutionBudget)
   router.use('/external/access', requireValidExternalSessionTokenWithPublicErrors)
 
   router.get(
     '/external/access/capabilities',
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       try {
-        const policy = await resolveEffectiveUserAccessPolicy()
+        const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })
         res.status(200).json({
           contractVersion: '2',
           currentSessionContract: req.externalAuth!.sessionContract ?? 'v1',
@@ -214,12 +250,15 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         return
       }
       try {
-        const catalog = await buildAccessCatalog({
-          session: req.externalSessionAuthority!,
-          ...(families ? { families } : {}),
-          ...(limit ? { limit } : {}),
-          ...(cursor ? { cursor } : {}),
-        })
+        const catalog = await buildAccessCatalog(
+          {
+            session: req.externalSessionAuthority!,
+            ...(families ? { families } : {}),
+            ...(limit ? { limit } : {}),
+            ...(cursor ? { cursor } : {}),
+          },
+          { budget: req.accessExecutionBudget! }
+        )
         res.status(200).json(catalog)
       } catch (error) {
         sendCatalogError(req, res, error)
@@ -290,7 +329,11 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
           ...(accessPathId ? { requestedAccessPathId: accessPathId } : {}),
           ...(target ? { operationTarget: target } : {}),
         },
-        { gateway, correlationId: req.correlationId }
+        {
+          gateway,
+          correlationId: req.correlationId,
+          budget: req.accessExecutionBudget!,
+        }
       )
       if (result.status === 'allowed') {
         res.status(200).json({

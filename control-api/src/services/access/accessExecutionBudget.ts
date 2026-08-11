@@ -365,6 +365,10 @@ export class AccessExecutionBudget {
 
   async runProducer<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     this.charge({ kind: 'producerCalls' })
+    return this.runBoundedWork(work)
+  }
+
+  async runBoundedWork<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const release = await this.shared.semaphore.acquire(this.signal)
     try {
       this.assertActive()

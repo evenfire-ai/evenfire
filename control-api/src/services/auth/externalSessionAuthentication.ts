@@ -4,6 +4,7 @@ import {
   type UserSessionV2Claims,
   verifyUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
+import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import {
   type EffectiveUserAccessPolicy,
   compareSemanticVersions,
@@ -49,6 +50,7 @@ type AuthenticationOptions = Readonly<{
   purpose: ExternalSessionPurpose
   client?: ExternalSessionClient
   policy?: EffectiveUserAccessPolicy
+  budget?: AccessExecutionBudget
   now?: Date
 }>
 
@@ -132,7 +134,8 @@ export async function authenticateExternalUserSession(
   token: string,
   options: AuthenticationOptions
 ): Promise<ExternalSessionAuthentication> {
-  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
+  const policy =
+    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
   if (
     purposeRequiresMinimumClient(options.purpose) &&
     !clientMeetsMinimum(options.client, policy)
@@ -145,7 +148,10 @@ export async function authenticateExternalUserSession(
     if (!v2Allowed(options.purpose, policy)) {
       return { status: 'invalid', reason: 'session_contract_not_accepted' }
     }
-    const validation = await validateUserSessionClaims(v2Claims, { now: options.now })
+    const validation = await validateUserSessionClaims(v2Claims, {
+      now: options.now,
+      budget: options.budget,
+    })
     if (validation.status !== 'valid') return validation
     return {
       status: 'authenticated',
@@ -167,7 +173,9 @@ export async function authenticateExternalUserSession(
   if (!v1Allowed(options.purpose, policy)) {
     return { status: 'invalid', reason: 'session_contract_not_accepted' }
   }
-  const validation = await validateLegacyUserSession(token, v1Claims)
+  const validation = await validateLegacyUserSession(token, v1Claims, {
+    budget: options.budget,
+  })
   if (validation.status !== 'valid') return validation
   return {
     status: 'authenticated',
@@ -187,7 +195,8 @@ export async function renewExternalUserSession(
   token: string,
   options: Omit<AuthenticationOptions, 'purpose'> = {}
 ): Promise<ExternalSessionRenewal> {
-  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
+  const policy =
+    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
   if (!clientMeetsMinimum(options.client, policy)) {
     return { status: 'upgrade_required', reason: 'minimum_client_version' }
   }
@@ -196,7 +205,7 @@ export async function renewExternalUserSession(
   }
   const claims = verifyUserSessionV2Token(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  const result = await renewUserSession(claims, { now: options.now })
+  const result = await renewUserSession(claims, { now: options.now, budget: options.budget })
   if (!('token' in result)) {
     if (result.status === 'valid') {
       return { status: 'invalid', reason: 'session_renewal_failed' }
