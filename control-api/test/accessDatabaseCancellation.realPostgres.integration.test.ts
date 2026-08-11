@@ -7,6 +7,7 @@ import {
   AccessExecutionCancelledError,
 } from '../src/services/access/accessExecutionBudget.js'
 import { catalogQuery } from '../src/services/access/catalogProducerSupport.js'
+import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -127,6 +128,34 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
       const work = withAccessDatabaseTransaction(budget, async db => db.query('SELECT 1'), {
         mode: 'read_only',
         connectionPool: constrainedPool,
+      })
+      setTimeout(() => budget.cancel(), 50)
+      await expect(work).rejects.toBeInstanceOf(AccessExecutionCancelledError)
+      expect(performance.now() - startedAt).toBeLessThan(1_000)
+
+      heldClient.release()
+      heldReleased = true
+      const replacement = await constrainedPool.connect()
+      replacement.release()
+    } finally {
+      if (!heldReleased) heldClient.release()
+      budget.close()
+      await constrainedPool.end()
+    }
+  })
+
+  it('bounds the operational index default transaction acquisition', async () => {
+    const constrainedPool = new Pool({ connectionString: adminUrl, max: 1 })
+    const heldClient = await constrainedPool.connect()
+    let heldReleased = false
+    const budget = AccessExecutionBudget.create('action')
+    const index = new OperationalAccessIndex(constrainedPool)
+    try {
+      const startedAt = performance.now()
+      const work = index.loadSourceStates({
+        environmentId: 'test:cluster',
+        sourceFamilies: ['host'],
+        budget,
       })
       setTimeout(() => budget.cancel(), 50)
       await expect(work).rejects.toBeInstanceOf(AccessExecutionCancelledError)

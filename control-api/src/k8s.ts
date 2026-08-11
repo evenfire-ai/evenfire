@@ -289,6 +289,10 @@ export class K8sGateway {
         finish()
       }
       signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
       void watch
         .watch(
           path,

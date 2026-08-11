@@ -16,6 +16,29 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
 })
 
 describe('K8sGateway.watchResource', () => {
+  it('does not start a watch for an already-aborted request', async () => {
+    mocks.watch.mockImplementation(() => new Promise(() => undefined))
+    const gateway = Object.create(K8sGateway.prototype) as K8sGateway
+    Object.defineProperties(gateway, {
+      resources: {
+        value: { assertNamespaceAllowed: vi.fn() },
+      },
+      kc: { value: {} },
+    })
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      Promise.race([
+        gateway.watchResource('hosts', 'mcp-host', '42', controller.signal, vi.fn()),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('watch did not settle')), 250)
+        ),
+      ])
+    ).resolves.toBeUndefined()
+    expect(mocks.watch).not.toHaveBeenCalled()
+  })
+
   it('rejects and aborts when an event handler fails before the controller resolves', async () => {
     const controller = { abort: vi.fn() }
     const handlerError = new Error('handler failed')

@@ -1,5 +1,5 @@
-import { type DbClient, pool, withTransaction } from '../../db.js'
-import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
+import { type DbClient, pool } from '../../db.js'
+import { runAccessDatabaseQuery, withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import type {
   OperationalObjectProjection,
@@ -28,6 +28,13 @@ export class OperationalSourceStateError extends Error {
 }
 
 type TransactionRunner = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
+type ConnectionPool = Pick<typeof pool, 'connect'>
+
+function connectionPoolFor(db: DbClient): ConnectionPool | null {
+  const candidate = db as DbClient & Partial<ConnectionPool>
+  if (typeof candidate.connect !== 'function') return null
+  return { connect: candidate.connect.bind(candidate) }
+}
 
 function numberValue(value: unknown): number {
   const result = Number(value)
@@ -96,8 +103,21 @@ function relationshipPayload(value: OperationalRelationshipRecord, generation: n
 export class OperationalAccessIndex {
   constructor(
     private readonly readDb: DbClient = pool,
-    private readonly transaction: TransactionRunner = withTransaction
+    private readonly transaction?: TransactionRunner
   ) {}
+
+  private async runTransaction<T>(
+    budget: AccessExecutionBudget,
+    work: (db: DbClient) => Promise<T>
+  ): Promise<T> {
+    if (this.transaction) return this.transaction(work)
+    const connectionPool = connectionPoolFor(this.readDb)
+    if (!connectionPool) throw new OperationalSourceStateError('source_unavailable')
+    return withAccessDatabaseTransaction(budget, work, {
+      mode: 'caller_configured',
+      connectionPool,
+    })
+  }
 
   private async query(
     db: DbClient,
@@ -119,7 +139,7 @@ export class OperationalAccessIndex {
     sourceFamily: OperationalSourceFamily
     budget: AccessExecutionBudget
   }): Promise<number> {
-    return this.transaction(async db => {
+    return this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       const result = await this.query(
         db,
@@ -168,7 +188,7 @@ export class OperationalAccessIndex {
     const relationships = input.projections.flatMap(projection =>
       projection.relationships.map(value => relationshipPayload(value, input.stagingGeneration))
     )
-    await this.transaction(async db => {
+    await this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       const result = await this.query(
         db,
@@ -269,7 +289,7 @@ export class OperationalAccessIndex {
     resourceVersion: string
     budget: AccessExecutionBudget
   }): Promise<void> {
-    await this.transaction(async db => {
+    await this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       const locked = await this.query(
         db,
@@ -374,7 +394,7 @@ export class OperationalAccessIndex {
     deleted: boolean
     budget: AccessExecutionBudget
   }): Promise<number> {
-    return this.transaction(async db => {
+    return this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       const locked = await this.query(
         db,
@@ -501,7 +521,7 @@ export class OperationalAccessIndex {
     safeErrorCode: string
     budget: AccessExecutionBudget
   }): Promise<void> {
-    await this.transaction(async db => {
+    await this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       await this.query(
         db,
@@ -529,7 +549,7 @@ export class OperationalAccessIndex {
     resourceVersion: string
     budget: AccessExecutionBudget
   }): Promise<void> {
-    await this.transaction(async db => {
+    await this.runTransaction(input.budget, async db => {
       await this.configureTransaction(db, input.budget)
       const result = await this.query(
         db,
@@ -555,17 +575,20 @@ export class OperationalAccessIndex {
     budget: AccessExecutionBudget
   }): Promise<readonly OperationalSourceState[]> {
     if (input.sourceFamilies.length === 0) return []
-    const result = await this.query(
-      this.readDb,
-      input.budget,
-      `SELECT environment_id, source_family, generation, staging_generation,
-              resource_version, status, safe_error_code
-         FROM operational_catalog_source_state
-        WHERE environment_id = $1
-          AND source_family = ANY($2::text[])
-        ORDER BY source_family`,
-      [input.environmentId, input.sourceFamilies]
-    )
-    return Object.freeze(result.rows.map(sourceState))
+    return this.runTransaction(input.budget, async db => {
+      await this.configureTransaction(db, input.budget)
+      const result = await this.query(
+        db,
+        input.budget,
+        `SELECT environment_id, source_family, generation, staging_generation,
+                resource_version, status, safe_error_code
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1
+            AND source_family = ANY($2::text[])
+          ORDER BY source_family`,
+        [input.environmentId, input.sourceFamilies]
+      )
+      return Object.freeze(result.rows.map(sourceState))
+    })
   }
 }
