@@ -12,7 +12,7 @@ const mockIssueWorkflowControlToken = vi.fn()
 const mockVerifyWorkflowControlToken = vi.fn()
 const mockIsHostRefAuthorized = vi.fn()
 const mockVerifyAdminToken = vi.fn()
-const mockVerifyExternalSessionToken = vi.fn()
+const mockAuthenticateExternalUserSession = vi.fn()
 const mockVerifyInternalControlJwt = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
 
@@ -39,8 +39,9 @@ vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
   verifyAdminToken: (...args: unknown[]) => mockVerifyAdminToken(...args),
 }))
 
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
+  authenticateExternalUserSession: (...args: unknown[]) =>
+    mockAuthenticateExternalUserSession(...args),
 }))
 
 vi.mock('../src/utils/auth/internalControlToken.js', () => ({
@@ -127,7 +128,7 @@ describe('routes/external/workflows', () => {
     mockVerifyWorkflowControlToken.mockReset()
     mockIsHostRefAuthorized.mockReset()
     mockVerifyAdminToken.mockReset()
-    mockVerifyExternalSessionToken.mockReset()
+    mockAuthenticateExternalUserSession.mockReset()
     mockVerifyInternalControlJwt.mockReset()
     mockIsAdminTokenRevoked.mockReset()
     gateway = new MockGateway(RECIPE_NS)
@@ -137,8 +138,14 @@ describe('routes/external/workflows', () => {
       expiresInSeconds: 600,
     })
     mockIsAdminTokenRevoked.mockResolvedValue(false)
-    mockVerifyExternalSessionToken.mockImplementation(token =>
-      token === 'user-session-token' ? USER_SESSION_CLAIMS : null
+    mockAuthenticateExternalUserSession.mockImplementation(token =>
+      token === 'user-session-token'
+        ? Promise.resolve({
+            status: 'authenticated',
+            contract: 'v1',
+            claims: USER_SESSION_CLAIMS,
+          })
+        : Promise.resolve({ status: 'invalid', reason: 'invalid_representation' })
     )
     mockVerifyAdminToken.mockImplementation(token =>
       token === 'admin-token' ? ADMIN_CLAIMS : null
