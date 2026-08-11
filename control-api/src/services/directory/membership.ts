@@ -1877,6 +1877,9 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
      )
      SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
+            (SELECT COUNT(*)::integer
+               FROM invitation_teams all_it
+              WHERE all_it.invitation_id = i.id) AS assignment_count,
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
@@ -1892,6 +1895,12 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
     result.rows as InvitationRow[],
     normalizedManagerUserId
   )
+  const assignmentCounts = new Map(
+    result.rows.map(row => [
+      String((row as { id: string }).id),
+      Number((row as { assignment_count?: unknown }).assignment_count ?? 0),
+    ])
+  )
   const allTeamIds = Array.from(
     new Set(
       invitations.flatMap(invitation =>
@@ -1904,6 +1913,7 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
     const teams = invitation.teams as Array<{ id: string; name: string; role: InviteRole }>
     const canManage =
       teams.length > 0 &&
+      assignmentCounts.get(invitation.id) === teams.length &&
       teams.every(team => canManagerInviteAssignment(managerRoles.get(team.id), team.role))
     return {
       ...invitation,

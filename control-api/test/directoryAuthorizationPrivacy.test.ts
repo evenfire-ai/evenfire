@@ -93,6 +93,7 @@ describe('directory privacy and atomic authorization', () => {
               expires_at: new Date('2026-08-11T12:00:00Z'),
               accepted_at: null,
               accepted_user_id: null,
+              assignment_count: 2,
               team_name: 'Secret Team',
             },
           ],
@@ -128,6 +129,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(result[0]).not.toHaveProperty('team_name')
     expect(result[0]).not.toHaveProperty('role')
     expect(JSON.stringify(result)).not.toContain('must-never-serialize')
+    expect(result[0]).toMatchObject({ canCancel: false, canResend: false })
   })
 
   it('locks manager and target authority in the same transaction as a role mutation', async () => {
