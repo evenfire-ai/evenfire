@@ -62,23 +62,30 @@ type BoundedKubernetesRequest = Readonly<{
   timeoutSeconds: number
 }>
 
-function abortableKubernetesCall<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('request aborted'))
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason ?? new Error('request aborted'))
-    signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(
-      value => {
-        signal.removeEventListener('abort', onAbort)
-        if (signal.aborted) reject(signal.reason ?? new Error('request aborted'))
-        else resolve(value)
-      },
-      error => {
-        signal.removeEventListener('abort', onAbort)
-        reject(error)
-      }
-    )
-  })
+type KubernetesCallOptions = k8s.ConfigurationOptions<k8s.ObservableMiddleware>
+
+function kubernetesAbortOptions(signal: AbortSignal): KubernetesCallOptions {
+  const middleware: k8s.ObservableMiddleware = {
+    pre: context => {
+      context.setSignal(signal)
+      return new k8s.Observable(Promise.resolve(context))
+    },
+    post: context => new k8s.Observable(Promise.resolve(context)),
+  }
+  return {
+    middleware: [middleware],
+    middlewareMergeStrategy: 'append',
+  }
+}
+
+async function runKubernetesTransportCall<T>(
+  signal: AbortSignal,
+  invoke: (options: KubernetesCallOptions) => Promise<T>
+): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  const result = await invoke(kubernetesAbortOptions(signal))
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  return result
 }
 
 type MutableResourceSnapshot = {
@@ -252,18 +259,20 @@ export class ResourceService {
       throw new Error('Kubernetes request timeout must be between 1 and 60 seconds')
     }
     const resolvedNamespace = this.resolveNamespace(plural, namespace)
-    const response = (await abortableKubernetesCall(
-      this.customApi.listNamespacedCustomObject({
-        group: CLERUM_GROUP,
-        version: CLERUM_VERSION,
-        namespace: resolvedNamespace,
-        plural,
-        limit: options.limit,
-        _continue: options.continueToken,
-        resourceVersion: options.resourceVersion,
-        timeoutSeconds: options.timeoutSeconds,
-      }),
-      options.signal
+    const response = (await runKubernetesTransportCall(options.signal, callOptions =>
+      this.customApi.listNamespacedCustomObject(
+        {
+          group: CLERUM_GROUP,
+          version: CLERUM_VERSION,
+          namespace: resolvedNamespace,
+          plural,
+          limit: options.limit,
+          _continue: options.continueToken,
+          resourceVersion: options.resourceVersion,
+          timeoutSeconds: options.timeoutSeconds,
+        },
+        callOptions
+      )
     )) as ResourceListResponse
     const resourceVersion = String(response.metadata?.resourceVersion || '').trim()
     if (!resourceVersion) throw new Error('Kubernetes list response omitted resourceVersion')
@@ -289,15 +298,17 @@ export class ResourceService {
     }
     const resolvedNamespace = this.resolveNamespace(plural, namespace)
     try {
-      return await abortableKubernetesCall(
-        this.customApi.getNamespacedCustomObject({
-          group: CLERUM_GROUP,
-          version: CLERUM_VERSION,
-          namespace: resolvedNamespace,
-          plural,
-          name,
-        }),
-        options.signal
+      return await runKubernetesTransportCall(options.signal, callOptions =>
+        this.customApi.getNamespacedCustomObject(
+          {
+            group: CLERUM_GROUP,
+            version: CLERUM_VERSION,
+            namespace: resolvedNamespace,
+            plural,
+            name,
+          },
+          callOptions
+        )
       )
     } catch (error) {
       if (extractK8sStatus(error) === 404) {

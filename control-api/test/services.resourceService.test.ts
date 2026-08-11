@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type * as k8s from '@kubernetes/client-node'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -119,7 +120,8 @@ describe('ResourceService bounded operational reads', () => {
         limit: 100,
         _continue: 'prior-page',
         timeoutSeconds: 5,
-      })
+      }),
+      expect.objectContaining({ middlewareMergeStrategy: 'append' })
     )
   })
 
@@ -139,13 +141,26 @@ describe('ResourceService bounded operational reads', () => {
     expect(listNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
-  it('rejects the caller promptly when the shared request is cancelled', async () => {
-    let resolveList!: (value: unknown) => void
+  it('propagates cancellation into the Kubernetes transport and waits for it to stop', async () => {
+    let transportSignal: AbortSignal | undefined
+    let transportStopped = false
     const listNamespacedCustomObject = vi.fn(
-      () =>
-        new Promise(resolve => {
-          resolveList = resolve
+      async (_request: unknown, options: { middleware: k8s.ObservableMiddleware[] }) => {
+        const context = {
+          setSignal: (signal: AbortSignal) => {
+            transportSignal = signal
+          },
+        }
+        await options.middleware[0]!.pre(context as never).toPromise()
+        return new Promise((_resolve, reject) => {
+          const stop = () => {
+            transportStopped = true
+            reject(new Error('transport aborted'))
+          }
+          if (transportSignal!.aborted) stop()
+          else transportSignal!.addEventListener('abort', stop, { once: true })
         })
+      }
     )
     const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
       hosts: 'mcp-host',
@@ -158,8 +173,9 @@ describe('ResourceService bounded operational reads', () => {
     })
 
     controller.abort('test-cancel')
-    await expect(pending).rejects.toBe('test-cancel')
-    resolveList({ items: [], metadata: { resourceVersion: '43' } })
+    await expect(pending).rejects.toThrow('transport aborted')
+    expect(transportSignal).toBe(controller.signal)
+    expect(transportStopped).toBe(true)
   })
 
   it('uses exact namespace/name lookup and maps a Kubernetes 404', async () => {
@@ -174,7 +190,10 @@ describe('ResourceService bounded operational reads', () => {
         signal: new AbortController().signal,
       })
     ).rejects.toBeInstanceOf(K8sNotFoundError)
-    expect(getNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: 'mcp-host', plural: 'hosts', name: 'host-a' }),
+      expect.objectContaining({ middlewareMergeStrategy: 'append' })
+    )
   })
 })
 
