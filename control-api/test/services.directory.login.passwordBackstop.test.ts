@@ -98,7 +98,7 @@ describe('directory login without team memberships', () => {
     expect(dbMocks.txQuery.mock.calls[4][0]).toContain('WHERE tm.user_id = $1')
   })
 
-  it('returns a teamless member session instead of creating a default team for Google login', async () => {
+  it('does not treat a pending invitation as Google-login membership authority', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({
         rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null }],
@@ -112,7 +112,10 @@ describe('directory login without team memberships', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // accepted invitation memberships
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // UPDATE accepted invitations
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // findFirstActiveMembership → none
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // findPendingInvitationMembership → none
+      .mockResolvedValueOnce({
+        rows: [{ team_id: 'pending-team', role: 'admin', team_name: 'Pending Team' }],
+        rowCount: 1,
+      }) // a pending invitation must not be consulted
 
     const result = await googleLoginData({ email: 'a@b.com', name: 'Ada' })
 
@@ -126,6 +129,10 @@ describe('directory login without team memberships', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining("WHERE team_members.status <> 'deleted'"),
       ['u1', 'a@b.com']
+    )
+    expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining("i.status = 'pending'"),
+      expect.anything()
     )
   })
 
