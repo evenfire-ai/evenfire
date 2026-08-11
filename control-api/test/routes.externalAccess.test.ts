@@ -6,11 +6,15 @@ import {
   attachAccessExecutionBudget,
   createExternalAccessRouter,
 } from '../src/routes/external/access.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 
 const mocks = vi.hoisted(() => ({
   verifyV1: vi.fn(),
   verifyV2: vi.fn(),
   validateV1: vi.fn(),
+  validateV2: vi.fn(),
+  resolvePolicy: vi.fn(),
+  resolveAuthorization: vi.fn(),
 }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
@@ -21,8 +25,41 @@ vi.mock('../src/utils/auth/userSessionV2Token.js', () => ({
 }))
 vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
-  return { ...actual, validateLegacyUserSession: mocks.validateV1 }
+  return {
+    ...actual,
+    validateLegacyUserSession: mocks.validateV1,
+    validateUserSessionClaims: mocks.validateV2,
+  }
 })
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
+  resolveEffectiveUserAccessPolicy: mocks.resolvePolicy,
+}))
+vi.mock('../src/services/access/liveAuthorizationResolver.js', () => ({
+  resolveLiveAuthorization: mocks.resolveAuthorization,
+}))
+
+function effectivePolicy(overrides: Record<string, unknown> = {}) {
+  return {
+    policyVersion: '1',
+    policyRevision: 'test-policy',
+    acceptV1: true,
+    issueV1: true,
+    acceptV2: true,
+    issueV2: false,
+    renewV2: false,
+    switchCompatibility: true,
+    computeCatalogShadow: false,
+    serveCatalog: false,
+    actionContextV2: false,
+    rpcDelegationV2: false,
+    desktopAllTeamMode: false,
+    profileV2Mode: false,
+    minimumClientVersion: null,
+    enforceMinimumClient: false,
+    advertisedCatalogFamilies: [],
+    ...overrides,
+  }
+}
 
 function app() {
   const value = express()
@@ -34,6 +71,7 @@ function app() {
 describe('external user-access contracts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.resolvePolicy.mockResolvedValue(effectivePolicy())
     mocks.verifyV2.mockReturnValue(null)
     mocks.verifyV1.mockReturnValue({
       userId: '10000000-0000-4000-8000-000000000001',
@@ -47,6 +85,16 @@ describe('external user-access contracts', () => {
     mocks.validateV1.mockResolvedValue({
       status: 'valid',
       identity: { jti: 'token-hash' },
+    })
+    mocks.validateV2.mockResolvedValue({
+      status: 'valid',
+      identity: {
+        userId: '10000000-0000-4000-8000-000000000001',
+        email: 'user@example.test',
+        sid: '20000000-0000-4000-8000-000000000002',
+        jti: '30000000-0000-4000-8000-000000000003',
+        sessionVersion: 1,
+      },
     })
   })
 
@@ -123,5 +171,54 @@ describe('external user-access contracts', () => {
       .set('x-user-session-token', 'invalid')
     expect(response.status).toBe(401)
     expect(response.body.error.code).toBe('invalid_session')
+  })
+
+  it('uses the authoritative target schema for team management actions', async () => {
+    const teamId = '40000000-0000-4000-8000-000000000004'
+    const pathId = `ap1_${'A'.repeat(43)}`
+    mocks.verifyV1.mockReturnValue(null)
+    mocks.verifyV2.mockReturnValue({
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      jti: '30000000-0000-4000-8000-000000000003',
+      sv: 1,
+      ver: 2,
+      typ: 'user_session',
+      email: 'user@example.test',
+      auth_time: 1_900_000_000,
+      amr: ['pwd'],
+      iat: 1_900_000_000,
+      exp: 2_000_000_000,
+    })
+    mocks.resolvePolicy.mockResolvedValue(effectivePolicy({ actionContextV2: true }))
+    mocks.resolveAuthorization.mockResolvedValue({
+      status: 'allowed',
+      effectiveCapabilities: ['team.manage'],
+      paths: [{ id: pathId, kind: 'team', teamId }],
+      selectedPath: { id: pathId, kind: 'team', teamId },
+      authorizationRevision: 'revision-1',
+    })
+
+    const response = await request(app())
+      .post('/external/access/resolve')
+      .set('x-user-session-token', 'v2-session')
+      .send({
+        requiredCapability: 'team.manage',
+        resource: {
+          environmentId: canonicalEnvironmentId(),
+          type: 'team',
+          logicalId: teamId,
+        },
+        operationTarget: { teamId, action: 'rename' },
+      })
+
+    expect(response.status).toBe(200)
+    expect(mocks.resolveAuthorization).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requiredCapability: 'team.manage',
+        operationTarget: { teamId, action: 'rename' },
+      }),
+      expect.any(Object)
+    )
   })
 })
