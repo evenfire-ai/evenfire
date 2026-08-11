@@ -10,6 +10,10 @@ JOB_NAME="control-api-db-migrate-reset"
 NAMESPACE=control-plane
 PVC=control-postgres-data
 RESET_STATE=control-db-reset-state
+# Migration Jobs intentionally share app=control-api for NetworkPolicy access.
+# Fence only the unlabeled runtime Deployment Pods; completed Job Pods can
+# remain until their TTL expires and must not block writer quiescence.
+CONTROL_API_POD_SELECTOR='app=control-api,!clerum.io/component'
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -128,11 +132,11 @@ fail_closed() {
     kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/workflow-recipes deployment/trace-maintenance-worker --replicas=0 >/dev/null || scale_rc=1
     kc -n gfs scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0 >/dev/null || scale_rc=1
-    if ! control_api_pods="$(kc -n control-plane get pods -l app=control-api -o name)"; then
+    if ! control_api_pods="$(kc -n control-plane get pods -l "$CONTROL_API_POD_SELECTOR" -o name)"; then
       scale_rc=1
     elif [ -n "$control_api_pods" ]; then
       kc -n control-plane wait --for=delete pod \
-        -l app=control-api --timeout=180s >/dev/null || scale_rc=1
+        -l "$CONTROL_API_POD_SELECTOR" --timeout=180s >/dev/null || scale_rc=1
     fi
     printf '[converge-control-db-after-reset] ERROR: convergence failed; DB-dependent controllers remain scaled to zero' >&2
     [ "$scale_rc" -eq 0 ] || printf ' (failed to confirm fail-closed quiescence)' >&2
@@ -193,10 +197,10 @@ fi
 # every replacement-bound retry, not only in the destructive reset process, so
 # no stale control-api Pod can survive runtime-role credential reconciliation.
 kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null
-CONTROL_API_PODS="$(kc -n control-plane get pods -l app=control-api -o name)"
+CONTROL_API_PODS="$(kc -n control-plane get pods -l "$CONTROL_API_POD_SELECTOR" -o name)"
 if [ -n "$CONTROL_API_PODS" ]; then
   kc -n control-plane wait --for=delete pod \
-    -l app=control-api --timeout=180s >/dev/null
+    -l "$CONTROL_API_POD_SELECTOR" --timeout=180s >/dev/null
 fi
 kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
 HCC_PODS="$(kc -n control-plane get pods -l app=host-context-controller -o name)"

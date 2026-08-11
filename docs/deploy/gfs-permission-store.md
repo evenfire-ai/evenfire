@@ -82,6 +82,9 @@ are Secret-backed environment variables captured at Pod creation, so patching
 the runtime Secret cannot repair a container that started with the pre-reset
 credential. Runtime roles and Secrets are reconciled only behind that fence;
 the saved replica count is then restored, creating Pods with the current DSN.
+Migration Job Pods intentionally share `app=control-api` for NetworkPolicy
+access, so the fence excludes Pods carrying `clerum.io/component`; a completed
+migration Pod awaiting TTL cleanup cannot delay runtime writer quiescence.
 Any later convergence failure reasserts the Control API fence together with the
 other database-dependent controllers and waits for the Control API Pods to
 terminate before returning.

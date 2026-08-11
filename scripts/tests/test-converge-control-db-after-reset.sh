@@ -31,8 +31,10 @@ case "$*" in
     ;;
   *'scale deployment/host-context-controller --replicas=0') exit 0 ;;
   *'scale deployment/control-api --replicas=0') exit 0 ;;
-  *'get pods -l app=control-api -o name') printf 'pod/control-api-old\n' ;;
-  *'wait --for=delete pod -l app=control-api --timeout=180s') exit 0 ;;
+  *'get pods -l app=control-api,!clerum.io/component -o name') printf 'pod/control-api-old\n' ;;
+  *'wait --for=delete pod -l app=control-api,!clerum.io/component --timeout=180s') exit 0 ;;
+  *'get pods -l app=control-api -o name') printf 'pod/control-api-old\npod/control-api-db-migrate-reset-complete\n' ;;
+  *'wait --for=delete pod -l app=control-api --timeout=180s') exit 1 ;;
   *'get pods -l app=host-context-controller -o name') printf 'pod/hcc-old\n' ;;
   *'wait --for=delete pod -l app=host-context-controller --timeout=180s') exit 0 ;;
   *'get pods -l app=gfs-controller -o name') printf 'pod/gfsc-writer-old\n' ;;
@@ -96,15 +98,17 @@ if ! run_converge >"$TMP/success.out" 2>&1; then
 fi
 grep -q 'scale deployment/control-api --replicas=0' "$LOG" \
   || { printf 'FAIL: control-api was not fenced before runtime credential reconciliation\n' >&2; exit 1; }
-grep -q 'wait --for=delete pod -l app=control-api' "$LOG" \
+grep -q 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" \
   || { printf 'FAIL: stale control-api pod was not removed before credential reconciliation\n' >&2; exit 1; }
+! grep -q 'get pods -l app=control-api -o name' "$LOG" \
+  || { printf 'FAIL: completed migration pods were included in the control-api fence\n' >&2; exit 1; }
 writer_zero="$(grep -n 'scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
 hcc_zero="$(grep -n 'scale deployment/host-context-controller --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
 hcc_wait="$(grep -n 'wait --for=delete pod -l app=host-context-controller' "$LOG" | cut -d: -f1)"
 migration="$(grep -n 'run-control-api-db-migration.sh' "$LOG" | head -1 | cut -d: -f1)"
 runtime_roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$LOG" | head -1 | cut -d: -f1)"
 control_zero="$(grep -n 'scale deployment/control-api --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
-control_wait="$(grep -n 'wait --for=delete pod -l app=control-api' "$LOG" | head -1 | cut -d: -f1)"
+control_wait="$(grep -n 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" | head -1 | cut -d: -f1)"
 control_restore="$(grep -n 'scale deployment/control-api --replicas=2' "$LOG" | head -1 | cut -d: -f1)"
 control_ready="$(grep -n 'rollout status deployment/control-api --timeout=180s' "$LOG" | head -1 | cut -d: -f1)"
 restore_writer="$(grep -n 'scale deployment/gfsc-writer --replicas=3' "$LOG" | cut -d: -f1)"
@@ -125,7 +129,7 @@ state_delete="$(grep -n 'delete --raw /api/v1/namespaces/control-plane/configmap
   || { printf 'FAIL: GFSC isolation/restore order is wrong\n' >&2; exit 1; }
 grep -q 'wait --for=delete pod -l app=gfs-controller' "$LOG" \
   || { printf 'FAIL: GFSC pod termination was not awaited\n' >&2; exit 1; }
-grep -q 'wait --for=delete pod -l app=control-api' "$LOG" \
+grep -q 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" \
   || { printf 'FAIL: stale control-api pod was not removed before credential reconciliation\n' >&2; exit 1; }
 
 : >"$LOG"
@@ -135,7 +139,7 @@ if ! run_converge >/dev/null 2>&1; then
   exit 1
 fi
 retry_control_zero="$(grep -n 'scale deployment/control-api --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
-retry_control_wait="$(grep -n 'wait --for=delete pod -l app=control-api' "$LOG" | head -1 | cut -d: -f1)"
+retry_control_wait="$(grep -n 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" | head -1 | cut -d: -f1)"
 retry_runtime_roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$LOG" | head -1 | cut -d: -f1)"
 retry_control_restore="$(grep -n 'scale deployment/control-api --replicas=2' "$LOG" | head -1 | cut -d: -f1)"
 [[ "$retry_control_zero" -lt "$retry_control_wait" && \
@@ -153,7 +157,7 @@ fi
   || { printf 'FAIL: failure did not reassert the zero-replica state\n' >&2; exit 1; }
 [[ "$(grep -c 'scale deployment/control-api --replicas=0' "$LOG")" -eq 2 ]] \
   || { printf 'FAIL: failure did not reassert the control-api writer fence\n' >&2; exit 1; }
-[[ "$(grep -c 'wait --for=delete pod -l app=control-api' "$LOG")" -eq 2 ]] \
+[[ "$(grep -c 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG")" -eq 2 ]] \
   || { printf 'FAIL: failure returned before confirming control-api pod termination\n' >&2; exit 1; }
 ! grep -q 'scale deployment/gfsc-writer --replicas=3' "$LOG" \
   || { printf 'FAIL: writer replicas were restored after failure\n' >&2; exit 1; }

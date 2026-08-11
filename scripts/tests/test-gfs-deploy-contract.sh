@@ -56,13 +56,13 @@ grep -q 'claim.get("namespace") == "control-plane"' deploy/scripts/reset-control
 grep -q 'claim.get("uid") == expected_uid' deploy/scripts/reset-control-db-storage.sh || fail 'released PV cleanup is not claim-UID-scoped'
 ! grep -q 'ensure_pvc "control-postgres-data"' scripts/minikube/ensure-pvcs.sh || fail 'generic PVC reconciler can still delete the control database'
 reset_convergence="$(cat deploy/scripts/converge-control-db-after-reset.sh)"
-for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'scale deployment/control-api --replicas=0' 'wait --for=delete pod' 'rollout status deployment/control-api' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
+for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'scale deployment/control-api --replicas=0' "CONTROL_API_POD_SELECTOR='app=control-api,!clerum.io/component'" 'wait --for=delete pod' 'rollout status deployment/control-api' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
   [[ "$reset_convergence" == *"$required"* ]] || fail "reset convergence omits $required"
 done
 migration="$(grep -n 'run-control-api-db-migration.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 roles="$(grep -n 'provision-control-api-runtime-roles.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 control_zero="$(grep -n 'scale deployment/control-api --replicas=0' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
-control_wait="$(grep -n -- '-l app=control-api --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+control_wait="$(grep -n -- '-l "$CONTROL_API_POD_SELECTOR" --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 control_restore="$(grep -n 'scale deployment/control-api --replicas="\$CONTROL_API_REPLICAS"' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 restore="$(grep -n 'GFS_RESTORE_ACTIVE_NOLOGIN=true' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
