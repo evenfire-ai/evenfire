@@ -352,6 +352,12 @@ describe('routes/external/workflows', () => {
       expect(res.body.source).toBe('live')
       expect(res.body.actor).toEqual({ type: 'user-session', userId: 'user-123' })
       expect(res.body.executionRef).toBeNull()
+      const insertCall = mockPoolQuery.mock.calls.find(call =>
+        String(call[0]).includes('INSERT INTO workflow_runs')
+      )
+      const insertParams = insertCall?.[1] as unknown[]
+      expect(insertParams[3]).toBeNull()
+      expect(insertParams[4]).toBeNull()
     })
 
     it('creates a pre-run approval instead of a run when onDemand approval is required', async () => {
@@ -461,7 +467,7 @@ describe('routes/external/workflows', () => {
         } as never,
         RECIPE_NS
       )
-      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:team:${USER_SESSION_CLAIMS.teamId}`
+      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:direct`
       const idempotencyKey = 'external-key-stale-approval'
       const payload = {
         message: `Approve ${RECIPE_NS}/test-recipe workflow trigger.`,
@@ -924,7 +930,8 @@ describe('routes/external/workflows', () => {
         'approved-target-run-id',
       ])
       expect(String(mockPoolQuery.mock.calls[1][0])).toContain('workflow_approval_requests')
-      expect(String(mockPoolQuery.mock.calls[1][0])).not.toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain("tm.status = 'active'")
     })
 
     it('returns 403 when user-session caller is not granted to the recipe', async () => {

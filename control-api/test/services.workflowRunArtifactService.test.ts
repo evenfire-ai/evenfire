@@ -207,7 +207,7 @@ describe('workflowRunArtifactService', () => {
 
     expect(artifacts.map(artifact => artifact.name)).toEqual(['custom-sdk-result.json'])
     expect(String(mockPoolQuery.mock.calls[2][0])).toContain('workflow_approval_requests')
-    expect(String(mockPoolQuery.mock.calls[2][0])).not.toContain('team_workflow_triggers')
+    expect(String(mockPoolQuery.mock.calls[2][0])).toContain('team_workflow_triggers')
   })
 
   it('downloads a run-scoped artifact through WRC with run and artifact token bindings', async () => {
@@ -583,17 +583,21 @@ describe('workflowRunArtifactService', () => {
   it('does not expose another user artifact even when caller has a grant to the same recipe', async () => {
     const gateway = makeGateway()
     await seedRecipes(gateway)
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 }).mockResolvedValueOnce({
-      rows: [
-        {
-          ...RUN_ROW,
-          actor_id: 'other-user',
-          team_id: 'team-1',
-          usage_team_id: 'team-1',
-        },
-      ],
-      rowCount: 1,
-    })
+    mockPoolQuery
+      .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            ...RUN_ROW,
+            actor_id: 'other-user',
+            team_id: 'team-1',
+            usage_team_id: 'team-1',
+          },
+        ],
+        rowCount: 1,
+      })
+      // The token still names team-1, but the current membership/grant no longer exists.
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
 
     const result = listWorkflowRunArtifacts({
       gateway: gateway as never,

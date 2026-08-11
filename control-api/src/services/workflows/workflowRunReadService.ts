@@ -35,7 +35,34 @@ export type ProviderScopedWorkflowRunRow = WorkflowRunRow & {
 function userRunScope(caller: WorkflowRouteCaller): UserRunScope | null {
   if (caller.kind !== 'user-session') return null
   const ids = new Set([caller.claims.userId, getWorkflowPrincipalId(caller)])
-  return { userId: caller.claims.userId, principalIds: [...ids], teamId: caller.claims.teamId }
+  return {
+    userId: caller.claims.userId,
+    principalIds: [...ids],
+    teamId: caller.claims.teamId?.trim() || null,
+  }
+}
+
+async function hasLiveWorkflowTeamGrant(
+  scope: UserRunScope,
+  recipeNamespace: string,
+  recipeName: string,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<boolean> {
+  if (!scope.teamId) return false
+  const result = await db.query(
+    `SELECT 1
+       FROM team_members tm
+       JOIN team_workflow_triggers twt
+         ON twt.team_id = tm.team_id
+        AND twt.recipe_namespace = $3
+        AND twt.recipe_name = $4
+      WHERE tm.user_id = $1
+        AND tm.team_id = $2
+        AND tm.status = 'active'
+      LIMIT 1`,
+    [scope.userId, scope.teamId, recipeNamespace, recipeName]
+  )
+  return (result.rowCount ?? 0) > 0
 }
 
 function isTeamScopedRun(row: Pick<WorkflowRunRow, 'actor_type'>): boolean {
@@ -57,16 +84,14 @@ function approvalTargetMatchesUserScope(
 }
 
 function runMatchesUserScope(row: ApprovalScopedWorkflowRunRow, scope: UserRunScope): boolean {
+  const matchesTeam =
+    Boolean(scope.teamId) && (row.team_id === scope.teamId || row.usage_team_id === scope.teamId)
   if (row.actor_type === 'user') {
     if (row.actor_id && scope.principalIds.includes(row.actor_id)) return true
-    return !row.actor_id && (row.team_id === scope.teamId || row.usage_team_id === scope.teamId)
+    return !row.actor_id && matchesTeam
   }
   if (isTeamScopedRun(row)) {
-    return (
-      row.team_id === scope.teamId ||
-      row.usage_team_id === scope.teamId ||
-      approvalTargetMatchesUserScope(row, scope)
-    )
+    return matchesTeam || approvalTargetMatchesUserScope(row, scope)
   }
   return false
 }
@@ -76,24 +101,30 @@ function auditRunMatchesUserScope(row: Record<string, unknown>, scope: UserRunSc
   const userId = typeof row.triggerer_user_id === 'string' ? row.triggerer_user_id : ''
   const teamId = typeof row.triggerer_team_id === 'string' ? row.triggerer_team_id : ''
   const usageTeamId = typeof row.usage_team_id === 'string' ? row.usage_team_id : ''
+  const matchesTeam =
+    Boolean(scope.teamId) && (teamId === scope.teamId || usageTeamId === scope.teamId)
 
   if (actorType === 'user') {
     if (userId && scope.principalIds.includes(userId)) return true
-    return !userId && (teamId === scope.teamId || usageTeamId === scope.teamId)
+    return !userId && matchesTeam
   }
   if (actorType === 'scheduled' || actorType === 'autonomous') {
-    return teamId === scope.teamId || usageTeamId === scope.teamId
+    return matchesTeam
   }
   return false
 }
 
-export function canCallerReadWorkflowRun(
+export async function canCallerReadWorkflowRun(
   caller: WorkflowRouteCaller,
-  row: WorkflowRunRow
-): boolean {
+  row: WorkflowRunRow,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<boolean> {
   const scope = userRunScope(caller)
   if (!scope) return true
-  return runMatchesUserScope(row, scope)
+  const directScope = { ...scope, teamId: null }
+  if (runMatchesUserScope(row, directScope)) return true
+  if (!runMatchesUserScope(row, scope)) return false
+  return hasLiveWorkflowTeamGrant(scope, row.recipe_namespace, row.recipe_name, db)
 }
 
 export async function canCallerReadWorkflowRunWithApprovalTarget(
@@ -142,7 +173,14 @@ export async function canCallerReadWorkflowRunWithApprovalTarget(
 
   const scope = userRunScope(caller)
   if (!scope) return true
-  if (runMatchesUserScope(row, scope)) return true
+  const directScope = { ...scope, teamId: null }
+  if (runMatchesUserScope(row, directScope)) return true
+  if (
+    runMatchesUserScope(row, scope) &&
+    (await hasLiveWorkflowTeamGrant(scope, row.recipe_namespace, row.recipe_name))
+  ) {
+    return true
+  }
   if (!row.approval_request_id) return false
 
   const result = await pool.query(
@@ -152,16 +190,28 @@ export async function canCallerReadWorkflowRunWithApprovalTarget(
          ON tm.team_id = war.target_team_id
         AND tm.user_id::text = $4
         AND tm.status = 'active'
+       LEFT JOIN team_workflow_triggers twt
+         ON twt.team_id = tm.team_id
+        AND twt.recipe_namespace = $5
+        AND twt.recipe_name = $6
       WHERE war.id = $1
         AND (
           war.target_user_id::text = ANY($2::text[])
           OR (
             war.target_team_id::text = $3
             AND tm.user_id IS NOT NULL
+            AND twt.team_id IS NOT NULL
           )
         )
       LIMIT 1`,
-    [row.approval_request_id, scope.principalIds, scope.teamId, scope.userId]
+    [
+      row.approval_request_id,
+      scope.principalIds,
+      scope.teamId,
+      scope.userId,
+      row.recipe_namespace,
+      row.recipe_name,
+    ]
   )
   return (result.rowCount ?? 0) > 0
 }
@@ -318,11 +368,26 @@ export async function listAuditRunsByRecipe(
            ? `AND (
               (triggerer_actor_type = 'user' AND (
                 triggerer_user_id::text = ANY($4::text[]) OR
-                (triggerer_user_id IS NULL AND (triggerer_team_id::text = $5 OR usage_team_id = $5))
+                (triggerer_user_id IS NULL AND
+                 (triggerer_team_id::text = $5 OR usage_team_id = $5) AND
+                 EXISTS (
+                   SELECT 1 FROM team_members tm
+                   JOIN team_workflow_triggers twt ON twt.team_id = tm.team_id
+                    AND twt.recipe_namespace = $1 AND twt.recipe_name = $2
+                  WHERE tm.user_id::text = $6 AND tm.team_id::text = $5
+                    AND tm.status = 'active'
+                 ))
               ))
               OR
               (triggerer_actor_type IN ('scheduled', 'autonomous') AND (
-                triggerer_team_id::text = $5 OR usage_team_id = $5
+                (triggerer_team_id::text = $5 OR usage_team_id = $5) AND
+                EXISTS (
+                  SELECT 1 FROM team_members tm
+                  JOIN team_workflow_triggers twt ON twt.team_id = tm.team_id
+                   AND twt.recipe_namespace = $1 AND twt.recipe_name = $2
+                 WHERE tm.user_id::text = $6 AND tm.team_id::text = $5
+                   AND tm.status = 'active'
+                )
               ))
             )`
            : ''
@@ -330,7 +395,7 @@ export async function listAuditRunsByRecipe(
      ORDER BY triggered_at DESC
      LIMIT $3`,
     scope
-      ? [recipeNamespace, recipeName, limit, scope.principalIds, scope.teamId]
+      ? [recipeNamespace, recipeName, limit, scope.principalIds, scope.teamId, scope.userId]
       : [recipeNamespace, recipeName, limit]
   )
 
@@ -493,23 +558,33 @@ async function listRunsByRecipeForUserScope(
        FROM workflow_runs wr
        LEFT JOIN workflow_approval_requests war
          ON war.id = wr.approval_request_id
-       LEFT JOIN team_members tm
+      LEFT JOIN team_members tm
          ON tm.team_id = war.target_team_id
         AND tm.user_id::text = $6
         AND tm.status = 'active'
+       LEFT JOIN team_members scope_tm
+         ON scope_tm.team_id::text = $5
+        AND scope_tm.user_id::text = $6
+        AND scope_tm.status = 'active'
+       LEFT JOIN team_workflow_triggers scope_twt
+         ON scope_twt.team_id = scope_tm.team_id
+        AND scope_twt.recipe_namespace = $1
+        AND scope_twt.recipe_name = $2
       WHERE wr.recipe_namespace = $1 AND wr.recipe_name = $2
        AND (
          (wr.actor_type = 'user' AND (
            wr.actor_id::text = ANY($4::text[]) OR
-           (wr.actor_id IS NULL AND (wr.team_id::text = $5 OR wr.usage_team_id = $5))
+           (wr.actor_id IS NULL AND (wr.team_id::text = $5 OR wr.usage_team_id = $5)
+            AND scope_twt.team_id IS NOT NULL)
          ))
          OR (wr.actor_type IN ('scheduled', 'autonomous') AND (
-           wr.team_id::text = $5 OR
-           wr.usage_team_id = $5 OR
+           (wr.team_id::text = $5 AND scope_twt.team_id IS NOT NULL) OR
+           (wr.usage_team_id = $5 AND scope_twt.team_id IS NOT NULL) OR
            war.target_user_id::text = ANY($4::text[]) OR
            (
              war.target_team_id::text = $5
              AND tm.user_id IS NOT NULL
+             AND scope_twt.team_id IS NOT NULL
            )
          ))
        )
