@@ -12,6 +12,7 @@ import {
   requireGfsOperatorRunId,
   reserveGfsOperatorEvidenceRun,
   scenarioIdFromTitle,
+  writeJsonAtomically,
 } from './e2e-playwright/gfsDesktopOperatorParityContract'
 
 const evidenceRoots: string[] = []
@@ -92,6 +93,16 @@ describe('GFS Desktop operator Playwright gate', () => {
       runId: 'collision-proof',
       immutable: true,
     })
+  })
+
+  it('creates the evidence directory before an atomic reporter write', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-operator-write-'))
+    evidenceRoots.push(root)
+    const output = path.join(root, 'nested', 'summary.json')
+
+    writeJsonAtomically(output, { ok: true })
+
+    expect(JSON.parse(fs.readFileSync(output, 'utf8'))).toEqual({ ok: true })
   })
 
   it('recognizes only one exact required scenario prefix', () => {

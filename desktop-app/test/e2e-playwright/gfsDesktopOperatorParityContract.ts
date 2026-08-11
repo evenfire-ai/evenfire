@@ -297,6 +297,7 @@ export function evaluateGfsOperatorScenarioResults(
 }
 
 export function writeJsonAtomically(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 })
   const temporaryPath = `${filePath}.${process.pid}.tmp`
   try {
     fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {

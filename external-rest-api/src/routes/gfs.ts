@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
@@ -33,9 +34,36 @@ const CONTROL_API_ERROR_HEADERS = [
   'x-request-id',
 ] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-// Approved GFS source-IP boundary; control-api adds the class-specific
-// per-session/IP/effective-actor 10/30 limits after this public edge.
-const EXTERNAL_GFS_INGRESS_LIMIT_PER_MIN = 30
+const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
+
+export type ExternalGfsEdgeLimits = {
+  aggregatePerMin: number
+  authenticatedIpPerMin: number
+  tokenIpPerMin: number
+}
+
+/**
+ * Derive the coarse edge backstop from the number of users expected to share
+ * one trusted proxy address. The values deliberately scale the edge only:
+ * Control API PG buckets still enforce the 10/min token and 30/min
+ * session/actor product budgets across replicas.
+ */
+export function deriveExternalGfsEdgeLimits(expectedUsers: number): ExternalGfsEdgeLimits {
+  if (!Number.isSafeInteger(expectedUsers) || expectedUsers < 1 || expectedUsers > 1_000) {
+    throw new Error('external GFS expected users must be an integer between 1 and 1000')
+  }
+  return {
+    aggregatePerMin: expectedUsers * 120,
+    authenticatedIpPerMin: expectedUsers * 60,
+    tokenIpPerMin: expectedUsers * 12,
+  }
+}
+
+const DEFAULT_EXTERNAL_GFS_EDGE_LIMITS: ExternalGfsEdgeLimits = {
+  aggregatePerMin: config.externalGfsEdgeAggregateRlPerMin,
+  authenticatedIpPerMin: config.externalGfsEdgeAuthenticatedIpRlPerMin,
+  tokenIpPerMin: config.externalGfsEdgeTokenIpRlPerMin,
+}
 
 type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
 type GfsRequestOptions = {
@@ -98,25 +126,37 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
   next(error)
 }
 
-export function createGfsRouter(): Router {
+export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }): Router {
   const router = Router()
+  const edgeLimits = options?.edgeLimits ?? DEFAULT_EXTERNAL_GFS_EDGE_LIMITS
 
-  // Keep a direct, recognised edge guard at this service as well as the
-  // cross-replica control-api buckets. It runs before JWT work and prevents a
-  // client from using the proxy hop to make auth or downstream requests
-  // unbounded. Headers remain owned by control-api's durable limiter.
-  router.use(
-    '/me/gfs',
+  const edgeLimiter = (limit: number, bucket: string) =>
     rateLimit({
-      windowMs: 60_000,
-      limit: EXTERNAL_GFS_INGRESS_LIMIT_PER_MIN,
-      standardHeaders: false,
+      windowMs: EXTERNAL_GFS_EDGE_WINDOW_MS,
+      limit,
+      standardHeaders: 'draft-7',
       legacyHeaders: false,
-      message: { error: 'Too Many Requests' },
-    }),
-    attachGfsRequestId,
-    requireAuth
-  )
+      identifier: `gfs-edge-${bucket}`,
+      handler: (_req, res) => {
+        res.status(429).json({
+          error: 'Too Many Requests',
+          rateLimitLayer: 'external-rest-edge',
+          rateLimitBucket: bucket,
+        })
+      },
+    })
+
+  // Keep direct, recognised edge guards at this service as well as the
+  // cross-replica Control API buckets. They run before JWT work and prevent a
+  // client from using the proxy hop to make auth or downstream requests
+  // unbounded. The aggregate and authenticated class buckets are deliberately
+  // sized for a shared NAT address; the token bucket remains tighter. The
+  // Control API owns the authoritative per-user/session/actor budgets.
+  router.use('/me/gfs', attachGfsRequestId)
+  router.use('/me/gfs', edgeLimiter(edgeLimits.aggregatePerMin, 'aggregate-ip'))
+  router.use('/me/gfs', edgeLimiter(edgeLimits.authenticatedIpPerMin, 'authenticated-ip'))
+  router.use('/me/gfs/token', edgeLimiter(edgeLimits.tokenIpPerMin, 'token-ip'))
+  router.use('/me/gfs', requireAuth)
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
     try {

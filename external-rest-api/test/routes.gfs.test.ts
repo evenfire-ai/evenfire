@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { createGfsRouter } from '../src/routes/gfs.js'
+import {
+  type ExternalGfsEdgeLimits,
+  createGfsRouter,
+  deriveExternalGfsEdgeLimits,
+} from '../src/routes/gfs.js'
 
 const { ControlApiError, clientMock } = vi.hoisted(() => {
   class ControlApiError extends Error {
@@ -29,11 +33,12 @@ const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
 vi.mock('../src/authToken.js', () => authTokenMock)
 
 const REQUEST_ID = '11111111-2222-4333-8444-555555555555'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function buildApp() {
+function buildApp(edgeLimits?: ExternalGfsEdgeLimits) {
   const app = express()
   app.use(express.json())
-  app.use(createGfsRouter())
+  app.use(createGfsRouter(edgeLimits ? { edgeLimits } : undefined))
   return app
 }
 
@@ -181,10 +186,27 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(forwarded).not.toBe('203.0.113.99')
   })
 
-  it('enforces the recognised ingress limit before auth or a control-api request', async () => {
-    const app = buildApp()
+  it('derives edge capacity for the approved 20- and 50-user NAT cases', () => {
+    expect(deriveExternalGfsEdgeLimits(20)).toEqual({
+      aggregatePerMin: 2_400,
+      authenticatedIpPerMin: 1_200,
+      tokenIpPerMin: 240,
+    })
+    expect(deriveExternalGfsEdgeLimits(50)).toEqual({
+      aggregatePerMin: 6_000,
+      authenticatedIpPerMin: 3_000,
+      tokenIpPerMin: 600,
+    })
+  })
 
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+  it('enforces the aggregate edge backstop before auth and emits recovery headers', async () => {
+    const app = buildApp({
+      aggregatePerMin: 2,
+      authenticatedIpPerMin: 10,
+      tokenIpPerMin: 10,
+    })
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       await request(app)
         .get('/me/gfs/not-classified')
         .set('authorization', 'Bearer sess-xyz')
@@ -196,9 +218,44 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       .set('authorization', 'Bearer sess-xyz')
 
     expect(exhausted.status).toBe(429)
-    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(30)
+    expect(exhausted.headers['x-request-id']).toMatch(UUID_RE)
+    expect(exhausted.headers['retry-after']).toMatch(/^\d+$/)
+    expect(exhausted.headers['ratelimit']).toContain('limit=2')
+    expect(exhausted.body).toEqual({
+      error: 'Too Many Requests',
+      rateLimitLayer: 'external-rest-edge',
+      rateLimitBucket: 'aggregate-ip',
+    })
+    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(2)
     expect(clientMock.controlApiRequest).not.toHaveBeenCalled()
     expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+  })
+
+  it('keeps the token edge bucket separate from authenticated GFS traffic', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
+    const app = buildApp({
+      aggregatePerMin: 10,
+      authenticatedIpPerMin: 10,
+      tokenIpPerMin: 2,
+    })
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await request(app)
+        .post('/me/gfs/token')
+        .set('authorization', 'Bearer sess-xyz')
+        .send({})
+        .expect(200)
+    }
+    const exhausted = await request(app)
+      .post('/me/gfs/token')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({})
+
+    expect(exhausted.status).toBe(429)
+    expect(exhausted.headers['retry-after']).toMatch(/^\d+$/)
+    expect(exhausted.headers['ratelimit']).toContain('limit=2')
+    expect(exhausted.body.rateLimitBucket).toBe('token-ip')
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(2)
   })
 
   it('propagates a control-api no-escalation 403 verbatim', async () => {

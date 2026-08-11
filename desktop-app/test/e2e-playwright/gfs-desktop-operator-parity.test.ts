@@ -222,7 +222,8 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
   test('@gfs-operator/operator-root-crud root create/upload and nested CRUD use visible Desktop actions', async ({
     operatorJourney,
   }, testInfo) => {
-    const page = operatorJourney.operatorPage!
+    const page = await operatorJourney.launchOperatorDesktop()
+    await operatorJourney.openFiles(page)
     const rootId = operatorJourney.rootResourceId!
     expect(operatorJourney.operatorSubjectGrantCount()).toBe(0)
     await expect(page.getByTestId('gfs-view-operator')).toBeVisible()
@@ -422,7 +423,8 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
   test('@gfs-operator/grant-share-lifecycle visible Desktop grant/share create, list, revoke removes recipient access', async ({
     operatorJourney,
   }, testInfo) => {
-    const page = operatorJourney.operatorPage!
+    const page = await operatorJourney.launchOperatorDesktop()
+    await operatorJourney.openFiles(page)
     const grantFolder = operatorJourney.resources.get('grantFolder')!
     const shareFolder = operatorJourney.resources.get('shareFolder')!
     const auditFloor = operatorJourney.auditFloor()
@@ -511,8 +513,10 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
   test('@gfs-operator/live-control-ui-unlink visible Control UI revoke immediately denies same Electron session', async ({
     operatorJourney,
   }) => {
-    const controlPage = operatorJourney.controlPage!
-    const page = operatorJourney.operatorPage!
+    const controlPage = await operatorJourney.loginControlUi()
+    await operatorJourney.openControlAdmins()
+    const page = await operatorJourney.launchOperatorDesktop()
+    await operatorJourney.openFiles(page)
     const link = operatorJourney.operatorLink!
     await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
     const revoke = controlPage.getByRole('button', {
@@ -772,7 +776,8 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     operatorJourney,
   }) => {
     const link = operatorJourney.operatorLink!
-    const controlPage = operatorJourney.controlPage!
+    const controlPage = await operatorJourney.loginControlUi()
+    await operatorJourney.openControlAdmins()
     await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
     await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
       'Revoked'

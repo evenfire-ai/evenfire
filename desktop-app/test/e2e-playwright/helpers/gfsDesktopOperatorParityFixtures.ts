@@ -270,6 +270,8 @@ export class GfsDesktopOperatorJourney {
   operatorContext: BrowserContext | null = null
   operatorUserDataDir: string | null = null
   operatorVideoDir: string | null = null
+  private operatorSessionSequence = 0
+  private readonly operatorUserDataDirs = new Set<string>()
   operatorLink: OperatorLinkRow | null = null
   ordinaryUserId: string | null = null
   ordinaryTeamId: string | null = null
@@ -314,6 +316,12 @@ export class GfsDesktopOperatorJourney {
         }
       }
     }
+    // Independent journeys must not inherit an authenticated Electron or
+    // Control UI session. Keep the same Electron process only inside the
+    // revoke/reactivate journey itself, which intentionally proves live
+    // denial and recovery for one session.
+    await this.closeOperatorDesktop()
+    await this.closeControlUi()
   }
 
   async finish(): Promise<void> {
@@ -334,10 +342,8 @@ export class GfsDesktopOperatorJourney {
         cleanupErrors.push(error)
       }
     }
-    for (const app of [this.operatorApp]) {
-      await app?.close().catch(error => cleanupErrors.push(error))
-    }
-    await this.controlContext?.close().catch(error => cleanupErrors.push(error))
+    await this.closeOperatorDesktop().catch(error => cleanupErrors.push(error))
+    await this.closeControlUi().catch(error => cleanupErrors.push(error))
     if (this.ordinaryUserId) {
       try {
         runControlPostgresSql(`
@@ -350,9 +356,9 @@ export class GfsDesktopOperatorJourney {
         cleanupErrors.push(error)
       }
     }
-    if (this.operatorUserDataDir) {
+    for (const userDataDir of this.operatorUserDataDirs) {
       try {
-        const resolved = path.resolve(this.operatorUserDataDir)
+        const resolved = path.resolve(userDataDir)
         const allowedRoot = path.resolve(this.workerInfo.project.outputDir)
         if (!resolved.startsWith(`${allowedRoot}${path.sep}`)) {
           throw new Error(`refusing to remove user data outside ${allowedRoot}`)
@@ -742,6 +748,11 @@ export class GfsDesktopOperatorJourney {
   }
 
   async loginControlUi(): Promise<Page> {
+    // A fresh browser context per journey prevents the Control UI session
+    // cookie from becoming shared fixture state across the serial scenarios.
+    await this.closeControlUi()
+    this.controlContext = await this.browser.newContext({ baseURL: this.controlUiUrl })
+    this.controlPage = await this.controlContext.newPage()
     const page = this.requiredControlPage()
     await page.goto('/')
     await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
@@ -768,8 +779,11 @@ export class GfsDesktopOperatorJourney {
   async launchOperatorDesktop(): Promise<Page> {
     if (this.operatorApp) throw new Error('operator Electron process already launched')
     const outputRoot = this.workerInfo.project.outputDir
-    this.operatorUserDataDir = path.join(outputRoot, `gfs-operator-user-data-${this.runTag}`)
-    this.operatorVideoDir = path.join(outputRoot, `gfs-operator-video-${this.runTag}`)
+    this.operatorSessionSequence += 1
+    const sessionTag = `${this.runTag}-${this.operatorSessionSequence}`
+    this.operatorUserDataDir = path.join(outputRoot, `gfs-operator-user-data-${sessionTag}`)
+    this.operatorVideoDir = path.join(outputRoot, `gfs-operator-video-${sessionTag}`)
+    this.operatorUserDataDirs.add(this.operatorUserDataDir)
     fs.mkdirSync(this.operatorUserDataDir, { recursive: true })
     fs.mkdirSync(this.operatorVideoDir, { recursive: true })
     this.operatorApp = await electron.launch({
@@ -790,6 +804,23 @@ export class GfsDesktopOperatorJourney {
     await this.operatorPage.waitForLoadState('domcontentloaded')
     await this.loginDesktop(this.operatorPage, this.operatorEmail, this.operatorPassword)
     return this.operatorPage
+  }
+
+  async closeOperatorDesktop(): Promise<void> {
+    const app = this.operatorApp
+    const page = this.operatorPage
+    this.operatorApp = null
+    this.operatorPage = null
+    this.operatorContext = null
+    if (page) this.liveDesktopPages.delete(page)
+    await app?.close()
+  }
+
+  async closeControlUi(): Promise<void> {
+    const context = this.controlContext
+    this.controlContext = null
+    this.controlPage = null
+    await context?.close()
   }
 
   async launchOrdinaryDesktop(testInfo: TestInfo): Promise<{

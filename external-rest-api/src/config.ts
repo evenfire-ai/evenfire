@@ -14,6 +14,9 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
+  externalGfsEdgeAggregateRlPerMin: number
+  externalGfsEdgeAuthenticatedIpRlPerMin: number
+  externalGfsEdgeTokenIpRlPerMin: number
 }
 
 function required(name: string): string {
@@ -38,6 +41,14 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${name} must be a positive integer`)
+  }
+  return value
+}
+
+function boundedPositiveIntegerFromEnv(name: string, defaultValue: number, max: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value > max) {
+    throw new Error(`${name} must be <= ${max}`)
   }
   return value
 }
@@ -126,6 +137,24 @@ export const config: Config = {
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||
     'https://github.com/evenfire-ai/evenfire/releases'
   ).replace(/\/+$/, ''),
+  // Coarse edge backstop for GFS traffic behind a shared trusted proxy. These
+  // are deliberately independent values: the Control API's distributed
+  // 10/min token and 30/min session/actor budgets remain authoritative.
+  externalGfsEdgeAggregateRlPerMin: boundedPositiveIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN',
+    1_800,
+    1_000_000
+  ),
+  externalGfsEdgeAuthenticatedIpRlPerMin: boundedPositiveIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN',
+    1_200,
+    1_000_000
+  ),
+  externalGfsEdgeTokenIpRlPerMin: boundedPositiveIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN',
+    600,
+    1_000_000
+  ),
 }
 
 if (process.env.NODE_ENV === 'production' && config.corsOrigin === '*') {
