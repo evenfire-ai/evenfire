@@ -5,14 +5,18 @@ import {
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import { type AccessCatalogItem, buildAccessCatalog } from './accessCatalogCoordinator.js'
 import {
+  ACCESS_EXECUTION_LIMIT_CLAMPS,
   AccessBudgetExceededError,
   AccessExecutionBudget,
   AccessExecutionCancelledError,
 } from './accessExecutionBudget.js'
 import type { CatalogFamily } from './catalogContracts.js'
-import { effectiveUserAccessPolicy } from './userAccessPolicy.js'
+import { configuredUserAccessIntent } from './userAccessPolicy.js'
+import { resolveEffectiveUserAccessPolicy } from './userAccessRuntimePolicy.js'
 
 const SHADOW_MAX_IDENTITIES = 100
+const SHADOW_MAX_IN_FLIGHT = ACCESS_EXECUTION_LIMIT_CLAMPS.producerConcurrency
+let shadowInFlight = 0
 
 export type CatalogShadowScope =
   | Readonly<{
@@ -108,7 +112,14 @@ export async function compareAccessCatalogShadow(
   if (!input.legacyComplete) return record(input.family, 'skipped_legacy_incomplete')
   const legacy = safeLegacyIds(input.legacyLogicalIds)
   if (!legacy) return record(input.family, 'skipped_legacy_incomplete')
-  if (!(options.enabled ?? effectiveUserAccessPolicy.computeCatalogShadow)) {
+  if (options.enabled === undefined) {
+    try {
+      const policy = await resolveEffectiveUserAccessPolicy()
+      if (!policy.computeCatalogShadow) return 'skipped_unavailable'
+    } catch {
+      return record(input.family, 'skipped_unavailable')
+    }
+  } else if (!options.enabled) {
     return 'skipped_unavailable'
   }
 
@@ -163,8 +174,15 @@ export function scheduleAccessCatalogShadow(input: {
   legacyComplete: boolean
   scope?: CatalogShadowScope
 }): void {
-  if (!input.session || !effectiveUserAccessPolicy.computeCatalogShadow) return
+  if (!input.session || configuredUserAccessIntent.catalogMode === 'off') return
   setImmediate(() => {
-    void compareAccessCatalogShadow({ ...input, session: input.session! })
+    if (shadowInFlight >= SHADOW_MAX_IN_FLIGHT) {
+      record(input.family, 'skipped_capacity')
+      return
+    }
+    shadowInFlight += 1
+    void compareAccessCatalogShadow({ ...input, session: input.session! }).finally(() => {
+      shadowInFlight = Math.max(0, shadowInFlight - 1)
+    })
   })
 }
