@@ -1,5 +1,4 @@
 import type { DbClient } from '../../db.js'
-import { withTransaction } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import {
@@ -10,6 +9,7 @@ import {
   operationTargetIsCurrentlyValid,
 } from './accessAuthorityStore.js'
 import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
+import { withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
@@ -390,17 +390,19 @@ export async function resolveLiveAuthorization(
       }
       throw error
     }
+    const work = (db: DbClient) =>
+      resolveInTransaction({
+        request: { ...input, resource },
+        capability: input.requiredCapability as AccessCapability,
+        operationTarget,
+        db,
+        gateway: options.gateway,
+        budget,
+      })
     const factory = () =>
-      (options.transaction ?? withTransaction)(db =>
-        resolveInTransaction({
-          request: { ...input, resource },
-          capability: input.requiredCapability as AccessCapability,
-          operationTarget,
-          db,
-          gateway: options.gateway,
-          budget,
-        })
-      )
+      options.transaction
+        ? options.transaction(work)
+        : withAccessDatabaseTransaction(budget, work, { mode: 'caller_configured' })
     return options.memo
       ? await options.memo.getOrCreate(input, stableOperationTarget(operationTarget), factory)
       : await factory()

@@ -189,7 +189,7 @@ describe('user session state machine', () => {
         rowCount: 1,
       }),
     }
-    await expect(validateLegacyUserSession('v1-token', claims, epochDb)).resolves.toEqual({
+    await expect(validateLegacyUserSession('v1-token', claims, { db: epochDb })).resolves.toEqual({
       status: 'revoked',
       reason: 'security_event',
     })

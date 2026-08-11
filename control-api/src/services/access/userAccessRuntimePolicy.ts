@@ -1,7 +1,6 @@
 import { config } from '../../config.js'
 import type { DbClient } from '../../db.js'
-import { pool } from '../../db.js'
-import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
+import { runAccessDatabaseQuery, withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import {
@@ -162,16 +161,32 @@ export async function resolveEffectiveUserAccessPolicy(
   const ownedBudget = options.budget ? null : AccessExecutionBudget.create('action')
   const budget = options.budget ?? ownedBudget!
   try {
-    const result = await runAccessDatabaseQuery(
-      options.db ?? pool,
-      budget,
-      `SELECT source_family, generation, resource_version, status, last_success_at
+    const query = (db: Pick<DbClient, 'query'>) =>
+      runAccessDatabaseQuery(
+        db,
+        budget,
+        `SELECT source_family, generation, resource_version, status, last_success_at
          FROM operational_catalog_source_state
         WHERE environment_id = $1
           AND source_family = ANY($2::text[])
         ORDER BY source_family`,
-      [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES]
-    )
+        [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES]
+      )
+    const result = options.db
+      ? await query(options.db)
+      : await withAccessDatabaseTransaction(
+          budget,
+          db =>
+            db.query(
+              `SELECT source_family, generation, resource_version, status, last_success_at
+               FROM operational_catalog_source_state
+              WHERE environment_id = $1
+                AND source_family = ANY($2::text[])
+              ORDER BY source_family`,
+              [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES]
+            ),
+          { mode: 'read_only' }
+        )
     const states = parseSourceStates(result.rows as Record<string, unknown>[])
     return compileUserAccessPolicy(
       intent,

@@ -6,6 +6,11 @@ import {
   USER_SESSION_V2_TTL_SECONDS,
   signUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
+import {
+  runAccessDatabaseQuery,
+  withAccessDatabaseTransaction,
+} from '../access/accessDatabaseQuery.js'
+import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 export const USER_SESSION_ABSOLUTE_LIFETIME_SECONDS = 30 * 24 * 60 * 60
@@ -55,6 +60,15 @@ export type IssuedUserSession = {
 }
 
 type SessionClock = { now?: Date }
+
+function budgetedSessionDatabase(
+  db: SessionDatabase,
+  budget: AccessExecutionBudget
+): SessionDatabase {
+  const query = (text: string, values?: unknown[]) =>
+    runAccessDatabaseQuery(db, budget, text, values ?? [])
+  return Object.assign(Object.create(db), { query }) as SessionDatabase
+}
 
 function atSecond(date: Date): Date {
   return new Date(Math.floor(date.getTime() / 1000) * 1000)
@@ -259,19 +273,24 @@ export async function createUserSession(
 
 export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
-  options: SessionClock & { db?: SessionDatabase } = {}
+  options: SessionClock & { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
 ): Promise<UserSessionValidation> {
   const now = atSecond(options.now ?? new Date())
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
     return validateLoadedSession(db, row, claims, now, true)
   }
-  return options.db ? work(options.db) : withTransaction(work)
+  if (options.db) {
+    return work(options.budget ? budgetedSessionDatabase(options.db, options.budget) : options.db)
+  }
+  return options.budget
+    ? withAccessDatabaseTransaction(options.budget, work, { mode: 'read_write' })
+    : withTransaction(work)
 }
 
 export async function renewUserSession(
   claims: UserSessionV2Claims,
-  options: SessionClock & { db?: SessionDatabase } = {}
+  options: SessionClock & { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
 ): Promise<IssuedUserSession | UserSessionValidation> {
   const now = atSecond(options.now ?? new Date())
   const work = async (db: SessionDatabase) => {
@@ -328,7 +347,12 @@ export async function renewUserSession(
       identity: identityFromRow(next),
     }
   }
-  return options.db ? work(options.db) : withTransaction(work)
+  if (options.db) {
+    return work(options.budget ? budgetedSessionDatabase(options.db, options.budget) : options.db)
+  }
+  return options.budget
+    ? withAccessDatabaseTransaction(options.budget, work, { mode: 'read_write' })
+    : withTransaction(work)
 }
 
 export async function revokeUserSession(
@@ -397,11 +421,13 @@ function legacySessionFingerprint(token: string): string {
 export async function validateLegacyUserSession(
   token: string,
   claims: AuthClaims,
-  db: SessionDatabase = pool
+  options: { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
 ): Promise<UserSessionValidation> {
-  if (!claims.iat) return { status: 'invalid', reason: 'invalid_legacy_representation' }
-  const result = await db.query(
-    `SELECT u.id,
+  const issuedAt = claims.iat
+  if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
+  const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
+    const result = await db.query(
+      `SELECT u.id,
             epoch.valid_after,
             EXISTS (
               SELECT 1
@@ -414,29 +440,34 @@ export async function validateLegacyUserSession(
        LEFT JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
       WHERE u.id = $1
       LIMIT 1`,
-    [claims.userId, legacySessionFingerprint(token)]
-  )
-  const row = result.rows[0] as
-    | { id: string; valid_after: Date | string | null; token_revoked: boolean }
-    | undefined
-  if (!row) return { status: 'invalid', reason: 'user_not_found' }
-  if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
-  if (row.valid_after && claims.iat * 1000 <= dateOf(row.valid_after).getTime()) {
-    return { status: 'revoked', reason: 'security_event' }
+      [claims.userId, legacySessionFingerprint(token)]
+    )
+    const row = result.rows[0] as
+      | { id: string; valid_after: Date | string | null; token_revoked: boolean }
+      | undefined
+    if (!row) return { status: 'invalid', reason: 'user_not_found' }
+    if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
+    if (row.valid_after && issuedAt * 1000 <= dateOf(row.valid_after).getTime()) {
+      return { status: 'revoked', reason: 'security_event' }
+    }
+    return {
+      status: 'valid',
+      identity: {
+        userId: claims.userId,
+        email: claims.email,
+        sid: '',
+        jti: legacySessionFingerprint(token),
+        sessionVersion: 0,
+        expiresAt: new Date(claims.exp * 1000),
+        absoluteExpiresAt: new Date(claims.exp * 1000),
+        authenticationMethods: [],
+      },
+    }
   }
-  return {
-    status: 'valid',
-    identity: {
-      userId: claims.userId,
-      email: claims.email,
-      sid: '',
-      jti: legacySessionFingerprint(token),
-      sessionVersion: 0,
-      expiresAt: new Date(claims.exp * 1000),
-      absoluteExpiresAt: new Date(claims.exp * 1000),
-      authenticationMethods: [],
-    },
-  }
+  const db = options.db ?? pool
+  if (!options.budget) return work(db)
+  if (options.db) return work(budgetedSessionDatabase(db, options.budget))
+  return withAccessDatabaseTransaction(options.budget, work, { mode: 'read_only' })
 }
 
 export async function revokeLegacyUserSession(
