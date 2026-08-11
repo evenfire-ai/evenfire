@@ -161,13 +161,22 @@ if grep -q 'rollout restart deployment -l' "${LOG_FILE}"; then
 fi
 
 : >"${LOG_FILE}"
+if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_SECRET_PRESENT=0 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: optional bootstrap auth sync no longer skips an absent source Secret" >&2
+  exit 1
+fi
+grep -q 'Skipping auth key sync (rpc-proxy-secrets not found)' "${OUT_FILE}"
+
+: >"${LOG_FILE}"
 if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_SECRET_PRESENT=0 \
   PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
     --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
   echo "FAIL: strict GFS auth sync accepted a missing source Secret" >&2
   exit 1
 fi
-grep -q 'required GFS auth source rpc-proxy/rpc-proxy-secrets is missing' "${OUT_FILE}" || {
+grep -q 'required GFS auth source rpc-proxy/rpc-proxy-secrets is missing or unreadable' "${OUT_FILE}" || {
   cat "${OUT_FILE}" >&2
   echo "FAIL: strict GFS auth sync did not diagnose its missing source Secret" >&2
   exit 1
@@ -198,7 +207,7 @@ if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   echo "FAIL: strict GFS auth sync accepted a missing gfs-config target" >&2
   exit 1
 fi
-grep -q 'required GFS auth target gfs/gfs-config is missing' "${OUT_FILE}" || {
+grep -q 'required GFS auth target gfs/gfs-config is missing or unreadable' "${OUT_FILE}" || {
   cat "${OUT_FILE}" >&2
   echo "FAIL: strict GFS auth sync did not diagnose its missing target" >&2
   exit 1

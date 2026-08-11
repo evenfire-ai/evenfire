@@ -230,9 +230,9 @@ using them.
 
 > **NOTE**: `make minikube-gen-keys` applies the key Secrets and then chains
 > `make minikube-sync-auth-key` itself (Makefile, `minikube-gen-keys`), so the JWT public
-> key lands in mcp-host-config without a separate command. Re-running
+> key lands in `mcp-host-config` and `gfs-config` without a separate command. Re-running
 > `make minikube-sync-auth-key` later is harmless — `scripts/minikube/sync-auth-key.sh`
-> only writes the ConfigMap when it detects drift.
+> only writes each ConfigMap when it detects drift.
 
 > **`minikube-gen-keys` does NOT regenerate keys on an existing cluster.**
 > `scripts/minikube/generate-keys.sh` has an anti-pattern guard: if the Secret
@@ -1002,5 +1002,6 @@ kubectl rollout restart deployment/external-rest-api -n profiles
 > **Note**: you do not edit the public key by hand.
 > `scripts/minikube/sync-auth-key.sh` copies `RPC_PROXY_JWT_PUBLIC_KEY` from the
 > `rpc-proxy-secrets` Secret into the live `mcp-host-config` ConfigMap (as
-> `CLERUM_AUTH_JWT_PUBLIC_KEY`), and it is already invoked by
+> `CLERUM_AUTH_JWT_PUBLIC_KEY`) and the live `gfs-config` ConfigMap (as
+> `jwt-public-key`), and it is already invoked by
 > `make minikube-gen-keys` and `make minikube-deploy-all`.

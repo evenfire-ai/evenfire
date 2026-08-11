@@ -317,10 +317,11 @@ minikube-restart-deploy: ## Restart a single deployment without rebuilding (usag
 # KEY INVARIANT: After generating new keys, the public key must be in sync across:
 #   1. rpc-proxy-secrets (namespace: rpc-proxy)  → RPC_PROXY_JWT_PUBLIC_KEY
 #   2. mcp-host-config   (namespace: mcp-host)   → CLERUM_AUTH_JWT_PUBLIC_KEY
-#   3. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
+#   3. gfs-config        (namespace: gfs)        → jwt-public-key
+#   4. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
 #
 # Use `make minikube-sync-auth-key` to copy the public key automatically
-# from rpc-proxy-secrets into mcp-host-config after key regeneration.
+# from rpc-proxy-secrets into both runtime ConfigMaps after key regeneration.
 #
 .PHONY: minikube-gen-keys
 minikube-gen-keys: ## Generate JWT signing keys + auto-sync to mcp-host-config
@@ -362,7 +363,7 @@ minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
 .PHONY: minikube-sync-auth-key
-minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets -> mcp-host-config only when drift exists
+minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
 	@bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE)
 
 .PHONY: minikube-sync-auth-key-if-present

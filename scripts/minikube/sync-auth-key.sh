@@ -91,7 +91,7 @@ PY
 # fetched once and synced into each consumer's ConfigMap below.
 if ! "${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" >/dev/null 2>&1; then
   if [[ "${REQUIRE_GFS}" == "true" ]]; then
-    die "required GFS auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing"
+    die "required GFS auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing or unreadable"
   fi
   log "Skipping auth key sync (${SOURCE_SECRET} not found)"
   exit 0
@@ -102,7 +102,7 @@ if [[ "${REQUIRE_GFS}" == "true" && -z "${source_key}" ]]; then
 fi
 if [[ "${REQUIRE_GFS}" == "true" ]] && \
    ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
-  die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing"
+  die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable"
 fi
 
 # ── Target 1: mcp-host-config (restart named chatllm/mcp-host with retry) ──────
@@ -137,7 +137,7 @@ sync_mcp_host() {
 sync_gfs() {
   if ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
     if [[ "${REQUIRE_GFS}" == "true" ]]; then
-      die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} disappeared during sync"
+      die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} disappeared or became unreadable during sync"
     fi
     log "Skipping ${GFS_CONFIGMAP} sync (not found)"
     return 0
