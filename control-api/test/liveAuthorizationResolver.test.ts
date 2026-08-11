@@ -166,6 +166,7 @@ describe('live authorization resolver', () => {
         operationTarget: {
           teamId: team.logicalId,
           userId: '00000000-0000-4000-8000-000000000099',
+          role: 'member',
         },
       },
       db
@@ -219,6 +220,38 @@ describe('live authorization resolver', () => {
     )
 
     expect(result).toEqual({ status: 'denied', code: 'forbidden' })
+  })
+
+  it('requires complete action-specific targets for member mutations', async () => {
+    const team = canonicalResourceIdentity({
+      environmentId: 'cluster-a',
+      type: 'team',
+      logicalId: '00000000-0000-4000-8000-000000000010',
+      displayName: 'Team A',
+    })
+    const administratorPrincipal = principalRow({
+      memberships: [
+        {
+          teamId: team.logicalId,
+          role: 'admin',
+          membershipUpdatedAt: '2026-08-10T12:00:00.000Z',
+          teamRevision: 4,
+        },
+      ],
+    })
+
+    for (const requiredCapability of ['team.member.invite', 'team.member.manage'] as const) {
+      const result = await resolveLiveAuthorizationInTransaction(
+        {
+          principalUserId: '00000000-0000-4000-8000-000000000001',
+          requiredCapability,
+          resource: team,
+        },
+        dbFor([], administratorPrincipal)
+      )
+
+      expect(result).toEqual({ status: 'denied', code: 'forbidden' })
+    }
   })
 
   it('requires an explicit path when current path behaviors differ', async () => {

@@ -531,6 +531,22 @@ function grantLookupId(resource: CanonicalResourceIdentity): string {
   return resource.logicalId
 }
 
+function operationTargetIsComplete(input: LiveAuthorizationInput): boolean {
+  if (!['team.member.invite', 'team.member.manage'].includes(input.requiredCapability)) return true
+  if (input.resource.type !== 'team' || !input.operationTarget) return false
+  const teamId =
+    typeof input.operationTarget.teamId === 'string' ? input.operationTarget.teamId.trim() : ''
+  const role =
+    typeof input.operationTarget.role === 'string' ? input.operationTarget.role.trim() : ''
+  if (!teamId || !role) return false
+  if (input.requiredCapability === 'team.member.manage') {
+    const userId =
+      typeof input.operationTarget.userId === 'string' ? input.operationTarget.userId.trim() : ''
+    if (!userId) return false
+  }
+  return true
+}
+
 function applyOperationTarget(
   input: LiveAuthorizationInput,
   candidates: GrantCandidate[]
@@ -1058,6 +1074,7 @@ export async function resolveLiveAuthorizationInTransaction(
   if (!isCapability(input.requiredCapability)) {
     return { status: 'denied', code: 'unknown_capability' }
   }
+  if (!operationTargetIsComplete(input)) return { status: 'denied', code: 'forbidden' }
   const snapshot = await loadPrincipalSnapshot(input, db)
   if (!snapshot) return { status: 'not_found', code: 'not_found' }
   if (!snapshot.sessionLive) return { status: 'denied', code: 'session_not_live' }
