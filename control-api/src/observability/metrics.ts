@@ -254,6 +254,24 @@ export const rateLimitHitsTotal = getOrCreateCounter({
   labelNames: ['bucket_type', 'result'] as const as Array<'bucket_type' | 'result'>,
 })
 
+export const gfsUploadAdmissionRequestsTotal = getOrCreateCounter({
+  name: 'gfs_upload_admission_requests_total',
+  help: 'Upload-v2 edge admission decisions by bounded limit family and result.',
+  labelNames: ['limit', 'result'] as const as Array<'limit' | 'result'>,
+})
+
+export const gfsUploadAdmissionBytesTotal = getOrCreateCounter({
+  name: 'gfs_upload_admission_bytes_total',
+  help: 'Declared upload-v2 part bytes admitted or rejected before GFSC forwarding.',
+  labelNames: ['result'] as const as Array<'result'>,
+})
+
+export const gfsUploadAdmissionActiveRequests = getOrCreateGauge({
+  name: 'gfs_upload_admission_active_requests',
+  help: 'Current upload-v2 requests holding replica-safe PostgreSQL admission slots.',
+  labelNames: [] as string[],
+})
+
 // ─── Workflow-run archival cron metrics (DB-first, replaces CRD reaper) ──
 export const workflowRunsArchiveRunsTotal = getOrCreateCounter({
   name: 'workflow_runs_archive_runs_total',

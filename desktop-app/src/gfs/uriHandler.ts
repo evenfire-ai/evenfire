@@ -85,7 +85,7 @@ export interface GfsTransport {
   requestJson<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     url: string,
-    options?: { token?: string; body?: unknown; timeoutMs?: number }
+    options?: { token?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal }
   ): Promise<T>
   /** Binary fetch for downloads (resolves to the raw bytes). */
   fetchBytes(url: string, token: string): Promise<ArrayBuffer>
@@ -236,7 +236,8 @@ function unwrap<T>(payload: GfsEnvelope<T>): T {
 async function createGfsResource(
   transport: GfsTransport,
   input: GfsCreateInput,
-  session: string
+  session: string,
+  signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
@@ -252,8 +253,10 @@ async function createGfsResource(
     token?: string
     body?: unknown
     timeoutMs?: number
+    signal?: AbortSignal
   }
   options[TRANSPORT_TOKEN_FIELD] = session
+  if (signal) options.signal = signal
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'POST',
     joinUrl(transport.baseUrl, path),
@@ -265,7 +268,8 @@ async function createGfsResource(
 async function replaceGfsFile(
   transport: GfsTransport,
   input: GfsReplaceInput,
-  session: string
+  session: string,
+  signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
@@ -280,8 +284,10 @@ async function replaceGfsFile(
     token?: string
     body?: unknown
     timeoutMs?: number
+    signal?: AbortSignal
   }
   options[TRANSPORT_TOKEN_FIELD] = session
+  if (signal) options.signal = signal
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'PUT',
     joinUrl(transport.baseUrl, path),
@@ -513,12 +519,20 @@ export class GfsClient {
       throw surfaceGfsGrantError(error)
     }
   }
-  async createResource(input: GfsCreateInput, session: string): Promise<GfsResourceView> {
-    return createGfsResource(this.transport, input, session)
+  async createResource(
+    input: GfsCreateInput,
+    session: string,
+    signal?: AbortSignal
+  ): Promise<GfsResourceView> {
+    return createGfsResource(this.transport, input, session, signal)
   }
 
-  async replaceFile(input: GfsReplaceInput, session: string): Promise<GfsResourceView> {
-    return replaceGfsFile(this.transport, input, session)
+  async replaceFile(
+    input: GfsReplaceInput,
+    session: string,
+    signal?: AbortSignal
+  ): Promise<GfsResourceView> {
+    return replaceGfsFile(this.transport, input, session, signal)
   }
 
   async renameResource(

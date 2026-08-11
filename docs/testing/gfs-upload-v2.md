@@ -9,11 +9,11 @@ The feature flag remains false until T0, T1, T2, and T3 are green.
 Generate deterministic files in a run-unique temporary directory, not in the
 repository and not in memory:
 
-| Fixture | Exact size |
-| --- | ---: |
-| below boundary | `209715199` bytes |
-| exact boundary | `209715200` bytes |
-| oversize | `209715201` bytes |
+| Fixture           |                          Exact size |
+| ----------------- | ----------------------------------: |
+| below boundary    |                   `209715199` bytes |
+| exact boundary    |                   `209715200` bytes |
+| oversize          |                   `209715201` bytes |
 | legacy regression | `16777216` bytes and one byte above |
 
 Record SHA-256 for every fixture and verify the downloaded result matches the
@@ -39,6 +39,17 @@ T0 must execute real tests and fail loudly if zero tests run. It covers:
 - proxy invariants: exact v2 prefix bypasses the broad JSON parser, declared
   and observed 16 MiB caps are enforced, `Expect` is stripped, upload headers
   survive, and disconnect aborts upstream.
+- canonical-drive propagation for a non-`main` drive through capabilities,
+  create, HEAD, status, part, pause, resume, complete, and cancel; missing or
+  create-body-mismatched drive is rejected before GFSC token minting;
+- replica-safe request limits, weighted 1 MiB byte charging, stable 429 plus
+  `Retry-After`, active principal/IP/global concurrency release, and fail-closed
+  admission-backend failure;
+- Desktop state-v2 migration and legacy quarantine, exact owner/team/env/base/
+  drive resume matching, A → logout → B isolation, epoch-stale dispatch
+  rejection, and `suspended_auth` requiring explicit same-scope resume;
+- legacy fallback symlink/path-swap rejection and proof that logout aborts and
+  awaits a pending fallback before clearing the captured credential.
 
 The T0 red fixtures are contract tests: before the implementation seam exists,
 they must be marked as planned/disabled in the test harness rather than hidden

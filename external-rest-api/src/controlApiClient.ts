@@ -5,11 +5,13 @@ type RequestMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  constructor(message: string, status: number, body: unknown) {
+  headers?: Headers
+  constructor(message: string, status: number, body: unknown, headers?: Headers) {
     super(message)
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
+    this.headers = headers
   }
 }
 
@@ -102,7 +104,8 @@ export async function controlApiRequestWithStatus<T>(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
-      parsed
+      parsed,
+      response.headers
     )
   }
 
@@ -155,7 +158,8 @@ export async function controlApiBinaryRequestWithStatus(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      response.headers
     )
   }
 
@@ -217,7 +221,8 @@ export async function controlApiStreamRequest(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      response.headers
     )
   }
   return response

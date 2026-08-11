@@ -14,22 +14,51 @@ finalization.
 This is deliberately not a one-request 200 MiB upload and is not a claim of
 tus 1.0 compatibility. It does not raise the legacy JSON/base64 body limit.
 
-| Contract | Frozen value |
-| --- | ---: |
-| Product maximum | `209715200` bytes (200 MiB binary) |
-| Oversize boundary | `209715201` is rejected before session/payload allocation |
-| Preferred part | `8388608` bytes (8 MiB) |
-| Hard part/request maximum | `16777216` bytes (16 MiB) |
-| Default session concurrency | 4 parts |
-| Instability fallback | 2 parts after 3 consecutive retryable failures/timeouts |
-| Legacy raw-file limit | `16777216` bytes (16 MiB), unchanged during rollout |
-| Legacy GFSC body cap | `25165824` bytes (24 MiB), unchanged during rollout |
-| Protocol arithmetic ceiling | `1073741824` bytes (1 GiB); not an enabled product value |
+| Contract                    |                                              Frozen value |
+| --------------------------- | --------------------------------------------------------: |
+| Product maximum             |                        `209715200` bytes (200 MiB binary) |
+| Oversize boundary           | `209715201` is rejected before session/payload allocation |
+| Preferred part              |                                   `8388608` bytes (8 MiB) |
+| Hard part/request maximum   |                                 `16777216` bytes (16 MiB) |
+| Default session concurrency |                                                   4 parts |
+| Instability fallback        |   2 parts after 3 consecutive retryable failures/timeouts |
+| Legacy raw-file limit       |       `16777216` bytes (16 MiB), unchanged during rollout |
+| Legacy GFSC body cap        |       `25165824` bytes (24 MiB), unchanged during rollout |
+| Protocol arithmetic ceiling |  `1073741824` bytes (1 GiB); not an enabled product value |
 
 Cloudflare evaluates the body of each HTTP request. The aggregate file limit
 is therefore independent of the request limit: every v2 data-bearing request
 is at most 16 MiB, and the verified zone setting can force a lower negotiated
 `maxChunkBytes`. No client may send a single 100 MB or 200 MiB body.
+
+## Edge admission limits
+
+Upload-v2 has a transport-abuse admission layer before Control API forwards a
+body to GFSC. These budgets do not change the 200 MiB product/file limit, the
+8 MiB preferred part, the 16 MiB hard part limit, or GFSC's upload-session
+authority.
+
+| Admission budget                     |                             Default | Authority                                   |
+| ------------------------------------ | ----------------------------------: | ------------------------------------------- |
+| Public edge coarse requests          | 120/minute per user + source-IP key | external-rest-api process-local fast reject |
+| Requests per authenticated principal |                          120/minute | Control API PostgreSQL fixed-window bucket  |
+| Requests per source IP               |                          600/minute | Control API PostgreSQL fixed-window bucket  |
+| Declared part bytes per principal    |                      512 MiB/minute | Control API PostgreSQL weighted bucket      |
+| Declared part bytes per source IP    |                     2048 MiB/minute | Control API PostgreSQL weighted bucket      |
+| Active relay requests per principal  |                                   8 | Control API PostgreSQL advisory-lock slots  |
+| Active relay requests per source IP  |                                  16 | Control API PostgreSQL advisory-lock slots  |
+| Active relay requests globally       |                                  32 | Control API PostgreSQL advisory-lock slots  |
+| Part request maximum                 |                      16777216 bytes | Both relays, then GFSC                      |
+| GFSC part streams                    |                4/session, 16/global | GFSC session/stream authority               |
+
+Byte budgets are charged in fixed 1 MiB units, rounded up from the declared
+`Content-Length`. A part requires matching decimal `Content-Length` and
+`Upload-Chunk-Length` headers. Control API counts observed bytes while piping
+the stream and rejects short, long, or over-limit bodies without buffering the
+whole part. The authoritative PostgreSQL admission fails closed if its backend
+is unavailable. A denied budget returns stable
+`429 { error: "gfs_upload_rate_limited", limit, retryAfterSeconds }` plus
+`Retry-After`; both relays preserve that contract.
 
 ## End-to-end shape
 
@@ -85,6 +114,24 @@ before writing the resource, so a canceled response can never accompany a
 published resource.
 
 ## Persistence and safety
+
+Desktop upload persistence is a version-2 envelope. Every resumable record is
+bound to `ownerId`, team/tenant id, normalized environment key, normalized API
+base URL, canonical drive, and local `authEpoch`; it stores no bearer or
+session token. Pre-v2 unscoped arrays are quarantined as `legacy_unscoped` and
+are never listed or resumed. Invalid/unsupported records are inert. A logout,
+team switch (including internal team-context hops), or runtime/API-base switch
+blocks new dispatch, advances the epoch, aborts and awaits active v2 and legacy
+fallback work, clears credentials, and persists the old records as local
+`suspended_auth`. Resume is user-explicit and succeeds only when owner, team,
+environment, base URL, and drive match exactly; the new auth epoch is bound
+only after the server session is revalidated.
+
+The legacy compatibility fallback still accepts at most 16 MiB. It opens one
+descriptor with no-follow semantics where available, validates the descriptor
+with `fstat`, rejects symlinks/path swaps, reads that same descriptor with a
+bounded loop, and rechecks its identity/size before encoding. It never performs
+a pathname `stat` followed by a separate pathname `readFile`.
 
 `gfs_upload_sessions` stores owner, operation/target, an immutable request
 fingerprint, expected bytes, selected geometry, checksum, counters, state,

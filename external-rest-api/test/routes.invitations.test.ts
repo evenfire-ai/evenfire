@@ -26,6 +26,7 @@ describe('routes/invitations', () => {
 
   function makeApp() {
     const app = express()
+    app.set('trust proxy', 1)
     app.use(express.json())
     app.use(createInvitationsRouter())
     return app

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { PoolClient } from 'pg'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 
@@ -24,6 +26,7 @@ export type RateLimitCheck = {
   resetMs: number
   windowStartMs: number
   count: number
+  backendAvailable: boolean
 }
 
 export function currentWindowStartMs(nowMs = Date.now()): number {
@@ -42,8 +45,10 @@ export function currentWindowStartMs(nowMs = Date.now()): number {
 export async function checkAndIncrement(
   bucketKey: string,
   maxPerMinute: number,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  cost = 1
 ): Promise<RateLimitCheck> {
+  if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
   const windowStartMs = currentWindowStartMs(nowMs)
   const resetMs = windowStartMs + WINDOW_MS
 
@@ -51,11 +56,11 @@ export async function checkAndIncrement(
   try {
     result = await pool.query(
       `INSERT INTO rate_limit_buckets (bucket_key, window_start_ms, count)
-       VALUES ($1, $2, 1)
+       VALUES ($1, $2, $3)
        ON CONFLICT (bucket_key, window_start_ms) DO UPDATE
-         SET count = rate_limit_buckets.count + 1
+         SET count = rate_limit_buckets.count + EXCLUDED.count
        RETURNING count`,
-      [bucketKey, windowStartMs]
+      [bucketKey, windowStartMs, cost]
     )
   } catch (err) {
     // Fail-open on DB errors — the limiter is an abuse gate, not a security
@@ -75,6 +80,7 @@ export async function checkAndIncrement(
       resetMs,
       windowStartMs,
       count: 0,
+      backendAvailable: false,
     }
   }
   // Fail-open if the DB returns no row (e.g. test harness mocking pool.query
@@ -88,13 +94,172 @@ export async function checkAndIncrement(
       resetMs,
       windowStartMs,
       count: 0,
+      backendAvailable: false,
     }
   }
   const count = Number(row.count)
   const allowed = count <= maxPerMinute
   const remaining = Math.max(0, maxPerMinute - count)
 
-  return { allowed, remaining, resetMs, windowStartMs, count }
+  return { allowed, remaining, resetMs, windowStartMs, count, backendAvailable: true }
+}
+
+export type RateLimitConcurrencyRequirement = {
+  bucketKey: string
+  maxConcurrent: number
+}
+
+export type RateLimitConcurrencyLease = {
+  allowed: boolean
+  backendAvailable: boolean
+  release: () => Promise<void>
+}
+
+let concurrencyClient: PoolClient | null = null
+let concurrencyClientPromise: Promise<PoolClient> | null = null
+const heldConcurrencySlots = new Set<string>()
+let concurrencyOperation = Promise.resolve()
+
+async function serializeConcurrencyOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = concurrencyOperation
+  let finish!: () => void
+  concurrencyOperation = new Promise<void>(resolve => {
+    finish = resolve
+  })
+  await previous
+  try {
+    return await operation()
+  } finally {
+    finish()
+  }
+}
+
+function advisoryKey(value: string): number {
+  return createHash('sha256').update(value).digest().readInt32BE(0)
+}
+
+async function getConcurrencyClient(): Promise<PoolClient> {
+  if (concurrencyClient) return concurrencyClient
+  if (!concurrencyClientPromise) {
+    concurrencyClientPromise = pool.connect().then(client => {
+      concurrencyClient = client
+      client.once('error', error => {
+        rootLogger.warn(
+          { event: 'rate_limit_concurrency_connection_error', err: error.message },
+          'rate limiter concurrency connection failed'
+        )
+        if (concurrencyClient === client) concurrencyClient = null
+        heldConcurrencySlots.clear()
+        client.release(true)
+      })
+      return client
+    })
+  }
+  try {
+    return await concurrencyClientPromise
+  } finally {
+    concurrencyClientPromise = null
+  }
+}
+
+async function unlockSlots(
+  client: PoolClient,
+  slots: Array<{ key: number; slot: number; identity: string }>
+): Promise<void> {
+  for (const acquired of slots.reverse()) {
+    heldConcurrencySlots.delete(acquired.identity)
+    try {
+      await client.query('SELECT pg_advisory_unlock($1::integer, $2::integer)', [
+        acquired.key,
+        acquired.slot,
+      ])
+    } catch (error) {
+      rootLogger.warn(
+        {
+          event: 'rate_limit_concurrency_unlock_error',
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'rate limiter concurrency unlock failed'
+      )
+    }
+  }
+}
+
+/**
+ * Acquire bounded PostgreSQL advisory-lock slots on one dedicated pooled
+ * session. Advisory locks are replica-safe and PostgreSQL releases them if the
+ * process/connection dies. Local slot tracking prevents same-session lock
+ * reentrancy from admitting the same slot twice.
+ */
+export async function acquireRateLimitConcurrencyLease(
+  requirements: readonly RateLimitConcurrencyRequirement[]
+): Promise<RateLimitConcurrencyLease> {
+  for (const requirement of requirements) {
+    if (!Number.isSafeInteger(requirement.maxConcurrent) || requirement.maxConcurrent < 1)
+      throw new Error('rate limit concurrency must be positive')
+  }
+  return serializeConcurrencyOperation(async () => {
+    let client: PoolClient
+    try {
+      client = await getConcurrencyClient()
+    } catch (error) {
+      rootLogger.warn(
+        {
+          event: 'rate_limit_concurrency_db_error',
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'rate limiter concurrency admission failed closed'
+      )
+      return { allowed: false, backendAvailable: false, release: async () => undefined }
+    }
+
+    const acquired: Array<{ key: number; slot: number; identity: string }> = []
+    try {
+      for (const requirement of requirements) {
+        const key = advisoryKey(requirement.bucketKey)
+        let selected: { key: number; slot: number; identity: string } | null = null
+        for (let slot = 0; slot < requirement.maxConcurrent; slot += 1) {
+          const identity = `${key}:${slot}`
+          if (heldConcurrencySlots.has(identity)) continue
+          const result = await client.query<{ acquired: boolean }>(
+            'SELECT pg_try_advisory_lock($1::integer, $2::integer) AS acquired',
+            [key, slot]
+          )
+          if (result.rows[0]?.acquired === true) {
+            selected = { key, slot, identity }
+            heldConcurrencySlots.add(identity)
+            acquired.push(selected)
+            break
+          }
+        }
+        if (!selected) {
+          await unlockSlots(client, acquired)
+          return { allowed: false, backendAvailable: true, release: async () => undefined }
+        }
+      }
+    } catch (error) {
+      await unlockSlots(client, acquired)
+      rootLogger.warn(
+        {
+          event: 'rate_limit_concurrency_db_error',
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'rate limiter concurrency admission failed closed'
+      )
+      return { allowed: false, backendAvailable: false, release: async () => undefined }
+    }
+
+    let released = false
+    return {
+      allowed: true,
+      backendAvailable: true,
+      release: async () => {
+        if (released) return
+        released = true
+        await serializeConcurrencyOperation(() => unlockSlots(client, acquired))
+      },
+    }
+  })
 }
 
 /**

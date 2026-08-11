@@ -116,12 +116,15 @@ const clerum = Object.freeze({
         ifMatch,
         resumeUploadId,
       }),
-    getUploadSnapshot: (uploadId: string) =>
-      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId }),
-    listUploadSessions: () => ipcRenderer.invoke('gfs:listUploadSessions'),
-    pauseUpload: (uploadId: string) => ipcRenderer.invoke('gfs:pauseUpload', { uploadId }),
-    resumeUpload: (uploadId: string) => ipcRenderer.invoke('gfs:resumeUpload', { uploadId }),
-    cancelUpload: (uploadId: string) => ipcRenderer.invoke('gfs:cancelUpload', { uploadId }),
+    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
+    resumeUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
+    cancelUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>

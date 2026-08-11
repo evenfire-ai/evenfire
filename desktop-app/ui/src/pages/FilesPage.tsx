@@ -599,9 +599,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           {visibleError ? <StatusBanner tone="error" text={visibleError} /> : null}
 
           {uploadSnapshot &&
-          ['initiated', 'uploading', 'paused', 'finalizing', 'canceling', 'failed'].includes(
-            uploadSnapshot.state
-          ) ? (
+          [
+            'initiated',
+            'uploading',
+            'paused',
+            'suspended_auth',
+            'finalizing',
+            'canceling',
+            'failed',
+          ].includes(uploadSnapshot.state) ? (
             <section
               className="da-gfs-upload-status"
               data-testid="gfs-upload-row"
@@ -615,13 +621,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 <strong>
                   {uploadSnapshot.state === 'paused'
                     ? 'Upload paused'
-                    : uploadSnapshot.state === 'failed'
-                      ? 'Upload needs attention'
-                      : uploadSnapshot.state === 'finalizing'
-                        ? 'Finalizing upload'
-                        : uploadSnapshot.state === 'canceling'
-                          ? 'Canceling upload'
-                          : 'Uploading file'}
+                    : uploadSnapshot.state === 'suspended_auth'
+                      ? 'Upload suspended after sign-in changed'
+                      : uploadSnapshot.state === 'failed'
+                        ? 'Upload needs attention'
+                        : uploadSnapshot.state === 'finalizing'
+                          ? 'Finalizing upload'
+                          : uploadSnapshot.state === 'canceling'
+                            ? 'Canceling upload'
+                            : 'Uploading file'}
                 </strong>
                 <span>
                   {formatSharedFileSize(uploadSnapshot.uploadedBytes)} /{' '}
@@ -647,7 +655,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 )}
               />
               <div className="da-gfs-upload-status__actions">
-                {uploadSnapshot.state === 'paused' ? (
+                {uploadSnapshot.state === 'paused' || uploadSnapshot.state === 'suspended_auth' ? (
                   <Button size="sm" variant="outline" onClick={() => void resumeUpload()}>
                     Resume
                   </Button>

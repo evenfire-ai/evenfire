@@ -4,7 +4,6 @@ import {
   GFS_FILE_UPLOAD_MAX_BYTES,
   GFS_FILE_UPLOAD_MAX_MEGABYTES,
   GFS_FILE_UPLOAD_MAX_PART_BYTES,
-  GFS_FILE_UPLOAD_PREFERRED_PART_BYTES,
 } from '@constants/gfsFileUpload'
 import { apiSend } from './api'
 

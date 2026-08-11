@@ -76,6 +76,9 @@ describe('AppService.invokeHostMessage', () => {
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
     const service = new AppService() as any
+    service.desktopGfsUploadStatePath = vi
+      .fn()
+      .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
     service.sessionToken = 'teamless-token'
     service.me = {
       id: 'user-1',

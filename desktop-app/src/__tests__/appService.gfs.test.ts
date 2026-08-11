@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AppService } from '../appService.js'
+import fs from 'node:fs'
+import { mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
+import { config, getActiveEnvKey } from '../config.js'
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -128,5 +133,473 @@ describe('AppService GFS delegation subject boundary', () => {
 
     expect(service.gfsClient.grant).not.toHaveBeenCalled()
     expect(service.gfsClient.createShare).not.toHaveBeenCalled()
+  })
+})
+
+function uploadSession(uploadId: string, drive = 'main') {
+  return {
+    uploadId,
+    drive,
+    operation: 'create' as const,
+    expectedBytes: 4,
+    partBytes: 4,
+    partCount: 1,
+    state: 'uploading' as const,
+    contiguousBytes: 0,
+    committedBytes: 0,
+    committedPartCount: 0,
+    activePartCount: 0,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+}
+
+function canonicalExternalBaseUrl(): string {
+  return new URL(config.externalRestApiBaseUrl).toString().replace(/\/+$/, '')
+}
+
+function scopedUploadRecord(
+  uploadId: string,
+  options: {
+    ownerId?: string
+    teamId?: string | null
+    environmentKey?: string
+    drive?: string
+    authEpoch?: number
+    status?: 'active' | 'paused' | 'failed' | 'suspended_auth'
+  } = {}
+) {
+  const drive = options.drive ?? 'main'
+  return {
+    version: 2,
+    uploadId,
+    filePath: '/tmp/payload.bin',
+    fileName: 'payload.bin',
+    fileSize: 4,
+    target: { operation: 'create' as const, parentRid: 'parent' },
+    name: 'payload.bin',
+    session: uploadSession(uploadId, drive),
+    scope: {
+      ownerId: options.ownerId ?? 'user-a',
+      teamId: options.teamId ?? 'team-a',
+      environmentKey: options.environmentKey ?? getActiveEnvKey(),
+      baseUrl: canonicalExternalBaseUrl(),
+      drive,
+      authEpoch: options.authEpoch ?? 7,
+    },
+    status: options.status ?? 'active',
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+type UploadScopeTestService = {
+  sessionToken: string | null
+  me: {
+    id: string
+    email: string
+    name: null
+    picture: null
+    teamId: string | null
+    teamName: string | null
+    role: null
+  } | null
+  gfsAuthEpoch: number
+  gfsDispatchBlocked: boolean
+  gfsUploadJobs: Map<
+    string,
+    {
+      job: unknown
+      promise: Promise<unknown>
+      scope: ReturnType<typeof scopedUploadRecord>['scope']
+    }
+  >
+  desktopGfsUploadStatePath: () => Promise<string>
+  startDesktopGfsUpload: ReturnType<typeof vi.fn>
+  authClient: {
+    passwordLogin: ReturnType<typeof vi.fn>
+    googleLogin: ReturnType<typeof vi.fn>
+  }
+  tokenStore: {
+    clearSessionToken: ReturnType<typeof vi.fn>
+    setSessionToken: ReturnType<typeof vi.fn>
+  }
+  completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
+  googleLogin: AppService['googleLogin']
+  listGfsUploadSessions: AppService['listGfsUploadSessions']
+  resumeGfsUpload: AppService['resumeGfsUpload']
+  logout: AppService['logout']
+  runScopedLegacyGfsUpload: <T>(
+    scope: ReturnType<typeof scopedUploadRecord>['scope'],
+    operation: (token: string, signal: AbortSignal) => Promise<T>
+  ) => Promise<T>
+}
+
+function authenticatedUploadService(statePath: string): UploadScopeTestService {
+  const service = new AppService() as unknown as UploadScopeTestService
+  service.sessionToken = 'token-a'
+  service.me = {
+    id: 'user-a',
+    email: 'a@example.test',
+    name: null,
+    picture: null,
+    teamId: 'team-a',
+    teamName: 'Team A',
+    role: null,
+  }
+  service.gfsAuthEpoch = 7
+  service.gfsDispatchBlocked = false
+  service.desktopGfsUploadStatePath = async () => statePath
+  service.authClient = {
+    passwordLogin: vi.fn(),
+    googleLogin: vi.fn(),
+  }
+  service.tokenStore = {
+    clearSessionToken: vi.fn().mockResolvedValue(undefined),
+    setSessionToken: vi.fn().mockResolvedValue(undefined),
+  }
+  service.startDesktopGfsUpload = vi.fn()
+  return service
+}
+
+describe('AppService GFS upload security scope', () => {
+  it('quarantines legacy unscoped state instead of restoring it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-state-migration-'))
+    try {
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const legacy = {
+        uploadId: '77777777-7777-4777-8777-777777777777',
+        filePath: '/tmp/legacy.bin',
+        fileName: 'legacy.bin',
+        fileSize: 4,
+        target: { operation: 'create', parentRid: 'parent' },
+        name: 'legacy.bin',
+        session: {
+          ...uploadSession('77777777-7777-4777-8777-777777777777'),
+          token: 'nested-legacy-token-must-not-survive',
+        },
+        token: 'legacy-token-must-not-survive',
+      }
+      await writeFile(statePath, JSON.stringify([legacy]))
+      const service = authenticatedUploadService(statePath)
+
+      await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
+      const migrated = JSON.parse(await readFile(statePath, 'utf8')) as {
+        version: number
+        records: unknown[]
+        quarantined: Array<{ uploadId: string; reason: string }>
+      }
+      expect(migrated.version).toBe(2)
+      expect(migrated.records).toEqual([])
+      expect(migrated.quarantined).toEqual([
+        expect.objectContaining({ uploadId: legacy.uploadId, reason: 'legacy_unscoped' }),
+      ])
+      expect(await readFile(statePath, 'utf8')).not.toContain('token-must-not-survive')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('quarantines malformed v2 scope records deterministically', () => {
+    const malformed = scopedUploadRecord('78787878-7878-4787-8787-787878787878')
+    malformed.scope.baseUrl = 'not-a-url'
+    const migrated = migrateDesktopGfsUploadState({
+      version: 2,
+      records: [malformed],
+      quarantined: [],
+    })
+    expect(migrated.state.records).toEqual([])
+    expect(migrated.state.quarantined).toEqual([
+      expect.objectContaining({ uploadId: malformed.uploadId, reason: 'invalid_scope' }),
+    ])
+  })
+
+  it('canonicalizes valid v2 records and quarantine metadata without persisting extra token fields', () => {
+    const record = {
+      ...scopedUploadRecord('79797979-7979-4797-8797-797979797979'),
+      token: 'top-level-token-must-not-survive',
+    }
+    record.session = {
+      ...record.session,
+      token: 'session-token-must-not-survive',
+    } as typeof record.session
+    const migrated = migrateDesktopGfsUploadState({
+      version: 2,
+      records: [record],
+      quarantined: [
+        {
+          uploadId: 'legacy-id',
+          reason: 'legacy_unscoped',
+          quarantinedAt: new Date().toISOString(),
+          token: 'quarantine-token-must-not-survive',
+        },
+      ],
+    })
+
+    expect(migrated.migrated).toBe(true)
+    expect(JSON.stringify(migrated.state)).not.toContain('token-must-not-survive')
+    expect(migrated.state.records).toHaveLength(1)
+    expect(migrated.state.quarantined).toEqual([
+      expect.objectContaining({ uploadId: 'legacy-id', reason: 'legacy_unscoped' }),
+    ])
+  })
+
+  it('suspends only restart-orphaned active records and permits explicit resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-state-restart-active-'))
+    try {
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const orphaned = scopedUploadRecord('80808080-8080-4080-8080-808080808080')
+      const live = scopedUploadRecord('81818181-8181-4181-8181-818181818181')
+      await writeFile(
+        statePath,
+        JSON.stringify({ version: 2, records: [orphaned, live], quarantined: [] })
+      )
+      const service = authenticatedUploadService(statePath)
+      service.gfsUploadJobs.set(live.uploadId, {
+        job: {},
+        promise: Promise.resolve(live.session),
+        scope: live.scope,
+      })
+
+      await expect(service.listGfsUploadSessions('main')).resolves.toEqual([
+        expect.objectContaining({ uploadId: orphaned.uploadId, status: 'suspended_auth' }),
+        expect.objectContaining({ uploadId: live.uploadId, status: 'active' }),
+      ])
+      const migrated = JSON.parse(await readFile(statePath, 'utf8')) as {
+        records: Array<{ uploadId: string; status: string }>
+      }
+      expect(migrated.records).toEqual([
+        expect.objectContaining({ uploadId: orphaned.uploadId, status: 'suspended_auth' }),
+        expect.objectContaining({ uploadId: live.uploadId, status: 'active' }),
+      ])
+
+      service.startDesktopGfsUpload.mockResolvedValue({ ...orphaned.session, state: 'uploading' })
+      await service.resumeGfsUpload(orphaned.uploadId, 'main')
+      expect(service.startDesktopGfsUpload).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeUploadId: orphaned.uploadId, drive: 'main' })
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fences A on logout, hides its record from B, and permits explicit resume only for exact A scope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-state-scope-'))
+    try {
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const exact = scopedUploadRecord('88888888-8888-4888-8888-888888888888')
+      const otherEnvironment = scopedUploadRecord('89898989-8989-4898-8898-898989898989', {
+        environmentKey: `${getActiveEnvKey()}-other`,
+      })
+      const otherDrive = scopedUploadRecord('90909090-9090-4090-8090-909090909090', {
+        drive: 'archive',
+      })
+      await writeFile(
+        statePath,
+        JSON.stringify({
+          version: 2,
+          records: [exact, otherEnvironment, otherDrive],
+          quarantined: [],
+        })
+      )
+      const service = authenticatedUploadService(statePath)
+
+      await expect(service.listGfsUploadSessions('main')).resolves.toEqual([
+        expect.objectContaining({ uploadId: exact.uploadId, drive: 'main' }),
+      ])
+      await expect(service.listGfsUploadSessions('archive')).resolves.toEqual([
+        expect.objectContaining({ uploadId: otherDrive.uploadId, drive: 'archive' }),
+      ])
+
+      await service.logout()
+      const afterLogout = JSON.parse(await readFile(statePath, 'utf8')) as {
+        records: Array<{ uploadId: string; status: string }>
+      }
+      expect(afterLogout.records.find(record => record.uploadId === exact.uploadId)?.status).toBe(
+        'suspended_auth'
+      )
+      expect(service.sessionToken).toBeNull()
+      expect(service.gfsDispatchBlocked).toBe(true)
+
+      service.sessionToken = 'token-b'
+      service.me = {
+        id: 'user-b',
+        email: 'b@example.test',
+        name: null,
+        picture: null,
+        teamId: 'team-b',
+        teamName: 'Team B',
+        role: null,
+      }
+      service.gfsDispatchBlocked = false
+      await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
+      await expect(service.resumeGfsUpload(exact.uploadId, 'main')).rejects.toThrow(
+        'not available in the active security scope'
+      )
+      expect(service.startDesktopGfsUpload).not.toHaveBeenCalled()
+
+      service.sessionToken = 'token-a-new'
+      service.me = {
+        id: 'user-a',
+        email: 'a@example.test',
+        name: null,
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'Team A',
+        role: null,
+      }
+      service.gfsAuthEpoch += 1
+      service.startDesktopGfsUpload.mockResolvedValue({ ...exact.session, state: 'uploading' })
+      await service.resumeGfsUpload(exact.uploadId, 'main')
+      expect(service.startDesktopGfsUpload).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeUploadId: exact.uploadId, drive: 'main' })
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('aborts and awaits an in-flight legacy fallback before logout clears A credentials', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-auth-fence-'))
+    try {
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const scope = scopedUploadRecord('91919191-9191-4191-8191-919191919191').scope
+      let releaseAbort!: () => void
+      const abortReleased = new Promise<void>(resolve => {
+        releaseAbort = resolve
+      })
+      let sawAbort = false
+      const pending = service.runScopedLegacyGfsUpload(scope, (token, signal) => {
+        expect(token).toBe('token-a')
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            sawAbort = true
+            void abortReleased.then(() => reject(signal.reason))
+          })
+        })
+      })
+      const settled = pending.then(
+        () => 'resolved',
+        error => String(error instanceof Error ? error.message : error)
+      )
+      let logoutSettled = false
+      const logout = service.logout().then(() => {
+        logoutSettled = true
+      })
+      await vi.waitFor(() => expect(sawAbort).toBe(true))
+      expect(logoutSettled).toBe(false)
+      releaseAbort()
+      await logout
+
+      await expect(settled).resolves.toContain('authentication fence')
+      expect(service.sessionToken).toBeNull()
+      expect(service.tokenStore.clearSessionToken).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['password', 'google'] as const)(
+    'aborts and awaits A uploads before %s login installs B credentials',
+    async loginKind => {
+      const root = await mkdtemp(join(tmpdir(), `evenfire-gfs-${loginKind}-login-fence-`))
+      try {
+        const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+        const scope = scopedUploadRecord('92929292-9292-4292-8292-929292929292').scope
+        const nextMe = {
+          id: 'user-b',
+          email: 'b@example.test',
+          name: null,
+          picture: null,
+          teamId: 'team-b',
+          teamName: 'Team B',
+          role: null,
+        }
+        service.authClient.passwordLogin.mockResolvedValue({ token: 'token-b', me: nextMe })
+        service.authClient.googleLogin.mockResolvedValue({ token: 'token-b', me: nextMe })
+
+        let releaseAbort!: () => void
+        const abortReleased = new Promise<void>(resolve => {
+          releaseAbort = resolve
+        })
+        let sawAbort = false
+        const pending = service.runScopedLegacyGfsUpload(
+          scope,
+          (_token, signal) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => {
+                sawAbort = true
+                void abortReleased.then(() => reject(signal.reason))
+              })
+            })
+        )
+        const pendingOutcome = pending.then(
+          () => 'resolved',
+          error => String(error instanceof Error ? error.message : error)
+        )
+        let loginSettled = false
+        const login = (
+          loginKind === 'password'
+            ? service.completePasswordLogin('b@example.test', 'password')
+            : service.googleLogin('google-id-token')
+        ).then(result => {
+          loginSettled = true
+          return result
+        })
+
+        await vi.waitFor(() => expect(sawAbort).toBe(true))
+        expect(loginSettled).toBe(false)
+        expect(service.sessionToken).toBe('token-a')
+        expect(service.tokenStore.setSessionToken).not.toHaveBeenCalled()
+        releaseAbort()
+
+        await expect(pendingOutcome).resolves.toContain('authentication fence')
+        await expect(login).resolves.toEqual({ authenticated: true, me: nextMe })
+        expect(service.sessionToken).toBe('token-b')
+        expect(service.me).toEqual(nextMe)
+        expect(service.gfsDispatchBlocked).toBe(false)
+        expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
+          'token-b',
+          getActiveEnvKey()
+        )
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  )
+})
+
+describe('legacy GFS descriptor safety', () => {
+  it('rejects a symbolic-link upload path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-symlink-'))
+    try {
+      const target = join(root, 'target.bin')
+      const link = join(root, 'link.bin')
+      await writeFile(target, 'trusted')
+      await symlink(target, link)
+      await expect(legacyEncodedFile(link)).rejects.toThrow(/symbolic link/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a pathname swap after opening and never reads the replacement path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-swap-'))
+    const selected = join(root, 'selected.bin')
+    const originalMoved = join(root, 'original.bin')
+    const replacement = join(root, 'replacement.bin')
+    await writeFile(selected, 'trusted')
+    await writeFile(replacement, 'replacement')
+    const realOpen = fs.promises.open.bind(fs.promises)
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+      const handle = await realOpen(...args)
+      await rename(selected, originalMoved)
+      await rename(replacement, selected)
+      return handle
+    })
+    try {
+      await expect(legacyEncodedFile(selected)).rejects.toThrow('changed while it was being opened')
+    } finally {
+      openSpy.mockRestore()
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

@@ -34,10 +34,26 @@ vi.mock('../src/config.js', () => ({
     gfscBaseUrl: 'http://gfsc.gfs.svc:8087',
     gfscWriteBaseUrl: 'http://gfsc-writer.gfs.svc:8087',
     gfscProxyTimeoutMs: 300_000,
+    gfsUploadMaxPartBytes: 16 * 1024 * 1024,
     // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
     hostsNamespace: 'mcp-host',
   },
 }))
+vi.mock('../src/middleware/gfsUploadAdmission.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/middleware/gfsUploadAdmission.js')>()
+  return {
+    ...actual,
+    gfsUploadAdmission: (
+      req: { headers: Record<string, unknown>; gfsUploadDeclaredBytes?: number },
+      _res: unknown,
+      next: () => void
+    ) => {
+      const value = Number(req.headers['content-length'])
+      if (Number.isSafeInteger(value) && value > 0) req.gfsUploadDeclaredBytes = value
+      next()
+    },
+  }
+})
 vi.mock('../src/db.js', () => ({
   pool: { query: (...a: unknown[]) => mockQuery(...a) },
   withTransaction: (...a: unknown[]) => mockWithTransaction(...a),
@@ -245,6 +261,94 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     const app = await buildApp()
     const res = await request(app).post('/external/gfs/token').send({})
     expect(res.status).toBe(401)
+  })
+})
+
+describe('indexed upload relay canonical drive', () => {
+  it('rejects a missing or create-body-mismatched drive before minting a writer token', async () => {
+    auth()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+
+    const missing = await request(app)
+      .get('/external/gfs/capabilities')
+      .set('x-user-session-token', 'sess')
+    const mismatched = await request(app)
+      .post('/external/gfs/uploads?drive=archive')
+      .set('x-user-session-token', 'sess')
+      .send({ drive: 'main', operation: 'create' })
+
+    expect(missing.status).toBe(400)
+    expect(missing.body).toEqual({ error: 'drive_required' })
+    expect(mismatched.status).toBe(400)
+    expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('signs and forwards every lifecycle request from one non-main canonical drive', async () => {
+    auth()
+    const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.body && typeof init.body !== 'string') {
+        for await (const _chunk of init.body as unknown as AsyncIterable<Uint8Array>) {
+          /* drain the streaming part */
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, data: { drive: 'archive' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const withAuth = (builder: request.Test) => builder.set('x-user-session-token', 'sess')
+
+    await withAuth(request(app).get('/external/gfs/capabilities?drive=archive')).expect(200)
+    await withAuth(request(app).post('/external/gfs/uploads?drive=archive'))
+      .send({ drive: 'archive', operation: 'create' })
+      .expect(200)
+    await withAuth(request(app).head(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+    await withAuth(
+      request(app).get(`/external/gfs/uploads/${uploadId}/status?drive=archive&limit=256`)
+    ).expect(200)
+    await withAuth(
+      request(app)
+        .put(`/external/gfs/uploads/${uploadId}/parts/0?drive=archive`)
+        .set('content-type', 'application/offset+octet-stream')
+        .set('upload-part-number', '0')
+        .set('upload-offset', '0')
+        .set('upload-chunk-length', '4')
+        .set('upload-checksum', 'sha256 dGVzdA==')
+    )
+      .send(Buffer.from('test'))
+      .expect(200)
+    for (const action of ['pause', 'resume', 'complete']) {
+      await withAuth(request(app).post(`/external/gfs/uploads/${uploadId}/${action}?drive=archive`))
+        .send({})
+        .expect(200)
+    }
+    await withAuth(request(app).delete(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(
+      200
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(9)
+    expect(mockSignGfsToken).toHaveBeenCalledTimes(9)
+    for (const [input] of mockSignGfsToken.mock.calls) {
+      expect(input).toEqual({ subject: U1, drive: 'archive', scopes: ['gfs.write'] })
+    }
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
+      'http://gfsc-writer.gfs.svc:8087/v1/capabilities',
+      'http://gfsc-writer.gfs.svc:8087/v1/uploads',
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}/status?limit=256`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}/parts/0`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}/pause`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}/resume`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}/complete`,
+      `http://gfsc-writer.gfs.svc:8087/v1/uploads/${uploadId}`,
+    ])
   })
 })
 

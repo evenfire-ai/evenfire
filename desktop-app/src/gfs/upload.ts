@@ -44,6 +44,7 @@ export type DesktopUploadJobState =
   | 'initiated'
   | 'uploading'
   | 'paused'
+  | 'suspended_auth'
   | 'finalizing'
   | 'canceling'
   | 'completed'
@@ -133,6 +134,12 @@ export interface DesktopUploadInput {
     session: DesktopUploadSession
   }) => void | Promise<void>
   onClearPersisted?: (uploadId: string) => void | Promise<void>
+  /**
+   * Main-process authentication fence. It is evaluated immediately before
+   * every network operation so a queued part can never reuse a token after
+   * logout, team switch, or environment switch advanced the owning epoch.
+   */
+  assertAuthEpoch?: () => void
   /** Main-process-only source fence; never crosses the renderer boundary. */
   sourceIdentity?: DesktopUploadSourceIdentity
   advertisedConcurrency?: number
@@ -153,6 +160,22 @@ function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${path}`
 }
 
+function canonicalDrive(value: string): string {
+  const drive = String(value || '').trim()
+  if (!drive) throw new Error('drive_required: resumable uploads require a canonical drive')
+  return drive
+}
+
+function uploadPath(driveValue: string, path: string, query?: URLSearchParams): string {
+  const params = query ? new URLSearchParams(query) : new URLSearchParams()
+  params.set('drive', canonicalDrive(driveValue))
+  return `${path}?${params.toString()}`
+}
+
+function assertAuthEpoch(input: DesktopUploadInput): void {
+  input.assertAuthEpoch?.()
+}
+
 function unwrap<T>(value: unknown): T {
   const envelope = value as Envelope<T> | undefined
   if (!envelope || envelope.ok !== true || envelope.data === undefined) {
@@ -170,6 +193,7 @@ function retryable(status: number): boolean {
 function retryableError(error: unknown): boolean {
   if (error instanceof Error && error.name === 'AbortError') return false
   if (error instanceof Error && error.message.startsWith('source_changed:')) return false
+  if (error instanceof Error && error.message.startsWith('stale_auth_epoch:')) return false
   const status =
     error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
       ? Number((error as { status: number }).status)
@@ -277,6 +301,7 @@ async function putPart(
 ): Promise<void> {
   let attempt = 0
   for (;;) {
+    assertAuthEpoch(input)
     await assertSourceIdentity(input)
     const checksum = await checksumPart(input.filePath, start, start + length - 1)
     await assertSourceIdentity(input)
@@ -287,10 +312,14 @@ async function putPart(
     })
     let response: UploadPartResponse
     try {
+      assertAuthEpoch(input)
       response = await input.transport.requestPart(
         joinUrl(
           input.baseUrl,
-          `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/parts/${partNumber}`
+          uploadPath(
+            input.drive,
+            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/parts/${partNumber}`
+          )
         ),
         input.token,
         {
@@ -306,6 +335,7 @@ async function putPart(
         signal
       )
     } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error
       if (!retryableError(error) || attempt >= 2) throw error
       onRetryableFailure?.()
       await sleep(250 * 2 ** attempt)
@@ -407,7 +437,12 @@ async function runParts(
           input.onProgress?.(completedBytes, session.expectedBytes)
         } catch (error) {
           if (shouldPause()) return
-          if (error instanceof Error && error.name === 'AbortError') throw error
+          if (
+            signal?.aborted ||
+            (error instanceof Error &&
+              (error.name === 'AbortError' || error.message.startsWith('stale_auth_epoch:')))
+          )
+            throw error
           failed.set(part.partNumber, error)
           if (retryableError(error)) retryableFailed.add(part.partNumber)
         }
@@ -433,12 +468,15 @@ function uploadPartError(status: number, text: string): Error & { status: number
 
 export class DesktopGfsUploadJob {
   private readonly abortController = new AbortController()
+  private readonly authBoundaryController = new AbortController()
+  private readonly controlOperations = new Set<Promise<unknown>>()
   private session: DesktopUploadSession | null = null
   private state: DesktopUploadJobState = 'initiated'
   private uploadedBytes = 0
   private totalBytes = 0
   private pauseRequested = false
   private canceled = false
+  private suspendedForAuth = false
   private runPromise: Promise<DesktopUploadSession> | null = null
 
   constructor(private readonly input: DesktopUploadInput) {}
@@ -464,22 +502,48 @@ export class DesktopGfsUploadJob {
 
   /** Resolve once the server has created or resumed the session, before parts finish. */
   async waitForSession(): Promise<DesktopUploadSession> {
-    return this.ensureSession()
+    if (this.session) return this.session
+    const run = this.runPromise ?? this.start()
+    for (;;) {
+      if (this.session) return this.session
+      const outcome = await Promise.race([
+        run.then(
+          session => ({ done: true as const, session }),
+          error => Promise.reject(error)
+        ),
+        new Promise<{ done: false }>(resolve => setTimeout(() => resolve({ done: false }), 10)),
+      ])
+      if (outcome.done) return outcome.session
+    }
   }
 
-  async pause(): Promise<DesktopUploadSession> {
+  pause(): Promise<DesktopUploadSession> {
+    return this.trackControlOperation(this.pauseOperation())
+  }
+
+  private async pauseOperation(): Promise<DesktopUploadSession> {
+    this.assertAuthEpoch()
     const session = await this.ensureSession()
     if (['completed', 'aborted', 'failed'].includes(session.state))
       throw new Error(`cannot pause upload in ${session.state}`)
     this.pauseRequested = true
+    this.assertAuthEpoch()
     const paused = unwrap<DesktopUploadSession>(
       await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
         'POST',
         joinUrl(
           this.input.baseUrl,
-          `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/pause`
+          uploadPath(
+            this.input.drive,
+            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/pause`
+          )
         ),
-        { token: this.input.token, body: {}, timeoutMs: UPLOAD_TIMEOUT_MS }
+        {
+          token: this.input.token,
+          body: {},
+          timeoutMs: UPLOAD_TIMEOUT_MS,
+          signal: this.authBoundaryController.signal,
+        }
       )
     )
     this.session = paused
@@ -488,23 +552,32 @@ export class DesktopGfsUploadJob {
     return paused
   }
 
-  async resume(): Promise<DesktopUploadSession> {
+  resume(): Promise<DesktopUploadSession> {
+    return this.trackControlOperation(this.resumeOperation())
+  }
+
+  private async resumeOperation(): Promise<DesktopUploadSession> {
+    this.assertAuthEpoch()
     const session = await this.ensureSession()
     if (session.state === 'completed') return session
     if (session.state !== 'paused') return this.start()
     this.pauseRequested = false
+    this.assertAuthEpoch()
     const resumed = unwrap<DesktopUploadSession>(
       await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
         'POST',
         joinUrl(
           this.input.baseUrl,
-          `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/resume`
+          uploadPath(
+            this.input.drive,
+            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/resume`
+          )
         ),
         {
           token: this.input.token,
           body: {},
           timeoutMs: UPLOAD_TIMEOUT_MS,
-          signal: this.abortController.signal,
+          signal: this.authBoundaryController.signal,
         }
       )
     )
@@ -514,7 +587,12 @@ export class DesktopGfsUploadJob {
     return this.start()
   }
 
-  async cancel(): Promise<void> {
+  cancel(): Promise<void> {
+    return this.trackControlOperation(this.cancelOperation())
+  }
+
+  private async cancelOperation(): Promise<void> {
+    this.assertAuthEpoch()
     this.canceled = true
     this.pauseRequested = false
     this.state = 'canceling'
@@ -523,15 +601,20 @@ export class DesktopGfsUploadJob {
     const session = this.session
     if (session && !['completed', 'aborted'].includes(session.state)) {
       try {
+        this.assertAuthEpoch()
         await this.input.transport.requestJson(
           'DELETE',
           joinUrl(
             this.input.baseUrl,
-            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}`
+            uploadPath(
+              this.input.drive,
+              `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}`
+            )
           ),
           {
             token: this.input.token,
             timeoutMs: UPLOAD_TIMEOUT_MS,
+            signal: this.authBoundaryController.signal,
           }
         )
       } catch (error) {
@@ -542,14 +625,23 @@ export class DesktopGfsUploadJob {
             ? Number((error as { status: number }).status)
             : undefined
         if (status === 409) {
+          this.assertAuthEpoch()
           const observed = unwrap<DesktopUploadStatus>(
             await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
               'GET',
               joinUrl(
                 this.input.baseUrl,
-                `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/status?limit=256`
+                uploadPath(
+                  this.input.drive,
+                  `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/status`,
+                  new URLSearchParams({ limit: '256' })
+                )
               ),
-              { token: this.input.token, timeoutMs: UPLOAD_TIMEOUT_MS }
+              {
+                token: this.input.token,
+                timeoutMs: UPLOAD_TIMEOUT_MS,
+                signal: this.authBoundaryController.signal,
+              }
             )
           )
           this.session = observed.session
@@ -574,8 +666,49 @@ export class DesktopGfsUploadJob {
     if (session) await this.input.onClearPersisted?.(session.uploadId)
   }
 
+  private trackControlOperation<T>(operation: Promise<T>): Promise<T> {
+    const tracked = operation.finally(() => {
+      this.controlOperations.delete(tracked)
+    })
+    this.controlOperations.add(tracked)
+    return tracked
+  }
+
+  /**
+   * Authentication teardown is intentionally not a server-side cancel. The
+   * local request is aborted, the bounded job settles, and its scoped record
+   * remains inert for an explicit same-owner resume with a new token/epoch.
+   */
+  async suspendForAuth(): Promise<void> {
+    if (this.state === 'suspended_auth') return
+    if (
+      ['completed', 'aborted', 'failed'].includes(this.state) &&
+      this.controlOperations.size === 0
+    )
+      return
+    this.suspendedForAuth = true
+    this.pauseRequested = false
+    this.state = 'suspended_auth'
+    this.emit()
+    const reason = new Error('GFS upload suspended by authentication fence')
+    this.authBoundaryController.abort(reason)
+    this.abortController.abort(reason)
+    await Promise.all([
+      this.runPromise?.catch(() => undefined),
+      ...[...this.controlOperations].map(operation => operation.catch(() => undefined)),
+    ])
+    this.state = 'suspended_auth'
+    this.emit()
+  }
+
   private emit(): void {
     this.input.onState?.(this.snapshot())
+  }
+
+  private assertAuthEpoch(): void {
+    if (this.suspendedForAuth)
+      throw new Error('stale_auth_epoch: GFS upload is suspended pending re-authentication')
+    assertAuthEpoch(this.input)
   }
 
   private async ensureSession(): Promise<DesktopUploadSession> {
@@ -593,6 +726,8 @@ export class DesktopGfsUploadJob {
     committed: Set<number>
     resumable: NonNullable<NonNullable<UploadCapabilities['upload']>['resumableV2']>
   }> {
+    this.assertAuthEpoch()
+    const drive = canonicalDrive(this.input.drive)
     const identity = await sourceIdentity(this.input.filePath)
     const file = await stat(this.input.filePath)
     this.input.sourceIdentity = identity
@@ -601,10 +736,11 @@ export class DesktopGfsUploadJob {
     this.totalBytes = file.size
     let capabilities: UploadCapabilities
     try {
+      this.assertAuthEpoch()
       capabilities = unwrap<UploadCapabilities>(
         await this.input.transport.requestJson<Envelope<UploadCapabilities>>(
           'GET',
-          joinUrl(this.input.baseUrl, '/api/v1/me/gfs/capabilities'),
+          joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
           {
             token: this.input.token,
             timeoutMs: UPLOAD_TIMEOUT_MS,
@@ -628,9 +764,13 @@ export class DesktopGfsUploadJob {
     this.input.fallbackConcurrency = resumable.fallbackConcurrency
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
+      this.assertAuthEpoch()
       await this.input.transport.requestJson<Envelope<undefined>>(
         'HEAD',
-        joinUrl(this.input.baseUrl, `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}`),
+        joinUrl(
+          this.input.baseUrl,
+          uploadPath(drive, `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}`)
+        ),
         {
           token: this.input.token,
           timeoutMs: UPLOAD_TIMEOUT_MS,
@@ -641,13 +781,19 @@ export class DesktopGfsUploadJob {
       let session: DesktopUploadSession | null = null
       const parts: DesktopUploadPart[] = []
       for (let page = 0; page < 8; page += 1) {
-        const query = cursor ? `?limit=256&cursor=${encodeURIComponent(cursor)}` : '?limit=256'
+        this.assertAuthEpoch()
+        const query = new URLSearchParams({ limit: '256' })
+        if (cursor) query.set('cursor', cursor)
         const status = unwrap<DesktopUploadStatus>(
           await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
             'GET',
             joinUrl(
               this.input.baseUrl,
-              `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}/status${query}`
+              uploadPath(
+                drive,
+                `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}/status`,
+                query
+              )
             ),
             {
               token: this.input.token,
@@ -659,7 +805,8 @@ export class DesktopGfsUploadJob {
         session ??= status.session
         if (
           session.uploadId !== status.session.uploadId ||
-          session.expectedBytes !== status.session.expectedBytes
+          session.expectedBytes !== status.session.expectedBytes ||
+          status.session.drive !== drive
         )
           throw new Error('upload status changed during resume')
         parts.push(...status.parts)
@@ -667,7 +814,7 @@ export class DesktopGfsUploadJob {
         cursor = status.nextCursor
         if (page === 7) throw new Error('upload status pagination exceeded the bounded page limit')
       }
-      if (!session || session.expectedBytes !== file.size)
+      if (!session || session.expectedBytes !== file.size || session.drive !== drive)
         throw new Error('selected file size differs from the upload session')
       const committed =
         session.state === 'completed'
@@ -677,15 +824,16 @@ export class DesktopGfsUploadJob {
     }
     const target = this.input.operation === 'create' ? this.input.parentRid : this.input.resourceRid
     if (!target) throw new Error(`${this.input.operation} upload target is required`)
+    this.assertAuthEpoch()
     const created = unwrap<DesktopUploadSession>(
       await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
         'POST',
-        joinUrl(this.input.baseUrl, '/api/v1/me/gfs/uploads'),
+        joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/uploads')),
         {
           token: this.input.token,
           body: {
             operation: this.input.operation,
-            drive: this.input.drive,
+            drive,
             sizeBytes: file.size,
             idempotencyKey: randomUUID(),
             ...(this.input.operation === 'create'
@@ -697,6 +845,7 @@ export class DesktopGfsUploadJob {
         }
       )
     )
+    if (created.drive !== drive) throw new Error('upload_drive_mismatch: writer changed drive')
     if (created.expectedBytes !== file.size)
       throw new Error('GFS upload session size changed before transfer')
     if (created.partBytes < 1 || created.partBytes > GFS_UPLOAD_V2_MAX_PART_BYTES)
@@ -745,14 +894,23 @@ export class DesktopGfsUploadJob {
       )
       if (result.paused || this.pauseRequested) {
         this.state = 'paused'
+        this.assertAuthEpoch()
         const status = unwrap<DesktopUploadStatus>(
           await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
             'GET',
             joinUrl(
               this.input.baseUrl,
-              `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/status?limit=256`
+              uploadPath(
+                this.input.drive,
+                `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
+                new URLSearchParams({ limit: '256' })
+              )
             ),
-            { token: this.input.token, timeoutMs: UPLOAD_TIMEOUT_MS }
+            {
+              token: this.input.token,
+              timeoutMs: UPLOAD_TIMEOUT_MS,
+              signal: this.authBoundaryController.signal,
+            }
           )
         )
         this.session = status.session
@@ -763,6 +921,7 @@ export class DesktopGfsUploadJob {
       if (result.failed.length > 0)
         throw new Error('One or more upload parts could not be committed.')
       await assertSourceIdentity(this.input)
+      this.assertAuthEpoch()
       this.state = 'finalizing'
       this.emit()
       const completed = unwrap<DesktopUploadSession>(
@@ -770,7 +929,10 @@ export class DesktopGfsUploadJob {
           'POST',
           joinUrl(
             this.input.baseUrl,
-            `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`
+            uploadPath(
+              this.input.drive,
+              `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`
+            )
           ),
           {
             token: this.input.token,
@@ -780,6 +942,8 @@ export class DesktopGfsUploadJob {
           }
         )
       )
+      if (completed.drive !== canonicalDrive(this.input.drive))
+        throw new Error('upload_drive_mismatch: completion changed drive')
       this.session = completed
       this.state = 'completed'
       this.uploadedBytes = completed.expectedBytes
@@ -787,6 +951,11 @@ export class DesktopGfsUploadJob {
       await this.input.onClearPersisted?.(completed.uploadId)
       return completed
     } catch (error) {
+      if (this.suspendedForAuth) {
+        this.state = 'suspended_auth'
+        this.emit()
+        throw error
+      }
       if (this.canceled) {
         this.state = 'aborted'
         this.emit()

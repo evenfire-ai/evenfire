@@ -8,7 +8,8 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
     constructor(
       message: string,
       public status: number,
-      public body: unknown
+      public body: unknown,
+      public headers?: Headers
     ) {
       super(message)
     }
@@ -48,6 +49,105 @@ beforeEach(() => {
 })
 
 describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('rejects a missing or create-body-mismatched upload drive at the public edge', async () => {
+    const missing = await request(buildApp())
+      .get('/me/gfs/capabilities')
+      .set('authorization', 'Bearer sess-xyz')
+    const mismatched = await request(buildApp())
+      .post('/me/gfs/uploads?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ drive: 'main', operation: 'create' })
+    expect(missing.status).toBe(400)
+    expect(missing.body).toEqual({ error: 'drive_required' })
+    expect(mismatched.status).toBe(400)
+    expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+  })
+
+  it('preserves one non-main drive and the part stream through every upload lifecycle relay', async () => {
+    const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    let streamedPart = Buffer.alloc(0)
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (method: string, _path: string, options: { body?: unknown }) => {
+        if (method === 'PUT' && options.body && typeof options.body !== 'string') {
+          const chunks: Buffer[] = []
+          for await (const chunk of options.body as AsyncIterable<Buffer>) {
+            chunks.push(Buffer.from(chunk))
+          }
+          streamedPart = Buffer.concat(chunks)
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+    )
+    const app = buildApp()
+    const authed = (builder: request.Test) => builder.set('authorization', 'Bearer sess-xyz')
+
+    await authed(request(app).get('/me/gfs/capabilities?drive=archive')).expect(200)
+    await authed(request(app).post('/me/gfs/uploads?drive=archive'))
+      .send({ drive: 'archive', operation: 'create' })
+      .expect(200)
+    await authed(request(app).head(`/me/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+    await authed(
+      request(app).get(`/me/gfs/uploads/${uploadId}/status?drive=archive&limit=256&cursor=next`)
+    ).expect(200)
+    await authed(
+      request(app)
+        .put(`/me/gfs/uploads/${uploadId}/parts/0?drive=archive`)
+        .set('content-type', 'application/offset+octet-stream')
+        .set('upload-part-number', '0')
+        .set('upload-offset', '0')
+        .set('upload-chunk-length', '4')
+        .set('upload-checksum', 'sha256 dGVzdA==')
+    )
+      .send(Buffer.from('test'))
+      .expect(200)
+    for (const action of ['pause', 'resume', 'complete']) {
+      await authed(request(app).post(`/me/gfs/uploads/${uploadId}/${action}?drive=archive`))
+        .send({})
+        .expect(200)
+    }
+    await authed(request(app).delete(`/me/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+
+    expect(streamedPart.toString()).toBe('test')
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(9)
+    for (const call of clientMock.controlApiStreamRequest.mock.calls) {
+      expect(call[2]).toMatchObject({
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'archive' },
+      })
+    }
+    const partOptions = clientMock.controlApiStreamRequest.mock.calls[4][2]
+    expect(partOptions.extraHeaders).toMatchObject({
+      'content-length': '4',
+      'upload-chunk-length': '4',
+      'x-gfs-upload-source-ip': expect.any(String),
+    })
+  })
+
+  it('propagates the authoritative upload 429 and Retry-After header unchanged', async () => {
+    clientMock.controlApiStreamRequest.mockRejectedValue(
+      new ControlApiError(
+        'rate limited',
+        429,
+        { error: 'gfs_upload_rate_limited', limit: 'principal_bytes', retryAfterSeconds: 7 },
+        new Headers({ 'retry-after': '7' })
+      )
+    )
+    const response = await request(buildApp())
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(response.status).toBe(429)
+    expect(response.headers['retry-after']).toBe('7')
+    expect(response.body).toEqual({
+      error: 'gfs_upload_rate_limited',
+      limit: 'principal_bytes',
+      retryAfterSeconds: 7,
+    })
+  })
+
   it('mints a user gfs token, forwarding the session token to control-api', async () => {
     clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
     const res = await request(buildApp())

@@ -71,6 +71,7 @@ export interface GfsUploadSnapshot {
     | 'initiated'
     | 'uploading'
     | 'paused'
+    | 'suspended_auth'
     | 'finalizing'
     | 'canceling'
     | 'completed'
@@ -269,11 +270,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         throw new Error(
           'GFS upload status polling timed out; the upload can be resumed from the Files page.'
         )
-      const snapshot = await window.clerum.gfs.getUploadSnapshot(uploadId)
+      const snapshot = await window.clerum.gfs.getUploadSnapshot(uploadId, DRIVE)
       if (!snapshot) throw new Error('GFS upload is no longer available in this desktop session')
       setUploadSnapshot(snapshot)
       if (
         snapshot.state === 'paused' ||
+        snapshot.state === 'suspended_auth' ||
         snapshot.state === 'completed' ||
         snapshot.state === 'aborted' ||
         snapshot.state === 'failed'
@@ -342,14 +344,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const pauseUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
     const uploadId = uploadIdRef.current
     if (!uploadId) throw new Error('No active GFS upload')
-    await window.clerum.gfs.pauseUpload(uploadId)
+    await window.clerum.gfs.pauseUpload(uploadId, DRIVE)
     return waitForUpload(uploadId)
   }, [waitForUpload])
 
   const resumeUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
     const uploadId = uploadIdRef.current
     if (!uploadId) throw new Error('No paused GFS upload')
-    await window.clerum.gfs.resumeUpload(uploadId)
+    await window.clerum.gfs.resumeUpload(uploadId, DRIVE)
     const snapshot = await waitForUpload(uploadId)
     if (snapshot.state === 'completed') await refreshGfs()
     return snapshot
@@ -358,7 +360,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const cancelUpload = useCallback(async (): Promise<void> => {
     const uploadId = uploadIdRef.current
     if (!uploadId) return
-    await window.clerum.gfs.cancelUpload(uploadId)
+    await window.clerum.gfs.cancelUpload(uploadId, DRIVE)
     setUploadSnapshot(previous => (previous ? { ...previous, state: 'aborted' } : null))
     uploadIdRef.current = null
   }, [])

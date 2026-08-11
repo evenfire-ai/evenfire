@@ -2,8 +2,10 @@ import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import { createRateLimiter } from '../middleware/rateLimit.js'
 
 /**
  * End-user gfs (Global File System) surface — the user side of the delegation UI
@@ -19,7 +21,9 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
 // them forwardControlApiError falls through to the global handler, which collapses
 // every 5xx to a generic 500 and the documented codes become unobservable at the
 // client (a wedged gfsc looks identical to an internal bug).
-const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
+const PROPAGATED = new Set([
+  400, 401, 403, 404, 409, 410, 411, 412, 413, 422, 429, 500, 502, 503, 504,
+])
 const STREAM_HEADERS = [
   'content-type',
   'content-length',
@@ -42,6 +46,8 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
     const body =
       error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
+    const retryAfter = error.headers?.get('retry-after')
+    if (retryAfter) res.setHeader('Retry-After', retryAfter)
     res.status(error.status).json(body)
     return
   }
@@ -53,16 +59,30 @@ export function createGfsRouter(): Router {
 
   router.use('/me/gfs', requireAuth)
 
+  // Coarse per-process guard for the public Express edge (and a CodeQL-visible
+  // middleware on every new route). The authoritative replica-safe request,
+  // weighted-byte, and active-request budgets are enforced again in
+  // control-api with PostgreSQL before GFSC body forwarding.
+  const uploadEdgeRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: config.gfsUploadRequestPerMinute,
+    errorCode: 'gfs_upload_rate_limited',
+    keyFn: request => {
+      const req = request as AuthedRequest
+      return `${req.auth?.userId || '__no_user__'}:${req.ip || req.socket.remoteAddress || 'unknown'}`
+    },
+  })
+
   // Resumable v2 relay. JSON lifecycle calls remain bounded metadata requests;
   // a part PUT passes the IncomingMessage directly to control-api so neither
   // external-rest-api nor control-api materializes the part in memory.
-  router.get('/me/gfs/capabilities', (req: AuthedRequest, res, next) => {
+  router.get('/me/gfs/capabilities', uploadEdgeRateLimit, (req: AuthedRequest, res, next) => {
     void proxyUploadStream(req, res, next, 'GET', '/external/gfs/capabilities')
   })
-  router.post('/me/gfs/uploads', (req: AuthedRequest, res, next) => {
+  router.post('/me/gfs/uploads', uploadEdgeRateLimit, (req: AuthedRequest, res, next) => {
     void proxyUploadStream(req, res, next, 'POST', '/external/gfs/uploads')
   })
-  router.head('/me/gfs/uploads/:id', (req: AuthedRequest, res, next) => {
+  router.head('/me/gfs/uploads/:id', uploadEdgeRateLimit, (req: AuthedRequest, res, next) => {
     void proxyUploadStream(
       req,
       res,
@@ -71,7 +91,7 @@ export function createGfsRouter(): Router {
       `/external/gfs/uploads/${encodeURIComponent(req.params.id)}`
     )
   })
-  router.get('/me/gfs/uploads/:id/status', (req: AuthedRequest, res, next) => {
+  router.get('/me/gfs/uploads/:id/status', uploadEdgeRateLimit, (req: AuthedRequest, res, next) => {
     void proxyUploadStream(
       req,
       res,
@@ -80,27 +100,35 @@ export function createGfsRouter(): Router {
       `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/status`
     )
   })
-  router.put('/me/gfs/uploads/:id/parts/:part', (req: AuthedRequest, res, next) => {
-    void proxyUploadStream(
-      req,
-      res,
-      next,
-      'PUT',
-      `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/parts/${encodeURIComponent(req.params.part)}`
-    )
-  })
-  for (const action of ['pause', 'resume', 'complete'] as const) {
-    router.post(`/me/gfs/uploads/:id/${action}`, (req: AuthedRequest, res, next) => {
+  router.put(
+    '/me/gfs/uploads/:id/parts/:part',
+    uploadEdgeRateLimit,
+    (req: AuthedRequest, res, next) => {
       void proxyUploadStream(
         req,
         res,
         next,
-        'POST',
-        `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/${action}`
+        'PUT',
+        `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/parts/${encodeURIComponent(req.params.part)}`
       )
-    })
+    }
+  )
+  for (const action of ['pause', 'resume', 'complete'] as const) {
+    router.post(
+      `/me/gfs/uploads/:id/${action}`,
+      uploadEdgeRateLimit,
+      (req: AuthedRequest, res, next) => {
+        void proxyUploadStream(
+          req,
+          res,
+          next,
+          'POST',
+          `/external/gfs/uploads/${encodeURIComponent(req.params.id)}/${action}`
+        )
+      }
+    )
   }
-  router.delete('/me/gfs/uploads/:id', (req: AuthedRequest, res, next) => {
+  router.delete('/me/gfs/uploads/:id', uploadEdgeRateLimit, (req: AuthedRequest, res, next) => {
     void proxyUploadStream(
       req,
       res,
@@ -365,6 +393,21 @@ async function proxyUploadStream(
   path: string
 ): Promise<void> {
   try {
+    const drive = typeof req.query.drive === 'string' ? req.query.drive.trim() : ''
+    if (!drive || drive !== req.query.drive) {
+      res.status(400).json({ error: 'drive_required' })
+      return
+    }
+    if (
+      method === 'POST' &&
+      path === '/external/gfs/uploads' &&
+      (!req.body ||
+        typeof req.body !== 'object' ||
+        (req.body as { drive?: unknown }).drive !== drive)
+    ) {
+      res.status(400).json({ error: 'drive_mismatch' })
+      return
+    }
     const extraHeaders: Record<string, string> = {}
     for (const name of [
       'content-type',
@@ -377,6 +420,29 @@ async function proxyUploadStream(
       if (typeof value === 'string') extraHeaders[name] = value
     }
     const isPart = method === 'PUT' && /\/parts\/[0-9]+$/.test(path)
+    if (isPart) {
+      const contentLength = String(req.headers['content-length'] || '')
+      const chunkLength = String(req.headers['upload-chunk-length'] || '')
+      if (!/^[0-9]+$/.test(contentLength) || !/^[0-9]+$/.test(chunkLength)) {
+        res.status(411).json({ error: 'upload_content_length_required' })
+        return
+      }
+      const declaredBytes = Number(contentLength)
+      if (
+        !Number.isSafeInteger(declaredBytes) ||
+        declaredBytes < 1 ||
+        declaredBytes > config.gfsUploadMaxPartBytes
+      ) {
+        res.status(413).json({ error: 'payload_too_large' })
+        return
+      }
+      if (Number(chunkLength) !== declaredBytes) {
+        res.status(400).json({ error: 'upload_length_mismatch' })
+        return
+      }
+      extraHeaders['content-length'] = contentLength
+    }
+    extraHeaders['x-gfs-upload-source-ip'] = req.ip || req.socket.remoteAddress || 'unknown'
     const body =
       method === 'GET' || method === 'HEAD'
         ? undefined
@@ -389,7 +455,7 @@ async function proxyUploadStream(
       // these query parameters makes every resume request fetch page one and
       // can silently truncate a session with more than 256 parts.
       query: {
-        drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+        drive,
         limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
         cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
       },

@@ -14,6 +14,8 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
+  gfsUploadRequestPerMinute: number
+  gfsUploadMaxPartBytes: number
 }
 
 function required(name: string): string {
@@ -39,6 +41,12 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${name} must be a positive integer`)
   }
+  return value
+}
+
+function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value > maxValue) throw new Error(`${name} must be an integer between 1 and ${maxValue}`)
   return value
 }
 
@@ -126,6 +134,17 @@ export const config: Config = {
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||
     'https://github.com/evenfire-ai/evenfire/releases'
   ).replace(/\/+$/, ''),
+  // Coarse per-instance edge guard. The replica-safe principal/IP request and
+  // weighted-byte budgets live in control-api's PostgreSQL admission layer.
+  gfsUploadRequestPerMinute: positiveIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_UPLOAD_REQUESTS_PER_MINUTE',
+    120
+  ),
+  gfsUploadMaxPartBytes: boundedIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_UPLOAD_MAX_PART_BYTES',
+    16 * 1024 * 1024,
+    16 * 1024 * 1024
+  ),
 }
 
 if (process.env.NODE_ENV === 'production' && config.corsOrigin === '*') {

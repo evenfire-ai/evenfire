@@ -14,6 +14,11 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import {
+  type GfsUploadAdmissionRequest,
+  createObservedGfsUploadPartBody,
+  gfsUploadAdmission,
+} from '../../middleware/gfsUploadAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import { getUserAgents } from '../../services/directory/index.js'
@@ -39,6 +44,38 @@ const ACCESSIBLE_RESOURCE_DEFAULT_LIMIT = 100
 
 type ExternalGfsRequest = ExternalAuthedRequest & {
   gfsSubjectKeys?: string[]
+}
+
+type ExternalGfsUploadRequest = GfsUploadAdmissionRequest & {
+  gfsUploadDrive?: string
+}
+
+function requireCanonicalUploadDrive(
+  req: ExternalGfsUploadRequest,
+  res: import('express').Response,
+  next: NextFunction
+): void {
+  const rawDrive = typeof req.query.drive === 'string' ? req.query.drive : ''
+  const drive = rawDrive.trim()
+  if (!drive || drive !== rawDrive) {
+    res.status(400).json({ error: 'drive_required' })
+    return
+  }
+  if (req.method === 'POST' && req.path === '/external/gfs/uploads') {
+    const bodyDrive = (req.body as { drive?: unknown } | undefined)?.drive
+    if (bodyDrive !== drive) {
+      res.status(400).json({ error: 'drive_mismatch' })
+      return
+    }
+  }
+  req.gfsUploadDrive = drive
+  next()
+}
+
+function canonicalUploadDrive(req: ExternalGfsUploadRequest): string {
+  const drive = req.gfsUploadDrive
+  if (!drive) throw new Error('canonical upload drive middleware was not applied')
+  return drive
 }
 
 function ridOf(resourceId: string): string {
@@ -222,19 +259,25 @@ export function createExternalGfsRouter(): Router {
   // writer-scoped token and never fall back to the legacy JSON/base64 path.
   router.get(
     '/external/gfs/capabilities',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
-      await proxyUploadToGfsc(req, res, driveOf(req.query.drive), 'GET', '/v1/capabilities')
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
+      await proxyUploadToGfsc(req, res, canonicalUploadDrive(req), 'GET', '/v1/capabilities')
     })
   )
   router.post(
     '/external/gfs/uploads',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
-      await proxyUploadToGfsc(req, res, driveOf(req.query.drive), 'POST', '/v1/uploads')
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
+      await proxyUploadToGfsc(req, res, canonicalUploadDrive(req), 'POST', '/v1/uploads')
     })
   )
   router.head(
     '/external/gfs/uploads/:id',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
       if (!UUID_RE.test(String(req.params.id))) {
         res.status(400).json({ error: 'resource_invalid' })
         return
@@ -242,7 +285,7 @@ export function createExternalGfsRouter(): Router {
       await proxyUploadToGfsc(
         req,
         res,
-        driveOf(req.query.drive),
+        canonicalUploadDrive(req),
         'HEAD',
         `/v1/uploads/${encodeURIComponent(req.params.id)}`
       )
@@ -250,7 +293,9 @@ export function createExternalGfsRouter(): Router {
   )
   router.get(
     '/external/gfs/uploads/:id/status',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
       if (!UUID_RE.test(String(req.params.id))) {
         res.status(400).json({ error: 'resource_invalid' })
         return
@@ -258,7 +303,7 @@ export function createExternalGfsRouter(): Router {
       await proxyUploadToGfsc(
         req,
         res,
-        driveOf(req.query.drive),
+        canonicalUploadDrive(req),
         'GET',
         `/v1/uploads/${encodeURIComponent(req.params.id)}/status`,
         {
@@ -270,7 +315,9 @@ export function createExternalGfsRouter(): Router {
   )
   router.put(
     '/external/gfs/uploads/:id/parts/:part',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
       const id = String(req.params.id)
       const part = String(req.params.part)
       if (!UUID_RE.test(id) || !/^[0-9]+$/.test(part)) {
@@ -280,7 +327,7 @@ export function createExternalGfsRouter(): Router {
       await proxyUploadToGfsc(
         req,
         res,
-        driveOf(req.query.drive),
+        canonicalUploadDrive(req),
         'PUT',
         `/v1/uploads/${encodeURIComponent(id)}/parts/${part}`
       )
@@ -289,7 +336,9 @@ export function createExternalGfsRouter(): Router {
   for (const action of ['pause', 'resume', 'complete'] as const) {
     router.post(
       `/external/gfs/uploads/:id/${action}`,
-      asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      requireCanonicalUploadDrive,
+      gfsUploadAdmission,
+      asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
         if (!UUID_RE.test(String(req.params.id))) {
           res.status(400).json({ error: 'resource_invalid' })
           return
@@ -297,7 +346,7 @@ export function createExternalGfsRouter(): Router {
         await proxyUploadToGfsc(
           req,
           res,
-          driveOf(req.query.drive),
+          canonicalUploadDrive(req),
           'POST',
           `/v1/uploads/${encodeURIComponent(req.params.id)}/${action}`
         )
@@ -306,7 +355,9 @@ export function createExternalGfsRouter(): Router {
   }
   router.delete(
     '/external/gfs/uploads/:id',
-    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+    requireCanonicalUploadDrive,
+    gfsUploadAdmission,
+    asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
       if (!UUID_RE.test(String(req.params.id))) {
         res.status(400).json({ error: 'resource_invalid' })
         return
@@ -314,7 +365,7 @@ export function createExternalGfsRouter(): Router {
       await proxyUploadToGfsc(
         req,
         res,
-        driveOf(req.query.drive),
+        canonicalUploadDrive(req),
         'DELETE',
         `/v1/uploads/${encodeURIComponent(req.params.id)}`
       )
@@ -780,7 +831,7 @@ async function proxyMutationToGfsc(
 }
 
 async function proxyUploadToGfsc(
-  req: ExternalAuthedRequest,
+  req: ExternalGfsUploadRequest,
   res: import('express').Response,
   drive: string,
   method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE',
@@ -807,11 +858,33 @@ async function proxyUploadToGfsc(
       const value = req.headers[name]
       if (typeof value === 'string') headers[name] = value
     }
+    headers['content-length'] = String(req.gfsUploadDeclaredBytes)
   } else if (method !== 'GET' && method !== 'HEAD') {
     headers['content-type'] = 'application/json'
   }
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), Math.max(config.gfscProxyTimeoutMs, 600_000))
+  let timedOut = false
+  const timer = setTimeout(
+    () => {
+      timedOut = true
+      controller.abort()
+    },
+    Math.max(config.gfscProxyTimeoutMs, 600_000)
+  )
+  let clientAborted = false
+  const abortForClientDisconnect = (): void => {
+    clientAborted = true
+    controller.abort()
+  }
+  req.once('aborted', abortForClientDisconnect)
+
+  const declaredBytes = req.gfsUploadDeclaredBytes
+  if (rawPart && (!Number.isSafeInteger(declaredBytes) || !declaredBytes)) {
+    throw new Error('upload admission did not provide a declared byte count')
+  }
+  const observedPart = rawPart
+    ? createObservedGfsUploadPartBody(req, declaredBytes as number, config.gfsUploadMaxPartBytes)
+    : null
   const init: RequestInit & { duplex?: 'half' } = {
     method,
     headers,
@@ -819,7 +892,7 @@ async function proxyUploadToGfsc(
       method === 'GET' || method === 'HEAD'
         ? undefined
         : rawPart
-          ? (req as unknown as BodyInit)
+          ? (observedPart!.body as unknown as BodyInit)
           : JSON.stringify(req.body ?? {}),
     signal: controller.signal,
   }
@@ -828,7 +901,12 @@ async function proxyUploadToGfsc(
   try {
     upstream = await fetch(target, init)
   } catch (error) {
-    const timedOut = controller.signal.aborted
+    const validationError = observedPart?.validationError()
+    if (validationError) {
+      res.status(validationError.status).json({ error: validationError.code })
+      return
+    }
+    if (clientAborted) return
     rootLogger.error(
       { err: error, gfscPath, method },
       timedOut ? 'gfs external upload proxy timed out' : 'gfs external upload proxy failed'
@@ -837,6 +915,7 @@ async function proxyUploadToGfsc(
     return
   } finally {
     clearTimeout(timer)
+    req.off('aborted', abortForClientDisconnect)
   }
   if (upstream.status >= 400) {
     const body = await upstream.text()
@@ -867,6 +946,9 @@ async function proxyUploadToGfsc(
     'upload-part-offset',
     'upload-part-length',
     'upload-checksum',
+    'retry-after',
+    'x-ratelimit-limit',
+    'x-ratelimit-remaining',
   ]) {
     const value = upstream.headers.get(name)
     if (value) res.setHeader(name, value)

@@ -16,7 +16,6 @@ import {
   type GfsUploadJobSnapshot,
   assertGfsFileUploadSize,
   createGfsUploadJob,
-  uploadGfsFile,
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'

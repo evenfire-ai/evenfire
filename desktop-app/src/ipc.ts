@@ -500,27 +500,51 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
-  ipcMain.handle('gfs:getUploadSnapshot', async (event, payload: { uploadId: string }) => {
+  ipcMain.handle(
+    'gfs:getUploadSnapshot',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.getGfsUploadSnapshot(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
     assertTrustedSender(event)
-    return service.getGfsUploadSnapshot(sanitizeString(payload?.uploadId))
+    return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
   })
-  ipcMain.handle('gfs:listUploadSessions', async event => {
-    assertTrustedSender(event)
-    return service.listGfsUploadSessions()
-  })
-  ipcMain.handle('gfs:pauseUpload', async (event, payload: { uploadId: string }) => {
-    assertTrustedSender(event)
-    return service.pauseGfsUpload(sanitizeString(payload?.uploadId))
-  })
-  ipcMain.handle('gfs:resumeUpload', async (event, payload: { uploadId: string }) => {
-    assertTrustedSender(event)
-    return service.resumeGfsUpload(sanitizeString(payload?.uploadId))
-  })
-  ipcMain.handle('gfs:cancelUpload', async (event, payload: { uploadId: string }) => {
-    assertTrustedSender(event)
-    await service.cancelGfsUpload(sanitizeString(payload?.uploadId))
-    return { ok: true }
-  })
+  ipcMain.handle(
+    'gfs:pauseUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.pauseGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:resumeUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.resumeGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:cancelUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      await service.cancelGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+      return { ok: true }
+    }
+  )
   ipcMain.handle(
     'gfs:replaceFile',
     async (

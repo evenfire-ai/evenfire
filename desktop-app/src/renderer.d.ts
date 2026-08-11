@@ -246,11 +246,15 @@ declare global {
           partBytes: number
           partCount: number
         }>
-        getUploadSnapshot: (uploadId: string) => Promise<{
+        getUploadSnapshot: (
+          uploadId: string,
+          drive?: string
+        ) => Promise<{
           state:
             | 'initiated'
             | 'uploading'
             | 'paused'
+            | 'suspended_auth'
             | 'finalizing'
             | 'canceling'
             | 'completed'
@@ -267,12 +271,14 @@ declare global {
           uploadedBytes: number
           totalBytes: number
         } | null>
-        listUploadSessions: () => Promise<
+        listUploadSessions: (drive?: string) => Promise<
           Array<{
             uploadId: string
             fileName: string
             fileSize: number
             name: string
+            drive: string
+            status: 'active' | 'paused' | 'failed' | 'suspended_auth'
             target: {
               operation: 'create' | 'replace'
               parentRid?: string
@@ -281,9 +287,9 @@ declare global {
             }
           }>
         >
-        pauseUpload: (uploadId: string) => Promise<unknown>
-        resumeUpload: (uploadId: string) => Promise<unknown>
-        cancelUpload: (uploadId: string) => Promise<{ ok: true }>
+        pauseUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        resumeUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        cancelUpload: (uploadId: string, drive?: string) => Promise<{ ok: true }>
         replaceFile: (
           resourceId: string,
           encodedData: string,
