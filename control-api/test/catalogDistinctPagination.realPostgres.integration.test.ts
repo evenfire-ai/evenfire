@@ -52,6 +52,23 @@ function transaction(pool: Pool) {
   }
 }
 
+type ExplainNode = Record<string, unknown> & { Plans?: ExplainNode[] }
+
+function explainNodes(root: ExplainNode): ExplainNode[] {
+  const values: ExplainNode[] = []
+  const pending = [root]
+  while (pending.length > 0) {
+    const node = pending.pop()!
+    values.push(node)
+    pending.push(...(node.Plans ?? []))
+  }
+  return values
+}
+
+function actualWork(node: ExplainNode): number {
+  return Number(node['Actual Rows'] ?? 0) * Math.max(1, Number(node['Actual Loops'] ?? 1))
+}
+
 describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () => {
   const database = `control_api_catalog_distinct_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -299,11 +316,20 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       )
       expect(page.candidates.map(candidate => candidate.key[2])).toEqual([
         `${config.hostsNamespace}/a`,
-        `${config.hostsNamespace}/b`,
-        `${config.hostsNamespace}/c`,
       ])
       expect(page.hasMore).toBe(true)
       expect(page.continuation.exhausted).toBe(false)
+      const next = await requireCatalogProducer('host').listCanonicalKeys(
+        context,
+        { afterKey: page.candidates[0].key, exhausted: false },
+        2
+      )
+      expect(next.candidates.map(candidate => candidate.key[2])).toEqual([
+        `${config.hostsNamespace}/b`,
+        `${config.hostsNamespace}/c`,
+      ])
+      expect(next.hasMore).toBe(false)
+      expect(next.continuation.exhausted).toBe(true)
     } finally {
       budget.close()
     }
@@ -569,5 +595,72 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
         minimumPathsForFirst: 3,
       })
     }
+  }, 30_000)
+
+  it('keeps sparse GFS access subject-indexed instead of scanning unrelated resources', async () => {
+    const actor = await principal('sparse-gfs', 1)
+    const authorizedResourceId = 'f0000000-0000-4000-8000-000000000001'
+    const authorizedDrive = 'sparse-gfs-authorized'
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       SELECT ('01000000-0000-4000-8000-' || LPAD(value::text, 12, '0'))::uuid,
+              'sparse-unrelated-' || value, '/', 'directory'
+         FROM generate_series(1, 2000) value`
+    )
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, $2, '/', 'directory')`,
+      [authorizedResourceId, authorizedDrive]
+    )
+    for (const table of ['gfs_grants', 'gfs_shares'] as const) {
+      await databasePool.query(
+        `INSERT INTO ${table}(drive, resource_id, subject_type, subject_id, permissions)
+         SELECT drive, resource_id, 'user', 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+                ARRAY['read']::text[]
+           FROM gfs_resources
+          WHERE drive LIKE 'sparse-unrelated-%'`
+      )
+    }
+    for (const table of ['gfs_grants', 'gfs_shares'] as const) {
+      await databasePool.query(
+        `INSERT INTO ${table}(drive, resource_id, subject_type, subject_id, permissions)
+         VALUES ($1, $2, 'user', $3, ARRAY['read']::text[]),
+                ($1, $2, 'team', $4, ARRAY['read']::text[])`,
+        [authorizedDrive, authorizedResourceId, actor.userId, actor.teamIds[0]]
+      )
+    }
+    await databasePool.query('ANALYZE gfs_resources')
+    await databasePool.query('ANALYZE gfs_grants')
+    await databasePool.query('ANALYZE gfs_shares')
+
+    const explained = await databasePool.query(
+      `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${CATALOG_KEY_SQL.gfs_resource}`,
+      [actor.userId, '', environmentId, 3, config.hostsNamespace, config.contextsNamespace, '']
+    )
+    const envelope = (explained.rows[0] as Record<string, unknown>)['QUERY PLAN'] as Array<{
+      Plan: ExplainNode
+    }>
+    const nodes = explainNodes(envelope[0].Plan)
+    const indexNames = new Set(
+      nodes.flatMap(node => (typeof node['Index Name'] === 'string' ? [node['Index Name']] : []))
+    )
+    expect(indexNames).toContain('gfs_grants_subject_resource_catalog_idx')
+    expect(indexNames).toContain('gfs_shares_subject_resource_catalog_idx')
+    const resourceWork = nodes
+      .filter(node => node['Relation Name'] === 'gfs_resources')
+      .reduce((total, node) => total + actualWork(node), 0)
+    expect(resourceWork).toBeLessThanOrEqual(16)
+    for (const node of nodes) {
+      expect(String(node['Sort Method'] ?? '')).not.toContain('external')
+      expect(Number(node['Temp Read Blocks'] ?? 0)).toBe(0)
+      expect(Number(node['Temp Written Blocks'] ?? 0)).toBe(0)
+    }
+
+    await consumeFamily({
+      family: 'gfs_resource',
+      userId: actor.userId,
+      expected: [authorizedResourceId],
+      minimumPathsForFirst: 4,
+    })
   }, 30_000)
 })

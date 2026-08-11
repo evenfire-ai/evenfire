@@ -70,7 +70,10 @@ describe('catalog producer registry', () => {
       const sql = CATALOG_KEY_SQL[family]
       expect(sql).not.toMatch(/\bOFFSET\b/i)
       expect(sql.match(/AS MATERIALIZED/g)).toHaveLength(expectedArmCounts[family])
-      expect(sql.match(/LIMIT \$4/g)).toHaveLength(expectedArmCounts[family] + 1)
+      const perMembershipBounds = family === 'gfs_resource' ? 2 : 0
+      expect(sql.match(/LIMIT \$4/g)).toHaveLength(
+        expectedArmCounts[family] + perMembershipBounds + 1
+      )
     }
   })
 })
@@ -79,8 +82,14 @@ describe('catalog producer protocol', () => {
   it('returns a stable keyset page with one bounded lookahead candidate', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
-        { logical_id: '20000000-0000-4000-8000-000000000002' },
-        { logical_id: '30000000-0000-4000-8000-000000000003' },
+        {
+          logical_id: '20000000-0000-4000-8000-000000000002',
+          source_saturated: false,
+        },
+        {
+          logical_id: '30000000-0000-4000-8000-000000000003',
+          source_saturated: false,
+        },
       ],
       rowCount: 2,
     })
