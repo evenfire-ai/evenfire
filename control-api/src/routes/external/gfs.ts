@@ -13,6 +13,7 @@ import {
   type ExternalGfsAuthority,
   type RequestWithExternalGfsAuthority,
   attachExternalGfsAuthority,
+  attachExternalGfsUserLifecycle,
 } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
 import { DbResolveStore } from '../../gfs/resolve.js'
@@ -361,6 +362,7 @@ export function createExternalGfsRouter(): Router {
   router.post(
     '/external/gfs/token',
     externalGfsTokenRouteRateLimit,
+    asyncHandler(attachExternalGfsUserLifecycle),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const claims = req.externalAuth!
       const body = (req.body ?? {}) as { drive?: unknown; scopes?: unknown }

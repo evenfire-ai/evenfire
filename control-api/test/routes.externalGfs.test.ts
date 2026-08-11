@@ -19,6 +19,7 @@ const mockQuery = vi.hoisted(() => vi.fn())
 const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
 const mockWithTransaction = vi.hoisted(() => vi.fn())
 const mockResolveActiveLink = vi.hoisted(() => vi.fn())
+const mockIsDesktopUserActive = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
@@ -49,6 +50,7 @@ vi.mock('../src/config.js', () => ({
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
   gfsDesktopOperatorLinkService: {
     resolveActiveLink: (...a: unknown[]) => mockResolveActiveLink(...a),
+    isDesktopUserActive: (...a: unknown[]) => mockIsDesktopUserActive(...a),
   },
   GfsDesktopOperatorLinkError: class GfsDesktopOperatorLinkError extends Error {
     constructor(
@@ -152,7 +154,9 @@ beforeEach(() => {
   mockAppendPermissionEvents.mockReset()
   mockWithTransaction.mockReset()
   mockResolveActiveLink.mockReset()
+  mockIsDesktopUserActive.mockReset()
   mockResolveActiveLink.mockResolvedValue(null)
+  mockIsDesktopUserActive.mockResolvedValue(true)
   mockWithTransaction.mockImplementation(
     async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
       work({ query: mockQuery })
@@ -355,6 +359,21 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       pathBindings: [],
       principalType: 'user',
     })
+  })
+
+  it('denies token minting for a retired Desktop user before signing a user-plane token', async () => {
+    auth()
+    mockIsDesktopUserActive.mockResolvedValue(false)
+    const app = await buildApp()
+
+    const res = await request(app)
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'sess')
+      .send({})
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'desktop_user_retired' })
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
   })
 
   it('defaults to gfs.read when no scopes requested', async () => {

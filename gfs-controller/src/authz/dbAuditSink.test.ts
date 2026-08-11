@@ -104,6 +104,18 @@ describe("DbAuditSink", () => {
     ]);
   });
 
+  it("rejects a non-UUID Desktop actor before reaching the UUID audit cast", async () => {
+    const db = new AuditDb();
+    await expect(
+      new DbAuditSink(db).record({
+        ...directDecision,
+        desktopUserId: "host:1st:mcp-host/invalid",
+        authoritySource: "user-session",
+      })
+    ).rejects.toThrow("desktop_user_id must be a UUID");
+    expect(db.text).toBe("");
+  });
+
   it("persists cache attribution and includes it in the deterministic hash", async () => {
     const first = new AuditDb();
     const repeated = new AuditDb();

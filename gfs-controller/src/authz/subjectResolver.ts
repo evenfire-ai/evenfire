@@ -38,6 +38,7 @@ const K8S_NAME = "[a-z0-9](?:[-a-z0-9]*[a-z0-9])?";
 
 /** A host principal's `sub` is already the canonical subject key. */
 const HOST_SUB = new RegExp(`^host:(1st|3rd):${K8S_NAME}\\/${K8S_NAME}$`);
+const UUID_SUB = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** True iff `adminId` is an active cluster operator (`control_admin_users`). */
 async function isOperatorId(db: SubjectsDb, adminId: string): Promise<boolean> {
@@ -64,19 +65,27 @@ export async function resolveAuthzContext(
   requestId?: string
 ): Promise<AuthzContext> {
   const sub = claims.sub;
+  // PostgreSQL UUIDs are canonicalized to lowercase. Keep non-UUID host
+  // principals byte-for-byte stable, while making signed UUID subjects
+  // independent of hex casing across verify and authorization resolution.
+  const canonicalSub = UUID_SUB.test(sub) ? sub.toLowerCase() : sub;
 
   if (claims.brokeredAuthority) {
     const brokered = claims.brokeredAuthority;
-    if (brokered.controlAdminId !== sub || !(await isOperatorId(db, brokered.controlAdminId))) {
+    const canonicalBrokeredAdminId = brokered.controlAdminId.toLowerCase();
+    const canonicalDesktopUserId = UUID_SUB.test(brokered.desktopUserId)
+      ? brokered.desktopUserId.toLowerCase()
+      : brokered.desktopUserId;
+    if (canonicalBrokeredAdminId !== canonicalSub || !(await isOperatorId(db, canonicalBrokeredAdminId))) {
       throw new Error("linked admin is not active");
     }
     return {
       drive: claims.drive,
       subjects: ["operator:"],
       isOperator: true,
-      primarySubject: sub,
-      effectiveControlAdminId: brokered.controlAdminId,
-      desktopUserId: brokered.desktopUserId,
+      primarySubject: canonicalSub,
+      effectiveControlAdminId: canonicalBrokeredAdminId,
+      desktopUserId: canonicalDesktopUserId,
       authoritySource: "linked-admin",
       requestId,
     };
@@ -90,15 +99,20 @@ export async function resolveAuthzContext(
   }
 
   if (claims.principalType === "control-admin") {
-    if (!(await isOperatorId(db, sub))) throw new Error("control admin is not active");
+    if (!(await isOperatorId(db, canonicalSub))) throw new Error("control admin is not active");
     return {
       drive: claims.drive,
       subjects: ["operator:"],
       isOperator: true,
-      primarySubject: sub,
+      primarySubject: canonicalSub,
       requestId,
     };
   }
+
+  // Rollout ordering: control-api must stamp principalType=control-admin before
+  // gfsc is exposed to brokered operator tokens. Until then an omitted marker
+  // deliberately remains an ordinary user, which is safe but temporarily
+  // denies operator authority rather than elevating a bare UUID.
 
   // Every remaining bare principal is resolved conservatively as a user. An
   // omitted marker never probes the admin table: only an explicit signed
@@ -106,10 +120,10 @@ export async function resolveAuthzContext(
   // This also keeps legacy/unmarked user tokens fail-closed during rollout.
   // A user resolves to itself plus every team it is an ACTIVE member of
   // (soft-deleted memberships excluded — deny-by-default).
-  const subjects = new Set<string>([`user:${sub}`]);
+  const subjects = new Set<string>([`user:${canonicalSub}`]);
   const res = await db.query(
     `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
-    [sub]
+    [canonicalSub]
   );
   for (const row of res.rows) {
     subjects.add(`team:${String(row.team_id)}`);
@@ -118,8 +132,8 @@ export async function resolveAuthzContext(
     drive: claims.drive,
     subjects: [...subjects],
     isOperator: false,
-    primarySubject: sub,
-    desktopUserId: sub,
+    primarySubject: canonicalSub,
+    desktopUserId: canonicalSub,
     authoritySource: "user-session",
     requestId,
   };

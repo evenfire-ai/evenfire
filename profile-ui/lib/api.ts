@@ -107,10 +107,12 @@ export async function apiSend(
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   body?: unknown,
-  q: Record<string, string | undefined> = {}
+  q: Record<string, string | undefined> = {},
+  extraHeaders: Record<string, string> = {}
 ) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...extraHeaders,
   }
 
   const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}${path}${query(q)}`, {
@@ -305,8 +307,40 @@ export async function deleteManagedMember(userId: string, teamId: string) {
   )
 }
 
-export async function deleteManagedUser(userId: string) {
-  return apiSend('DELETE', `/api/v1/members/${encodeURIComponent(userId)}`)
+export type DeleteManagedUserRequest = {
+  reason?: string
+  idempotencyKey?: string
+  correlationId?: string
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function generateRetirementRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, marker => {
+    const nibble = Math.floor(Math.random() * 16)
+    return (marker === 'x' ? nibble : (nibble & 0x3) | 0x8).toString(16)
+  })
+}
+
+export async function deleteManagedUser(userId: string, request: DeleteManagedUserRequest = {}) {
+  const idempotencyKey = request.idempotencyKey?.trim() || generateRetirementRequestId()
+  const providedCorrelationId = request.correlationId?.trim() || ''
+  const correlationId = UUID_ANY_RE.test(providedCorrelationId)
+    ? providedCorrelationId.toLowerCase()
+    : generateRetirementRequestId()
+  return apiSend(
+    'DELETE',
+    `/api/v1/members/${encodeURIComponent(userId)}`,
+    { reason: request.reason?.trim() || 'profile_ui_user_retirement' },
+    {},
+    {
+      'Idempotency-Key': idempotencyKey,
+      'x-correlation-id': correlationId,
+    }
+  )
 }
 
 export async function resendManagedInvitation(invitationId: string) {

@@ -57,6 +57,29 @@ function userAuthority(desktopUserId: string): ExternalGfsUserAuthority {
   return { kind: 'user-session', desktopUserId, tokenSubject: desktopUserId }
 }
 
+async function assertDesktopUserActive(
+  desktopUserId: string,
+  guard: AuthorityDependencies['isDesktopUserActive'] = defaultDesktopUserLifecycleGuard
+): Promise<void> {
+  if (!guard) return
+  try {
+    if (!(await guard(desktopUserId))) {
+      throw new ExternalGfsAuthorityError(403, 'desktop_user_retired')
+    }
+  } catch (error) {
+    if (error instanceof ExternalGfsAuthorityError) throw error
+    throw new ExternalGfsAuthorityError(503, 'gfs_authority_unavailable', { cause: error })
+  }
+}
+
+/**
+ * User-plane token minting has no operator-link resolver mounted after it, so
+ * it needs the same lifecycle check explicitly before signing a token.
+ */
+export async function assertExternalGfsUserActive(desktopUserId: string): Promise<void> {
+  await assertDesktopUserActive(desktopUserId)
+}
+
 /**
  * Resolve the effective GFS authority for one authenticated Desktop user.
  *
@@ -73,16 +96,7 @@ export async function resolveExternalGfsAuthority(
     isDesktopUserActive: defaultDesktopUserLifecycleGuard,
   }
 ): Promise<ExternalGfsAuthority> {
-  if (dependencies.isDesktopUserActive) {
-    try {
-      if (!(await dependencies.isDesktopUserActive(desktopUserId))) {
-        throw new ExternalGfsAuthorityError(403, 'desktop_user_retired')
-      }
-    } catch (error) {
-      if (error instanceof ExternalGfsAuthorityError) throw error
-      throw new ExternalGfsAuthorityError(503, 'gfs_authority_unavailable', { cause: error })
-    }
-  }
+  await assertDesktopUserActive(desktopUserId, dependencies.isDesktopUserActive)
   if (dependencies.linkingEnabled !== true) return userAuthority(desktopUserId)
 
   let link: GfsDesktopOperatorLink | null
@@ -126,6 +140,30 @@ export async function attachExternalGfsAuthority(
   try {
     ;(req as RequestWithExternalGfsAuthority).gfsAuthority =
       await resolveExternalGfsAuthority(desktopUserId)
+    next()
+  } catch (error) {
+    if (error instanceof ExternalGfsAuthorityError) {
+      res.status(error.status).json({ error: error.code })
+      return
+    }
+    next(error)
+  }
+}
+
+/** Session-plane guard for the user-only token endpoint. */
+export async function attachExternalGfsUserLifecycle(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const desktopUserId = (req as Request & { externalAuth?: { userId?: string } }).externalAuth
+    ?.userId
+  if (!desktopUserId) {
+    res.status(401).json({ error: 'unauthenticated' })
+    return
+  }
+  try {
+    await assertExternalGfsUserActive(desktopUserId)
     next()
   } catch (error) {
     if (error instanceof ExternalGfsAuthorityError) {

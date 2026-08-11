@@ -108,9 +108,24 @@ export async function deleteManagedMember(userId: string, teamId: string, sessio
   })
 }
 
-export async function deleteManagedUser(userId: string, sessionToken: string) {
+export type ManagedUserRetirementRequest = {
+  reason: string
+  idempotencyKey: string
+  correlationId: string
+}
+
+export async function deleteManagedUser(
+  userId: string,
+  sessionToken: string,
+  retirement: ManagedUserRetirementRequest
+) {
   return controlApiRequest<unknown>('DELETE', `/external/members/${userId}`, {
+    body: { reason: retirement.reason },
     userSessionToken: sessionToken,
+    extraHeaders: {
+      'idempotency-key': retirement.idempotencyKey,
+      'x-correlation-id': retirement.correlationId,
+    },
   })
 }
 

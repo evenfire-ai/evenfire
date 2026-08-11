@@ -514,6 +514,33 @@ describe('GET /me/gfs/shares (delegation list passthrough)', () => {
     expect(clientMock.controlApiRequest).not.toHaveBeenCalled()
   })
 
+  it('keeps the aggregate edge backstop process-wide across source IPs', async () => {
+    const app = buildApp({
+      aggregatePerMin: 2,
+      authenticatedIpPerMin: 100,
+      tokenIpPerMin: 100,
+    })
+    app.set('trust proxy', 1)
+
+    await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
+      .expect(404)
+    await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.11')
+      .expect(404)
+
+    const exhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.12')
+    expect(exhausted.status).toBe(429)
+    expect(exhausted.body.rateLimitBucket).toBe('aggregate-ip')
+  })
+
   it.each([
     [401, 'unauthorized'],
     [403, 'manage_acl_required'],

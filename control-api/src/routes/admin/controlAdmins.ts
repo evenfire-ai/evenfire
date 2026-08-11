@@ -509,7 +509,9 @@ export function createAdminControlAdminsRouter(): Router {
         }
         if (
           error instanceof GfsDesktopOperatorLinkError &&
-          (error.code === 'control_admin_inactive' || error.code === 'malformed_link')
+          (error.code === 'control_admin_inactive' ||
+            error.code === 'desktop_user_retired' ||
+            error.code === 'malformed_link')
         ) {
           res.status(409).json({ error: error.code })
           return

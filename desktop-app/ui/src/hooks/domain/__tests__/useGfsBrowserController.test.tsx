@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import { useGfsBrowserController } from '../useGfsBrowserController'
+import {
+  describeGfsBrowserFailure,
+  isGfsSessionAuthorityFailure,
+  useGfsBrowserController,
+} from '../useGfsBrowserController'
 
 const userA = {
   id: 'user-a',
@@ -77,8 +81,8 @@ function authValue(me: AuthContextValue['me'], envKey = 'env-a'): AuthContextVal
   }
 }
 
-function Probe() {
-  const ctrl = useGfsBrowserController()
+function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
+  const ctrl = useGfsBrowserController({ grantsListEnabled })
   return (
     <>
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
@@ -186,6 +190,24 @@ describe('useGfsBrowserController', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+  })
+
+  it.each([
+    ['403 Forbidden: manage_acl_required', false],
+    ['403 Forbidden: escalation_rejected', false],
+    ['403 Forbidden: foreign_agent_forbidden', false],
+    ['403 Forbidden: operator_link_inactive', true],
+  ] as const)(
+    'distinguishes per-operation 403s from session authority (%s)',
+    (message, expected) => {
+      expect(isGfsSessionAuthorityFailure(message, 'operation')).toBe(expected)
+    }
+  )
+
+  it('prioritizes an authorization verdict over generic initialization wording', () => {
+    expect(describeGfsBrowserFailure('403 Forbidden: drive not initialized').kind).toBe(
+      'unauthorized'
+    )
   })
 
   it.each(['switch team', 'switch user', 'sign out'])(
@@ -466,6 +488,40 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
     expect(listAccessible).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps the browser session active when ACL listing is denied by resource policy', async () => {
+    const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [],
+            nextCursor: null,
+            rootResourceId,
+            view: 'operator' as const,
+          })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => {
+            throw new Error('403 Forbidden: manage_acl_required')
+          }),
+          listShares: vi.fn(async () => []),
+        },
+      },
+    })
+
+    render(<Probe grantsListEnabled />, { wrapper: Harness })
+    await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+    expect(screen.getByTestId('current').textContent).toBe(rootResourceId)
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {

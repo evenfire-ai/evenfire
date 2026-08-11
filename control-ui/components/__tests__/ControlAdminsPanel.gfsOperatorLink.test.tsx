@@ -139,6 +139,28 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(revokeControlAdminGfsOperatorLink).not.toHaveBeenCalled()
   })
 
+  it('distinguishes a never-linked admin from a revoked operator link', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'admin-2',
+          username: 'never-linked',
+          email: 'never-linked@example.com',
+          memberId: null,
+          status: 'active',
+          gfsOperatorLink: null,
+          gfsOperatorLinkStatus: 'none',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+
+    render(<ControlAdminsPanel />)
+    expect(await screen.findByTestId('gfs-operator-link-admin-2')).toHaveTextContent('Not linked')
+  })
+
   it('reactivates a retained revoked generation through the visible Control UI action', async () => {
     vi.mocked(getControlAdmins).mockResolvedValueOnce({
       admins: [

@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   cancelManagedInvitation,
@@ -17,6 +18,12 @@ import { TEAM_ROLES, TeamRole } from '../types.js'
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function retirementCorrelationId(value: unknown): string {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  return normalized && UUID_ANY_RE.test(normalized) ? normalized.toLowerCase() : randomUUID()
+}
 
 export function createMembersRouter(): Router {
   const router = Router()
@@ -206,7 +213,23 @@ export function createMembersRouter(): Router {
 
   router.delete('/members/:userId', requireAuth, async (req, res, next) => {
     try {
-      res.status(200).json(await deleteManagedUser(req.params.userId, extractAuthToken(req)))
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+      if (!reason) {
+        res.status(400).json({ error: 'Retirement reason is required' })
+        return
+      }
+      const idempotencyKey = String(req.header('Idempotency-Key') || '').trim()
+      if (!idempotencyKey) {
+        res.status(400).json({ error: 'Idempotency-Key header is required' })
+        return
+      }
+      res.status(200).json(
+        await deleteManagedUser(req.params.userId, extractAuthToken(req), {
+          reason,
+          idempotencyKey,
+          correlationId: retirementCorrelationId(req.header('x-correlation-id')),
+        })
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
       if (message.includes('(403)')) {

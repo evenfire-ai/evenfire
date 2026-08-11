@@ -81,4 +81,40 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
   })
+
+  it('forwards a governed member-retirement reason, replay key, and correlation id', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.deleteManagedUser.mockResolvedValueOnce({ ok: true })
+
+    await request(makeApp())
+      .delete('/members/user-2')
+      .set('authorization', 'Bearer good-token')
+      .set('Idempotency-Key', 'retire-user-2-v1')
+      .set('x-correlation-id', '11111111-1111-4111-8111-111111111111')
+      .send({ reason: 'team access no longer required' })
+      .expect(200, { ok: true })
+
+    expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledWith('user-2', 'good-token', {
+      reason: 'team access no longer required',
+      idempotencyKey: 'retire-user-2-v1',
+      correlationId: '11111111-1111-4111-8111-111111111111',
+    })
+  })
+
+  it.each([
+    [{}, 'Retirement reason is required'],
+    [{ reason: 'team access no longer required' }, 'Idempotency-Key header is required'],
+  ])('rejects missing governed-retirement inputs', async (body, expectedError) => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+
+    const requestBuilder = request(makeApp())
+      .delete('/members/user-2')
+      .set('authorization', 'Bearer good-token')
+      .send(body)
+    const response = await requestBuilder
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: expectedError })
+    expect(memberManagementMock.deleteManagedUser).not.toHaveBeenCalled()
+  })
 })

@@ -43,7 +43,7 @@ export type ControlAdminListItem = {
     rowVersion: number | null
     revocationReason: string | null
   } | null
-  gfsOperatorLinkStatus?: 'active' | 'inactive_admin' | 'revoked' | 'error'
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -769,7 +769,7 @@ export async function listControlAdmins(): Promise<{
                   ? 'active'
                   : 'inactive_admin'
                 : 'error'
-            : 'revoked') as 'active' | 'inactive_admin' | 'revoked' | 'error',
+            : 'none') as 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error',
           status: record.status,
           lastLoginAt: record.last_login_at ? record.last_login_at.toISOString() : null,
           createdAt: record.created_at.toISOString(),

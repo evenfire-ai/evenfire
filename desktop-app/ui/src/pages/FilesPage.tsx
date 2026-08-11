@@ -16,6 +16,7 @@ import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserFailure,
   describeGfsBrowserFailure,
+  isGfsSessionAuthorityFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
@@ -257,7 +258,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const surfaceContentMutationError = (mutationError: unknown) => {
     const raw = mutationError instanceof Error ? mutationError.message : String(mutationError)
     const failure = describeGfsBrowserFailure(raw)
-    if (failure.kind === 'unauthorized') {
+    if (isGfsSessionAuthorityFailure(raw, 'operation')) {
       ctrl.revokeAccess()
       setMutationFailure(failure)
       pushToast?.(failure.message, 'error')
@@ -311,7 +312,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   // forced false for files by the panel.
   const failClosedOnAuthorizationError = (error: unknown): never => {
     const message = error instanceof Error ? error.message : String(error)
-    if (describeGfsBrowserFailure(message).kind === 'unauthorized') ctrl.revokeAccess()
+    if (isGfsSessionAuthorityFailure(message, 'operation')) ctrl.revokeAccess()
     throw error
   }
   const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
@@ -333,8 +334,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeGrant(grantId)
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
-      if (describeGfsBrowserFailure(String(revokeError)).kind === 'unauthorized')
-        ctrl.revokeAccess()
+      if (isGfsSessionAuthorityFailure(String(revokeError), 'operation')) ctrl.revokeAccess()
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -357,8 +357,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeShare(shareId)
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
-      if (describeGfsBrowserFailure(String(revokeError)).kind === 'unauthorized')
-        ctrl.revokeAccess()
+      if (isGfsSessionAuthorityFailure(String(revokeError), 'operation')) ctrl.revokeAccess()
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }

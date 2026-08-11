@@ -130,6 +130,26 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
     });
   });
 
+  it("accepts uppercase UUID casing in linked-admin claims and canonicalizes the subject", async () => {
+    const controlAdminId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const desktopUserId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const db = fakeDb({ operators: new Set([controlAdminId]) });
+
+    const ctx = await resolveAuthzContext(db, {
+      sub: controlAdminId.toUpperCase(),
+      drive: "main",
+      brokeredAuthority: {
+        desktopUserId: desktopUserId.toUpperCase(),
+        controlAdminId: controlAdminId.toUpperCase(),
+        authoritySource: "linked-admin",
+      },
+    });
+
+    expect(ctx.primarySubject).toBe(controlAdminId);
+    expect(ctx.effectiveControlAdminId).toBe(controlAdminId);
+    expect(ctx.desktopUserId).toBe(desktopUserId);
+  });
+
   it("fails closed when a signed linked-admin claim names an inactive or missing admin", async () => {
     const controlAdminId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const db = fakeDb({});

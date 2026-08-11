@@ -422,7 +422,7 @@ export function ControlAdminsPanel({
                           </div>
                         </div>
                       ) : (
-                        <span data-testid={`gfs-operator-link-${admin.id}`}>Revoked</span>
+                        <span data-testid={`gfs-operator-link-${admin.id}`}>Not linked</span>
                       )}
                     </td>
                     <td>{formatDate(admin.lastLoginAt)}</td>

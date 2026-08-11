@@ -92,6 +92,16 @@ function isResourceDiscoveryUnavailable(message: string): boolean {
 
 function isUninitializedDriveError(message: string): boolean {
   const normalized = message.toLowerCase()
+  // A server authorization verdict wins over the generic wording below. For
+  // example, "403 Forbidden: drive not initialized" is still an authorization
+  // failure and must not be presented as a provisioning state.
+  if (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
+  ) {
+    return false
+  }
   return (
     normalized.includes('operator_root_missing') ||
     normalized.includes('gfs_drive_unseeded') ||
@@ -100,6 +110,33 @@ function isUninitializedDriveError(message: string): boolean {
     normalized.includes('gfs_not_initialized') ||
     normalized.includes('not initialized') ||
     normalized.includes('unseeded')
+  )
+}
+
+const SESSION_AUTHORITY_ERROR_CODES = [
+  'desktop_user_retired',
+  'operator_link_inactive',
+  'operator_link_invalid',
+  'gfs_operator_link_invalid',
+] as const
+
+/**
+ * Only a session/operator authority failure may invalidate the browser's
+ * session-local access state. Per-resource policy verdicts such as
+ * `manage_acl_required`, `escalation_rejected`, and `foreign_agent_forbidden`
+ * are expected 403s and must remain local to the attempted operation.
+ */
+export function isGfsSessionAuthorityFailure(
+  message: string,
+  surface: 'discovery' | 'operation' = 'operation'
+): boolean {
+  const normalized = message.toLowerCase()
+  if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
+  if (surface !== 'discovery') return false
+  return (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
   )
 }
 
@@ -324,15 +361,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // remains the sole authority that can restore the operator root.
     setAccessState('active')
   }, [])
-  const queryAuthorizationError = [
-    accessibleQuery.error,
-    childrenQuery.error,
-    affordancesQuery.error,
-    grantsQuery.error,
-    sharesQuery.error,
-  ]
+  const queryAuthorizationError = [accessibleQuery.error, childrenQuery.error]
     .map(error => (error ? toMessage(error) : null))
-    .find(error => error !== null && describeGfsBrowserFailure(error).kind === 'unauthorized')
+    .find(error => error !== null && isGfsSessionAuthorityFailure(error, 'discovery'))
   useEffect(() => {
     if (queryAuthorizationError && accessState !== 'revoked') revokeAccess()
   }, [accessState, queryAuthorizationError, revokeAccess])
@@ -484,7 +515,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         return crumb
       } catch (error) {
         const message = toMessage(error)
-        if (describeGfsBrowserFailure(message).kind === 'unauthorized') revokeAccess()
+        if (isGfsSessionAuthorityFailure(message, 'discovery')) revokeAccess()
         else setOpenError(message)
         return false
       } finally {

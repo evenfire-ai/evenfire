@@ -557,7 +557,7 @@ export type ControlAdminListItem = {
     rowVersion?: number | null
     revocationReason?: string | null
   } | null
-  gfsOperatorLinkStatus?: 'active' | 'inactive_admin' | 'revoked' | 'error'
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -2157,12 +2157,51 @@ export async function deleteAdminTeam(teamId: string) {
   }>
 }
 
+export type DeleteAdminUserRequest = {
+  /** Persisted with the governed retirement operation for its audit trail. */
+  reason?: string
+  /** Reuse this on a transport retry of the same user action. */
+  idempotencyKey?: string
+  /** Connects the browser request to the Control API retirement audit row. */
+  correlationId?: string
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function generateRetirementRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // The Control API accepts a correlation header only when it is UUID-shaped.
+  // This compatibility branch keeps embedded/legacy browser retries traceable.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, marker => {
+    const nibble = Math.floor(Math.random() * 16)
+    return (marker === 'x' ? nibble : (nibble & 0x3) | 0x8).toString(16)
+  })
+}
+
 /**
- * Hard-deletes the user account (CASCADE on profile and personal access).
- * Team memberships cascade; teams are retained even when this leaves them with no members.
+ * Retires the user through the governed lifecycle contract. A caller may retain
+ * the supplied key when retrying the same action; an ordinary UI action gets a
+ * new request identity and an explicit audit reason.
  */
-export async function deleteAdminUser(userId: string) {
-  return apiSend('DELETE', `/api/v1/admin/users/${encodeURIComponent(userId)}`) as Promise<{
+export async function deleteAdminUser(userId: string, request: DeleteAdminUserRequest = {}) {
+  const idempotencyKey = request.idempotencyKey?.trim() || generateRetirementRequestId()
+  const providedCorrelationId = request.correlationId?.trim() || ''
+  const correlationId = UUID_ANY_RE.test(providedCorrelationId)
+    ? providedCorrelationId.toLowerCase()
+    : generateRetirementRequestId()
+  const reason = request.reason?.trim() || 'control_ui_user_retirement'
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+    { reason },
+    {},
+    {
+      'Idempotency-Key': idempotencyKey,
+      'x-correlation-id': correlationId,
+    }
+  ) as Promise<{
     deleted: boolean
     id: string
   }>

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAdminControlAdminsRouter } from '../src/routes/admin/controlAdmins.js'
+import { GfsDesktopOperatorLinkError } from '../src/services/gfsDesktopOperatorLinkService.js'
 
 const adminSvc = vi.hoisted(() => ({
   createControlAdminEmailChangeRequest: vi.fn(),
@@ -240,5 +241,18 @@ describe('routes/adminControlAdmins', () => {
       rowVersion: 2,
       reason: 'control-ui-reactivate',
     })
+  })
+
+  it('maps a retired Desktop user reactivation refusal to a business conflict', async () => {
+    operatorLinkSvc.reactivate.mockRejectedValue(
+      new GfsDesktopOperatorLinkError('desktop_user_retired')
+    )
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admins/target-admin-id/gfs-operator-link/reactivate')
+      .send({ rowVersion: 2, reason: 'control-ui-reactivate' })
+      .expect(409)
+
+    expect(res.body).toEqual({ error: 'desktop_user_retired' })
   })
 })

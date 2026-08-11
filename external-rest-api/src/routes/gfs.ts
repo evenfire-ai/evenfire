@@ -130,13 +130,18 @@ export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }
   const router = Router()
   const edgeLimits = options?.edgeLimits ?? DEFAULT_EXTERNAL_GFS_EDGE_LIMITS
 
-  const edgeLimiter = (limit: number, bucket: string) =>
+  const edgeLimiter = (
+    limit: number,
+    bucket: string,
+    options?: { keyGenerator?: (req: Request) => string }
+  ) =>
     rateLimit({
       windowMs: EXTERNAL_GFS_EDGE_WINDOW_MS,
       limit,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
       identifier: `gfs-edge-${bucket}`,
+      ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
       handler: (_req, res) => {
         res.status(429).json({
           error: 'Too Many Requests',
@@ -153,7 +158,16 @@ export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }
   // sized for a shared NAT address; the token bucket remains tighter. The
   // Control API owns the authoritative per-user/session/actor budgets.
   router.use('/me/gfs', attachGfsRequestId)
-  router.use('/me/gfs', edgeLimiter(edgeLimits.aggregatePerMin, 'aggregate-ip'))
+  router.use(
+    '/me/gfs',
+    edgeLimiter(edgeLimits.aggregatePerMin, 'aggregate-ip', {
+      // This is intentionally a process-wide backstop, not another per-IP
+      // bucket. The authenticated-IP limiter below owns client fairness;
+      // keeping a constant key makes distributed source-IP floods observable
+      // at this edge instead of allowing the aggregate budget to be bypassed.
+      keyGenerator: () => 'gfs-edge-aggregate',
+    })
+  )
   router.use('/me/gfs', edgeLimiter(edgeLimits.authenticatedIpPerMin, 'authenticated-ip'))
   router.use('/me/gfs/token', edgeLimiter(edgeLimits.tokenIpPerMin, 'token-ip'))
   router.use('/me/gfs', requireAuth)
