@@ -1301,13 +1301,15 @@ export async function setInvitationPasswordForUser(
 
 export async function setInvitationPasswordForEmail(
   email: string,
+  invitationToken: string,
   invitationId: string,
   password: string
 ) {
   const normalizedEmail = email.trim().toLowerCase()
+  const trimmedInvitationToken = invitationToken.trim()
   const trimmedInvitationId = invitationId.trim()
   const trimmedPassword = password.trim()
-  if (!normalizedEmail || !trimmedInvitationId) {
+  if (!normalizedEmail || !trimmedInvitationToken || !trimmedInvitationId) {
     return { error: 'not_found' as const }
   }
   if (trimmedPassword.length < 8 || trimmedPassword.length > 256) {
@@ -1315,9 +1317,12 @@ export async function setInvitationPasswordForEmail(
   }
 
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
+    const invitation = await getInvitationRecordByToken(db, trimmedInvitationToken, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
+    }
+    if (invitation.id !== trimmedInvitationId) {
+      return { error: 'forbidden' as const }
     }
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }

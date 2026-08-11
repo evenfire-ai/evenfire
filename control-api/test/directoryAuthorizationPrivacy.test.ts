@@ -592,11 +592,20 @@ describe('directory privacy and atomic authorization', () => {
 
     for (const operation of [
       () => setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password'),
-      () => setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password'),
+      () =>
+        setInvitationPasswordForEmail(
+          invitation.email,
+          invitation.token,
+          invitation.id,
+          'valid-password'
+        ),
     ]) {
       mocks.query.mockReset()
       mocks.query.mockImplementation(async (sql: string) => {
-        if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+        if (
+          sql.includes('FROM invitations i') &&
+          (sql.includes('WHERE i.id::text = $1') || sql.includes('WHERE i.token = $1'))
+        ) {
           return { rows: [invitation], rowCount: 1 }
         }
         if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
@@ -646,7 +655,10 @@ describe('directory privacy and atomic authorization', () => {
     let passwordHash: string | null = null
     let membershipWrites = 0
     mocks.query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+      if (
+        sql.includes('FROM invitations i') &&
+        (sql.includes('WHERE i.token = $1') || sql.includes('WHERE i.id::text = $1'))
+      ) {
         return {
           rows: [
             { ...invitation, status, accepted_user_id: status === 'accepted' ? TARGET : null },
@@ -694,14 +706,24 @@ describe('directory privacy and atomic authorization', () => {
     })
 
     await expect(
-      setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password')
+      setInvitationPasswordForEmail(
+        invitation.email,
+        invitation.token,
+        invitation.id,
+        'valid-password'
+      )
     ).resolves.toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
     expect(status).toBe('accepted')
     expect(passwordHash).not.toBeNull()
     expect(membershipWrites).toBe(1)
 
     await expect(
-      setInvitationPasswordForEmail(invitation.email, invitation.id, 'another-password')
+      setInvitationPasswordForEmail(
+        invitation.email,
+        invitation.token,
+        invitation.id,
+        'another-password'
+      )
     ).resolves.toEqual({ error: 'not_pending' })
     expect(membershipWrites).toBe(1)
   })
@@ -723,14 +745,19 @@ describe('directory privacy and atomic authorization', () => {
       team_name: 'Team A',
     }
     mocks.query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.token = $1')) {
         return { rows: [invitation], rowCount: 1 }
       }
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
     })
 
     await expect(
-      setInvitationPasswordForEmail(invitation.email, invitation.id, 'attacker-password')
+      setInvitationPasswordForEmail(
+        invitation.email,
+        invitation.token,
+        invitation.id,
+        'attacker-password'
+      )
     ).resolves.toEqual({ error: 'not_pending' })
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(sql).toContain('FOR UPDATE OF i')

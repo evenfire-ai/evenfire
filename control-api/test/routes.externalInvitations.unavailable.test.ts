@@ -171,6 +171,37 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(userSessions.create).not.toHaveBeenCalled()
   })
 
+  it('binds a distinct invitation capability token to the public invitation id', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-secret-capability',
+    })
+    directory.setInvitationPasswordForEmail.mockResolvedValue({
+      data: {
+        id: '00000000-0000-4000-8000-000000000200',
+        userId: '00000000-0000-4000-8000-000000000001',
+        passwordUpdated: true,
+      },
+    })
+
+    await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        email: 'a@b.c',
+        token: 'member-registration-flow-token',
+        invitationId: '00000000-0000-4000-8000-000000000200',
+        password: 'valid-password',
+      })
+      .expect(200)
+
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
+      'a@b.c',
+      'database-secret-capability',
+      '00000000-0000-4000-8000-000000000200',
+      'valid-password'
+    )
+  })
+
   it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {
     flow.validateInvitationFlowToken.mockRejectedValue(new Error('invalid_invitation'))
     const res = await request(app()).get('/external/invitations/token/some-token')

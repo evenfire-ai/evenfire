@@ -95,13 +95,10 @@ export function createExternalInvitationsRouter(): Router {
           if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
-        if (validation.invitationUuid !== invitationId) {
-          return res.status(403).json({ error: 'forbidden' })
-        }
-
         const result = await setInvitationPasswordForEmail(
           validation.email,
           validation.invitationUuid,
+          invitationId,
           password
         )
         if ('error' in result) {
