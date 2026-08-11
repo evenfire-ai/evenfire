@@ -27,6 +27,7 @@ export function rateLimitMiddleware(opts: {
   bucketType: string
   maxPerMinute: number
   getBucketKey: (req: Request) => string | null
+  onLimited?: (req: Request, res: Response, retryAfterSeconds: number) => void
 }) {
   return function rateLimitMw(req: Request, res: Response, next: NextFunction): void {
     void (async () => {
@@ -59,7 +60,11 @@ export function rateLimitMiddleware(opts: {
               'rate limit exceeded'
             )
           }
-          res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
+          if (opts.onLimited) {
+            opts.onLimited(req, res, retryAfterSec)
+          } else {
+            res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
+          }
           return
         }
 

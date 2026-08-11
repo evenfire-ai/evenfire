@@ -120,7 +120,19 @@ export async function requestJson<T>(
       let msg = raw || response.statusText
       try {
         const parsed = JSON.parse(raw) as { error?: unknown; message?: unknown }
-        if (parsed.error) msg = String(parsed.error)
+        if (parsed.error && typeof parsed.error === 'object') {
+          const error = parsed.error as {
+            code?: unknown
+            message?: unknown
+            details?: { reason?: unknown }
+          }
+          const parts = [error.code, error.details?.reason, error.message]
+            .filter((value): value is string => typeof value === 'string' && value.length > 0)
+            .filter((value, index, values) => values.indexOf(value) === index)
+          if (parts.length > 0) msg = parts.join(' - ')
+        } else if (parsed.error) {
+          msg = String(parsed.error)
+        }
         if (parsed.message) msg = `${msg} - ${String(parsed.message)}`
       } catch {
         // Keep raw text as message.

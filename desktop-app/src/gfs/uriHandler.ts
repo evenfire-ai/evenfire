@@ -578,6 +578,7 @@ export function parseSubjectKey(key: string): GfsSubject {
  * on a 429 (middleware/rateLimitMiddleware.ts) — not inside the human message.
  */
 interface GfsGrantErrorFields {
+  reason?: string
   invalidIndexes?: number[]
   retryAfterSeconds?: number
 }
@@ -599,16 +600,35 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
     return {}
   }
   if (!parsed || typeof parsed !== 'object') return {}
-  const record = parsed as { invalidIndexes?: unknown; retryAfterSeconds?: unknown }
+  const record = parsed as {
+    error?: unknown
+    invalidIndexes?: unknown
+    retryAfterSeconds?: unknown
+  }
+  const envelope =
+    record.error && typeof record.error === 'object'
+      ? (record.error as { details?: unknown })
+      : undefined
+  const details =
+    envelope?.details && typeof envelope.details === 'object'
+      ? (envelope.details as {
+          reason?: unknown
+          invalidIndexes?: unknown
+          retryAfterSeconds?: unknown
+        })
+      : undefined
   const fields: GfsGrantErrorFields = {}
-  if (Array.isArray(record.invalidIndexes)) {
-    const indexes = record.invalidIndexes.filter(
+  if (typeof details?.reason === 'string') fields.reason = details.reason
+  const rawInvalidIndexes = details?.invalidIndexes ?? record.invalidIndexes
+  if (Array.isArray(rawInvalidIndexes)) {
+    const indexes = rawInvalidIndexes.filter(
       (value): value is number => Number.isInteger(value) && (value as number) >= 0
     )
     if (indexes.length > 0) fields.invalidIndexes = indexes
   }
-  if (Number.isInteger(record.retryAfterSeconds) && (record.retryAfterSeconds as number) >= 0) {
-    fields.retryAfterSeconds = record.retryAfterSeconds as number
+  const rawRetryAfterSeconds = details?.retryAfterSeconds ?? record.retryAfterSeconds
+  if (Number.isInteger(rawRetryAfterSeconds) && (rawRetryAfterSeconds as number) >= 0) {
+    fields.retryAfterSeconds = rawRetryAfterSeconds as number
   }
   return fields
 }
@@ -639,11 +659,12 @@ function surfaceGfsGrantError(error: unknown): unknown {
   if (!bodyText) return error
   const fields = parseGfsGrantErrorFields(bodyText)
   const parts: string[] = []
+  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
+  if (fields.reason && !baseMessage.includes(fields.reason)) parts.push(fields.reason)
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
   if (fields.retryAfterSeconds !== undefined) {
     parts.push(`retryAfterSeconds=${fields.retryAfterSeconds}`)
   }
   if (parts.length === 0) return error
-  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
   return new GfsUriError(`${baseMessage} ${parts.join(' ')}`)
 }

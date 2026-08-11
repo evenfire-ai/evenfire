@@ -20,6 +20,7 @@ export {
   listAllTeams,
   listTeams,
   renameTeam,
+  renameTeamForUser,
 } from './teams.js'
 
 export {

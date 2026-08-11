@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
+import { sendPublicApiError } from './http/publicApiError.js'
 import { K8sGateway } from './k8s.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from './middleware/controlUIAuth.js'
 import { correlationIdMiddleware } from './middleware/correlationId.js'
@@ -261,7 +262,7 @@ export function createApp(gateway: K8sGateway) {
         {
           event: memberRegistration.error,
           correlationId,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'member registration unavailable'
       )
@@ -286,10 +287,35 @@ export function createApp(gateway: K8sGateway) {
           event: 'forwarded_client_error',
           correlationId,
           status: errStatus,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'forwarded client error from upstream'
       )
+      if (req.originalUrl.startsWith('/api/v1/external')) {
+        const publicCode =
+          errStatus === 401
+            ? 'invalid_session'
+            : errStatus === 403
+              ? 'forbidden'
+              : errStatus === 404
+                ? 'not_found'
+                : errStatus === 429
+                  ? 'rate_limited'
+                  : 'invalid_request'
+        sendPublicApiError(
+          req,
+          res,
+          errStatus as number,
+          publicCode,
+          errStatus === 404
+            ? 'The resource was not found.'
+            : errStatus === 429
+              ? 'Too many requests; retry later.'
+              : 'The request could not be completed.',
+          errStatus === 429
+        )
+        return
+      }
       res.status(errStatus as number).json({
         error: err instanceof Error ? err.message : 'Bad Request',
         correlationId,
@@ -315,7 +341,7 @@ export function createApp(gateway: K8sGateway) {
           correlationId,
           status: integrationStatus,
           code: integrationCode,
-          err: err instanceof Error ? err.message : String(err),
+          errorName: err instanceof Error ? err.name : 'unknown',
         },
         'forwarded registry integration error'
       )
@@ -331,23 +357,14 @@ export function createApp(gateway: K8sGateway) {
       {
         event: 'unhandled_error',
         correlationId,
-        err: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
+        errorName: err instanceof Error ? err.name : 'unknown',
       },
       'unhandled error'
     )
-    if (process.env.NODE_ENV !== 'production') {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        message: err instanceof Error ? err.message : 'Unknown error',
-        correlationId,
-      })
-    } else {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        correlationId,
-      })
-    }
+    res.status(500).json({
+      error: 'Internal Server Error',
+      correlationId,
+    })
   })
 
   return app

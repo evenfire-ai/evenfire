@@ -1,8 +1,10 @@
 import { Router } from 'express'
 import { pool } from '../../db.js'
+import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
+import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import { authenticateExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import { renewExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import {
@@ -179,20 +181,32 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post('/external/auth/verify', async (req, res, next) => {
     try {
       const token = String(req.body?.token || '').trim()
-      if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
+      if (!token || token.length > 4096) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'verify',
         client: externalSessionClient(req),
       })
       if (authentication.status === 'upgrade_required') {
-        return res.status(426).json({ error: 'upgrade_required' })
+        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+        return
       }
       if (authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       return res.status(200).json({ claims: authentication.claims })
-    } catch (error) {
-      return res.status(503).json({ error: 'authority_unavailable' })
+    } catch {
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
     }
   })
 
@@ -212,14 +226,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         client: externalSessionClient(req),
       })
       if (authentication.status === 'upgrade_required') {
-        return res.status(426).json({ error: 'upgrade_required' })
+        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+        return
       }
       if (
         authentication.status !== 'authenticated' ||
         authentication.claims.userId !== userId ||
         authentication.claims.email.toLowerCase() !== email
       ) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const membership = await pool.query(
         `SELECT tm.role
@@ -257,8 +273,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         sessionContract: issued.contract,
         deprecated: true,
       })
-    } catch (error) {
-      return res.status(503).json({ error: 'authority_unavailable' })
+    } catch {
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Authorization is temporarily unavailable.',
+        true
+      )
     }
   })
 
@@ -266,16 +289,19 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     try {
       const token = sessionTokenFromRequest(req)
       if (!token || token.length > 4096) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const renewal = await renewExternalUserSession(token, {
         client: externalSessionClient(req),
       })
       if (renewal.status === 'upgrade_required') {
-        return res.status(426).json({ error: 'upgrade_required' })
+        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+        return
       }
       if (renewal.status !== 'renewed') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       return res.status(200).json({
         token: renewal.session.token,
@@ -284,7 +310,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         absoluteExpiresAt: renewal.session.identity.absoluteExpiresAt.toISOString(),
       })
     } catch {
-      return res.status(503).json({ error: 'authority_unavailable' })
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
     }
   })
 
@@ -292,14 +325,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     try {
       const token = sessionTokenFromRequest(req)
       if (!token || token.length > 4096) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'revoke_cleanup',
         client: externalSessionClient(req),
       })
       if (authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const revoked =
         authentication.contract === 'v2' && authentication.claims.sid
@@ -311,7 +346,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           : await revokeLegacyUserSession(token, authentication.claims, 'logout')
       return res.status(200).json({ revoked })
     } catch {
-      return res.status(503).json({ error: 'authority_unavailable' })
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
     }
   })
 
@@ -319,22 +361,73 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     try {
       const token = sessionTokenFromRequest(req)
       if (!token || token.length > 4096) {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'protected',
         client: externalSessionClient(req),
       })
       if (authentication.status === 'upgrade_required') {
-        return res.status(426).json({ error: 'upgrade_required' })
+        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+        return
       }
       if (authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
       const revoked = await revokeAllUserSessions(authentication.claims.userId, 'user_revoked_all')
       return res.status(200).json({ revoked })
     } catch {
-      return res.status(503).json({ error: 'authority_unavailable' })
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+    }
+  })
+
+  router.post('/external/auth/sessions/:sid/revoke', async (req, res) => {
+    try {
+      const token = sessionTokenFromRequest(req)
+      const authentication = token
+        ? await authenticateExternalUserSession(token, {
+            purpose: 'protected',
+            client: externalSessionClient(req),
+          })
+        : null
+      if (!authentication || authentication.status !== 'authenticated') {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
+      if (authentication.contract !== 'v2') {
+        sendPublicApiError(
+          req,
+          res,
+          409,
+          'conflict',
+          'A user-session v2 login is required for session management.'
+        )
+        return
+      }
+      const revoked = await revokeUserSession(
+        authentication.claims.userId,
+        String(req.params.sid || '').trim(),
+        'user_revoked'
+      )
+      return res.status(200).json({ revoked })
+    } catch {
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
     }
   })
 
@@ -354,6 +447,20 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       }
       const claims = authentication.claims
+      let liveTeam: Awaited<ReturnType<typeof getLiveTeamMembership>> = null
+      try {
+        liveTeam = claims.teamId ? await getLiveTeamMembership(claims.userId, claims.teamId) : null
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Authorization is temporarily unavailable.',
+          true
+        )
+        return
+      }
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {
@@ -376,13 +483,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (agentHostRefs.length > 0) {
         const userAgents = await getUserAgents(claims.userId)
         const grantedHostRefs = new Set(userAgents.agentNames)
-        if (claims.teamId) {
-          const teamAgents = await getTeamAgents(claims.teamId)
+        if (liveTeam) {
+          const teamAgents = await getTeamAgents(liveTeam.teamId)
           for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
         }
         if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
           return res.status(403).json({
-            error: claims.teamId ? 'host_access_denied' : 'direct_host_access_required',
+            error: liveTeam ? 'host_access_denied' : 'direct_host_access_required',
           })
         }
       }
@@ -393,11 +500,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       // paying the sandbox UI recipe lookup cost or receiving unused grants.
       if (
         requestsSandboxUiScope &&
-        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, claims.teamId))
+        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, liveTeam?.teamId ?? null))
       ) {
         extraScopes.push('sandbox:ui:view')
       }
-      const auth = { userId: claims.userId, teamId: claims.teamId, role: claims.role }
+      const auth = {
+        userId: claims.userId,
+        teamId: liveTeam?.teamId ?? null,
+        role: liveTeam?.role ?? 'member',
+      }
       const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
       if (!result) {
         // Distinguish "you need a team for this" from a generic scope failure so

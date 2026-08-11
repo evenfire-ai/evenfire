@@ -461,7 +461,7 @@ describe('routes/external/workflows', () => {
         } as never,
         RECIPE_NS
       )
-      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:team:${USER_SESSION_CLAIMS.teamId}`
+      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:direct`
       const idempotencyKey = 'external-key-stale-approval'
       const payload = {
         message: `Approve ${RECIPE_NS}/test-recipe workflow trigger.`,
@@ -924,7 +924,8 @@ describe('routes/external/workflows', () => {
         'approved-target-run-id',
       ])
       expect(String(mockPoolQuery.mock.calls[1][0])).toContain('workflow_approval_requests')
-      expect(String(mockPoolQuery.mock.calls[1][0])).not.toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain("tm.status = 'active'")
     })
 
     it('returns 403 when user-session caller is not granted to the recipe', async () => {

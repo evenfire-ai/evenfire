@@ -1,6 +1,8 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { sendPublicApiError } from './http/publicApiError.js'
+import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
@@ -29,6 +31,7 @@ export function createApp() {
     })
   )
   app.use(express.json({ limit: config.jsonBodyLimit }))
+  app.use(requireTrustedBrowserMutation)
 
   app.use(createHealthRouter())
 
@@ -56,23 +59,58 @@ export function createApp() {
     res.status(404).json({ error: 'Not Found' })
   })
 
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const status =
-      err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
-        ? (err as Error & { status: number }).status
-        : undefined
-    if (status !== undefined && status >= 400 && status < 500) {
-      res.status(status).json({
-        error: err instanceof Error ? err.message : 'Bad Request',
-      })
-      return
-    }
-
-    res.status(500).json({
-      error: 'Internal Server Error',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  })
+  app.use(externalRestPublicErrorHandler)
 
   return app
+}
+
+export function externalRestPublicErrorHandler(
+  err: unknown,
+  req: Request,
+  res: Response,
+  _next: NextFunction
+): void {
+  const status =
+    err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
+      ? (err as Error & { status: number }).status
+      : undefined
+  if (status !== undefined && status >= 400 && status < 500) {
+    const code =
+      status === 401
+        ? 'invalid_session'
+        : status === 403
+          ? 'forbidden'
+          : status === 404
+            ? 'not_found'
+            : status === 429
+              ? 'rate_limited'
+              : 'invalid_request'
+    sendPublicApiError(
+      req,
+      res,
+      status,
+      code,
+      status === 404
+        ? 'The resource was not found.'
+        : status === 429
+          ? 'Too many requests; retry later.'
+          : 'The request could not be completed.',
+      status === 429
+    )
+    return
+  }
+
+  if (status === 503) {
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      'authority_unavailable',
+      'Authorization is temporarily unavailable.',
+      true
+    )
+    return
+  }
+
+  sendPublicApiError(req, res, 500, 'internal_error', 'The request could not be completed.')
 }

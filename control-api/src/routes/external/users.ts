@@ -39,6 +39,12 @@ type TeamDirectoryMember = {
   status: string
 }
 
+type TeamDirectoryPartialError = {
+  teamId?: string
+  source: 'operational_resources' | 'members' | 'contexts' | 'agents'
+  code: 'unavailable'
+}
+
 function projectTeamMembers(values: unknown): TeamDirectoryMember[] {
   if (!Array.isArray(values)) return []
   return values.map(value => {
@@ -111,6 +117,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const truncated = allTeams.length > teams.length
         let activeContextIds: Set<string> | null = null
         let activeAgentNames: Set<string> | null = null
+        const initialPartialErrors: TeamDirectoryPartialError[] = []
         try {
           const [contextIds, agentNames] = await Promise.all([
             listActiveContextIds(gateway),
@@ -120,36 +127,60 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           activeAgentNames = new Set(agentNames)
         } catch (err) {
           console.warn('[external/users] access reconciliation failed for team directory:', err)
+          initialPartialErrors.push({ source: 'operational_resources', code: 'unavailable' })
         }
 
-        const items = await mapWithConcurrencyLimit(teams, 4, async team => {
-          try {
-            const [members, contexts, agents] = await Promise.all([
-              listMembers(team.id),
-              getTeamContexts(team.id),
-              getTeamAgents(team.id),
-            ])
-            return {
-              team,
-              members: projectTeamMembers(members),
-              contextIds: filterAccessValues(contexts?.contextIds, activeContextIds),
-              agentNames: filterAccessValues(agents?.agentNames, activeAgentNames),
-            }
-          } catch (err) {
-            console.warn(`[external/users] team-directory fetch failed for team ${team.id}:`, err)
-            return {
-              team,
-              members: [],
-              contextIds: [],
-              agentNames: [],
+        const mapped = await mapWithConcurrencyLimit(teams, 4, async team => {
+          const canReadMembers = team.role === 'admin' || team.role === 'inviter'
+          const [members, contexts, agents] = await Promise.allSettled([
+            canReadMembers ? listMembers(team.id) : Promise.resolve(null),
+            getTeamContexts(team.id),
+            getTeamAgents(team.id),
+          ])
+          const partialErrors: TeamDirectoryPartialError[] = []
+          for (const [source, result] of [
+            ['members', members],
+            ['contexts', contexts],
+            ['agents', agents],
+          ] as const) {
+            if (result.status === 'rejected') {
+              console.warn(
+                `[external/users] team-directory ${source} fetch failed for team ${team.id}:`,
+                result.reason
+              )
+              partialErrors.push({ teamId: team.id, source, code: 'unavailable' })
             }
           }
+          return {
+            item: {
+              team,
+              members:
+                canReadMembers && members.status === 'fulfilled'
+                  ? projectTeamMembers(members.value)
+                  : [],
+              contextIds:
+                contexts.status === 'fulfilled'
+                  ? filterAccessValues(contexts.value?.contextIds, activeContextIds)
+                  : [],
+              agentNames:
+                agents.status === 'fulfilled'
+                  ? filterAccessValues(agents.value?.agentNames, activeAgentNames)
+                  : [],
+            },
+            partialErrors,
+          }
         })
+        const partialErrors = [
+          ...initialPartialErrors,
+          ...mapped.flatMap(result => result.partialErrors),
+        ]
 
         return res.status(200).json({
           currentTeamId: listed.currentTeamId || currentTeamId,
           truncated,
-          items,
+          complete: partialErrors.length === 0 && !truncated,
+          partialErrors,
+          items: mapped.map(result => result.item),
         })
       } catch (error) {
         return next(error)

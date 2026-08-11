@@ -11,9 +11,11 @@ const svc = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
   acceptInvitationForEmail: vi.fn(),
   createInvitation: vi.fn(),
+  createManagedInvitationForUser: vi.fn(),
   createTeamForUser: vi.fn(),
   findMemberRole: vi.fn(),
   findMembership: vi.fn(),
+  externalManagedInvitationResponse: vi.fn((value: unknown) => value),
   getCurrentTeam: vi.fn(),
   getMe: vi.fn(),
   getTeamAgents: vi.fn(),
@@ -434,7 +436,7 @@ describe('routes/profile', () => {
       teamId: 't1',
       role: 'inviter',
     })
-    svc.createInvitation.mockResolvedValue({ id: 'invitation-1' })
+    svc.createManagedInvitationForUser.mockResolvedValue({ error: 'forbidden' })
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, accessCatalogGateway())
@@ -444,7 +446,12 @@ describe('routes/profile', () => {
       .send({ email: 'target@example.com', role: 'admin' })
       .expect(403)
 
-    expect(svc.createInvitation).not.toHaveBeenCalled()
+    expect(svc.createManagedInvitationForUser).toHaveBeenCalledWith(
+      'u1',
+      'target@example.com',
+      [{ teamId: 't1', role: 'admin' }],
+      'target'
+    )
   })
 
   it('allows membership lookup for another team when user claim matches', async () => {
@@ -516,12 +523,12 @@ describe('routes/profile', () => {
     expect(res.body).toEqual({
       currentTeamId: 't1',
       truncated: false,
+      complete: true,
+      partialErrors: [],
       items: [
         {
           team: { id: 't1', name: 'Alpha', role: 'member' },
-          members: [
-            { id: 'u1', email: 'u@example.com', name: 'User', role: 'member', status: 'active' },
-          ],
+          members: [],
           contextIds: ['ctx-a'],
           agentNames: ['agent-a'],
         },
@@ -544,6 +551,7 @@ describe('routes/profile', () => {
     expect(svc.getTeamContexts).toHaveBeenCalledWith('t2')
     expect(svc.getTeamAgents).toHaveBeenCalledWith('t2')
     expect(svc.listMembers).toHaveBeenCalledWith('t2')
+    expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
   })
 
   it('caps initial team directory fan-out and reports truncation', async () => {
@@ -566,9 +574,11 @@ describe('routes/profile', () => {
     ).expect(200)
 
     expect(res.body.truncated).toBe(true)
+    expect(res.body.complete).toBe(false)
+    expect(res.body.partialErrors).toEqual([])
     expect(res.body.items).toHaveLength(50)
     expect(res.body.items.at(-1)?.team.id).toBe('t50')
-    expect(svc.listMembers).toHaveBeenCalledTimes(50)
+    expect(svc.listMembers).not.toHaveBeenCalled()
     expect(svc.getTeamContexts).toHaveBeenCalledTimes(50)
     expect(svc.getTeamAgents).toHaveBeenCalledTimes(50)
   })
@@ -686,6 +696,10 @@ describe('routes/profile', () => {
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 'team-from-claims',
+      role: 'member',
+    })
     rpcMock.issueRpcAccessToken.mockReturnValue({
       token: 'rpc-token',
       accessScope: 'team',
