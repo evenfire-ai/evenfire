@@ -158,6 +158,48 @@ describe('live authorization resolver', () => {
     ])
   })
 
+  it('does not let an inviter authorize an administrator invitation target', async () => {
+    const team = canonicalResourceIdentity({
+      environmentId: 'cluster-a',
+      type: 'team',
+      logicalId: '00000000-0000-4000-8000-000000000010',
+      displayName: 'Team A',
+    })
+    const inviterPrincipal = principalRow({
+      memberships: [
+        {
+          teamId: team.logicalId,
+          role: 'inviter',
+          membershipUpdatedAt: '2026-08-10T12:00:00.000Z',
+          teamRevision: 4,
+        },
+      ],
+    })
+
+    const result = await resolveLiveAuthorizationInTransaction(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'team.member.invite',
+        resource: team,
+        operationTarget: { teamId: team.logicalId, role: 'admin' },
+      },
+      dbFor(
+        [
+          {
+            kind: 'team',
+            grant_id: `team_members:${team.logicalId}:user-1`,
+            team_id: team.logicalId,
+            current_role: 'inviter',
+            capabilities: ['team.member.invite'],
+          },
+        ],
+        inviterPrincipal
+      )
+    )
+
+    expect(result).toEqual({ status: 'denied', code: 'forbidden' })
+  })
+
   it('requires an explicit path when current path behaviors differ', async () => {
     const db = dbFor([
       {

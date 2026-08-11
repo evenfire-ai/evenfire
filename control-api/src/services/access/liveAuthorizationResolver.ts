@@ -550,6 +550,15 @@ function applyOperationTarget(
   if (targetUserId && input.resource.type === 'user' && input.resource.logicalId !== targetUserId) {
     return null
   }
+  const targetRole = typeof target.role === 'string' ? target.role.trim() : ''
+  if (targetRole) {
+    if (!['admin', 'inviter', 'member'].includes(targetRole)) return null
+    if (!['team.member.invite', 'team.member.manage'].includes(input.requiredCapability))
+      return null
+    if (targetRole === 'admin') {
+      return candidates.filter(candidate => candidate.currentRole === 'admin')
+    }
+  }
   return candidates
 }
 
@@ -560,8 +569,19 @@ async function operationTargetRelationshipIsCurrent(
   const target = input.operationTarget
   if (!target) return true
 
+  const allowedKeys = new Set(['teamId', 'userId', 'role'])
+  if (Object.keys(target).some(key => !allowedKeys.has(key))) return false
+
   const targetTeamId = typeof target.teamId === 'string' ? target.teamId.trim() : ''
   const targetUserId = typeof target.userId === 'string' ? target.userId.trim() : ''
+  const targetRole = typeof target.role === 'string' ? target.role.trim() : ''
+  if (
+    targetRole &&
+    (!['admin', 'inviter', 'member'].includes(targetRole) ||
+      !['team.member.invite', 'team.member.manage'].includes(input.requiredCapability))
+  ) {
+    return false
+  }
   if (targetTeamId && input.resource.type === 'team' && targetTeamId !== input.resource.logicalId) {
     return false
   }
