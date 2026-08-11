@@ -52,6 +52,17 @@ rules:
   - create
   - update
   - delete
+# The user-access operational index keeps an authoritative list/watch projection
+# for these three cluster-readable families. Keep watch separate so the existing
+# CommunicationChannel CRUD rule does not gain an unrelated watch capability.
+- apiGroups:
+  - clerum.io
+  resources:
+  - hosts
+  - contexts
+  - mcpservers
+  verbs:
+  - watch
 # workflowrecipepolicies: READ-ONLY access so the /admin/recipes/validate
 # handler can check the agenticWorkflowContextRefBlocked invariant (spec
 # §270-271 / §1441). control-api never mutates policies — those are authored
