@@ -60,8 +60,8 @@ zero-executed-test result is a failure.
 
 T1 uses real Postgres for migration and role checks. It proves:
 
-- additive migration order, writer-only mutation privileges, and reader-role
-  mutation denial;
+- additive migration order, exact writer-only session-table privileges, and
+  complete denial for `control_api_runtime`, the reader role, and `PUBLIC`;
 - session/part uniqueness, offset geometry, idempotency, status map and
   response-loss replay;
 - restart recovery, orphan reconciliation, lease release, disk reservation,

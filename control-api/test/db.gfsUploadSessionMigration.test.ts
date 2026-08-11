@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 
+function runtimeAccessProfile(): Map<string, string> {
+  const source = readFileSync(
+    new URL('../../deploy/scripts/control-api-runtime-access-profiles.tsv', import.meta.url),
+    'utf8'
+  )
+  return new Map(
+    source
+      .split('\n')
+      .filter(line => line && !line.startsWith('#'))
+      .map(line => line.split('\t') as [string, string])
+  )
+}
+
 describe('0091_gfs_upload_sessions', () => {
   it('is additive and keeps the protocol ceiling separate from the product policy', () => {
     const schema = readFileSync(
@@ -28,5 +41,24 @@ describe('0091_gfs_upload_sessions', () => {
     )
     expect(schema).not.toMatch(/DROP\s+(TABLE|COLUMN)/i)
     expect(schema).not.toContain('209715200')
+  })
+
+  it('classifies every upload relation as inaccessible to control_api_runtime', () => {
+    const schema = readFileSync(
+      new URL('../src/services/gfsUploadSchema.ts', import.meta.url),
+      'utf8'
+    )
+    const uploadRelations = [
+      ...schema.matchAll(/CREATE TABLE IF NOT EXISTS (gfs_upload_[a-z0-9_]+)/g),
+    ]
+      .map(([, relation]) => relation)
+      .sort()
+    const profile = runtimeAccessProfile()
+
+    expect(uploadRelations).toEqual(['gfs_upload_parts', 'gfs_upload_sessions'])
+    expect(uploadRelations.map(relation => [relation, profile.get(relation)])).toEqual([
+      ['gfs_upload_parts', 'none'],
+      ['gfs_upload_sessions', 'none'],
+    ])
   })
 })

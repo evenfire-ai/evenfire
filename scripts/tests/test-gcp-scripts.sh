@@ -1466,7 +1466,9 @@ assert_control_api_runtime_access_contract_is_exact() {
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" == "80" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ "$relation_count" == "82" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+     grep -qx $'gfs_upload_parts\tnone' "$profile_file" && \
+     grep -qx $'gfs_upload_sessions\tnone' "$profile_file" && \
      grep -qx $'llm_allowed_models\tlegacy_dml' "$profile_file" && \
      grep -qx $'member_registration_credentials\tupsert' "$profile_file" && \
      grep -qx $'llm_allowed_models_audit\tappend' "$profile_file" && \

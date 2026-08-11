@@ -410,6 +410,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
     }
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
 
     const maintenanceRelations = await relationPrivileges(dbPool, 'trace_maintenance_runtime')
     const expectedMaintenanceRelations: Record<string, string[]> = {

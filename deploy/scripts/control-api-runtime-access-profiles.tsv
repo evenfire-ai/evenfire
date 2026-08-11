@@ -13,6 +13,8 @@ gfs_blob_manifests	none
 gfs_grants	legacy_dml
 gfs_resources	legacy_dml
 gfs_shares	legacy_dml
+gfs_upload_parts	none
+gfs_upload_sessions	none
 governed_event_read_v1	read
 governed_event_stream	append
 governed_run_attribution_bindings	append

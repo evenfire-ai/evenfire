@@ -138,8 +138,9 @@ fingerprint, expected bytes, selected geometry, checksum, counters, state,
 epochs, expiry, and the completion receipt. `gfs_upload_parts` stores only
 part metadata, checksum, lease state, and a server-generated staging path; it
 never stores the chunk bytes in Postgres. The writer role alone may mutate both
-tables. Readers cannot mutate sessions, and even `HEAD` is routed to the
-writer.
+tables. `control_api_runtime`, `gfs_controller_reader`, and `PUBLIC` have no
+table privileges on either relation: Control API is a streaming/auth relay,
+not a second upload-session store client. Even `HEAD` is routed to the writer.
 
 Before accepting a part the writer re-authorizes the current principal,
 reserves the indexed part and a global/session stream slot, and validates the
