@@ -205,6 +205,51 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-token', 'team-a')
   })
 
+  it('blocks new GFS dispatches while a transient team token is installed', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsDispatchBlocked = false
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-token`,
+        team: { id: teamId, name: teamId, role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+
+    await expect(
+      service.runWithTeamContext('team-b', async () => {
+        await expect(
+          service.startGfsFileUpload('parent-a', 'upload.bin', '/tmp/upload.bin')
+        ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
+        return 'team-b-operation'
+      })
+    ).resolves.toBe('team-b-operation')
+
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-token', 'team-a')
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
   it('fences the old GFS scope if a replacement team token cannot be refreshed', async () => {
     const service = new AppService() as any
     service.sessionToken = 'team-a-token'
@@ -248,7 +293,7 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
   })
 
-  it('fences GFS uploads only after an explicit switchTeam succeeds', async () => {
+  it('clears and revokes a replacement token even when GFS fence persistence fails', async () => {
     const service = new AppService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
@@ -271,11 +316,61 @@ describe('AppService.invokeHostMessage', () => {
         token: 'team-b-token',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
+      getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
+    }
+    service.tokenStore = {
+      setSessionToken: vi.fn(),
+      clearSessionToken: vi.fn(),
+    }
+    service.rpcTokenManager = { clear: vi.fn() }
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi
+      .fn()
+      .mockRejectedValue(new Error('state file is read-only'))
+    service.clearAuthenticatedSessionState = vi.fn()
+
+    await expect(service.switchSessionToTeam('team-b', 'team-a-token')).rejects.toThrow(
+      'replacement session rejected'
+    )
+
+    expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
+    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(expect.any(String), {
+      legacyEnvKeys: expect.any(Array),
+    })
+  })
+
+  it('fences GFS uploads only after an explicit switchTeam succeeds', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsDispatchBlocked = false
+    service.authClient = {
+      switchTeam: vi.fn().mockResolvedValue({
+        token: 'team-b-token',
+        team: { id: 'team-b', name: 'Team B', role: 'member' },
+      }),
       getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
     }
     service.tokenStore = { setSessionToken: vi.fn() }
     service.rpcTokenManager = { clear: vi.fn() }
-    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
+      await expect(
+        service.startGfsFileUpload('parent-a', 'upload.bin', '/tmp/upload.bin')
+      ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
+    })
     service.activateGfsAuthScope = vi.fn()
     service.stopAllStreams = vi.fn()
     service.gfsUploadJobs = new Map([['upload-1', { job: { suspendForAuth: vi.fn() } }]])

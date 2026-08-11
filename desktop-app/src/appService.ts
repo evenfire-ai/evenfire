@@ -818,6 +818,10 @@ export class AppService {
   private logoutInProgress = false
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
+  // A transient runWithTeamContext hop temporarily installs another team's
+  // token in sessionToken. Existing GFS jobs keep their captured token and
+  // scope, but new GFS operations must not capture that temporary token.
+  private gfsTransientTeamHopDepth = 0
   // A finite RPC may temporarily borrow another team session. Keep the
   // deliberate user-owned GFS scope stable across that hop so in-flight jobs
   // are not invalidated by the transient `me` value.
@@ -992,47 +996,77 @@ export class AppService {
   }
 
   private async switchSessionToTeam(teamId: string, token = this.requireSessionToken()) {
+    const releaseTransientHop = this.enterGfsTransientTeamHop()
     const targetTeamId = String(teamId || '').trim()
-    if (!targetTeamId) throw new Error('teamId is required')
-    const switchGeneration = this.sessionGeneration
-    if (this.sessionToken !== token || !this.me) {
-      throw new Error('stale_auth_epoch: authenticated team scope changed before switch dispatch')
-    }
-    const previousIdentity =
-      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
-    let switchedToken: string | null = null
     try {
-      const switched = await this.authClient.switchTeam(token, targetTeamId)
-      switchedToken = switched.token
-      if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
-        throw new Error('stale_auth_epoch: authenticated team scope changed during switch')
+      if (!targetTeamId) throw new Error('teamId is required')
+      const switchGeneration = this.sessionGeneration
+      if (this.sessionToken !== token || !this.me) {
+        throw new Error('stale_auth_epoch: authenticated team scope changed before switch dispatch')
       }
-      await this.commitSessionToken(switched.token, { refreshMe: true })
-      if (!this.me) throw new Error('Team switch ended without an authenticated session')
-      return switched.token
-    } catch (error) {
-      if (!switchedToken && this.sessionToken === token && this.me) {
-        // A failed transient hop leaves the deliberate GFS scope untouched.
-      } else {
-        // Once the auth service has issued a replacement token, the previous
-        // authenticated scope is no longer safe to continue. Fence and
-        // persist its uploads before clearing the partially switched session;
-        // otherwise a failed refresh/restore could leave a job running with a
-        // token whose team ownership is unknown.
-        await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
-        this.clearAuthenticatedSessionState()
-        try {
-          await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-            legacyEnvKeys: getActiveLegacyEnvKeys(),
-          })
-        } catch (clearError) {
-          console.warn(
-            '[AppService] Failed to clear a partially switched team session:',
-            clearError
-          )
+      const previousIdentity =
+        this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+      let switchedToken: string | null = null
+      try {
+        const switched = await this.authClient.switchTeam(token, targetTeamId)
+        switchedToken = switched.token
+        if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
+          throw new Error('stale_auth_epoch: authenticated team scope changed during switch')
         }
+        await this.commitSessionToken(switched.token, { refreshMe: true })
+        if (!this.me) throw new Error('Team switch ended without an authenticated session')
+        return switched.token
+      } catch (error) {
+        if (!switchedToken && this.sessionToken === token && this.me) {
+          // A failed transient hop leaves the deliberate GFS scope untouched.
+        } else {
+          // Once the auth service has issued a replacement token, the previous
+          // authenticated scope is no longer safe to continue. Fence and
+          // persist its uploads before clearing the partially switched session;
+          // otherwise a failed refresh/restore could leave a job running with a
+          // token whose team ownership is unknown. The fence is best effort:
+          // clearing the in-memory scope and revoking the persisted token must
+          // still happen when its state write is unavailable.
+          try {
+            await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+          } catch (fenceError) {
+            console.warn(
+              '[AppService] Failed to persist the GFS authentication fence during team switch:',
+              fenceError
+            )
+          }
+          this.clearAuthenticatedSessionState()
+          try {
+            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+              legacyEnvKeys: getActiveLegacyEnvKeys(),
+            })
+          } catch (clearError) {
+            console.warn(
+              '[AppService] Failed to clear a partially switched team session:',
+              clearError
+            )
+          }
+        }
+        throw error
       }
-      throw error
+    } finally {
+      releaseTransientHop()
+    }
+  }
+
+  private enterGfsTransientTeamHop(): () => void {
+    this.gfsTransientTeamHopDepth += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.gfsTransientTeamHopDepth = Math.max(0, this.gfsTransientTeamHopDepth - 1)
+    }
+  }
+
+  private assertGfsDispatchAllowed(): void {
+    if (this.gfsTransientTeamHopDepth > 0) {
+      throw new Error('GFS upload dispatch is unavailable during a transient team hop')
     }
   }
 
@@ -1066,28 +1100,33 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
-
-      if (shouldSwitch) {
-        activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
-      }
+      const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
 
       try {
-        return await operation(activeToken)
-      } catch (error) {
-        operationError = error
-        throw error
-      } finally {
-        if (shouldRestore) {
-          try {
-            await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
-          } catch (restoreError) {
-            if (!operationError) throw restoreError
-            console.warn(
-              '[AppService] Failed to restore team context after operation:',
-              restoreError
-            )
+        if (shouldSwitch) {
+          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
+        }
+
+        try {
+          return await operation(activeToken)
+        } catch (error) {
+          operationError = error
+          throw error
+        } finally {
+          if (shouldRestore) {
+            try {
+              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+            } catch (restoreError) {
+              if (!operationError) throw restoreError
+              console.warn(
+                '[AppService] Failed to restore team context after operation:',
+                restoreError
+              )
+            }
           }
         }
+      } finally {
+        releaseTransientHop?.()
       }
     } finally {
       releaseQueue()
@@ -1176,10 +1215,14 @@ export class AppService {
     this.gfsScopeIdentity = identityOverride ?? (this.me ? desktopGfsUploadIdentity(this.me) : null)
   }
 
-  private currentDesktopGfsUploadScope(driveValue: string | undefined): DesktopGfsUploadScope {
+  private currentDesktopGfsUploadScope(
+    driveValue: string | undefined,
+    options: { allowTransientTeamHop?: boolean } = {}
+  ): DesktopGfsUploadScope {
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
+    if (!options.allowTransientTeamHop) this.assertGfsDispatchAllowed()
     const identity = this.gfsScopeIdentity
     if (!identity) {
       throw new Error('GFS upload dispatch is unavailable before scope activation')
@@ -1192,7 +1235,9 @@ export class AppService {
   }
 
   private assertCurrentDesktopGfsUploadScope(scope: DesktopGfsUploadScope): void {
-    const current = this.currentDesktopGfsUploadScope(scope.drive)
+    // Existing jobs retain their original token and scope while a finite RPC
+    // borrows another team session. Only new user-facing dispatches are gated.
+    const current = this.currentDesktopGfsUploadScope(scope.drive, { allowTransientTeamHop: true })
     if (!sameDesktopGfsUploadScope(scope, current)) {
       throw new Error('stale_auth_epoch: GFS upload no longer belongs to the active scope')
     }
@@ -2776,29 +2821,38 @@ export class AppService {
     if (!targetTeamId) throw new Error('teamId is required')
     const previousIdentity =
       this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
-    // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
-    // stream — the old team's progress/activity/status/notification sockets must
-    // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
-    // renderer, which only calls `resetChat()`/`releaseAll()` once the `team.switch`
-    // IPC resolves (so a FAILED switch leaves both the streams and the trackers
-    // intact rather than a frozen half-torn-down state). Tasks stay alive
-    // server-side and reconverge via reconcile when the user returns to that team.
-    // NOTE: only the user-initiated `switchTeam` closes streams — the transient
-    // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
-    // minting a cross-team RPC token to decide an approval) must NOT.
-    await this.switchSessionToTeam(targetTeamId)
-    if (!this.me) throw new Error('Team switch ended without an authenticated session')
-    // A deliberate user switch is the only team-context boundary that fences
-    // in-flight uploads. Transient runWithTeamContext hops intentionally use
-    // switchSessionToTeam directly and must leave those jobs untouched.
-    await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
-    this.activateGfsAuthScope()
-    this.stopAllStreams()
-    // Grants are keyed by userId, not by team, so they carry over — but every
-    // cached org/agents/contexts answer is now about the wrong team. Drop the
-    // cache and tell mounted plugins to refetch (spec §6.2).
-    tryGetPluginSdkRuntime()?.notifySessionChanged(true)
-    return { authenticated: true, me: this.me }
+    // Keep the new team token fenced until the old GFS jobs have been
+    // suspended. `switchSessionToTeam` has its own nested gate, but releases
+    // it when the token exchange returns; this outer gate closes that small
+    // interval before the auth-boundary persistence completes.
+    const releaseTransientHop = this.enterGfsTransientTeamHop()
+    try {
+      // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
+      // stream — the old team's progress/activity/status/notification sockets must
+      // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
+      // renderer, which only calls `resetChat()`/`releaseAll()` once the `team.switch`
+      // IPC resolves (so a FAILED switch leaves both the streams and the trackers
+      // intact rather than a frozen half-torn-down state). Tasks stay alive
+      // server-side and reconverge via reconcile when the user returns to that team.
+      // NOTE: only the user-initiated `switchTeam` closes streams — the transient
+      // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
+      // minting a cross-team RPC token to decide an approval) must NOT.
+      await this.switchSessionToTeam(targetTeamId)
+      if (!this.me) throw new Error('Team switch ended without an authenticated session')
+      // A deliberate user switch is the only team-context boundary that fences
+      // in-flight uploads. Transient runWithTeamContext hops intentionally use
+      // switchSessionToTeam directly and must leave those jobs untouched.
+      await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+      this.activateGfsAuthScope()
+      this.stopAllStreams()
+      // Grants are keyed by userId, not by team, so they carry over — but every
+      // cached org/agents/contexts answer is now about the wrong team. Drop the
+      // cache and tell mounted plugins to refetch (spec §6.2).
+      tryGetPluginSdkRuntime()?.notifySessionChanged(true)
+      return { authenticated: true, me: this.me }
+    } finally {
+      releaseTransientHop()
+    }
   }
 
   async refreshAccessCatalog(): Promise<AccessCatalog> {
