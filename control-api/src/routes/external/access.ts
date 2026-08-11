@@ -20,6 +20,7 @@ import {
 import { isAccessCapability } from '../../services/access/capabilityRegistry.js'
 import { CATALOG_FAMILIES, type CatalogFamily } from '../../services/access/catalogContracts.js'
 import { resolveLiveAuthorization } from '../../services/access/liveAuthorizationResolver.js'
+import { validateOperationTarget } from '../../services/access/operationTarget.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
 import { userAccessCapabilityManifest } from '../../services/access/userAccessPolicy.js'
@@ -88,35 +89,6 @@ function pageLimit(value: unknown): number | null | undefined {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 100 ? parsed : null
-}
-
-function operationTarget(
-  value: unknown,
-  capability: string
-): Record<string, string> | null | undefined {
-  if (value === undefined) return undefined
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const candidate = value as Record<string, unknown>
-  const allowed = new Set(['teamId'])
-  if (['team.member.read', 'team.member.manage'].includes(capability)) allowed.add('userId')
-  if (['team.member.invite', 'team.member.manage'].includes(capability)) allowed.add('role')
-  if (capability === 'team.member.invite') {
-    allowed.add('action')
-    allowed.add('invitationId')
-  }
-  const keys = Object.keys(candidate)
-  if (keys.length === 0 || keys.length > allowed.size || keys.some(key => !allowed.has(key))) {
-    return null
-  }
-  const normalized: Record<string, string> = {}
-  for (const key of keys) {
-    const item = candidate[key]
-    if (typeof item !== 'string') return null
-    const text = item.trim()
-    if (!text || text.length > 128 || /[\u0000-\u001f\u007f]/u.test(text)) return null
-    normalized[key] = text
-  }
-  return normalized
 }
 
 async function requireEffectiveV2Contract(
@@ -293,7 +265,6 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
           : null
       const capability = typeof body?.requiredCapability === 'string' ? body.requiredCapability : ''
       const accessPathId = typeof body?.accessPathId === 'string' ? body.accessPathId : undefined
-      const target = operationTarget(body?.operationTarget, capability)
       let resource
       try {
         resource = canonicalResourceIdentity({
@@ -309,9 +280,25 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         !resource ||
         resource.environmentId !== canonicalEnvironmentId() ||
         !isAccessCapability(capability) ||
-        (accessPathId !== undefined && !ACCESS_PATH_PATTERN.test(accessPathId)) ||
-        target === null
+        (accessPathId !== undefined && !ACCESS_PATH_PATTERN.test(accessPathId))
       ) {
+        sendPublicApiError(
+          req,
+          res,
+          400,
+          'invalid_request',
+          'The authorization request is invalid.'
+        )
+        return
+      }
+      let target
+      try {
+        target = validateOperationTarget({
+          capability,
+          resource,
+          operationTarget: body?.operationTarget,
+        })
+      } catch {
         sendPublicApiError(
           req,
           res,
