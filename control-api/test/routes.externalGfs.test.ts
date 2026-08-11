@@ -340,6 +340,44 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
     expect(insert?.[1]?.[6]).toBe(`user:${U1}`)
   })
 
+  it('does not honor a stale team carried only by the user session token', async () => {
+    auth()
+    const staleTeamGrants = [
+      {
+        subject_type: 'team',
+        subject_id: T1,
+        resource_id: R,
+        permissions: ['manage_acl', 'read'],
+        inherit: false,
+      },
+    ]
+    mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      if (text.includes('FROM team_members')) return { rows: [] }
+      if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+        return combinedAuthorityRow(staleTeamGrants, values)
+      }
+      if (text.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-stale-team' }] }
+      return { rows: [] }
+    })
+
+    const app = await buildApp()
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: ['read'],
+        inherit: false,
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('not_manager')
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
+  })
+
   it('rejects a non-UUID user subject id → 400 subject_invalid', async () => {
     auth()
     dbReturning([

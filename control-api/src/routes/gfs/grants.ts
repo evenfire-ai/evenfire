@@ -88,14 +88,12 @@ export function resolveCaller(req: Request): GfsCaller {
   if (admin?.sub) {
     return { isOperator: true, subjects: new Set(['operator:']), actorKey: 'operator:' }
   }
-  const external = (req as { externalAuth?: { userId?: string; teamId?: string | null } })
-    .externalAuth
+  const external = (req as { externalAuth?: { userId?: string } }).externalAuth
   if (external?.userId) {
     const key = `user:${external.userId}`
     const preResolved = (req as RequestWithResolvedGfsSubjects).gfsSubjectKeys
     const subjects = new Set(preResolved && preResolved.length > 0 ? preResolved : [key])
     subjects.add(key)
-    if (external.teamId) subjects.add(`team:${external.teamId}`)
     return { isOperator: false, subjects, actorKey: key }
   }
   throw new GfsGrantError(401, 'unauthenticated')
