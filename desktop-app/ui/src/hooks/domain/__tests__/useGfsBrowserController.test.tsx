@@ -159,11 +159,11 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
   )
 }
 
-function Harness({ children }: { children: ReactNode }) {
+function Harness({ children, queryClient }: { children: ReactNode; queryClient?: QueryClient }) {
   const [me, setMe] = useState<AuthContextValue['me']>(userA)
   const [envKey, setEnvKey] = useState('env-a')
   const [client] = useState(
-    () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    () => queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } })
   )
   return (
     <AuthContext.Provider value={authValue(me, envKey)}>
@@ -492,6 +492,9 @@ describe('useGfsBrowserController', () => {
 
   it('keeps the browser session active when ACL listing is denied by resource policy', async () => {
     const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    const listGrants = vi.fn(async () => {
+      throw new Error('403 Forbidden: manage_acl_required')
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -510,17 +513,25 @@ describe('useGfsBrowserController', () => {
             grantableBits: [],
             canCreateShare: false,
           })),
-          listGrants: vi.fn(async () => {
-            throw new Error('403 Forbidden: manage_acl_required')
-          }),
+          listGrants,
           listShares: vi.fn(async () => []),
         },
       },
     })
 
-    render(<Probe grantsListEnabled />, { wrapper: Harness })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const removeQueries = vi.spyOn(queryClient, 'removeQueries')
+    render(<Probe grantsListEnabled />, {
+      wrapper: ({ children }) => <Harness queryClient={queryClient}>{children}</Harness>,
+    })
     await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
-    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+    await waitFor(() => expect(listGrants).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(removeQueries).not.toHaveBeenCalled()
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
     expect(screen.getByTestId('current').textContent).toBe(rootResourceId)
   })
 
