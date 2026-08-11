@@ -5,7 +5,6 @@ import type { UserSessionV2Claims } from '../../utils/auth/userSessionV2Token.js
 import {
   USER_SESSION_V2_TTL_SECONDS,
   signUserSessionV2Token,
-  verifyUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
 
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
@@ -270,15 +269,6 @@ export async function validateUserSessionClaims(
   return options.db ? work(options.db) : withTransaction(work)
 }
 
-export async function authenticateUserSessionToken(
-  token: string,
-  options: SessionClock & { db?: SessionDatabase } = {}
-): Promise<UserSessionValidation> {
-  const claims = verifyUserSessionV2Token(token)
-  if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  return validateUserSessionClaims(claims, options)
-}
-
 export async function renewUserSession(
   claims: UserSessionV2Claims,
   options: SessionClock & { db?: SessionDatabase } = {}
@@ -339,15 +329,6 @@ export async function renewUserSession(
     }
   }
   return options.db ? work(options.db) : withTransaction(work)
-}
-
-export async function renewUserSessionToken(
-  token: string,
-  options: SessionClock & { db?: SessionDatabase } = {}
-): Promise<IssuedUserSession | UserSessionValidation> {
-  const claims = verifyUserSessionV2Token(token)
-  if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  return renewUserSession(claims, options)
 }
 
 export async function revokeUserSession(
