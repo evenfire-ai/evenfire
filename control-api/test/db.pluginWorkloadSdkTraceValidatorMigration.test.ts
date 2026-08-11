@@ -23,8 +23,13 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
       candidate => candidate.version === '0090_plugin_workload_sdk_runtime_contract_reconciliation'
     )
     expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS.at(-2)?.version).toBe(
-      '0089_plugin_workload_sdk_credential_ticket_runtime_access'
+    expect(
+      CONTROL_API_MIGRATIONS.findIndex(candidate => candidate.version === migration?.version)
+    ).toBe(
+      CONTROL_API_MIGRATIONS.findIndex(
+        candidate =>
+          candidate.version === '0089_plugin_workload_sdk_credential_ticket_runtime_access'
+      ) + 1
     )
 
     clientQuery.mockImplementation(async (sql: string) => {
