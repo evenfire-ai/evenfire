@@ -109,7 +109,6 @@ function resourceSource(resource: GfsDriveResource, currentFolderName?: string):
   return resource.sources?.length ? resource.sources.join(' + ') : 'Shared'
 }
 
-export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
 function pickErrorMessage(error: unknown): string | null {
   if (!error) return null
   return error instanceof Error ? error.message : String(error)
@@ -120,7 +119,7 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   return messages.length > 0 ? messages.join(' · ') : null
 }
 
-export function FilesPage({ pushToast }: FilesPageProps) {
+export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
