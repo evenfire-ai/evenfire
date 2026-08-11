@@ -7,6 +7,7 @@ import { K8sNotFoundError } from '../src/services/resourceService.js'
 const mockVerifyExternalSessionToken = vi.fn()
 const mockGetUserContexts = vi.fn()
 const mockGetTeamContexts = vi.fn()
+const mockGetLiveTeamMembership = vi.fn()
 const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
@@ -23,6 +24,10 @@ vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
 vi.mock('../src/services/directory/index.js', () => ({
   getUserContexts: (...args: unknown[]) => mockGetUserContexts(...args),
   getTeamContexts: (...args: unknown[]) => mockGetTeamContexts(...args),
+}))
+
+vi.mock('../src/services/access/liveTeamAuthorization.js', () => ({
+  getLiveTeamMembership: (...args: unknown[]) => mockGetLiveTeamMembership(...args),
 }))
 
 vi.mock('../src/utils/auth/wfcBrowsingToken.js', () => ({
@@ -76,6 +81,8 @@ beforeEach(() => {
   mockVerifyExternalSessionToken.mockReset()
   mockGetUserContexts.mockReset()
   mockGetTeamContexts.mockReset()
+  mockGetLiveTeamMembership.mockReset()
+  mockGetLiveTeamMembership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
   mockSignWfcBrowsingCredential.mockReset()
   mockSignWfcBrowsingCredential.mockReturnValue({ token: 'browsing-token', expiresInSeconds: 60 })
 })
@@ -152,6 +159,36 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
       .set('x-user-session-token', 'dummy')
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
+    expect(mockGetLiveTeamMembership).toHaveBeenCalledWith('user-1', 'team-1')
+  })
+
+  it('does not trust a stale v1 team claim after membership revocation', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetLiveTeamMembership.mockResolvedValue(null)
+    const getResource = vi.fn()
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'stale-team-token')
+      .expect(403)
+
+    expect(mockGetTeamContexts).not.toHaveBeenCalled()
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('returns unavailable when live membership cannot be decided', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetLiveTeamMembership.mockRejectedValue(new Error('directory unavailable'))
+    const app = buildApp({ getResource: vi.fn() })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'stale-team-token')
+      .expect(503)
+      .expect({ error: 'authority_unavailable' })
   })
 
   it('returns 403 when caller has no access to the context', async () => {
