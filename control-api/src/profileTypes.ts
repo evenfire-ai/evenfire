@@ -45,6 +45,7 @@ export type AuthClaims = {
   teamId: string | null
   role: TeamRole
   exp: number
+  iat?: number
 }
 
 export type RpcAccessClaims = {
