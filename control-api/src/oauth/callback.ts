@@ -1,8 +1,10 @@
 import type { DbClient } from '../db.js'
+import { deriveCodeVerifier } from './pkce.js'
 import {
   type OAuthProvider,
   type ParsedTokenResponse,
   getOAuthProviderAdapter,
+  isKnownOAuthProvider,
 } from './providers.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
 import { setUserGrantBackground, upsertOAuthGrant } from './store.js'
@@ -203,15 +205,21 @@ export async function handleOAuthCallback(
 
   // ─── 4. Exchange code with provider ───────────────────────────────────
   const provider = clientDecl.provider
-  if (!isKnownProvider(provider)) {
+  if (!isKnownOAuthProvider(provider)) {
     return { kind: 'unsupported_provider', provider }
   }
   const adapter = getOAuthProviderAdapter(provider)
+  // PKCE (DEC-1): re-derive the verifier from the EXACT round-tripped state
+  // string — the same signed value the authorize URL derived its challenge from.
+  const codeVerifier = adapter.usesPkce
+    ? deriveCodeVerifier(deps.stateSecret, input.state)
+    : undefined
   const tokenRequest = adapter.buildTokenRequest({
     code: input.code,
     clientId,
     clientSecret,
     redirectUri: input.redirectUri,
+    codeVerifier,
   })
 
   let parsed: ParsedTokenResponse
@@ -293,18 +301,6 @@ export async function handleOAuthCallback(
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────
-
-const KNOWN_PROVIDERS: ReadonlySet<OAuthProvider> = new Set([
-  'salesforce',
-  'slack',
-  'notion',
-  'microsoft-graph',
-  'google',
-])
-
-function isKnownProvider(value: string): value is OAuthProvider {
-  return KNOWN_PROVIDERS.has(value as OAuthProvider)
-}
 
 async function safeReadText(response: Response): Promise<string> {
   try {

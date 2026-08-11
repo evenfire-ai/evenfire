@@ -52,13 +52,16 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     expect(grantScope.default).toBe('user')
   })
 
-  it('provider enum lists exactly the adapters shipped today (U2 extends monday/clickup/vercel)', () => {
+  it('provider enum lists exactly the adapters shipped today (U2 adds monday/clickup/vercel)', () => {
     expect(specSchema.properties.oauth.properties.provider.enum).toEqual([
       'salesforce',
       'slack',
       'notion',
       'microsoft-graph',
       'google',
+      'monday',
+      'clickup',
+      'vercel',
     ])
   })
 

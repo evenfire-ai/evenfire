@@ -139,13 +139,16 @@ spec:
                       # Known-shape adapters baked into control-api
                       # (src/oauth/providers.ts). Adding a provider is a control-api
                       # change — servers cannot speak OAuth to arbitrary endpoints.
-                      # U2 extends: monday, clickup, vercel.
+                      # U2 adds: monday, clickup, vercel (monday + vercel use PKCE).
                       enum:
                         - salesforce
                         - slack
                         - notion
                         - microsoft-graph
                         - google
+                        - monday
+                        - clickup
+                        - vercel
                       description: >-
                         Known-shape adapter. control-api owns the authorize/token
                         URLs and response-shape parsing per provider. Immutable.

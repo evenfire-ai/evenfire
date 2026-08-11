@@ -7,9 +7,9 @@ import {
   type SecretReader,
 } from './callback.js'
 import {
-  type OAuthProvider,
   type ParsedTokenResponse,
   getOAuthProviderAdapter,
+  isKnownOAuthProvider,
 } from './providers.js'
 import { type OAuthGrantKey, getOAuthGrant, upsertOAuthGrant } from './store.js'
 
@@ -85,7 +85,7 @@ export async function getAccessToken(
 
   const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
-  if (!isKnownProvider(decl.provider)) {
+  if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }
 
@@ -172,16 +172,4 @@ export async function getAccessToken(
       ? new Date(Date.now() + parsed.expiresIn * 1000)
       : undefined
   return { kind: 'ok', accessToken: parsed.accessToken, expiresAt }
-}
-
-const KNOWN_PROVIDERS: ReadonlySet<OAuthProvider> = new Set([
-  'salesforce',
-  'slack',
-  'notion',
-  'microsoft-graph',
-  'google',
-])
-
-function isKnownProvider(value: string): value is OAuthProvider {
-  return KNOWN_PROVIDERS.has(value as OAuthProvider)
 }

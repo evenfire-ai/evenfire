@@ -430,10 +430,27 @@ export interface SandboxUiSpec {
  * provider is a control-api change — recipes cannot speak OAuth to
  * arbitrary endpoints. Spec §9.9 / Decision 20.
  */
-export type OAuthProvider = 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+export type OAuthProvider =
+  | 'salesforce'
+  | 'slack'
+  | 'notion'
+  | 'microsoft-graph'
+  | 'google'
+  | 'monday'
+  | 'clickup'
+  | 'vercel'
 
 export function isOAuthProvider(value: string): value is OAuthProvider {
-  return ['salesforce', 'slack', 'notion', 'microsoft-graph', 'google'].includes(value)
+  return [
+    'salesforce',
+    'slack',
+    'notion',
+    'microsoft-graph',
+    'google',
+    'monday',
+    'clickup',
+    'vercel',
+  ].includes(value)
 }
 
 /** Reference to a Secret in the recipe's sandbox-recipes namespace. */

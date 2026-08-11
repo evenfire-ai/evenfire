@@ -5,7 +5,8 @@ import {
   SecretNotFoundError,
   type SecretReader,
 } from './callback.js'
-import { type OAuthProvider, getOAuthProviderAdapter } from './providers.js'
+import { computeCodeChallengeS256, deriveCodeVerifier } from './pkce.js'
+import { getOAuthProviderAdapter, isKnownOAuthProvider } from './providers.js'
 import { signOAuthState } from './state.js'
 
 /**
@@ -87,7 +88,7 @@ export async function buildAuthorizeUrl(
     return { kind: 'background_access_not_enabled' }
   }
 
-  if (!isKnownProvider(decl.provider)) {
+  if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }
   const adapter = getOAuthProviderAdapter(decl.provider)
@@ -118,24 +119,21 @@ export async function buildAuthorizeUrl(
     background: input.background ?? false,
   })
 
+  // PKCE (DEC-1): derive the verifier deterministically from the signed state,
+  // then send its S256 challenge. The callback re-derives the same verifier from
+  // the round-tripped state — nothing PKCE-related is stored server-side.
+  let codeChallenge: string | undefined
+  if (adapter.usesPkce) {
+    codeChallenge = computeCodeChallengeS256(deriveCodeVerifier(deps.stateSecret, state))
+  }
+
   const authorizeUrl = adapter.buildAuthorizeUrl({
     clientId,
     redirectUri: input.redirectUri,
     state,
     scopes: decl.scopes ?? [],
+    codeChallenge,
   })
 
   return { kind: 'ok', authorizeUrl }
-}
-
-const KNOWN_PROVIDERS: ReadonlySet<OAuthProvider> = new Set([
-  'salesforce',
-  'slack',
-  'notion',
-  'microsoft-graph',
-  'google',
-])
-
-function isKnownProvider(value: string): value is OAuthProvider {
-  return KNOWN_PROVIDERS.has(value as OAuthProvider)
 }

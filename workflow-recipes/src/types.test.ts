@@ -503,12 +503,15 @@ describe('WorkflowRecipePolicySpec nested structure (Risk 1.2)', () => {
 })
 
 describe('isOAuthProvider (O1.1)', () => {
-  it('accepts the five known-shape providers', () => {
+  it('accepts the eight known-shape providers', () => {
     expect(isOAuthProvider('salesforce')).toBe(true)
     expect(isOAuthProvider('slack')).toBe(true)
     expect(isOAuthProvider('notion')).toBe(true)
     expect(isOAuthProvider('microsoft-graph')).toBe(true)
     expect(isOAuthProvider('google')).toBe(true)
+    expect(isOAuthProvider('monday')).toBe(true)
+    expect(isOAuthProvider('clickup')).toBe(true)
+    expect(isOAuthProvider('vercel')).toBe(true)
   })
 
   it('rejects misspellings, casing, and unknown providers', () => {
@@ -517,10 +520,21 @@ describe('isOAuthProvider (O1.1)', () => {
     expect(isOAuthProvider('github')).toBe(false)
     expect(isOAuthProvider('google-workspace')).toBe(false)
     expect(isOAuthProvider('microsoft')).toBe(false)
+    expect(isOAuthProvider('Monday')).toBe(false)
+    expect(isOAuthProvider('click-up')).toBe(false)
   })
 
   it('covers every OAuthProvider branch (exhaustiveness)', () => {
-    const all: OAuthProvider[] = ['salesforce', 'slack', 'notion', 'microsoft-graph', 'google']
+    const all: OAuthProvider[] = [
+      'salesforce',
+      'slack',
+      'notion',
+      'microsoft-graph',
+      'google',
+      'monday',
+      'clickup',
+      'vercel',
+    ]
     for (const p of all) {
       expect(isOAuthProvider(p)).toBe(true)
     }
