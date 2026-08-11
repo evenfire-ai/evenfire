@@ -28,10 +28,11 @@ vi.mock('../src/controlApiClient.js', () => ({
 const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
 vi.mock('../src/authToken.js', () => authTokenMock)
 
-function buildApp() {
+function buildApp(edgeRequestLimit = 120) {
   const app = express()
+  app.set('trust proxy', 1)
   app.use(express.json())
-  app.use(createGfsRouter())
+  app.use(createGfsRouter({ edgeRequestLimit }))
   return app
 }
 
@@ -49,6 +50,86 @@ beforeEach(() => {
 })
 
 describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('applies one shared local edge bucket across v2 methods before proxying', async () => {
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    const app = buildApp(1)
+    const first = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    const second = await request(app)
+      .get('/me/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/status?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(429)
+    expect(second.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(second.headers['x-ratelimit-limit']).toBe('1')
+    expect(second.headers['x-ratelimit-remaining']).toBe('0')
+    expect(second.body).toEqual({
+      error: 'gfs_upload_rate_limited',
+      retryAfterSeconds: expect.any(Number),
+    })
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not spend an authenticated bucket on unauthenticated requests', async () => {
+    const app = buildApp(1)
+    const unauthenticated = await request(app).get('/me/gfs/capabilities?drive=archive')
+    expect(unauthenticated.status).toBe(401)
+
+    clientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const authenticated = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(authenticated.status).toBe(200)
+  })
+
+  it('isolates users and groups IPv6 addresses by the library subnet policy', async () => {
+    authTokenMock.verifyToken.mockImplementation((token: string) => ({
+      userId: token === 'sess-two' ? 'u2' : 'u1',
+      email: `${token}@example.com`,
+      teamId: null,
+      role: 'member',
+      exp: 9_999_999_999,
+    }))
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    const app = buildApp(1)
+    const first = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-one')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::1')
+    const differentUser = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-two')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::1')
+    const sameUserPrefix = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-one')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::2')
+
+    expect(first.status).toBe(200)
+    expect(differentUser.status).toBe(200)
+    expect(sameUserPrefix.status).toBe(429)
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
+  })
+
   it('rejects a missing or create-body-mismatched upload drive at the public edge', async () => {
     const missing = await request(buildApp())
       .get('/me/gfs/capabilities')
@@ -61,6 +142,23 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(missing.body).toEqual({ error: 'drive_required' })
     expect(mismatched.status).toBe(400)
     expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed drive wire values without forwarding them upstream', async () => {
+    const malformed = ['', ' archive', 'archive ', '\tarchive', 'archive\n']
+    for (const drive of malformed) {
+      const response = await request(buildApp())
+        .get(`/me/gfs/capabilities?drive=${encodeURIComponent(drive)}`)
+        .set('authorization', 'Bearer sess-xyz')
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'drive_required' })
+    }
+    const arrayValue = await request(buildApp())
+      .get('/me/gfs/capabilities?drive=archive&drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(arrayValue.status).toBe(400)
+    expect(arrayValue.body).toEqual({ error: 'drive_required' })
     expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
   })
 

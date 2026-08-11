@@ -1,11 +1,33 @@
-import { Router } from 'express'
+import { type Request, Router } from 'express'
 import type { NextFunction, Response } from 'express'
+import { type AugmentedRequest, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
-import { createRateLimiter } from '../middleware/rateLimit.js'
+
+const UPLOAD_DRIVE_WIRE_RE = /^\S(?:[\s\S]*\S)?$/
+
+type GfsRouterOptions = {
+  edgeRequestLimit?: number
+}
+
+/**
+ * Validate only the public wire format. Drive ownership and authorization are
+ * re-established by control-api/GFSC from the authenticated subject; this
+ * helper must never become an authorization decision.
+ */
+function uploadDriveFromRequest(req: Request): string | null {
+  const rawDrive = req.query.drive
+  return typeof rawDrive === 'string' && UPLOAD_DRIVE_WIRE_RE.test(rawDrive) ? rawDrive : null
+}
+
+function uploadCreateBodyMatchesDrive(req: Request, path: string, drive: string): boolean {
+  if (req.method !== 'POST' || path !== '/external/gfs/uploads') return true
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return false
+  return (req.body as { drive?: unknown }).drive === drive
+}
 
 /**
  * End-user gfs (Global File System) surface — the user side of the delegation UI
@@ -54,7 +76,7 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
   next(error)
 }
 
-export function createGfsRouter(): Router {
+export function createGfsRouter(options: GfsRouterOptions = {}): Router {
   const router = Router()
 
   router.use('/me/gfs', requireAuth)
@@ -63,13 +85,32 @@ export function createGfsRouter(): Router {
   // middleware on every new route). The authoritative replica-safe request,
   // weighted-byte, and active-request budgets are enforced again in
   // control-api with PostgreSQL before GFSC body forwarding.
-  const uploadEdgeRateLimit = createRateLimiter({
+  const edgeRequestLimit = options.edgeRequestLimit ?? config.gfsUploadRequestPerMinute
+  const uploadEdgeRateLimit = rateLimit({
     windowMs: 60_000,
-    maxRequests: config.gfsUploadRequestPerMinute,
-    errorCode: 'gfs_upload_rate_limited',
-    keyFn: request => {
+    limit: edgeRequestLimit,
+    legacyHeaders: false,
+    standardHeaders: false,
+    skipFailedRequests: false,
+    skipSuccessfulRequests: false,
+    passOnStoreError: true,
+    keyGenerator: request => {
       const req = request as AuthedRequest
-      return `${req.auth?.userId || '__no_user__'}:${req.ip || req.socket.remoteAddress || 'unknown'}`
+      const sourceIp = req.ip || req.socket.remoteAddress || 'unknown'
+      const normalizedIp = sourceIp === 'unknown' ? sourceIp : ipKeyGenerator(sourceIp)
+      return `${req.auth?.userId || '__no_user__'}:${normalizedIp}`
+    },
+    handler: (request, res, _next, optionsUsed) => {
+      const info = (request as AugmentedRequest).rateLimit
+      const resetAt = info?.resetTime?.getTime() ?? Date.now() + optionsUsed.windowMs
+      const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - Date.now()) / 1000))
+      res.setHeader('Retry-After', String(retryAfterSeconds))
+      res.setHeader('X-RateLimit-Limit', String(info?.limit ?? edgeRequestLimit))
+      res.setHeader('X-RateLimit-Remaining', '0')
+      res.status(429).json({
+        error: 'gfs_upload_rate_limited',
+        retryAfterSeconds,
+      })
     },
   })
 
@@ -393,17 +434,15 @@ async function proxyUploadStream(
   path: string
 ): Promise<void> {
   try {
-    const drive = typeof req.query.drive === 'string' ? req.query.drive.trim() : ''
-    if (!drive || drive !== req.query.drive) {
+    const drive = uploadDriveFromRequest(req)
+    if (!drive) {
       res.status(400).json({ error: 'drive_required' })
       return
     }
     if (
       method === 'POST' &&
       path === '/external/gfs/uploads' &&
-      (!req.body ||
-        typeof req.body !== 'object' ||
-        (req.body as { drive?: unknown }).drive !== drive)
+      !uploadCreateBodyMatchesDrive(req, path, drive)
     ) {
       res.status(400).json({ error: 'drive_mismatch' })
       return
