@@ -1393,6 +1393,40 @@ describe('POST /admin/registry/install', () => {
       })
       .expect(404)
   })
+
+  it('installing an McpServer preserves spec.displayName on the target context (R4-B4)', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+
+    const gw = new MockGateway('mcp-server')
+    // Seed a context that ALREADY carries displayName plus an existing allowlist
+    // entry — displayName is the additive field the allowlist update must not
+    // drop when it rebuilds the context spec.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: { contextId: 'ctx-keep', mcpServers: ['srv-other'], displayName: 'Keep Me' },
+    })
+    const app = makeApp(gw)
+
+    await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'ctx-keep',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(201)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and the new server joined the allowlist alongside the pre-existing one.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other', 'my-airtable'])
+  })
 })
 
 describe('POST /admin/registry/install — image allowlist enforce (2.3)', () => {

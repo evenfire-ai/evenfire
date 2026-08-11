@@ -1283,14 +1283,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // must roll back rather than return a false success.
         try {
           const ctx = (await gateway.getResource('contexts', contextRef)) as {
-            spec?: { contextId?: string; description?: string; mcpServers?: string[] }
+            spec?: Record<string, unknown> & {
+              contextId?: string
+              description?: string
+              mcpServers?: string[]
+            }
           }
           const existing: string[] = ctx.spec?.mcpServers ?? []
           if (!existing.includes(serverName)) {
             await gateway.updateResource('contexts', contextRef, {
               spec: {
+                ...ctx.spec,
                 contextId: ctx.spec?.contextId ?? contextRef,
-                description: ctx.spec?.description,
                 mcpServers: [...existing, serverName],
               } as Record<string, unknown>,
             })
