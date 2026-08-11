@@ -7,10 +7,10 @@ import {
   requireValidExternalSessionToken,
 } from '../src/middleware/externalSessionAuth.js'
 
-const session = vi.hoisted(() => ({ verifyExternalSessionToken: vi.fn() }))
+const session = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const db = vi.hoisted(() => ({ query: vi.fn() }))
 
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => session)
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => session)
 vi.mock('../src/db.js', () => ({ pool: db }))
 
 function app() {
@@ -28,12 +28,16 @@ function app() {
 describe('external team authorization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    session.verifyExternalSessionToken.mockReturnValue({
-      userId: 'user-1',
-      email: 'user@example.com',
-      teamId: 'team-1',
-      role: 'admin',
-      exp: Math.floor(Date.now() / 1000) + 3600,
+    session.authenticateExternalUserSession.mockResolvedValue({
+      status: 'authenticated',
+      contract: 'v1',
+      claims: {
+        userId: 'user-1',
+        email: 'user@example.com',
+        teamId: 'team-1',
+        role: 'admin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
     })
   })
 
@@ -55,12 +59,16 @@ describe('external team authorization', () => {
   })
 
   it('allows a current admin even when the legacy token team and role are stale', async () => {
-    session.verifyExternalSessionToken.mockReturnValue({
-      userId: 'user-1',
-      email: 'user@example.com',
-      teamId: 'other-team',
-      role: 'member',
-      exp: Math.floor(Date.now() / 1000) + 3600,
+    session.authenticateExternalUserSession.mockResolvedValue({
+      status: 'authenticated',
+      contract: 'v1',
+      claims: {
+        userId: 'user-1',
+        email: 'user@example.com',
+        teamId: 'other-team',
+        role: 'member',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
     })
     db.query.mockResolvedValue({
       rows: [{ team_id: 'team-1', role: 'admin' }],

@@ -19,8 +19,8 @@ const mockQuery = vi.hoisted(() => vi.fn())
 const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
 const mockWithTransaction = vi.hoisted(() => vi.fn())
 
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
+  authenticateExternalUserSession: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
 }))
 vi.mock('../src/auth/gfsToken.js', () => ({
   GFS_DELETE_SCOPE: 'gfs.delete',
@@ -132,7 +132,12 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-const auth = () => mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+const auth = () =>
+  mockVerifyExternalSessionToken.mockResolvedValue({
+    status: 'authenticated',
+    contract: 'v1',
+    claims: SESSION,
+  })
 
 function combinedAuthorityRow(
   grants: Record<string, unknown>[],
@@ -241,7 +246,10 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
   })
 
   it('401 without a session token (Session-JWT plane gate)', async () => {
-    mockVerifyExternalSessionToken.mockReturnValue(null)
+    mockVerifyExternalSessionToken.mockResolvedValue({
+      status: 'invalid',
+      reason: 'invalid_representation',
+    })
     const app = await buildApp()
     const res = await request(app).post('/external/gfs/token').send({})
     expect(res.status).toBe(401)
@@ -1029,7 +1037,10 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
 
 describe('user resource mutations via gfsc proxy', () => {
   it('rejects non-session tokens on external mutation routes before minting a GFS token', async () => {
-    mockVerifyExternalSessionToken.mockReturnValue(null)
+    mockVerifyExternalSessionToken.mockResolvedValue({
+      status: 'invalid',
+      reason: 'invalid_representation',
+    })
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const app = await buildApp()

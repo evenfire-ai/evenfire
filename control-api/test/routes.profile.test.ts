@@ -73,6 +73,25 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async (_token, claims) => ({
+      status: 'valid' as const,
+      identity: {
+        userId: claims.userId,
+        email: claims.email,
+        sid: '',
+        jti: 'test-v1-fingerprint',
+        sessionVersion: 0,
+        expiresAt: new Date(claims.exp * 1000),
+        absoluteExpiresAt: new Date(claims.exp * 1000),
+        authenticationMethods: [],
+      },
+    })),
+  }
+})
 
 describe('routes/profile', () => {
   const token = 'dev-external-rest-api-token'

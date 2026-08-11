@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
-import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
+import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
@@ -15,25 +15,35 @@ function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
 }
 
-export function requireValidExternalSessionToken(
+export async function requireValidExternalSessionToken(
   req: ExternalAuthedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const token = extractUserSessionToken(req)
   if (!token || token.length > 4096) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
 
-  const claims = verifyExternalSessionToken(token)
-  if (!claims) {
-    res.status(401).json({ error: 'Unauthorized' })
-    return
+  try {
+    const authentication = await authenticateExternalUserSession(token, {
+      purpose: 'protected',
+      client: { version: req.header('x-evenfire-client-version') || undefined },
+    })
+    if (authentication.status === 'upgrade_required') {
+      res.status(426).json({ error: 'upgrade_required' })
+      return
+    }
+    if (authentication.status !== 'authenticated') {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    req.externalAuth = authentication.claims
+    next()
+  } catch {
+    res.status(503).json({ error: 'authority_unavailable' })
   }
-
-  req.externalAuth = claims
-  next()
 }
 
 export function requireExternalUserParamMatch(paramName = 'userId') {

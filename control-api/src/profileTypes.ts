@@ -46,6 +46,13 @@ export type AuthClaims = {
   role: TeamRole
   exp: number
   iat?: number
+  sessionContract?: 'v2'
+  sid?: string
+  jti?: string
+  sv?: number
+  ver?: 2
+  authTime?: number
+  amr?: string[]
 }
 
 export type RpcAccessClaims = {

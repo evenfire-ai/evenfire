@@ -7,6 +7,10 @@ import {
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
+  issueExternalUserSession,
+  selectExternalSessionRepresentation,
+} from '../../services/auth/externalSessionIssuance.js'
+import {
   acceptInvitationForEmail,
   getInvitationByToken,
   listPendingInvitations,
@@ -19,7 +23,6 @@ import {
   validateInvitationFlowToken,
 } from '../../services/invitationFlowRegistrationService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
-import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
 function invitationLookupIpKey(req: {
   ip?: string
@@ -124,16 +127,25 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
-        const sessionToken = signExternalSessionToken({
+        const selection = selectExternalSessionRepresentation({
+          requestedContract: req.body?.sessionContract === 'v2' ? 'v2' : undefined,
+        })
+        if (selection.status !== 'selected') {
+          return res.status(426).json({ error: 'upgrade_required' })
+        }
+        const issued = await issueExternalUserSession({
+          contract: selection.contract,
           userId,
           email: result.data.email,
           teamId: result.data.teamId || null,
           role: result.data.role,
+          authenticationMethods: ['invitation'],
         })
 
         return res.status(200).json({
           ...result.data,
-          token: sessionToken,
+          token: issued.token,
+          sessionContract: issued.contract,
         })
       } catch (error) {
         return next(error)
@@ -269,16 +281,25 @@ export function createExternalInvitationsRouter(): Router {
         return res.status(400).json({ error: 'not_pending' })
       }
 
-      const sessionToken = signExternalSessionToken({
+      const selection = selectExternalSessionRepresentation({
+        requestedContract: req.body?.sessionContract === 'v2' ? 'v2' : undefined,
+      })
+      if (selection.status !== 'selected') {
+        return res.status(426).json({ error: 'upgrade_required' })
+      }
+      const issued = await issueExternalUserSession({
+        contract: selection.contract,
         userId: result.data.userId,
         email: result.data.email,
         teamId: result.data.teamId || null,
         role: result.data.role,
+        authenticationMethods: ['invitation'],
       })
 
       return res.status(200).json({
         ...result.data,
-        token: sessionToken,
+        token: issued.token,
+        sessionContract: issued.contract,
       })
     } catch (error) {
       return next(error)
