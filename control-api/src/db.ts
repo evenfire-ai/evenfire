@@ -5,6 +5,15 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
+import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
+import { rootLogger } from './observability/logger.js'
+import {
+  applyCatalogUtf8OrderingSchema,
+  applyComposableCatalogRevisionSchema,
+  applyUserAccessFoundationSchema,
+  backfillLegacyPasswordSecurityEpochs,
+} from './services/access/userAccessFoundationSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -14,6 +23,7 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -75,7 +85,7 @@ export type DbTransactionClient = DbClient & {
 }
 
 type DbSessionClient = DbClient & {
-  release: () => void
+  release: (destroy?: boolean | Error) => void
 }
 
 type DbConnector = {
@@ -83,6 +93,7 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const migrationLogger = rootLogger.child({ module: 'database-migration' })
 
 type DbMigration = {
   version: string
@@ -6117,6 +6128,44 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGrokSubscriptionConnectionSchema,
   },
   {
+    version: '0109_user_access_foundation',
+    legacyVersions: ['0107_user_access_foundation', '0101_user_access_foundation'],
+    apply: applyUserAccessFoundationSchema,
+  },
+  {
+    version: '010a_invitation_delivery_commands',
+    legacyVersions: ['0108_invitation_delivery_commands', '0102_invitation_delivery_commands'],
+    apply: applyInvitationDeliveryCommandFoundation,
+  },
+  {
+    version: '010b_catalog_utf8_ordering',
+    legacyVersions: ['0109_catalog_utf8_ordering', '0103_catalog_utf8_ordering'],
+    apply: applyCatalogUtf8OrderingSchema,
+  },
+  {
+    version: '010c_composable_catalog_revisions',
+    legacyVersions: ['010a_composable_catalog_revisions', '0104_composable_catalog_revisions'],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    // Fix-forward for databases that recorded the first composable-catalog
+    // body before the GFS resource-component mapping was completed.
+    version: '010d_gfs_catalog_revision_components',
+    legacyVersions: [
+      '010b_gfs_catalog_revision_components',
+      '0105_gfs_catalog_revision_components',
+    ],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    version: '010e_legacy_password_security_epoch_backfill',
+    legacyVersions: [
+      '010c_legacy_password_security_epoch_backfill',
+      '0106_legacy_password_security_epoch_backfill',
+    ],
+    apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
     version: '0110_grok_subscription_oauth_states',
     apply: applyGrokSubscriptionOAuthStateSchema,
   },
@@ -6407,11 +6456,12 @@ async function recordMigration(db: DbClient, version: string): Promise<void> {
   )
 }
 
-async function applyPendingMigrations(db: DbClient): Promise<void> {
+async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> {
   await ensureSchemaMigrationsTable(db)
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
+    if (migration.version > '0106_oauth_grants_owner_generalization') break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)
@@ -6422,30 +6472,41 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
     await recordMigration(db, migration.version)
     appliedVersions.add(migration.version)
   }
+  return appliedVersions
 }
 
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
   let inTransaction = false
+  let destroySession = false
 
   try {
+    for (const sql of migrationSessionBoundsSql(false)) {
+      await client.query(sql)
+    }
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
     await client.query('BEGIN')
     inTransaction = true
-
-    await applyPendingMigrations(client)
-
+    const appliedVersions = await applyPendingLegacyMigrations(client)
     await client.query('COMMIT')
     inTransaction = false
+
+    await applyPendingPr1Migrations({
+      db: client,
+      migrations: CONTROL_API_MIGRATIONS,
+      appliedVersions,
+      recordMigration,
+    })
   } catch (error) {
+    destroySession = true
     if (inTransaction) {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        console.warn('[ControlAPI] initDb rollback failed:', rollbackError)
+        migrationLogger.warn({ err: rollbackError }, 'Database migration rollback failed')
       }
     }
     throw error
@@ -6454,10 +6515,11 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        console.warn('[ControlAPI] initDb advisory unlock failed:', unlockError)
+        destroySession = true
+        migrationLogger.warn({ err: unlockError }, 'Database migration advisory unlock failed')
       }
     }
-    client.release()
+    client.release(destroySession)
   }
 }
 
@@ -6476,28 +6538,45 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 }
 
 export async function withTransaction<T>(
-  work: (db: DbTransactionClient) => Promise<T>
+  work: (db: DbTransactionClient) => Promise<T>,
+  options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<T> {
-  const client = (await pool.connect()) as PoolClient
+  let client: PoolClient
+  try {
+    client = (await pool.connect()) as PoolClient
+  } catch (error) {
+    throw options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
+  }
   let transactionStarted = false
   let commitSent = false
   let releaseError: Error | boolean | undefined
+  const transactionClient: DbClient = options.onDatabaseFailure
+    ? Object.assign(Object.create(client) as DbClient, {
+        query: async (text: string, values?: unknown[]) => {
+          try {
+            return await client.query(text, values)
+          } catch (error) {
+            throw options.onDatabaseFailure!(error)
+          }
+        },
+      })
+    : (client as DbClient)
   try {
-    await client.query('BEGIN')
+    await transactionClient.query('BEGIN')
     transactionStarted = true
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
-    const result = await work(client as unknown as DbTransactionClient)
+    const result = await work(transactionClient as unknown as DbTransactionClient)
     commitSent = true
-    await client.query('COMMIT')
+    await transactionClient.query('COMMIT')
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
       releaseError = error instanceof Error ? error : true
     } else {
       try {
-        await client.query('ROLLBACK')
+        await transactionClient.query('ROLLBACK')
       } catch (rollbackError) {
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
