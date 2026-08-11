@@ -6,6 +6,7 @@ import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { externalUserSessionEventsTotal } from '../../observability/metrics.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
+import { userAccessRollout } from '../../services/access/userAccessRollout.js'
 import { authenticateExternalSessionToken } from '../../services/auth/externalSessionAuthentication.js'
 import {
   issueExternalUserSession,
@@ -184,6 +185,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post('/external/auth/session-token', async (req, res, next) => {
     try {
+      if (!userAccessRollout.legacySwitchEndpoint) {
+        sendPublicApiError(
+          req,
+          res,
+          409,
+          'conflict',
+          'Legacy team-session switching is no longer available.'
+        )
+        return
+      }
       const role = String(req.body?.role || '').trim() as AuthClaims['role']
       const userId = String(req.body?.userId || '').trim()
       const email = String(req.body?.email || '')

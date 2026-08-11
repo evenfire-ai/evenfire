@@ -13,10 +13,15 @@ const userSessions = vi.hoisted(() => ({
   validateUserSessionClaims: vi.fn(),
   validateLegacyUserSession: vi.fn(),
 }))
+const rollout = vi.hoisted(() => ({
+  sessionV2Acceptance: true,
+  legacyV1Acceptance: true,
+}))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => session)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => authorization)
 vi.mock('../src/services/auth/userSessionService.js', () => userSessions)
+vi.mock('../src/services/access/userAccessRollout.js', () => ({ userAccessRollout: rollout }))
 
 function app() {
   const value = express()
@@ -53,6 +58,35 @@ describe('external team authorization', () => {
       exp: Math.floor(Date.now() / 1000) + 3600,
     })
     userSessions.validateLegacyUserSession.mockResolvedValue({ status: 'valid', identity: {} })
+    rollout.sessionV2Acceptance = true
+    rollout.legacyV1Acceptance = true
+  })
+
+  it('enforces v1 and v2 acceptance as independent deployment controls', async () => {
+    rollout.legacyV1Acceptance = false
+    await request(app())
+      .get('/teams/team-1')
+      .set('x-user-session-token', 'legacy-token')
+      .expect(401)
+    expect(userSessions.validateLegacyUserSession).not.toHaveBeenCalled()
+
+    session.verifyExternalSessionToken.mockReturnValue({
+      userId: 'user-1',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      sessionContract: 'v2',
+      sid: 'session-1',
+      jti: 'representation-1',
+      sv: 1,
+      authTime: Math.floor(Date.now() / 1000),
+      amr: ['pwd'],
+    })
+    rollout.legacyV1Acceptance = true
+    rollout.sessionV2Acceptance = false
+    await request(app()).get('/teams/team-1').set('x-user-session-token', 'v2-token').expect(401)
+    expect(userSessions.validateUserSessionClaims).not.toHaveBeenCalled()
   })
 
   it('rejects a revoked v2 session before team authorization', async () => {

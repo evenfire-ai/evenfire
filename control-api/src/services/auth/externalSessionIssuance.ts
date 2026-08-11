@@ -1,12 +1,13 @@
 import type { DbClient } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
+import { userAccessRollout } from '../access/userAccessRollout.js'
 import { createUserSession } from './userSessionService.js'
 
 export type ExternalSessionContract = 'v1' | 'v2'
 
 export function requestedExternalSessionContract(value: unknown): ExternalSessionContract {
-  return value === 'v2' ? 'v2' : 'v1'
+  return value === 'v2' && userAccessRollout.sessionV2Issuance ? 'v2' : 'v1'
 }
 
 export async function issueExternalUserSession(

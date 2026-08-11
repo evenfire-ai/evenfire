@@ -27,6 +27,7 @@ import {
   type ResourceType,
   canonicalResourceIdentity,
 } from '../../services/access/resourceIdentity.js'
+import { userAccessRollout } from '../../services/access/userAccessRollout.js'
 
 const resourceTypes = new Set<string>(RESOURCE_TYPES)
 const catalogResourceTypes = new Set<string>(ACCESS_CATALOG_RESOURCE_TYPES)
@@ -98,35 +99,43 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     res.status(200).json({
       contractVersion: '2',
       session: {
-        v2Accepted: true,
-        v2Issued: currentV2,
+        v2Accepted: userAccessRollout.sessionV2Acceptance,
+        v2Issued: userAccessRollout.sessionV2Issuance,
         issuanceMode: 'client_negotiated',
         currentContract: currentV2 ? 'v2' : 'v1',
       },
       aggregateCatalog: {
-        shadow: false,
-        served: currentV2,
+        shadow: userAccessRollout.aggregateCatalogShadowing,
+        served: userAccessRollout.aggregateCatalogServing,
         contractVersion: '2',
         resourceTypes: ACCESS_CATALOG_RESOURCE_TYPES,
       },
-      actionContext: { v2: currentV2 },
-      rpcDelegation: { v2: false },
-      clientModes: { desktopV2: false, profileV2: false },
+      actionContext: { v2: userAccessRollout.actionContextV2 },
+      rpcDelegation: { v2: userAccessRollout.rpcDelegationV2 },
+      clientModes: {
+        desktopV2: userAccessRollout.desktopAllTeamMode,
+        profileV2: userAccessRollout.profileV2Mode,
+      },
       compatibility: {
-        legacyV1Accepted: true,
-        legacySwitchEndpoint: true,
-        minimumClientVersion: null,
+        legacyV1Accepted: userAccessRollout.legacyV1Acceptance,
+        legacySwitchEndpoint: userAccessRollout.legacySwitchEndpoint,
+        minimumClientVersion: userAccessRollout.minimumClientVersion,
       },
       capabilities: CAPABILITIES,
     })
   })
 
   const requireV2AccessContract = (
+    gate: 'catalog' | 'action',
     req: ExternalAuthedRequest,
     res: Parameters<typeof sendPublicApiError>[1],
     next: () => void
   ) => {
-    if (req.externalAuth?.sessionContract !== 'v2') {
+    const enabled =
+      gate === 'catalog'
+        ? userAccessRollout.aggregateCatalogServing
+        : userAccessRollout.actionContextV2
+    if (req.externalAuth?.sessionContract !== 'v2' || !enabled) {
       sendPublicApiError(
         req,
         res,
@@ -141,7 +150,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/access/catalog',
-    requireV2AccessContract,
+    (req, res, next) => requireV2AccessContract('catalog', req, res, next),
     rateLimitMiddleware({
       bucketType: 'external_access_catalog',
       maxPerMinute: ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE,
@@ -230,7 +239,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/access/resolve',
-    requireV2AccessContract,
+    (req, res, next) => requireV2AccessContract('action', req, res, next),
     rateLimitMiddleware({
       bucketType: 'external_access_resolve',
       maxPerMinute: ACCESS_RESOLVE_RATE_LIMIT_PER_MINUTE,

@@ -68,6 +68,19 @@ const userSessionServiceMock = vi.hoisted(() => ({
   validateUserSessionClaims: vi.fn(),
   validateLegacyUserSession: vi.fn(),
 }))
+const userAccessRolloutMock = vi.hoisted(() => ({
+  sessionV2Acceptance: true,
+  sessionV2Issuance: true,
+  aggregateCatalogShadowing: false,
+  aggregateCatalogServing: false,
+  actionContextV2: false,
+  rpcDelegationV2: false,
+  desktopAllTeamMode: false,
+  profileV2Mode: false,
+  legacyV1Acceptance: true,
+  legacySwitchEndpoint: true,
+  minimumClientVersion: null,
+}))
 
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
@@ -86,6 +99,9 @@ vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
 vi.mock('../src/services/auth/userSessionService.js', () => userSessionServiceMock)
+vi.mock('../src/services/access/userAccessRollout.js', () => ({
+  userAccessRollout: userAccessRolloutMock,
+}))
 
 describe('routes/profile', () => {
   const token = 'dev-external-rest-api-token'
@@ -129,6 +145,10 @@ describe('routes/profile', () => {
       async (_userId: string, teamId: string) =>
         teamId === 't1' ? { teamId: 't1', role: 'member' } : null
     )
+    userAccessRolloutMock.sessionV2Acceptance = true
+    userAccessRolloutMock.sessionV2Issuance = true
+    userAccessRolloutMock.legacyV1Acceptance = true
+    userAccessRolloutMock.legacySwitchEndpoint = true
     userSessionServiceMock.createUserSession.mockResolvedValue({
       token: 'user-session-v2',
       expiresInSeconds: 3600,
@@ -1089,5 +1109,52 @@ describe('routes/profile', () => {
       role: 'member',
     })
     expect(userSessionServiceMock.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('can stop v2 issuance without disabling legacy login or v2 acceptance', async () => {
+    userAccessRolloutMock.sessionV2Issuance = false
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue({
+      email: 'user@example.com',
+      name: 'User',
+      picture: null,
+    })
+    svc.googleLoginData.mockResolvedValue({
+      isNewUser: false,
+      user: {
+        id: 'u1',
+        email: 'user@example.com',
+        name: 'User',
+        picture: null,
+      },
+      membership: { team_id: 't1', team_name: 'team', role: 'member' },
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(
+      request(app).post('/external/auth/google-login')
+    ).send({ idToken: 'google-id-token', sessionContract: 'v2' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.sessionContract).toBe('v1')
+    expect(userSessionServiceMock.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('can retire legacy switching independently with a bounded public error', async () => {
+    userAccessRolloutMock.legacySwitchEndpoint = false
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(
+      request(app).post('/external/auth/session-token')
+    ).send({ userId: 'u1', email: 'u@example.com', teamId: 't1', role: 'member' })
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toMatchObject({
+      code: 'conflict',
+      retryable: false,
+    })
   })
 })

@@ -6,6 +6,19 @@ import { createExternalAccessRouter } from '../src/routes/external/access.js'
 const token = vi.hoisted(() => ({ verify: vi.fn() }))
 const sessions = vi.hoisted(() => ({ validate: vi.fn(), validateLegacy: vi.fn() }))
 const rateLimits = vi.hoisted(() => ({ check: vi.fn() }))
+const rollout = vi.hoisted(() => ({
+  sessionV2Acceptance: true,
+  sessionV2Issuance: false,
+  aggregateCatalogShadowing: false,
+  aggregateCatalogServing: true,
+  actionContextV2: true,
+  rpcDelegationV2: false,
+  desktopAllTeamMode: false,
+  profileV2Mode: false,
+  legacyV1Acceptance: true,
+  legacySwitchEndpoint: true,
+  minimumClientVersion: null as string | null,
+}))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: token.verify,
@@ -17,6 +30,7 @@ vi.mock('../src/services/auth/userSessionService.js', () => ({
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: rateLimits.check,
 }))
+vi.mock('../src/services/access/userAccessRollout.js', () => ({ userAccessRollout: rollout }))
 
 function app(gateway: Record<string, unknown> = {}) {
   const value = express()
@@ -44,6 +58,19 @@ describe('external aggregate access routes', () => {
         jti: '00000000-0000-4000-8000-000000000200',
         sessionVersion: 1,
       },
+    })
+    Object.assign(rollout, {
+      sessionV2Acceptance: true,
+      sessionV2Issuance: false,
+      aggregateCatalogShadowing: false,
+      aggregateCatalogServing: true,
+      actionContextV2: true,
+      rpcDelegationV2: false,
+      desktopAllTeamMode: false,
+      profileV2Mode: false,
+      legacyV1Acceptance: true,
+      legacySwitchEndpoint: true,
+      minimumClientVersion: null,
     })
   })
 
@@ -83,7 +110,7 @@ describe('external aggregate access routes', () => {
       },
       aggregateCatalog: {
         shadow: false,
-        served: false,
+        served: true,
         contractVersion: '2',
         resourceTypes: [
           'user',
@@ -100,7 +127,7 @@ describe('external aggregate access routes', () => {
           'notification',
         ],
       },
-      actionContext: { v2: false },
+      actionContext: { v2: true },
       rpcDelegation: { v2: false },
       clientModes: { desktopV2: false, profileV2: false },
       compatibility: {
@@ -140,6 +167,87 @@ describe('external aggregate access routes', () => {
       .set('x-user-session-token', 'v2-session')
     expect(unsupported.status).toBe(400)
     expect(unsupported.body.error.code).toBe('invalid_request')
+  })
+
+  it('reports independent rollout controls rather than deriving support from the token', async () => {
+    Object.assign(rollout, {
+      sessionV2Acceptance: true,
+      sessionV2Issuance: true,
+      aggregateCatalogShadowing: true,
+      aggregateCatalogServing: false,
+      actionContextV2: false,
+      rpcDelegationV2: true,
+      desktopAllTeamMode: true,
+      profileV2Mode: true,
+      legacyV1Acceptance: true,
+      legacySwitchEndpoint: false,
+      minimumClientVersion: '2.0.0',
+    })
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v1',
+    })
+
+    const response = await request(app())
+      .get('/external/access/capabilities')
+      .set('x-user-session-token', 'legacy-session')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      session: { v2Accepted: true, v2Issued: true, currentContract: 'v1' },
+      aggregateCatalog: { shadow: true, served: false },
+      actionContext: { v2: false },
+      rpcDelegation: { v2: true },
+      clientModes: { desktopV2: true, profileV2: true },
+      compatibility: {
+        legacyV1Accepted: true,
+        legacySwitchEndpoint: false,
+        minimumClientVersion: '2.0.0',
+      },
+    })
+  })
+
+  it('keeps catalog serving and action-context gates independently enforceable', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      iat: 1_999_996_400,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+    })
+    rollout.aggregateCatalogServing = false
+    rollout.actionContextV2 = true
+
+    const catalog = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'v2-session')
+    expect(catalog.status).toBe(409)
+
+    rollout.aggregateCatalogServing = true
+    rollout.actionContextV2 = false
+    const resolution = await request(app())
+      .post('/external/access/resolve')
+      .set('x-user-session-token', 'v2-session')
+      .send({
+        requiredCapability: 'host.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'host',
+          logicalId: 'mcp-host/example',
+        },
+      })
+    expect(resolution.status).toBe(409)
   })
 
   it('rejects a caller-selected foreign environment before resolving authority', async () => {

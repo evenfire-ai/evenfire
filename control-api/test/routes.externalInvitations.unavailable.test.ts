@@ -52,6 +52,21 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 const userSessions = vi.hoisted(() => ({
   create: vi.fn(async () => ({ token: 'session-token' })),
 }))
+vi.mock('../src/services/access/userAccessRollout.js', () => ({
+  userAccessRollout: {
+    sessionV2Acceptance: true,
+    sessionV2Issuance: true,
+    aggregateCatalogShadowing: false,
+    aggregateCatalogServing: false,
+    actionContextV2: false,
+    rpcDelegationV2: false,
+    desktopAllTeamMode: false,
+    profileV2Mode: false,
+    legacyV1Acceptance: true,
+    legacySwitchEndpoint: true,
+    minimumClientVersion: null,
+  },
+}))
 vi.mock('../src/services/auth/userSessionService.js', () => ({
   createUserSession: userSessions.create,
   validateUserSessionClaims: vi.fn(),

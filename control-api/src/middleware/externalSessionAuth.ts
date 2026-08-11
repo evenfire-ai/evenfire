@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
+import { userAccessRollout } from '../services/access/userAccessRollout.js'
 import {
   validateLegacyUserSession,
   validateUserSessionClaims,
@@ -47,6 +48,14 @@ async function validateExternalSessionToken(
       return
     }
     if (claims.sessionContract === 'v2') {
+      if (!userAccessRollout.sessionV2Acceptance) {
+        if (publicErrors) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        } else {
+          res.status(401).json({ error: 'Unauthorized' })
+        }
+        return
+      }
       const validation = await validateUserSessionClaims({
         sub: claims.userId,
         sid: claims.sid!,
@@ -72,6 +81,14 @@ async function validateExternalSessionToken(
       claims.jti = validation.identity.jti
       claims.sv = validation.identity.sessionVersion
     } else {
+      if (!userAccessRollout.legacyV1Acceptance) {
+        if (publicErrors) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        } else {
+          res.status(401).json({ error: 'Unauthorized' })
+        }
+        return
+      }
       const validation = await validateLegacyUserSession(token, claims)
       if (validation.status !== 'valid') {
         if (publicErrors) {
