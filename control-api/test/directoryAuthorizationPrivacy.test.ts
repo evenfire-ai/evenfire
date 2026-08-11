@@ -39,6 +39,13 @@ const TARGET = '00000000-0000-4000-8000-000000000002'
 const TEAM_A = '00000000-0000-4000-8000-000000000010'
 const TEAM_SECRET = '00000000-0000-4000-8000-000000000099'
 
+function activeInvitationWindow() {
+  return {
+    created_at: new Date(Date.now() - 60_000),
+    expires_at: new Date(Date.now() + 60_000),
+  }
+}
+
 describe('directory privacy and atomic authorization', () => {
   beforeEach(() => {
     mocks.query.mockReset()
@@ -89,8 +96,7 @@ describe('directory privacy and atomic authorization', () => {
               token: 'must-never-serialize',
               status: 'pending',
               purpose: 'member_invitation',
-              created_at: new Date('2026-08-10T12:00:00Z'),
-              expires_at: new Date('2026-08-11T12:00:00Z'),
+              ...activeInvitationWindow(),
               accepted_at: null,
               accepted_user_id: null,
               assignment_count: 2,
@@ -201,8 +207,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'must-never-leave-control-api',
       status: 'draft',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -264,8 +269,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'inert-until-activation',
       status: 'draft',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -335,8 +339,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -413,8 +416,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'single-use-token',
       status: 'pending',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -490,8 +492,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -585,8 +586,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'password-reset-token',
       status: 'pending',
       purpose: 'password_reset',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: null,
@@ -780,8 +780,7 @@ describe('directory privacy and atomic authorization', () => {
       token: 'invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
-      created_at: new Date('2026-08-10T12:00:00Z'),
-      expires_at: new Date('2026-08-11T12:00:00Z'),
+      ...activeInvitationWindow(),
       accepted_at: null,
       accepted_user_id: null,
       team_name: 'Team A',
@@ -834,8 +833,7 @@ describe('directory privacy and atomic authorization', () => {
         token: 'secret',
         status: 'pending',
         purpose: 'member_invitation',
-        created_at: new Date('2026-08-10T12:00:00Z'),
-        expires_at: new Date('2026-08-11T12:00:00Z'),
+        ...activeInvitationWindow(),
         accepted_at: null,
         accepted_user_id: null,
         team_name: 'Team A',
