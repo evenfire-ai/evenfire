@@ -16,16 +16,33 @@ assert_fixed() {
   fi
 }
 
+assert_absent() {
+  local label=$1 pattern=$2 file=$3
+  if rg -Fq -- "$pattern" "$REPO_ROOT/$file"; then
+    fail "$label"
+  else
+    pass "$label"
+  fi
+}
+
 assert_fixed \
-  'manual image publication selects exact-SHA CI provenance' \
-  "mode: \${{ github.event_name == 'workflow_dispatch' && 'exact-ci' || 'direct' }}" \
+  'manual image publication uses the exact-CI workflow' \
+  'uses: ./.github/workflows/exact-ci-provenance.yml' \
   '.github/workflows/build-publish.yml'
 assert_fixed \
   'manual image publication accepts provenance from dev only' \
   'allowed_branches: dev' \
   '.github/workflows/build-publish.yml'
 assert_fixed \
-  'image detection depends on source preflight' \
+  'manual image publication requires the trusted dev workflow revision' \
+  "github.ref == 'refs/heads/dev'" \
+  '.github/workflows/build-publish.yml'
+assert_fixed \
+  'push image publication uses bounded incoming-diff Prettier' \
+  'uses: ./.github/workflows/prettier-source-preflight.yml' \
+  '.github/workflows/build-publish.yml'
+assert_fixed \
+  'image detection depends on the terminal source preflight' \
   'needs: preflight' \
   '.github/workflows/build-publish.yml'
 assert_fixed \
@@ -33,27 +50,39 @@ assert_fixed \
   '^{commit}' \
   '.github/workflows/release-images.yml'
 assert_fixed \
-  'release promotion requires source preflight' \
+  'release promotion requires exact-SHA provenance' \
   'needs: [resolve-release-ref, preflight]' \
-  '.github/workflows/release-images.yml'
-assert_fixed \
-  'release preflight always uses exact-SHA CI provenance' \
-  'mode: exact-ci' \
   '.github/workflows/release-images.yml'
 assert_fixed \
   'release provenance is restricted to main' \
   'allowed_branches: main' \
   '.github/workflows/release-images.yml'
 assert_fixed \
-  'release promotion checks out the verified commit' \
+  'manual release rehearsal requires the trusted main workflow revision' \
+  "github.ref == 'refs/heads/main'" \
+  '.github/workflows/release-images.yml'
+assert_fixed \
+  'tag release resolution checks out trusted main source' \
+  "'refs/heads/main'" \
+  '.github/workflows/release-images.yml'
+assert_fixed \
+  'release promotion uses the resolved trusted source SHA' \
+  'ref: ${{ needs.resolve-release-ref.outputs.trusted_sha }}' \
+  '.github/workflows/release-images.yml'
+assert_absent \
+  'release executable checkouts never select the release candidate SHA' \
   'ref: ${{ needs.resolve-release-ref.outputs.sha }}' \
   '.github/workflows/release-images.yml'
 assert_fixed \
-  'release promotion passes the verified commit to the resolver' \
+  'release promotion passes the selected commit as resolver data' \
   'TAG_SHA: ${{ needs.resolve-release-ref.outputs.sha }}' \
   '.github/workflows/release-images.yml'
 assert_fixed \
-  'release promotion honors the verified commit input' \
+  'manual release rehearsal remains dry-run' \
+  'DRY_RUN: ${{ github.event_name' \
+  '.github/workflows/release-images.yml'
+assert_fixed \
+  'release promotion honors the selected commit input' \
   'TAG_SHA="${TAG_SHA:-$(git rev-parse --verify --end-of-options "$RELEASE_REF^{commit}")}"' \
   'scripts/release/promote-release-images.sh'
 assert_fixed \
@@ -64,6 +93,14 @@ assert_fixed \
   'provenance checks the CI workflow by source file' \
   "CI_WORKFLOW_FILE = 'ci-public.yml'" \
   'scripts/ci/require-successful-ci-run.mjs'
+assert_absent \
+  'contents-only formatter workflow has no exact-CI mode' \
+  'exact-ci' \
+  '.github/workflows/prettier-source-preflight.yml'
+assert_absent \
+  'contents-only formatter workflow has no Actions API permission' \
+  'actions: read' \
+  '.github/workflows/prettier-source-preflight.yml'
 
 for job in \
   repo-hygiene \

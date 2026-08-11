@@ -357,6 +357,9 @@ jobs:
       - name: Test publication source-preflight wiring
         run: bash scripts/tests/test-publication-source-preflight.sh
 
+      - name: Test trusted release executable source
+        run: bash scripts/tests/test-trusted-release-source.sh
+
       - name: Run bash -n on all .sh files
         run: |
           fail=0

@@ -80,6 +80,7 @@ jobs:
     with:
       allowed_branches: dev
       head_sha: ${{ github.sha }}
+      trusted_sha: ${{ github.workflow_sha }}
 
   preflight:
     name: Publication preflight result

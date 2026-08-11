@@ -23,18 +23,22 @@ permissions:
 jobs:
   resolve-release-ref:
     name: Resolve release commit
-    if: github.repository == 'evenfire-ai/evenfire'
+    if: >-
+      github.repository == 'evenfire-ai/evenfire' &&
+      (github.event_name != 'workflow_dispatch' ||
+        (github.ref == 'refs/heads/main' && github.workflow_sha == github.sha))
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      trusted_sha: ${{ steps.resolve.outputs.trusted_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.workflow_sha || 'refs/heads/main' }}
 
       - name: Peel release ref to its commit
         id: resolve
@@ -42,8 +46,20 @@ jobs:
           RELEASE_REF: ${{ github.event.inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
-          sha="$(git rev-parse --verify --end-of-options "${RELEASE_REF}^{commit}")"
+          trusted_sha="$(git rev-parse HEAD)"
+          if [[ "$RELEASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            candidate="$RELEASE_REF"
+            if ! git cat-file -e "${candidate}^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$candidate"
+            fi
+          else
+            git check-ref-format --branch "$RELEASE_REF" >/dev/null
+            git fetch --force origin "$RELEASE_REF"
+            candidate=FETCH_HEAD
+          fi
+          sha="$(git rev-parse --verify --end-of-options "${candidate}^{commit}")"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "trusted_sha=$trusted_sha" >> "$GITHUB_OUTPUT"
 
   preflight:
     name: Exact-CI release preflight
@@ -55,6 +71,7 @@ jobs:
     with:
       allowed_branches: main
       head_sha: ${{ needs.resolve-release-ref.outputs.sha }}
+      trusted_sha: ${{ needs.resolve-release-ref.outputs.trusted_sha }}
 
   promote:
     name: Promote images
@@ -62,7 +79,12 @@ jobs:
     runs-on: ubuntu-latest
     # Forks cannot write to ghcr.io/evenfire-ai/*, and a fork's v* tag would
     # otherwise produce a red run against a namespace it does not own.
-    if: github.repository == 'evenfire-ai/evenfire'
+    if: >-
+      github.repository == 'evenfire-ai/evenfire' &&
+      needs.resolve-release-ref.result == 'success' &&
+      needs.preflight.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' ||
+        (github.ref == 'refs/heads/main' && github.workflow_sha == github.sha))
     permissions:
       contents: read
       packages: write
@@ -74,7 +96,17 @@ jobs:
           # checkout has neither.
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ needs.resolve-release-ref.outputs.sha }}
+          ref: ${{ needs.resolve-release-ref.outputs.trusted_sha }}
+
+      - name: Fetch the selected release commit as data
+        env:
+          TAG_SHA: ${{ needs.resolve-release-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${TAG_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$TAG_SHA"
+          fi
+          git cat-file -e "${TAG_SHA}^{commit}"
 
       - name: Install crane
         run: |
