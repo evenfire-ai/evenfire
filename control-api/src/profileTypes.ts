@@ -49,6 +49,7 @@ export type AuthClaims = {
   /** Authoritative users.lifecycle_version captured when the session was issued. */
   authGeneration: number
   exp: number
+  iat?: number
 }
 
 export type RpcAccessClaims = {
