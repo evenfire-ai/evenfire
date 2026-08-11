@@ -1,5 +1,4 @@
 import type { DbClient } from '../../db.js'
-import { withTransaction } from '../../db.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
 import {
@@ -16,6 +15,7 @@ import {
   mergeCatalogCandidateStreams,
   mergeHydratedCatalogResources,
 } from './accessCatalogMerge.js'
+import { withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import { AccessExecutionBudget, type AccessExecutionLimits } from './accessExecutionBudget.js'
 import { buildAccessPath, canonicalAccessPathTuple } from './accessPath.js'
 import { authorizationRevision, revisionOfValues } from './authorizationRevision.js'
@@ -370,7 +370,7 @@ export async function buildAccessCatalog(
     budget.assertPageSize(limit)
     const filterHash = catalogFilterHash(families)
     const decodedCursor = input.cursor ? decodeAccessCatalogCursor(input.cursor, budget) : null
-    return await (options.transaction ?? withTransaction)(db =>
+    const work = (db: DbClient) =>
       buildInTransaction({
         db,
         budget,
@@ -382,7 +382,9 @@ export async function buildAccessCatalog(
         filterHash,
         now: options.now ?? new Date(),
       })
-    )
+    return await (options.transaction
+      ? options.transaction(work)
+      : withAccessDatabaseTransaction(budget, work, { mode: 'caller_configured' }))
   } catch (error) {
     if (error instanceof CatalogAuthorityError) {
       throw new AccessCatalogRequestError(
