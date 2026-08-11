@@ -412,6 +412,9 @@ jobs:
       - name: Test pre-gate sync state contract
         run: bash scripts/tests/test-minikube-pre-gate-sync-state.sh
 
+      - name: Test pre-gate runtime assertions
+        run: bash scripts/tests/test-minikube-pre-gate-runtime.sh
+
       # ADMIN_PASSWORD is a required precondition of full-setup.sh Step 1 on the
       # default (minimal) seed profile. Two cases in this harness execute the
       # script against stubbed docker/minikube/kubectl, so without it they abort
