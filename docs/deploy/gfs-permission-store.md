@@ -85,6 +85,12 @@ the saved replica count is then restored, creating Pods with the current DSN.
 Migration Job Pods intentionally share `app=control-api` for NetworkPolicy
 access, so the fence excludes Pods carrying `clerum.io/component`; a completed
 migration Pod awaiting TTL cleanup cannot delay runtime writer quiescence.
+After Control API is Ready and while GFSC remains at zero, convergence invokes
+the canonical `sync-auth-key.sh --require-gfs` path. It must copy the non-empty
+`rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` authority into
+`gfs-config.jwt-public-key` before GFS credentials are restored or either GFSC
+deployment is scaled up. Missing source or target resources abort recovery and
+retain the fail-closed replica state; no reset path patches the key ad hoc.
 Any later convergence failure reasserts the Control API fence together with the
 other database-dependent controllers and waits for the Control API Pods to
 terminate before returning.

@@ -70,6 +70,7 @@ cat >"$TMP/bin/bash" <<'EOF'
 #!/bin/sh
 printf 'bash %s\n' "$*" >>"$FAKE_LOG"
 case "$*" in
+  *sync-auth-key.sh*) [ "${FAIL_AUTH_SYNC:-false}" != true ] ;;
   *reconcile-gfs-deploy-credentials.sh*) [ "${FAIL_RECONCILE:-false}" != true ] ;;
   *scripts/minikube/verify-gfs.sh*) [ "${FAIL_VERIFY:-false}" != true ] ;;
   *) exit 0 ;;
@@ -102,6 +103,8 @@ grep -q 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" \
   || { printf 'FAIL: stale control-api pod was not removed before credential reconciliation\n' >&2; exit 1; }
 ! grep -q 'get pods -l app=control-api -o name' "$LOG" \
   || { printf 'FAIL: completed migration pods were included in the control-api fence\n' >&2; exit 1; }
+grep -q 'sync-auth-key.sh --context test-context --require-gfs' "$LOG" \
+  || { printf 'FAIL: required GFS auth key was not synced before GFSC restoration\n' >&2; exit 1; }
 writer_zero="$(grep -n 'scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
 hcc_zero="$(grep -n 'scale deployment/host-context-controller --replicas=0' "$LOG" | head -1 | cut -d: -f1)"
 hcc_wait="$(grep -n 'wait --for=delete pod -l app=host-context-controller' "$LOG" | cut -d: -f1)"
@@ -111,6 +114,7 @@ control_zero="$(grep -n 'scale deployment/control-api --replicas=0' "$LOG" | hea
 control_wait="$(grep -n 'wait --for=delete pod -l app=control-api,!clerum.io/component' "$LOG" | head -1 | cut -d: -f1)"
 control_restore="$(grep -n 'scale deployment/control-api --replicas=2' "$LOG" | head -1 | cut -d: -f1)"
 control_ready="$(grep -n 'rollout status deployment/control-api --timeout=180s' "$LOG" | head -1 | cut -d: -f1)"
+auth_sync="$(grep -n 'sync-auth-key.sh --context test-context --require-gfs' "$LOG" | head -1 | cut -d: -f1)"
 restore_writer="$(grep -n 'scale deployment/gfsc-writer --replicas=3' "$LOG" | cut -d: -f1)"
 restore_reader="$(grep -n 'scale deployment/gfsc-reader --replicas=2' "$LOG" | cut -d: -f1)"
 reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' "$LOG" | cut -d: -f1)"
@@ -122,7 +126,8 @@ state_delete="$(grep -n 'delete --raw /api/v1/namespaces/control-plane/configmap
 [[ "$hcc_zero" -lt "$hcc_wait" && "$hcc_wait" -lt "$writer_zero" && "$writer_zero" -lt "$migration" && \
    "$control_zero" -lt "$control_wait" && "$control_wait" -lt "$migration" && \
    "$migration" -lt "$runtime_roles" && "$runtime_roles" -lt "$control_restore" && \
-   "$control_restore" -lt "$control_ready" && \
+   "$control_restore" -lt "$control_ready" && "$control_ready" -lt "$auth_sync" && \
+   "$auth_sync" -lt "$reconcile" && \
    "$reconcile" -lt "$restore_writer" && "$reconcile" -lt "$restore_reader" && \
    "$gfs_verify" -lt "$workflow_restore" && "$gfs_verify" -lt "$trace_restore" && \
    "$workflow_restore" -lt "$hcc_restore" && "$hcc_restore" -lt "$state_delete" ]] \
@@ -146,6 +151,21 @@ retry_control_restore="$(grep -n 'scale deployment/control-api --replicas=2' "$L
    "$retry_control_wait" -lt "$retry_runtime_roles" && \
    "$retry_runtime_roles" -lt "$retry_control_restore" ]] \
   || { printf 'FAIL: replacement-bound retry reused a stale control-api pod\n' >&2; exit 1; }
+
+: >"$LOG"
+init_state replacement-bound replacement-uid
+if run_converge env FAIL_AUTH_SYNC=true >/dev/null 2>&1; then
+  printf 'FAIL: missing required GFS auth source was reported as success\n' >&2
+  exit 1
+fi
+grep -q 'sync-auth-key.sh --context test-context --require-gfs' "$LOG" \
+  || { printf 'FAIL: reset convergence did not invoke strict GFS auth sync\n' >&2; exit 1; }
+! grep -q 'reconcile-gfs-deploy-credentials.sh' "$LOG" \
+  || { printf 'FAIL: GFS credentials reconciled after required auth sync failed\n' >&2; exit 1; }
+! grep -q 'scale deployment/gfsc-writer --replicas=3' "$LOG" \
+  || { printf 'FAIL: GFSC writer was restored without its required auth key\n' >&2; exit 1; }
+[[ "$(grep -c 'scale deployment/control-api --replicas=0' "$LOG")" -eq 2 ]] \
+  || { printf 'FAIL: auth sync failure did not preserve the fail-closed writer fence\n' >&2; exit 1; }
 
 : >"$LOG"
 init_state

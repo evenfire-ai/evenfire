@@ -234,6 +234,12 @@ env CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
 kc -n control-plane scale deployment/control-api --replicas="$CONTROL_API_REPLICAS" >/dev/null
 kc -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
 
+# The base gfs-config intentionally carries no real key. Reset recovery is a
+# complete serving restoration boundary, so materialize the canonical platform
+# public key while GFSC remains at zero; missing authority inputs fail closed.
+bash "$ROOT/scripts/minikube/sync-auth-key.sh" \
+  --context "$CONTEXT" --require-gfs
+
 GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$CONTEXT" \
   bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
 
