@@ -54,6 +54,23 @@ const ALLOWED_CODES_BY_STATUS: Readonly<Record<number, ReadonlySet<string>>> = {
 
 type PublicPathDescriptor = { id: string; kind: 'direct' | 'team'; teamId?: string }
 
+const SAFE_DOMAIN_REASONS = new Set([
+  'agent_manager_forbidden',
+  'managed_agent_permission_forbidden',
+  'foreign_agent_forbidden',
+  'subjects_invalid',
+  'escalation_rejected',
+  'manage_acl_required',
+])
+
+function safeInvalidIndexes(value: unknown): number[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return undefined
+  const indexes = value.filter(
+    (item): item is number => Number.isSafeInteger(item) && item >= 0 && item <= 10_000
+  )
+  return indexes.length === value.length ? indexes : undefined
+}
+
 function safePathDescriptors(value: unknown): PublicPathDescriptor[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) return undefined
   const paths: PublicPathDescriptor[] = []
@@ -103,6 +120,17 @@ export function sanitizeControlApiPublicError(
       ? ((rawEnvelope as { details: Record<string, unknown> }).details ?? undefined)
       : undefined
   const paths = code === 'access_path_required' ? safePathDescriptors(rawDetails?.paths) : undefined
+  const rawReason =
+    typeof rawError === 'string'
+      ? rawError
+      : typeof rawDetails?.reason === 'string'
+        ? rawDetails.reason
+        : ''
+  const reason = SAFE_DOMAIN_REASONS.has(rawReason) ? rawReason : undefined
+  const invalidIndexes =
+    reason === 'subjects_invalid'
+      ? safeInvalidIndexes(rawDetails?.invalidIndexes ?? rawBody?.invalidIndexes)
+      : undefined
   const rawRetryAfterSeconds = rawDetails?.retryAfterSeconds ?? rawBody?.retryAfterSeconds
   const retryAfterSeconds =
     code === 'rate_limited' &&
@@ -111,6 +139,15 @@ export function sanitizeControlApiPublicError(
     rawRetryAfterSeconds >= 1 &&
     rawRetryAfterSeconds <= 86_400
       ? rawRetryAfterSeconds
+      : undefined
+  const details = paths
+    ? { paths }
+    : reason || invalidIndexes || retryAfterSeconds
+      ? {
+          ...(reason ? { reason } : {}),
+          ...(invalidIndexes ? { invalidIndexes } : {}),
+          ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+        }
       : undefined
 
   return {
@@ -121,11 +158,7 @@ export function sanitizeControlApiPublicError(
         message: PUBLIC_MESSAGE_BY_CODE[code] || PUBLIC_MESSAGE_BY_CODE[fallbackCode],
         correlationId,
         retryable,
-        ...(paths
-          ? { details: { paths } }
-          : retryAfterSeconds
-            ? { details: { retryAfterSeconds } }
-            : {}),
+        ...(details ? { details } : {}),
       },
     },
   }

@@ -115,6 +115,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       message: 'The requested operation is not allowed.',
       correlationId: expect.any(String),
       retryable: false,
+      details: { reason: 'escalation_rejected' },
     })
   })
 
@@ -274,6 +275,7 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       message: 'The requested operation is not allowed.',
       correlationId: expect.any(String),
       retryable: false,
+      details: { reason: 'manage_acl_required' },
     })
   })
 

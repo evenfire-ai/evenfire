@@ -82,6 +82,25 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(sanitized?.body)).not.toContain('secret-internal-bucket')
   })
 
+  it('preserves only allowlisted GFS denial details from legacy bodies', () => {
+    const sanitized = sanitizeControlApiPublicError(
+      new ControlApiError('raw', 400, {
+        error: 'subjects_invalid',
+        invalidIndexes: [0, 2],
+        sql: 'SELECT secret',
+      }),
+      new Set([400])
+    )
+
+    expect(sanitized?.body).toMatchObject({
+      error: {
+        code: 'invalid_request',
+        details: { reason: 'subjects_invalid', invalidIndexes: [0, 2] },
+      },
+    })
+    expect(JSON.stringify(sanitized?.body)).not.toContain('SELECT secret')
+  })
+
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
     const sentinel = 'postgres://secret@internal/var/run/service.sock'
     for (const status of [400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504]) {
