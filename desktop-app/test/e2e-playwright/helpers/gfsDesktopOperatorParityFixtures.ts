@@ -816,8 +816,17 @@ export class GfsDesktopOperatorJourney {
       recordVideo: { dir: this.operatorVideoDir, size: { width: 1280, height: 720 } },
     })
     const configuredDownloadsDir = await this.operatorApp.evaluate(
-      ({ app: electronApp }, downloadsDir) => {
+      ({ app: electronApp, session }, downloadsDir) => {
         electronApp.setPath('downloads', downloadsDir)
+        // The product uses a Blob-backed anchor in the Electron renderer. The
+        // native session event is the supported Electron boundary that saves
+        // that user-initiated download; Playwright's browser download event is
+        // not emitted for this native-window path. This listener is scoped to
+        // the run-owned test process and never changes production behavior.
+        session.defaultSession.on('will-download', (_event, item) => {
+          const safeFilename = item.getFilename().replace(/[\\/]/g, '_')
+          item.setSavePath(`${downloadsDir}/${safeFilename}`)
+        })
         return electronApp.getPath('downloads')
       },
       this.operatorDownloadsDir
