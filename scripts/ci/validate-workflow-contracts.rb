@@ -2,8 +2,11 @@
 # frozen_string_literal: true
 
 require 'optparse'
+require 'open3'
 require 'pathname'
 require 'yaml'
+
+RESULT_STATES = %w[success failure skipped cancelled].freeze
 
 options = { root: Pathname.pwd }
 OptionParser.new do |parser|
@@ -63,6 +66,91 @@ def literal_type_matches?(value, declared_type)
   when 'string' then value.is_a?(String)
   else false
   end
+end
+
+def combined_run(job)
+  Array(job['steps']).map { |step| step['run'] }.compact.join("\n")
+end
+
+def two_result_cases(first_name, second_name)
+  RESULT_STATES.product(RESULT_STATES).map do |first, second|
+    {
+      description: "#{first_name}=#{first}, #{second_name}=#{second}",
+      env: { first_name => first, second_name => second },
+      success: first == 'success' && second == 'success',
+    }
+  end
+end
+
+def validate_shell_truth_table(errors, label, script, cases)
+  if script.empty?
+    errors << "#{label} terminal gate has no executable shell logic"
+    return
+  end
+
+  cases.each do |entry|
+    _stdout, _stderr, status = Open3.capture3(entry.fetch(:env), 'bash', '-c', script)
+    next if status.success? == entry.fetch(:success)
+
+    expected = entry.fetch(:success) ? 'success' : 'failure'
+    errors << "#{label} terminal truth table expected #{expected} for #{entry.fetch(:description)}"
+    break
+  end
+end
+
+def publication_cases
+  trusted = {
+    'RUN_REF' => 'refs/heads/dev',
+    'RUN_SHA' => 'a' * 40,
+    'WORKFLOW_SHA' => 'a' * 40,
+  }
+  cases = []
+
+  %w[push workflow_dispatch].each do |event|
+    RESULT_STATES.product(RESULT_STATES).each do |diff, provenance|
+      expected = if event == 'push'
+                   diff == 'success' && provenance == 'skipped'
+                 else
+                   diff == 'skipped' && provenance == 'success'
+                 end
+      cases << {
+        description: "event=#{event}, diff=#{diff}, provenance=#{provenance}, trusted identity",
+        env: trusted.merge(
+          'DIFF_RESULT' => diff,
+          'EVENT' => event,
+          'PROVENANCE_RESULT' => provenance
+        ),
+        success: expected,
+      }
+    end
+  end
+
+  valid_dispatch = trusted.merge(
+    'DIFF_RESULT' => 'skipped',
+    'EVENT' => 'workflow_dispatch',
+    'PROVENANCE_RESULT' => 'success'
+  )
+  cases << {
+    description: 'workflow_dispatch with an untrusted branch',
+    env: valid_dispatch.merge('RUN_REF' => 'refs/heads/feature'),
+    success: false,
+  }
+  cases << {
+    description: 'workflow_dispatch with a mismatched workflow SHA',
+    env: valid_dispatch.merge('WORKFLOW_SHA' => 'b' * 40),
+    success: false,
+  }
+  cases << {
+    description: 'unsupported event',
+    env: trusted.merge(
+      'DIFF_RESULT' => 'success',
+      'EVENT' => 'pull_request',
+      'PROVENANCE_RESULT' => 'skipped'
+    ),
+    success: false,
+  }
+
+  cases
 end
 
 workflow_paths = Dir[workflow_dir.join('*.{yml,yaml}')].sort.map { |path| Pathname(path) }
@@ -137,12 +225,26 @@ if formatter
   expected_inputs = %w[base_sha head_sha mode]
   errors << "prettier-source-preflight inputs must be #{expected_inputs.join(', ')}" unless formatter_inputs == expected_inputs
   errors << 'prettier-source-preflight must not accept secrets' unless (formatter_call['secrets'] || {}).empty?
-  (formatter['jobs'] || {}).each do |job_id, job|
+  formatter_jobs = formatter['jobs'] || {}
+  formatter_jobs.each do |job_id, job|
     requested = permissions(job['permissions']) || permissions(formatter['permissions']) || {}
     if requested['actions'] && requested['actions'] != 'none'
       errors << "prettier-source-preflight job #{job_id} must not request actions permission"
     end
   end
+  formatter_conclude = formatter_jobs['conclude'] || {}
+  unless (needs(formatter_conclude) & %w[validate-inputs prettier]).sort == %w[prettier validate-inputs]
+    errors << 'prettier terminal result must depend on validation and the formatter'
+  end
+  unless formatter_conclude['if'].to_s.include?('always()')
+    errors << 'prettier terminal result must run after failed or skipped prerequisites'
+  end
+  validate_shell_truth_table(
+    errors,
+    'prettier-source-preflight',
+    combined_run(formatter_conclude),
+    two_result_cases('VALIDATE_RESULT', 'PRETTIER_RESULT')
+  )
 end
 
 provenance_path = workflow_dir.join('exact-ci-provenance.yml')
@@ -168,11 +270,15 @@ if provenance
   unless (needs(provenance_conclude) & %w[validate-inputs provenance]).sort == %w[provenance validate-inputs]
     errors << 'exact-ci terminal result must depend on validation and provenance'
   end
-  conclude_runs = Array(provenance_conclude['steps']).map { |step| step['run'].to_s }.join("\n")
-  unless provenance_conclude['if'].to_s.include?('always()') &&
-         conclude_runs.include?('VALIDATE_RESULT') && conclude_runs.include?('PROVENANCE_RESULT')
+  unless provenance_conclude['if'].to_s.include?('always()')
     errors << 'exact-ci terminal result must fail closed for failed or skipped provenance'
   end
+  validate_shell_truth_table(
+    errors,
+    'exact-ci-provenance',
+    combined_run(provenance_conclude),
+    two_result_cases('VALIDATE_RESULT', 'PROVENANCE_RESULT')
+  )
   (provenance['jobs'] || {}).each do |job_id, job|
     Array(job['steps']).each do |step|
       next unless step['uses'].to_s.start_with?('actions/checkout@')
@@ -226,10 +332,15 @@ if build
   unless (needs(terminal) & %w[incoming-diff-preflight exact-ci-preflight]).sort == %w[exact-ci-preflight incoming-diff-preflight]
     errors << 'publication preflight result must depend on both alternate-mode gates'
   end
-  terminal_run = Array(terminal['steps']).map { |step| step['run'].to_s }.join("\n")
-  unless terminal['if'].to_s.include?('always()') && terminal_run.include?('DIFF_RESULT') && terminal_run.include?('PROVENANCE_RESULT')
+  unless terminal['if'].to_s.include?('always()')
     errors << 'publication preflight result must fail closed across skipped alternate-mode gates'
   end
+  validate_shell_truth_table(
+    errors,
+    'build-publish',
+    combined_run(terminal),
+    publication_cases
+  )
   errors << 'image detection must depend on terminal publication preflight' unless needs(jobs['detect'] || {}).include?('preflight')
 end
 

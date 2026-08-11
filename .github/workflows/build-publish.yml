@@ -104,8 +104,10 @@ jobs:
               [ "$DIFF_RESULT" = success ] && [ "$PROVENANCE_RESULT" = skipped ]
               ;;
             workflow_dispatch)
-              [ "$RUN_REF" = refs/heads/dev ] && [ "$WORKFLOW_SHA" = "$RUN_SHA" ]
-              [ "$DIFF_RESULT" = skipped ] && [ "$PROVENANCE_RESULT" = success ]
+              [ "$RUN_REF" = refs/heads/dev ] &&
+                [ "$WORKFLOW_SHA" = "$RUN_SHA" ] &&
+                [ "$DIFF_RESULT" = skipped ] &&
+                [ "$PROVENANCE_RESULT" = success ]
               ;;
             *)
               exit 1

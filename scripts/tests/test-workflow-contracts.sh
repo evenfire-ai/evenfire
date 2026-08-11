@@ -23,6 +23,19 @@ copy_workflows() {
   cp -R "$REPO_ROOT/.github/workflows" "$target/.github/"
 }
 
+assert_terminal_mutation_rejected() {
+  local label=$1 root=$2
+  if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$root" \
+      >"$TEST_ROOT/terminal.out" 2>&1; then
+    fail "$label"
+  elif grep -q 'terminal truth table expected' "$TEST_ROOT/terminal.out"; then
+    pass "$label"
+  else
+    sed -n '1,120p' "$TEST_ROOT/terminal.out" >&2
+    fail "$label reports the terminal truth-table violation"
+  fi
+}
+
 mismatch_root="$TEST_ROOT/permission-mismatch"
 copy_workflows "$mismatch_root"
 perl -0pi -e 's/(name: Prettier \(incoming files\).*?permissions:\n)(\s+contents: read)/$1      actions: read\n$2/s' \
@@ -65,5 +78,37 @@ else
   sed -n '1,120p' "$TEST_ROOT/helper.out" >&2
   fail 'missing-provenance-helper mutation reports the contract violation'
 fi
+
+formatter_root="$TEST_ROOT/formatter-terminal"
+copy_workflows "$formatter_root"
+perl -0pi -e 's/\[ "\$PRETTIER_RESULT" = success \]/printf "prettier=%%s\\n" "\$PRETTIER_RESULT"/' \
+  "$formatter_root/.github/workflows/prettier-source-preflight.yml"
+assert_terminal_mutation_rejected \
+  'formatter terminal comparison mutation is rejected' \
+  "$formatter_root"
+
+provenance_root="$TEST_ROOT/provenance-terminal"
+copy_workflows "$provenance_root"
+perl -0pi -e 's/\[ "\$PROVENANCE_RESULT" = success \]/printf "provenance=%%s\\n" "\$PROVENANCE_RESULT"/' \
+  "$provenance_root/.github/workflows/exact-ci-provenance.yml"
+assert_terminal_mutation_rejected \
+  'exact-provenance terminal comparison mutation is rejected' \
+  "$provenance_root"
+
+push_root="$TEST_ROOT/push-terminal"
+copy_workflows "$push_root"
+perl -0pi -e 's/\[ "\$DIFF_RESULT" = success \] && \[ "\$PROVENANCE_RESULT" = skipped \]/printf "push=%%s,%%s\\n" "\$DIFF_RESULT" "\$PROVENANCE_RESULT"/' \
+  "$push_root/.github/workflows/build-publish.yml"
+assert_terminal_mutation_rejected \
+  'push publication terminal comparison mutation is rejected' \
+  "$push_root"
+
+dispatch_root="$TEST_ROOT/dispatch-terminal"
+copy_workflows "$dispatch_root"
+perl -0pi -e 's/\[ "\$PROVENANCE_RESULT" = success \]/printf "dispatch=%%s,%%s\\n" "\$DIFF_RESULT" "\$PROVENANCE_RESULT"/' \
+  "$dispatch_root/.github/workflows/build-publish.yml"
+assert_terminal_mutation_rejected \
+  'workflow-dispatch terminal comparison mutation is rejected' \
+  "$dispatch_root"
 
 exit "$FAIL"
