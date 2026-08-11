@@ -11,6 +11,7 @@ control_admin_users	legacy_dml
 gfs_audit	legacy_dml
 gfs_blob_manifests	none
 gfs_desktop_operator_links	link_lifecycle
+desktop_user_retirement_operations	link_lifecycle
 gfs_grants	legacy_dml
 gfs_resources	legacy_dml
 gfs_shares	legacy_dml
