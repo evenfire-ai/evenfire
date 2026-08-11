@@ -253,13 +253,16 @@ export function createExternalGfsRouter(): Router {
   const router = Router()
 
   // The durable externalGfs* guards below are the authoritative distributed
-  // limiter. These direct express-rate-limit guards intentionally mirror the
-  // approved quotas at the routing boundary so static analysis can prove that
-  // every auth/authority/handler path is metered. They keep no response quota
-  // headers: the distributed guard owns the externally forwarded values.
+  // limiter. These direct express-rate-limit guards provide a recognisable
+  // routing-boundary backstop so static analysis can prove every
+  // auth/authority/handler path is metered. The all-route ingress guard is
+  // deliberately wider than the product quotas; the per-class guards and
+  // distributed buckets retain the narrower security budgets. They keep no
+  // response quota headers: the distributed guard owns the externally
+  // forwarded values.
   const externalGfsIngressRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsIpRlPerMin,
+    limit: config.externalGfsIngressRlPerMin,
     standardHeaders: false,
     legacyHeaders: false,
     keyGenerator: externalGfsIngressRateKey,

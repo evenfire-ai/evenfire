@@ -38,7 +38,9 @@ vi.mock('../src/config.js', () => ({
     // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
     hostsNamespace: 'mcp-host',
     desktopGfsOperatorLinkingEnabled: false,
+    externalGfsIngressRlPerMin: 1800,
     externalGfsTokenUserRlPerMin: 10,
+    externalGfsTokenIpRlPerMin: 600,
     externalGfsIpRlPerMin: 30,
     externalGfsOperationRlPerMin: 30,
   },
@@ -231,25 +233,49 @@ function dbReturning(
 }
 
 describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)', () => {
-  it('enforces the recognised ingress limit before session authentication or authority resolution', async () => {
+  it('allows a mixed GFS journey beyond the former 30/min ingress cap', async () => {
     auth()
     const app = await buildApp()
 
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    for (let attempt = 0; attempt < 31; attempt += 1) {
       const response = await request(app)
         .post('/external/gfs/not-classified')
         .set('x-user-session-token', 'sess')
       expect(response.status).toBe(404)
     }
 
-    const exhausted = await request(app)
-      .post('/external/gfs/not-classified')
-      .set('x-user-session-token', 'sess')
-
-    expect(exhausted.status).toBe(429)
-    expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(30)
+    expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(31)
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
     expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('enforces the configurable ingress backstop before session or authority work', async () => {
+    const previousIngressLimit = (config as { externalGfsIngressRlPerMin: number })
+      .externalGfsIngressRlPerMin
+    ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin = 3
+    try {
+      auth()
+      const app = await buildApp()
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await request(app)
+          .post('/external/gfs/not-classified')
+          .set('x-user-session-token', 'sess')
+        expect(response.status).toBe(404)
+      }
+
+      const exhausted = await request(app)
+        .post('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+
+      expect(exhausted.status).toBe(429)
+      expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(3)
+      expect(mockResolveActiveLink).not.toHaveBeenCalled()
+      expect(mockQuery).not.toHaveBeenCalled()
+    } finally {
+      ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin =
+        previousIngressLimit
+    }
   })
 
   it('enforces the recognised 10/min token route limit per authenticated user', async () => {

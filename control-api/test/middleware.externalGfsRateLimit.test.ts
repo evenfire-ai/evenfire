@@ -20,7 +20,9 @@ const logger = vi.hoisted(() => ({
 
 vi.mock('../src/config.js', () => ({
   config: {
+    externalGfsIngressRlPerMin: 1800,
     externalGfsTokenUserRlPerMin: 10,
+    externalGfsTokenIpRlPerMin: 600,
     externalGfsIpRlPerMin: 30,
     externalGfsOperationRlPerMin: 30,
   },
@@ -227,7 +229,7 @@ describe('external GFS rate boundary', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
-  it('enforces the fixed 30/min source-IP ceiling after an allowed token user bucket', async () => {
+  it('enforces the fixed 600/min token source-IP ceiling after an allowed token user bucket', async () => {
     checkAndIncrement.mockResolvedValueOnce(allowed(9)).mockResolvedValueOnce(denied())
     const { app, resolver, handler } = buildApp()
 
@@ -236,7 +238,7 @@ describe('external GFS rate boundary', () => {
       .set('x-user-session-token', 'session-one')
 
     expect(response.status).toBe(429)
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-limit']).toBe('600')
     expect(checkAndIncrement).toHaveBeenNthCalledWith(
       1,
       `gfs-ext:pre:token:user:${DESKTOP_USER_ID}`,
@@ -245,7 +247,7 @@ describe('external GFS rate boundary', () => {
     expect(checkAndIncrement).toHaveBeenNthCalledWith(
       2,
       expect.stringMatching(/^gfs-ext:pre:token:ip:[0-9a-f]{64}$/),
-      30
+      600
     )
     expect(resolver).not.toHaveBeenCalled()
     expect(handler).not.toHaveBeenCalled()
@@ -266,7 +268,7 @@ describe('external GFS rate boundary', () => {
     expect(checkAndIncrement).toHaveBeenNthCalledWith(
       2,
       `gfs-ext:pre:token:ip:${clientIpDigest}`,
-      30
+      600
     )
   })
 

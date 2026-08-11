@@ -272,7 +272,7 @@ export function externalGfsPreResolutionRateLimit(
             },
             {
               key: `gfs-ext:pre:token:ip:${sourceIpDigest(req)}`,
-              maxPerMinute: config.externalGfsIpRlPerMin,
+              maxPerMinute: config.externalGfsTokenIpRlPerMin,
             },
           ]
         : [

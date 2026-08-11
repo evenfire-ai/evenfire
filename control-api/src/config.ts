@@ -133,9 +133,14 @@ type Config = {
   approvalRlExternalPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
-  // External Desktop GFS is a separate authority plane. These values are the
-  // approved fixed budgets for its pre-resolution and resolved-operation gates.
+  // External Desktop GFS is a separate authority plane. The process-local
+  // ingress backstop is intentionally wider than the distributed operation
+  // buckets so normal Desktop read waterfalls cannot consume the security
+  // budgets before authority resolution. The narrower values remain the
+  // authoritative per-user/IP/actor operation ceilings.
+  externalGfsIngressRlPerMin: number
   externalGfsTokenUserRlPerMin: number
+  externalGfsTokenIpRlPerMin: number
   externalGfsIpRlPerMin: number
   externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
@@ -734,9 +739,12 @@ export const config: Config = {
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
   // Approved GFS authority-boundary budgets. Keep them fixed here rather than
-  // accepting an unreviewed environment override: token minting is 10/min per
-  // Desktop user and 30/min per source IP; every other operation class is 30/min.
+  // accepting an unreviewed environment override. The 1800/min ingress guard
+  // is only a coarse process-local backstop; token/user, token/IP, operation/IP,
+  // and resolved session/actor buckets remain independently bounded below.
+  externalGfsIngressRlPerMin: 1_800,
   externalGfsTokenUserRlPerMin: 10,
+  externalGfsTokenIpRlPerMin: 600,
   externalGfsIpRlPerMin: 30,
   externalGfsOperationRlPerMin: 30,
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
