@@ -518,12 +518,12 @@ describe('routes/profile', () => {
     expect(res.body).toEqual({
       currentTeamId: 't1',
       truncated: false,
+      complete: true,
+      partialErrors: [],
       items: [
         {
           team: { id: 't1', name: 'Alpha', role: 'member' },
-          members: [
-            { id: 'u1', email: 'u@example.com', name: 'User', role: 'member', status: 'active' },
-          ],
+          members: [],
           contextIds: ['ctx-a'],
           agentNames: ['agent-a'],
         },
@@ -546,6 +546,7 @@ describe('routes/profile', () => {
     expect(svc.getTeamContexts).toHaveBeenCalledWith('t2')
     expect(svc.getTeamAgents).toHaveBeenCalledWith('t2')
     expect(svc.listMembers).toHaveBeenCalledWith('t2')
+    expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
   })
 
   it('caps initial team directory fan-out and reports truncation', async () => {
@@ -568,11 +569,41 @@ describe('routes/profile', () => {
     ).expect(200)
 
     expect(res.body.truncated).toBe(true)
+    expect(res.body.complete).toBe(false)
+    expect(res.body.partialErrors).toEqual([])
     expect(res.body.items).toHaveLength(50)
     expect(res.body.items.at(-1)?.team.id).toBe('t50')
-    expect(svc.listMembers).toHaveBeenCalledTimes(50)
+    expect(svc.listMembers).not.toHaveBeenCalled()
     expect(svc.getTeamContexts).toHaveBeenCalledTimes(50)
     expect(svc.getTeamAgents).toHaveBeenCalledTimes(50)
+  })
+
+  it('marks a member-directory dependency failure as partial without hiding other resources', async () => {
+    svc.listTeams.mockResolvedValue({
+      currentTeamId: 't1',
+      items: [{ id: 't1', name: 'Alpha', role: 'admin' }],
+    })
+    svc.listMembers.mockRejectedValue(new Error('directory unavailable'))
+    svc.getTeamContexts.mockResolvedValue({ teamId: 't1', contextIds: ['ctx-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    const res = await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/team-directory')
+    ).expect(200)
+
+    expect(res.body.complete).toBe(false)
+    expect(res.body.partialErrors).toEqual([
+      { teamId: 't1', source: 'members', code: 'unavailable' },
+    ])
+    expect(res.body.items[0]).toMatchObject({
+      members: [],
+      contextIds: ['ctx-a'],
+      agentNames: ['agent-a'],
+    })
   })
 
   it('returns user/team access data for matching claim-bound routes', async () => {
