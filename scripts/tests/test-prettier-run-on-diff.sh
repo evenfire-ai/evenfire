@@ -28,6 +28,7 @@ new_repo() {
     "$fixture/deploy/overlays/minikube/patches" \
     "$fixture/gfs-controller/src" \
     "$fixture/not-selected" \
+    "$fixture/packages/network-policy-core" \
     "$fixture/scripts/prettier"
   cp "$REPO_ROOT"/scripts/prettier/*.mjs "$fixture/scripts/prettier/"
   cp "$REPO_ROOT/prettier.config.cjs" "$fixture/"
@@ -172,6 +173,42 @@ expect_diff_failure 'CI-only service root is checked' "$fixture" "$base" "$head"
 
 fixture="$(new_repo)"
 base="$(sha_of "$fixture")"
+printf 'module.exports={allow:false}\n' > "$fixture/packages/network-policy-core/index.cjs"
+commit_all "$fixture" 'add unformatted network policy core source'
+head="$(sha_of "$fixture")"
+expect_diff_failure 'unformatted network-policy-core source is checked' \
+  "$fixture" "$base" "$head" direct
+
+fixture="$(new_repo)"
+base="$(sha_of "$fixture")"
+printf 'module.exports = { allow: false }\n' > "$fixture/packages/network-policy-core/index.cjs"
+commit_all "$fixture" 'add formatted network policy core source'
+head="$(sha_of "$fixture")"
+expect_diff_success 'formatted network-policy-core source passes' \
+  "$fixture" "$base" "$head" direct
+
+if node --input-type=module - "$REPO_ROOT" <<'NODE'
+import assert from 'node:assert/strict'
+import { pathToFileURL } from 'node:url'
+import path from 'node:path'
+
+const repoRoot = process.argv[2]
+const paths = await import(pathToFileURL(path.join(repoRoot, 'scripts/prettier/paths.mjs')))
+const networkPolicyRoot = 'packages/network-policy-core'
+
+assert.ok(paths.ciProjectRoots.includes(networkPolicyRoot))
+assert.ok(!paths.projectRoots.includes(networkPolicyRoot))
+assert.ok(!paths.packageRoots.includes(networkPolicyRoot))
+assert.ok(!paths.rootFormatTargets.includes(networkPolicyRoot))
+NODE
+then
+  pass 'network-policy-core expands only the CI formatter roots'
+else
+  fail 'network-policy-core expands only the CI formatter roots'
+fi
+
+fixture="$(new_repo)"
+base="$(sha_of "$fixture")"
 printf 'name: test\non: [push]\njobs: {check: {runs-on: ubuntu-latest}}\n' \
   > "$fixture/.github/workflows/test.yml"
 commit_all "$fixture" 'add workflow yaml'
@@ -301,6 +338,22 @@ if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
   pass 'CI-only roots do not expand the staged formatter scope'
 else
   fail 'CI-only roots do not expand the staged formatter scope'
+fi
+
+fixture="$(new_repo)"
+printf 'module.exports={allow:false}\n' > "$fixture/packages/network-policy-core/index.cjs"
+git -C "$fixture" add -- packages/network-policy-core/index.cjs
+network_policy_blob="$(git -C "$fixture" rev-parse :packages/network-policy-core/index.cjs)"
+if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
+  && [ "$(git -C "$fixture" rev-parse :packages/network-policy-core/index.cjs)" \
+    = "$network_policy_blob" ] \
+  && [ "$(git -C "$fixture" hash-object packages/network-policy-core/index.cjs)" \
+    = "$network_policy_blob" ] \
+  && git -C "$fixture" diff --quiet \
+    -- packages/network-policy-core/index.cjs; then
+  pass 'network-policy-core remains outside the staged formatter scope'
+else
+  fail 'network-policy-core remains outside the staged formatter scope'
 fi
 
 exit "$FAIL"

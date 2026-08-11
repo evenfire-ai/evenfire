@@ -60,6 +60,7 @@ export const ciProjectRoots = [
   'nginx-egress-proxy',
   'packages/image-policy',
   'packages/llm-providers',
+  'packages/network-policy-core',
   'packages/workflow-recipe-capability-policy',
   'packages/workflow-runtime-core',
   'webhook-gateway',
