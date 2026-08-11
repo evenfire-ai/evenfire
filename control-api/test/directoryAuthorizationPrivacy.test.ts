@@ -702,6 +702,9 @@ describe('directory privacy and atomic authorization', () => {
         passwordHash = 'stored-hash'
         return { rows: [], rowCount: 1 }
       }
+      if (sql.includes('SELECT id') && sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: TARGET }], rowCount: 1 }
+      }
       if (sql.includes('external_user_session_security_epochs')) return { rows: [], rowCount: 1 }
       if (sql.includes('UPDATE external_user_sessions')) return { rows: [], rowCount: 0 }
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
@@ -876,6 +879,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.query
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
@@ -886,10 +890,11 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
     const passwordUpdate = String(mocks.query.mock.calls[1]?.[0])
     expect(passwordUpdate).toContain('AND password_hash = $4')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain(
+    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR UPDATE')
+    expect(String(mocks.query.mock.calls[3]?.[0])).toContain(
       'INSERT INTO external_user_session_security_epochs'
     )
-    expect(String(mocks.query.mock.calls[3]?.[0])).toContain('UPDATE external_user_sessions')
+    expect(String(mocks.query.mock.calls[4]?.[0])).toContain('UPDATE external_user_sessions')
   })
 
   it('treats wildcard characters literally, excludes channels, and publishes a stable cursor', async () => {
