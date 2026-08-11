@@ -69,6 +69,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       role: payload.role as AuthClaims['role'],
       authGeneration: Number(authGeneration),
       exp: payload.exp,
+      ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
     }
   } catch {
     return null
