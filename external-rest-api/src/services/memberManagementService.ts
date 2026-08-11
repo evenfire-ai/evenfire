@@ -119,7 +119,7 @@ export async function deleteManagedUser(
   sessionToken: string,
   retirement: ManagedUserRetirementRequest
 ) {
-  return controlApiRequest<unknown>('DELETE', `/external/members/${userId}`, {
+  return controlApiRequest<unknown>('DELETE', `/external/members/${encodeURIComponent(userId)}`, {
     body: { reason: retirement.reason },
     userSessionToken: sessionToken,
     extraHeaders: {

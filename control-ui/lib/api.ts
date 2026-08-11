@@ -2180,6 +2180,17 @@ function generateRetirementRequestId(): string {
   })
 }
 
+/** Creates one stable request identity for all transport retries in a UI operation. */
+export function createDeleteAdminUserRequest(
+  reason = 'control_ui_user_retirement'
+): Required<DeleteAdminUserRequest> {
+  return {
+    reason,
+    idempotencyKey: generateRetirementRequestId(),
+    correlationId: generateRetirementRequestId(),
+  }
+}
+
 /**
  * Retires the user through the governed lifecycle contract. A caller may retain
  * the supplied key when retrying the same action; an ordinary UI action gets a

@@ -30,6 +30,7 @@ const claims = {
   role: 'admin' as const,
   exp: 9999999999,
 }
+const TARGET_USER_ID = '11111111-1111-4111-8111-111111111111'
 
 function makeApp() {
   const app = express()
@@ -87,34 +88,83 @@ describe('routes/members', () => {
     memberManagementMock.deleteManagedUser.mockResolvedValueOnce({ ok: true })
 
     await request(makeApp())
-      .delete('/members/user-2')
+      .delete(`/members/${TARGET_USER_ID}`)
       .set('authorization', 'Bearer good-token')
       .set('Idempotency-Key', 'retire-user-2-v1')
       .set('x-correlation-id', '11111111-1111-4111-8111-111111111111')
       .send({ reason: 'team access no longer required' })
       .expect(200, { ok: true })
 
-    expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledWith('user-2', 'good-token', {
-      reason: 'team access no longer required',
-      idempotencyKey: 'retire-user-2-v1',
-      correlationId: '11111111-1111-4111-8111-111111111111',
-    })
+    expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledWith(
+      TARGET_USER_ID,
+      'good-token',
+      {
+        reason: 'team access no longer required',
+        idempotencyKey: 'retire-user-2-v1',
+        correlationId: '11111111-1111-4111-8111-111111111111',
+      }
+    )
   })
 
   it.each([
     [{}, 'Retirement reason is required'],
     [{ reason: 'team access no longer required' }, 'Idempotency-Key header is required'],
-  ])('rejects missing governed-retirement inputs', async (body, expectedError) => {
-    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+  ])(
+    'rejects missing governed-retirement inputs before they reach Control API',
+    async (body, expectedError) => {
+      authTokenMock.verifyToken.mockReturnValueOnce(claims)
 
-    const requestBuilder = request(makeApp())
-      .delete('/members/user-2')
+      const response = await request(makeApp())
+        .delete(`/members/${TARGET_USER_ID}`)
+        .set('authorization', 'Bearer good-token')
+        .send(body)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: expectedError })
+      expect(memberManagementMock.deleteManagedUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rate-limits retirement attempts by the verified subject despite changing user inputs', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, userId: 'rate-limited-user' })
+    memberManagementMock.deleteManagedUser.mockResolvedValue({ ok: true })
+
+    for (let attempt = 1; attempt <= 30; attempt++) {
+      await request(makeApp())
+        .delete(`/members/${TARGET_USER_ID}`)
+        .set('authorization', 'Bearer good-token')
+        .set('Idempotency-Key', `retire-attempt-${attempt}`)
+        .send({ reason: `retirement attempt ${attempt}` })
+        .expect(200)
+    }
+
+    await request(makeApp())
+      .delete(`/members/${TARGET_USER_ID}`)
       .set('authorization', 'Bearer good-token')
-      .send(body)
-    const response = await requestBuilder
+      .set('Idempotency-Key', 'retire-attempt-31')
+      .set('x-correlation-id', '22222222-2222-4222-8222-222222222222')
+      .send({ reason: 'changed reason cannot bypass the verified-actor bucket' })
+      .expect(429)
 
-    expect(response.status).toBe(400)
-    expect(response.body).toEqual({ error: expectedError })
-    expect(memberManagementMock.deleteManagedUser).not.toHaveBeenCalled()
+    expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledTimes(30)
   })
+
+  it.each([
+    ['reason', { reason: 'x'.repeat(513) }, { 'Idempotency-Key': 'valid-key' }],
+    ['idempotency key', { reason: 'valid reason' }, { 'Idempotency-Key': 'x'.repeat(257) }],
+  ])(
+    'rejects an overlong retirement %s before it reaches Control API',
+    async (_field, body, headers) => {
+      authTokenMock.verifyToken.mockReturnValueOnce({ ...claims, userId: `bounded-${_field}` })
+
+      const response = await request(makeApp())
+        .delete(`/members/${TARGET_USER_ID}`)
+        .set('authorization', 'Bearer good-token')
+        .set(headers)
+        .send(body)
+
+      expect(response.status).toBe(400)
+      expect(memberManagementMock.deleteManagedUser).not.toHaveBeenCalled()
+    }
+  )
 })
