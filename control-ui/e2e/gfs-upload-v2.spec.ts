@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, truncate } from 'node:fs/promises'
 import {
   assertGfsFixtureCleaned,
   cleanupGfsFixture,
