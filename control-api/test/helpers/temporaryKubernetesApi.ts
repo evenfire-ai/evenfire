@@ -142,10 +142,16 @@ current-context: temporary
   }
 
   async close(): Promise<void> {
-    for (const response of this.watchResponses) response.end()
+    const held = this.heldList
+    this.heldList = null
+    if (held?.response) held.response.destroy()
+    held?.closed()
+    for (const response of this.watchResponses) response.destroy()
     this.watchResponses.clear()
-    await new Promise<void>(resolve => this.server.close(() => resolve()))
     this.server.closeAllConnections?.()
+    if (this.server.listening) {
+      await new Promise<void>(resolve => this.server.close(() => resolve()))
+    }
     if (this.scratchDirectory) await rm(this.scratchDirectory, { recursive: true, force: true })
     this.scratchDirectory = null
     this.kubeconfigPath = null
