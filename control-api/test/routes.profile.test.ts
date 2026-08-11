@@ -400,6 +400,27 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
+  it('uses the public error envelope when legacy sessions call v2 management routes', async () => {
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    for (const path of [
+      '/external/auth/sessions/00000000-0000-4000-8000-000000000001/revoke',
+      '/external/auth/sessions/revoke-all',
+    ]) {
+      const response = await withInternalServiceAuth(
+        request(app).post(path).set('x-user-session-token', userSessionToken)
+      ).expect(409)
+      expect(response.body.error).toEqual({
+        code: 'conflict',
+        message: 'A user-session v2 login is required for session management.',
+        correlationId: expect.any(String),
+        retryable: false,
+      })
+    }
+  })
+
   it('binds pending invitation listing to the authenticated email', async () => {
     svc.listPendingInvitations.mockResolvedValue([])
     const app = express()

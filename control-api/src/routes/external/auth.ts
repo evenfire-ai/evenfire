@@ -330,7 +330,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return
       }
       if (authentication.claims.sessionContract !== 'v2') {
-        return res.status(409).json({ error: 'v2_session_required' })
+        sendPublicApiError(
+          req,
+          res,
+          409,
+          'conflict',
+          'A user-session v2 login is required for session management.'
+        )
+        return
       }
       const revoked = await revokeUserSession(
         authentication.claims.userId,
@@ -360,7 +367,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return
       }
       if (authentication.claims.sessionContract !== 'v2') {
-        return res.status(409).json({ error: 'v2_session_required' })
+        sendPublicApiError(
+          req,
+          res,
+          409,
+          'conflict',
+          'A user-session v2 login is required for session management.'
+        )
+        return
       }
       const revoked = await revokeAllUserSessions(authentication.claims.userId, 'user_revoked_all')
       return res.status(200).json({ revoked })

@@ -6,6 +6,7 @@ export type PublicApiErrorCode =
   | 'session_revoked'
   | 'forbidden'
   | 'not_found'
+  | 'conflict'
   | 'access_path_required'
   | 'access_path_stale'
   | 'authority_unavailable'
