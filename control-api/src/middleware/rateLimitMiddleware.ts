@@ -24,6 +24,7 @@ export type RateLimitEnforcerOptions = {
   bucketType: string
   maxPerMinute: number
   onBackendUnavailable: RateLimitBackendUnavailableMode
+  onLimited?: (req: Request, res: Response, retryAfterSeconds: number) => void
 }
 
 /**
@@ -167,7 +168,11 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         'rate limit exceeded'
       )
     }
-    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
+    if (opts.onLimited) {
+      opts.onLimited(req, res, retryAfterSec)
+    } else {
+      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
+    }
   }
 
   return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {

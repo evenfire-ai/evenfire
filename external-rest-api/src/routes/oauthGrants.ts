@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError } from '../controlApiClient.js'
+import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   type OauthGrantSummary,
@@ -31,10 +31,9 @@ function toGrantView(g: OauthGrantSummary): OauthGrantSummary {
 }
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
+  const sanitized = sanitizeControlApiPublicError(error, PROPAGATED_STATUSES)
+  if (sanitized) {
+    res.status(sanitized.status).json(sanitized.body)
     return
   }
   next(error)
