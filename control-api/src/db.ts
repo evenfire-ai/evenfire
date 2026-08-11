@@ -5463,6 +5463,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
     apply: reconcilePluginWorkloadSdkRuntimeContracts,
   },
+  {
+    version: '0091_oauth_grants_owner_generalization',
+    apply: applyOAuthGrantsOwnerGeneralization,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -5561,6 +5565,68 @@ async function applyOAuthServiceGrants(db: DbClient): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_service_unique
       ON oauth_grants (recipe_namespace, recipe_name, oauth_client_id)
       WHERE grant_kind = 'service';
+  `)
+}
+
+async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> {
+  // U1 — generalize `oauth_grants` beyond recipe-owned grants so OAuth
+  // mcp-servers can own grants too, and introduce the `shared` (context-scoped)
+  // identity grant. NON-DESTRUCTIVE + idempotent: `recipe_namespace`/`recipe_name`
+  // are NOT renamed (they are reinterpreted as owner coordinates); the rename to
+  // `owner_*` is deferred.
+  //
+  //   - `owner_kind`  — discriminator; DEFAULT 'recipe' so every pre-existing row
+  //                     keeps its meaning and uniqueness.
+  //   - `context_id`  — replaces `user_id` in the key for `shared` grants (the
+  //                     Context the shared identity belongs to).
+  //   - `bootstrapped_by_user_id` — audit: who first authorized a shared identity.
+  //                     OUTSIDE the key and never rewritten on refresh.
+  //
+  // The kind/user_id CHECK is REPLACED (not extended) to admit 'shared': without
+  // this, any `shared` INSERT would violate the old `user`/`service`-only CHECK.
+  await db.query(`
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS owner_kind TEXT NOT NULL DEFAULT 'recipe';
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS context_id TEXT;
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS bootstrapped_by_user_id TEXT;
+
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_kind_userid_check;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_kind_userid_check
+        CHECK ((grant_kind = 'user' AND user_id IS NOT NULL)
+            OR (grant_kind = 'service' AND user_id IS NULL)
+            OR (grant_kind = 'shared' AND user_id IS NULL
+                AND context_id IS NOT NULL
+                AND bootstrapped_by_user_id IS NOT NULL));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Recreate oauth_grants_unique as a superset with owner_kind. Existing rows
+    -- are owner_kind='recipe', so the recipe user-grant uniqueness is preserved;
+    -- a McpServer owner (owner_kind='mcpserver') with the same ns/name can now
+    -- coexist. Governs user grants (non-null user_id) across owner domains.
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_unique;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_unique
+        UNIQUE (owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Shared-identity uniqueness: exactly one shared grant per
+    -- (owner, ns, name, context, client). The user/service grants keep their own
+    -- uniqueness (superset constraint + oauth_grants_service_unique). The key
+    -- asymmetry is deliberate: user grants keep user_id (per-user, global across
+    -- contexts), shared grants replace it with context_id (identity scoped to the
+    -- Context, prevents cross-context leakage; sec 5.2/U6).
+    CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_shared_unique
+      ON oauth_grants (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)
+      WHERE grant_kind = 'shared';
   `)
 }
 

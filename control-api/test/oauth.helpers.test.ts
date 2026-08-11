@@ -493,8 +493,8 @@ describe('getAccessToken (O5.1)', () => {
     const [sql, params] = db.query.mock.calls[0] as unknown as [string, unknown[]]
     expect(sql).toContain('user_id IS NULL')
     expect(sql).toContain("grant_kind = 'service'")
-    // No userId param — the service key is (ns, name, oauthClientId).
-    expect(params).toEqual(['sandbox-recipes', 'crm', 'salesforce'])
+    // No userId param — the service key is (owner_kind, ns, name, oauthClientId).
+    expect(params).toEqual(['recipe', 'sandbox-recipes', 'crm', 'salesforce'])
   })
 
   it('refreshes a service grant and re-upserts via the service path (Path B)', async () => {
@@ -554,8 +554,9 @@ describe('getAccessToken (O5.1)', () => {
     expect(upsertSql).toContain(
       "ON CONFLICT (recipe_namespace, recipe_name, oauth_client_id) WHERE grant_kind = 'service'"
     )
-    // Service INSERT carries 7 params (no user_id); the user INSERT carries 8.
-    expect(upsertParams).toHaveLength(7)
+    // Service INSERT carries 8 params (owner_kind, ns, name, oauthClientId,
+    // provider, accessToken, refreshToken, expiresAt) — no user_id.
+    expect(upsertParams).toHaveLength(8)
   })
 
   // Suppresses unused-import warnings for helpers we kept exported

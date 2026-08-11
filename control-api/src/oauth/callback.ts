@@ -48,6 +48,20 @@ export interface RecipeReader {
   read(name: string, namespace: string): Promise<RecipeWithOAuthClients | null>
 }
 
+/**
+ * Structural alias of {@link RecipeReader} for the generalized owner model (U1).
+ *
+ * An owner declaration reader resolves a grant owner — a WorkflowRecipe, or an
+ * OAuth McpServer — to the same `{ spec: { oauthClients: [...] } }` shape the
+ * broker + refresh path already consume. The McpServer variant normalizes its
+ * single `spec.oauth` object into a one-element `oauthClients` array so the
+ * downstream code (`getAccessToken`) stays owner-agnostic. It is deliberately a
+ * plain alias (single method `read(name, namespace)`) so it can be injected
+ * per-router with a minimal blast radius — `tokenHelper.ts` and `state.ts` are
+ * untouched. (Generalizing `OAuthStateClaims` is U5, not here.)
+ */
+export type OwnerDeclReader = RecipeReader
+
 export class SecretNotFoundError extends Error {}
 export class RecipeNotFoundError extends Error {}
 
@@ -153,10 +167,7 @@ export async function handleOAuthCallback(
   // ─── 3. Read clientId + clientSecret from K8s Secrets ─────────────────
   let clientIdSecret: Record<string, string>
   try {
-    clientIdSecret = await deps.secretReader.read(
-      clientDecl.clientIdRef.name,
-      recipeNamespace
-    )
+    clientIdSecret = await deps.secretReader.read(clientDecl.clientIdRef.name, recipeNamespace)
   } catch (err) {
     if (err instanceof SecretNotFoundError) {
       return { kind: 'secret_missing', secret: clientDecl.clientIdRef.name }

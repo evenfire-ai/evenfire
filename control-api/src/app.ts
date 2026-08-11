@@ -30,6 +30,7 @@ import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.j
 import { createInternalWebhooksRouter } from './routes/internal/webhooks.js'
 import { createInternalWorkflowApprovalReaderRouter } from './routes/internal/workflowApprovalReader.js'
 import { createMcpHostRoutes } from './routes/mcp-host/index.js'
+import { createMcpOauthRouter } from './routes/mcpOauth.js'
 import { createMetricsRouter } from './routes/metrics.js'
 import { createRecipeOauthRouter } from './routes/recipeOauth.js'
 import { createRegistryRouter } from './routes/registry.js'
@@ -197,6 +198,10 @@ export function createApp(gateway: K8sGateway) {
   // token (Bearer, aud=oauth-broker). Auth is the broker token itself, not a
   // Clerum cookie or service token, so it is mounted BEFORE requireInternalToken.
   api.use(createRecipeOauthRouter(gateway))
+  // OAuth mcp-server broker (U1): POST /api/v1/mcp-oauth/user-token, gated by
+  // the mcp-host control JWT + scope oauth:user-token (self-authenticating, like
+  // the recipe broker — mounted before the internal-token gate below).
+  api.use(createMcpOauthRouter(gateway))
 
   // Workflow trigger endpoints use control-ui JWT auth (admin users).
   // Mounted BEFORE requireInternalToken — same pattern as mcpHost.

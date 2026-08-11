@@ -13,10 +13,36 @@ export interface McpServerTransport {
 }
 
 /**
+ * Reference to a key within a Kubernetes Secret.
+ */
+export interface McpServerSecretRef {
+  name: string
+  key: string
+}
+
+/**
+ * OAuth broker configuration for an mcp-server (auth.type === 'oauth').
+ *
+ * Present iff `spec.auth.type === 'oauth'`. control-api owns the OAuth flow and
+ * resolves tokens per connection just-in-time; HCC does NOT mount the token as
+ * env (invariant O4 stays intact — this type only lets the controller type the
+ * discriminator; the runtime token carril is mcp-host's, not HCC's).
+ */
+export interface McpServerOAuth {
+  id: string
+  provider: 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+  clientIdRef: McpServerSecretRef
+  clientSecretRef: McpServerSecretRef
+  scopes?: string[]
+  backgroundAccess?: boolean
+  grantScope?: 'user' | 'context'
+}
+
+/**
  * McpServer authentication configuration.
  */
 export interface McpServerAuth {
-  type: 'none' | 'bearer' | 'basic' | 'apiKey'
+  type: 'none' | 'bearer' | 'basic' | 'apiKey' | 'oauth'
   secretRef?: string
   secretKey?: string
 }
@@ -121,6 +147,9 @@ export interface McpServerSpec {
   args?: string[]
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config; present iff auth.type === 'oauth'. Typing only — HCC
+  // does NOT mount the resolved token as env (O4 stays intact).
+  oauth?: McpServerOAuth
   serverConfig?: McpServerConfig
   envMapping?: McpServerEnvMapping
   env?: McpServerEnvVar[]

@@ -1,0 +1,65 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const clientQuery = vi.fn()
+const clientRelease = vi.fn()
+const mockConnect = vi.fn()
+const mockPoolCtor = vi.fn(function MockPool() {
+  return { connect: mockConnect, query: vi.fn() }
+})
+
+vi.mock('pg', () => ({ Pool: mockPoolCtor }))
+
+describe('0091 oauth_grants owner generalization migration', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+    mockConnect.mockResolvedValue({ query: clientQuery, release: clientRelease })
+    clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+  })
+
+  it('is registered last in the migration array, after 0090', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
+    expect(versions.at(-1)).toBe('0091_oauth_grants_owner_generalization')
+    expect(versions).toContain('0090_plugin_workload_sdk_runtime_contract_reconciliation')
+  })
+
+  it('adds owner_kind/context_id/bootstrapped_by, replaces the kind CHECK to admit shared, and rebuilds uniqueness', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+    const migration = sqls.find(
+      sql => sql.includes('ADD COLUMN IF NOT EXISTS owner_kind') && sql.includes('oauth_grants')
+    )
+    expect(migration, 'the 0091 DDL was applied').toBeDefined()
+    const ddl = migration as string
+
+    // New columns (idempotent).
+    expect(ddl).toContain("ADD COLUMN IF NOT EXISTS owner_kind TEXT NOT NULL DEFAULT 'recipe'")
+    expect(ddl).toContain('ADD COLUMN IF NOT EXISTS context_id TEXT')
+    expect(ddl).toContain('ADD COLUMN IF NOT EXISTS bootstrapped_by_user_id TEXT')
+
+    // The kind/user_id CHECK is DROP+re-ADD to admit 'shared' — without this a
+    // shared INSERT would violate the old user/service-only CHECK.
+    expect(ddl).toContain('DROP CONSTRAINT IF EXISTS oauth_grants_kind_userid_check')
+    expect(ddl).toContain("grant_kind = 'shared' AND user_id IS NULL")
+    expect(ddl).toContain('context_id IS NOT NULL')
+    expect(ddl).toContain('bootstrapped_by_user_id IS NOT NULL')
+
+    // oauth_grants_unique recreated as a superset with owner_kind.
+    expect(ddl).toContain('DROP CONSTRAINT IF EXISTS oauth_grants_unique')
+    expect(ddl).toContain(
+      'UNIQUE (owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id)'
+    )
+
+    // Shared partial unique index keyed by context_id.
+    expect(ddl).toContain('CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_shared_unique')
+    expect(ddl).toContain(
+      'ON oauth_grants (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)'
+    )
+    expect(ddl).toContain("WHERE grant_kind = 'shared'")
+
+    // Non-destructive: recipe_namespace/recipe_name are NOT renamed.
+    expect(ddl).not.toContain('RENAME COLUMN')
+  })
+})

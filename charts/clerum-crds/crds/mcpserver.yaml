@@ -100,13 +100,111 @@ spec:
                         - bearer
                         - basic
                         - apiKey
-                      description: Authentication type.
+                        - oauth
+                      description: >-
+                        Authentication type. `oauth` selects the control-api OAuth
+                        broker (per-user or shared identity); it requires spec.oauth
+                        and forbids a static secretRef/secretKey.
                     secretRef:
                       type: string
                       description: Name of the Kubernetes Secret containing auth credentials.
                     secretKey:
                       type: string
                       description: Key within the secret to use (default depends on auth type).
+                oauth:
+                  type: object
+                  description: >-
+                    OAuth 2.1 broker configuration for this mcp-server. Present iff
+                    spec.auth.type == 'oauth'. The control-api OAuth subsystem owns
+                    the authorize/token/refresh flow; tokens are resolved per
+                    connection just-in-time and NEVER mounted into the pod. Shape
+                    mirrors WorkflowRecipe spec.oauthClients[] (a single client per
+                    server).
+                  required:
+                    - id
+                    - provider
+                    - clientIdRef
+                    - clientSecretRef
+                  properties:
+                    id:
+                      type: string
+                      maxLength: 63
+                      pattern: "^[a-z0-9-]{1,63}$"
+                      description: >-
+                        Stable OAuth client identifier for this server. Surfaced as
+                        the `clientId` on clerum:oauth URLs and the callback path
+                        segment. Immutable once set.
+                    provider:
+                      type: string
+                      # Known-shape adapters baked into control-api
+                      # (src/oauth/providers.ts). Adding a provider is a control-api
+                      # change — servers cannot speak OAuth to arbitrary endpoints.
+                      # U2 extends: monday, clickup, vercel.
+                      enum:
+                        - salesforce
+                        - slack
+                        - notion
+                        - microsoft-graph
+                        - google
+                      description: >-
+                        Known-shape adapter. control-api owns the authorize/token
+                        URLs and response-shape parsing per provider. Immutable.
+                    clientIdRef:
+                      type: object
+                      required: [name, key]
+                      description: >-
+                        Reference to a Secret in the mcp-servers namespace holding
+                        the OAuth client_id.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                        key:
+                          type: string
+                          maxLength: 253
+                    clientSecretRef:
+                      type: object
+                      required: [name, key]
+                      description: >-
+                        Reference to a Secret in the mcp-servers namespace holding
+                        the OAuth client_secret.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                        key:
+                          type: string
+                          maxLength: 253
+                    scopes:
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: string
+                        maxLength: 128
+                      description: >-
+                        OAuth scopes to request. Provider-specific syntax. Include
+                        the provider's offline/refresh scope when backgroundAccess
+                        is true.
+                    backgroundAccess:
+                      type: boolean
+                      description: >-
+                        When true, this grant may be used by a workload without a
+                        live human session (subject to the control-api background
+                        gate). Requires scopes to include the provider's
+                        offline/refresh scope.
+                    grantScope:
+                      type: string
+                      enum:
+                        - user
+                        - context
+                      default: user
+                      description: >-
+                        Whose OAuth identity is exercised. `user` (default): each
+                        user authorizes their own grant, keyed by (server, user).
+                        `context`: one shared identity per Context — a member
+                        bootstraps it and the rest inherit it, keyed by
+                        (server, context). Immutable once set: flipping it would
+                        change in place which identity is exercised.
                 serverConfig:
                   type: object
                   description: Operational configuration for the MCP server runtime.
@@ -388,6 +486,25 @@ spec:
                   message: "spec.managed is immutable; delete and recreate the McpServer to change runtime ownership"
                 - rule: "!has(self.remote) || (has(self.egressBindings) && size(self.egressBindings) > 0)"
                   message: "Remote servers must declare at least one egressBinding for egress NetworkPolicy"
+                # OAuth coupling: auth.type=='oauth' iff spec.oauth is present.
+                # grantScope ⇒ oauth is structural (grantScope nests under oauth).
+                - rule: "((has(self.auth) && has(self.auth.type) && self.auth.type == 'oauth') == has(self.oauth))"
+                  message: "spec.auth.type 'oauth' requires spec.oauth, and spec.oauth requires auth.type 'oauth'"
+                # OAuth servers must not also carry a static credential.
+                - rule: "!has(self.oauth) || !has(self.auth) || (!has(self.auth.secretRef) && !has(self.auth.secretKey))"
+                  message: "OAuth mcp-servers must not declare a static auth.secretRef/secretKey"
+                # Immutability via has()-guard (patrón `managed`): these are
+                # transition rules (they reference oldSelf), so they are SKIPPED on
+                # CREATE and only enforced on UPDATE. Guarding on has(oldSelf.oauth)
+                # means create-time grantScope:'context' is allowed, and a
+                # none→oauth UPDATE is allowed, while any change to a grantScope /
+                # id / provider that ALREADY existed is rejected.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.grantScope == self.oauth.grantScope"
+                  message: "spec.oauth.grantScope is immutable; delete and recreate the McpServer to change which identity is exercised"
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.id == self.oauth.id"
+                  message: "spec.oauth.id is immutable"
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.provider == self.oauth.provider"
+                  message: "spec.oauth.provider is immutable"
             status:
               type: object
               properties:

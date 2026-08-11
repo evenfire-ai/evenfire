@@ -24,7 +24,12 @@ import { type OAuthGrantKey, getOAuthGrant, upsertOAuthGrant } from './store.js'
  */
 
 export type GetAccessTokenInput = OAuthGrantKey & {
-  /** User grants only: require a background-consented grant (per-user broker, SEC-5). */
+  /**
+   * Require a background-consented grant (per-user broker, SEC-5). Parametrized,
+   * NOT pinned to `true`: the recipe background broker passes `true`; the
+   * interactive mcp-host live-session path (U1) passes `false` (there IS a live
+   * session). Honored for `user` and `shared` grants; ignored for `service`.
+   */
   requireBackground?: boolean
 }
 
@@ -148,8 +153,12 @@ export async function getAccessToken(
   }
 
   // Some providers omit refresh_token on refresh — keep the previous one.
-  // Spread `...input` so the grant key (grantKind + identifiers) is carried
-  // through verbatim — the refresh re-upserts the same row, user or service.
+  // Spread `...input` so the grant key (grantKind + owner/identifiers) is carried
+  // through verbatim — the refresh re-upserts the SAME row. For `user`/`service`
+  // this is ON CONFLICT DO UPDATE (identity columns excluded); for `shared` it
+  // is a plain UPDATE by key (see store.ts) that never rewrites
+  // `bootstrapped_by_user_id` or the shared identity. Columns outside the key
+  // are preserved either way.
   await upsertOAuthGrant(deps.db, deps.encryptionKey, {
     ...input,
     provider: decl.provider,
