@@ -300,13 +300,14 @@ export class K8sGateway {
               .catch(error => {
                 handlerError = error
                 controller?.abort()
+                finish(error)
               })
           },
           error => finish(error)
         )
         .then(value => {
           controller = value
-          if (signal.aborted) onAbort()
+          if (settled || signal.aborted || handlerError) controller.abort()
         })
         .catch(finish)
     })
