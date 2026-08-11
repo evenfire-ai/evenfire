@@ -3,9 +3,11 @@ import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
+import type { ExternalSessionAuthorityContext } from '../services/auth/externalSessionAuthentication.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
+  externalSessionAuthority?: ExternalSessionAuthorityContext
   externalTeamAuth?: {
     teamId: string
     role: TeamRole
@@ -54,6 +56,7 @@ async function validateExternalSessionToken(
       return
     }
     req.externalAuth = authentication.claims
+    req.externalSessionAuthority = authentication.authorityContext
     next()
   } catch {
     if (publicErrors) {

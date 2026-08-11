@@ -31,7 +31,12 @@ export type ExternalSessionClient = Readonly<{
 }>
 
 export type ExternalSessionAuthentication =
-  | { status: 'authenticated'; claims: AuthClaims; contract: 'v1' | 'v2' }
+  | {
+      status: 'authenticated'
+      claims: AuthClaims
+      contract: 'v1' | 'v2'
+      authorityContext: ExternalSessionAuthorityContext
+    }
   | { status: 'invalid' | 'expired' | 'revoked'; reason: string }
   | { status: 'upgrade_required'; reason: string }
 
@@ -45,6 +50,22 @@ type AuthenticationOptions = Readonly<{
   policy?: EffectiveUserAccessPolicy
   now?: Date
 }>
+
+export type ExternalSessionAuthorityContext = Readonly<
+  | {
+      contract: 'v1'
+      userId: string
+      tokenHash: string
+      issuedAt: number
+    }
+  | {
+      contract: 'v2'
+      userId: string
+      sid: string
+      jti: string
+      sessionVersion: number
+    }
+>
 
 function clientMeetsMinimum(
   client: ExternalSessionClient | undefined,
@@ -129,6 +150,13 @@ export async function authenticateExternalUserSession(
       status: 'authenticated',
       contract: 'v2',
       claims: normalizedV2Claims(v2Claims, validation.identity),
+      authorityContext: Object.freeze({
+        contract: 'v2',
+        userId: v2Claims.sub,
+        sid: v2Claims.sid,
+        jti: v2Claims.jti,
+        sessionVersion: v2Claims.sv,
+      }),
     }
   }
 
@@ -139,7 +167,17 @@ export async function authenticateExternalUserSession(
   }
   const validation = await validateLegacyUserSession(token, v1Claims)
   if (validation.status !== 'valid') return validation
-  return { status: 'authenticated', contract: 'v1', claims: v1Claims }
+  return {
+    status: 'authenticated',
+    contract: 'v1',
+    claims: v1Claims,
+    authorityContext: Object.freeze({
+      contract: 'v1',
+      userId: v1Claims.userId,
+      tokenHash: validation.identity.jti,
+      issuedAt: v1Claims.iat!,
+    }),
+  }
 }
 
 export async function renewExternalUserSession(
