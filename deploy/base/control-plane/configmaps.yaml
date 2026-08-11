@@ -15,6 +15,10 @@ data:
   CONTROL_API_MCP_SERVERS_NAMESPACE: mcp-server
   CONTROL_API_COMMUNICATION_CHANNELS_NAMESPACE: channels
   CONTROL_API_SECRETS_NAMESPACE: mcp-host
+  # Maintain the bounded resource/relationship projection even while aggregate
+  # serving and action-context gates remain disabled. The index contains no
+  # effective user or team authorization and fails unavailable on source drift.
+  CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'true'
   CONTROL_API_JWT_ISSUER: control-api
   CONTROL_API_JWT_AUDIENCE: dev-profile-ui
   CONTROL_API_RPC_JWT_ISSUER: control-api

@@ -1004,6 +1004,9 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(roleRulesForResource(controlApiWorkflowRole, 'workflowrecipes')).toSatisfy(rules =>
       rules.some(rule => rule.includes('watch'))
     )
+
+    const controlApiConfig = read(`${BASE}/control-plane/configmaps.yaml`)
+    expect(controlApiConfig).toContain("CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'true'")
   })
 
   it('routes every rpc-proxy internal-service endpoint through the control-api-rpc-gateway allowlist', () => {

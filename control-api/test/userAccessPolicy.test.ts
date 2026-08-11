@@ -73,7 +73,7 @@ describe('central user-access rollout compiler', () => {
       desktopAllTeamMode: false,
       profileV2Mode: false,
       enforceMinimumClient: false,
-      advertisedCatalogFamilies: [],
+      advertisedCatalogFamilies: CATALOG_FAMILIES,
     })
   })
 
