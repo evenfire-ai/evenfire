@@ -321,4 +321,51 @@ describe('external aggregate access routes', () => {
     expect(gateway.getResource).not.toHaveBeenCalled()
     expect(gateway.listResource).not.toHaveBeenCalled()
   })
+
+  it('rejects oversized resolver identity and path fields before gateway work', async () => {
+    token.verify.mockReturnValue({
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'user@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 2_000_000_000,
+      sessionContract: 'v2',
+      sid: '00000000-0000-4000-8000-000000000100',
+      jti: '00000000-0000-4000-8000-000000000200',
+      sv: 1,
+      authTime: 1_999_996_400,
+      amr: ['pwd'],
+      iat: 1_999_996_400,
+    })
+    const gateway = { getResource: vi.fn(), listResource: vi.fn() }
+
+    for (const body of [
+      {
+        requiredCapability: 'host.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'host',
+          logicalId: `mcp-host/${'x'.repeat(513)}`,
+        },
+      },
+      {
+        requiredCapability: 'host.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'host',
+          logicalId: 'mcp-host/example',
+        },
+        accessPathId: `ap1_${'x'.repeat(44)}`,
+      },
+    ]) {
+      const response = await request(app(gateway))
+        .post('/external/access/resolve')
+        .set('x-user-session-token', 'v2-session')
+        .send(body)
+      expect(response.status).toBe(400)
+      expect(response.body.error.code).toBe('invalid_request')
+    }
+    expect(gateway.getResource).not.toHaveBeenCalled()
+    expect(gateway.listResource).not.toHaveBeenCalled()
+  })
 })

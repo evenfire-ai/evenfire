@@ -17,7 +17,7 @@ import {
   buildAccessCatalog,
   canonicalEnvironmentId,
 } from '../../services/access/accessCatalog.js'
-import { CAPABILITIES } from '../../services/access/capabilityRegistry.js'
+import { CAPABILITIES, isCapability } from '../../services/access/capabilityRegistry.js'
 import {
   claimsToLiveAuthorizationIdentity,
   resolveLiveAuthorization,
@@ -32,6 +32,8 @@ const resourceTypes = new Set<string>(RESOURCE_TYPES)
 const catalogResourceTypes = new Set<string>(ACCESS_CATALOG_RESOURCE_TYPES)
 const ACCESS_CATALOG_RATE_LIMIT_PER_MINUTE = 10
 const ACCESS_RESOLVE_RATE_LIMIT_PER_MINUTE = 10
+const MAX_RESOURCE_LOGICAL_ID_LENGTH = 512
+const ACCESS_PATH_ID_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/
 
 function catalogTypes(value: unknown): ResourceType[] | null {
   if (value === undefined) return []
@@ -250,7 +252,10 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     }),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const body = req.body as Record<string, unknown> | undefined
-      const resource = body?.resource as Record<string, unknown> | undefined
+      const resource =
+        body?.resource && typeof body.resource === 'object' && !Array.isArray(body.resource)
+          ? (body.resource as Record<string, unknown>)
+          : undefined
       const environmentId =
         typeof resource?.environmentId === 'string' ? resource.environmentId.trim() : ''
       const type = typeof resource?.type === 'string' ? resource.type.trim() : ''
@@ -274,7 +279,11 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
         environmentId !== canonicalEnvironmentId() ||
         !resourceTypes.has(type) ||
         !logicalId ||
-        !requiredCapability ||
+        logicalId.length > MAX_RESOURCE_LOGICAL_ID_LENGTH ||
+        /[\u0000-\u001f\u007f]/.test(logicalId) ||
+        !isCapability(requiredCapability) ||
+        (body?.accessPathId !== undefined &&
+          (!requestedAccessPathId || !ACCESS_PATH_ID_PATTERN.test(requestedAccessPathId))) ||
         operationTarget === null
       ) {
         sendPublicApiError(req, res, 400, 'invalid_request', 'Invalid authorization request.')
