@@ -8,6 +8,8 @@ FIXTURE="$TEST_ROOT/repository"
 cleanup() { rm -rf "$TEST_ROOT"; }
 trap cleanup EXIT
 
+ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$REPO_ROOT"
+
 mkdir -p "$FIXTURE/scripts/ci" "$FIXTURE/scripts/release" "$FIXTURE/bin"
 cp "$REPO_ROOT/scripts/ci/require-successful-ci-run.mjs" "$FIXTURE/scripts/ci/"
 cp "$REPO_ROOT/scripts/release/promote-release-images.sh" "$FIXTURE/scripts/release/"
