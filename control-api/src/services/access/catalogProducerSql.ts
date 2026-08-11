@@ -242,14 +242,18 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       sql: `SELECT war.id::text AS logical_id, war.id AS cursor_id,
                   war.expires_at AS valid_until
        FROM workflow_approval_requests war
-       JOIN team_members tm
-         ON tm.team_id = war.target_team_id AND tm.user_id = $1 AND tm.status = 'active'
-       JOIN team_workflow_triggers twt
-         ON twt.team_id = tm.team_id
-        AND twt.recipe_namespace = war.recipe_namespace
-        AND twt.recipe_name = war.recipe_name
       WHERE war.status = 'pending' AND war.expires_at > NOW()
-        AND war.id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
+        AND war.id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
+        AND EXISTS (
+          SELECT 1
+            FROM team_members tm
+            JOIN team_workflow_triggers twt
+              ON twt.team_id = tm.team_id
+             AND twt.recipe_namespace = war.recipe_namespace
+             AND twt.recipe_name = war.recipe_name
+           WHERE tm.team_id = war.target_team_id
+             AND tm.user_id = $1 AND tm.status = 'active'
+        )`,
       orderBy: 'cursor_id',
       hasValidUntil: true,
     },
@@ -369,13 +373,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
   ]),
   sandbox_app: boundedKeyUnionSql([
     `SELECT edge.target_id AS logical_id
-       FROM user_workflow_triggers uwt
-       JOIN operational_resource_relationships edge
-         ON edge.environment_id = $3
-        AND edge.source_type = 'workflow_recipe'
-        AND edge.source_id = uwt.recipe_namespace || '/' || uwt.recipe_name
-        AND edge.relationship_type = 'exposes_sandbox_app'
-        AND edge.target_type = 'sandbox_app'
+       FROM operational_resource_relationships edge
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3
         AND source_resource.resource_type = 'workflow_recipe'
@@ -385,16 +383,19 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'sandbox_app'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE uwt.user_id = $1 AND edge.target_id > $2`,
+      WHERE edge.environment_id = $3
+        AND edge.source_type = 'workflow_recipe'
+        AND edge.relationship_type = 'exposes_sandbox_app'
+        AND edge.target_type = 'sandbox_app'
+        AND edge.target_id > $2
+        AND EXISTS (
+          SELECT 1
+            FROM user_workflow_triggers uwt
+           WHERE uwt.user_id = $1
+             AND uwt.recipe_namespace || '/' || uwt.recipe_name = edge.source_id
+        )`,
     `SELECT edge.target_id AS logical_id
-       FROM team_workflow_triggers twt
-       JOIN team_members tm ON tm.team_id = twt.team_id
-       JOIN operational_resource_relationships edge
-         ON edge.environment_id = $3
-        AND edge.source_type = 'workflow_recipe'
-        AND edge.source_id = twt.recipe_namespace || '/' || twt.recipe_name
-        AND edge.relationship_type = 'exposes_sandbox_app'
-        AND edge.target_type = 'sandbox_app'
+       FROM operational_resource_relationships edge
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3
         AND source_resource.resource_type = 'workflow_recipe'
@@ -404,6 +405,17 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'sandbox_app'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
+      WHERE edge.environment_id = $3
+        AND edge.source_type = 'workflow_recipe'
+        AND edge.relationship_type = 'exposes_sandbox_app'
+        AND edge.target_type = 'sandbox_app'
+        AND edge.target_id > $2
+        AND EXISTS (
+          SELECT 1
+            FROM team_workflow_triggers twt
+            JOIN team_members tm ON tm.team_id = twt.team_id
+           WHERE tm.user_id = $1 AND tm.status = 'active'
+             AND twt.recipe_namespace || '/' || twt.recipe_name = edge.source_id
+        )`,
   ]),
 })
