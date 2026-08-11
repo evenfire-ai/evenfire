@@ -8,7 +8,8 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
     constructor(
       message: string,
       public status: number,
-      public body: unknown
+      public body: unknown,
+      public headers: Record<string, string> = {}
     ) {
       super(message)
     }
@@ -62,7 +63,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('POST', '/external/gfs/token', {
       userSessionToken: 'sess-xyz',
       body: { scopes: ['gfs.read'] },
-      extraHeaders: { 'x-request-id': REQUEST_ID },
+      extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
     })
     expect(res.headers['x-request-id']).toBe(REQUEST_ID)
   })
@@ -84,7 +85,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('PUT', '/external/gfs/grants', {
       userSessionToken: 'sess-xyz',
       body,
-      extraHeaders: { 'x-request-id': REQUEST_ID },
+      extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
     })
   })
 
@@ -102,8 +103,58 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/resources', {
       userSessionToken: 'sess-xyz',
       query: { drive: 'main', limit: '25', cursor: 'cursor-1' },
-      extraHeaders: { 'x-request-id': REQUEST_ID },
+      extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
     })
+  })
+
+  it('forwards the proxy-attested client IP for the control-api GFS rate boundary', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({
+      ok: true,
+      data: { items: [], nextCursor: null },
+    })
+    const app = buildApp()
+    app.set('trust proxy', 1)
+
+    await request(app)
+      .get('/me/gfs/resources')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+      .set('x-forwarded-for', '198.51.100.42')
+      .expect(200)
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/resources', {
+      userSessionToken: 'sess-xyz',
+      query: { drive: undefined, limit: undefined, cursor: undefined },
+      extraHeaders: {
+        'x-request-id': REQUEST_ID,
+        'x-forwarded-for': '198.51.100.42',
+      },
+    })
+  })
+
+  it('does not forward a caller-supplied XFF value when the hop is untrusted', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({
+      ok: true,
+      data: { items: [], nextCursor: null },
+    })
+    const app = buildApp()
+    // The production app trusts exactly its configured proxy hop. This test
+    // exercises the fail-closed behavior when that trust is absent: the
+    // incoming XFF must not become the attestation sent to control-api.
+    app.set('trust proxy', false)
+
+    await request(app)
+      .get('/me/gfs/resources')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+      .set('x-forwarded-for', '203.0.113.99')
+      .expect(200)
+
+    const call = clientMock.controlApiRequest.mock.calls.at(-1)
+    const forwarded = (call?.[2] as { extraHeaders?: Record<string, string> } | undefined)
+      ?.extraHeaders?.['x-forwarded-for']
+    expect(forwarded).toBeDefined()
+    expect(forwarded).not.toBe('203.0.113.99')
   })
 
   it('propagates a control-api no-escalation 403 verbatim', async () => {
@@ -164,7 +215,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       {
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
-        extraHeaders: { 'x-request-id': REQUEST_ID },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
       }
     )
   })
@@ -204,7 +255,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { newName: 'renamed.md', ifMatch: 1 },
-        extraHeaders: { 'x-request-id': REQUEST_ID },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -215,7 +266,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { name: 'docs', kind: 'directory' },
-        extraHeaders: { 'x-request-id': REQUEST_ID },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -226,7 +277,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { content: 'hello', ifMatch: 2 },
-        extraHeaders: { 'x-request-id': REQUEST_ID },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
       }
     )
     expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
@@ -237,7 +288,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },
         body: { ifMatch: 3 },
-        extraHeaders: { 'x-request-id': REQUEST_ID },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
       }
     )
   })
@@ -274,7 +325,7 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/grants', {
       userSessionToken: 'sess-xyz',
       query: { drive: 'main', resourceId: '11111111-1111-1111-1111-111111111111' },
-      extraHeaders: { 'x-request-id': REQUEST_ID },
+      extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
     })
   })
 
@@ -289,18 +340,40 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
     expect(res.body).toEqual({ error: 'manage_acl_required' })
   })
 
-  it('propagates the delegation-plane 429 with retryAfterSeconds intact', async () => {
+  it('forwards only the allowlisted rate-limit and request headers on a control-api 429', async () => {
     clientMock.controlApiRequest.mockRejectedValue(
-      new ControlApiError('rate limited', 429, {
-        error: 'Too Many Requests',
-        retryAfterSeconds: 17,
-      })
+      new ControlApiError(
+        'rate limited',
+        429,
+        {
+          error: 'Too Many Requests',
+          retryAfterSeconds: 17,
+        },
+        {
+          'retry-after': '17',
+          'x-ratelimit-limit': '30',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1776000000',
+          'x-request-id': REQUEST_ID,
+          'set-cookie': 'internal-session=never-forward',
+          server: 'control-api-internal',
+          'x-internal-debug': 'never-forward',
+        }
+      )
     )
     const res = await request(buildApp())
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(429)
     expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
+    expect(res.headers['retry-after']).toBe('17')
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1776000000')
+    expect(res.headers['x-request-id']).toBe(REQUEST_ID)
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(res.headers.server).toBeUndefined()
+    expect(res.headers['x-internal-debug']).toBeUndefined()
   })
 })
 
@@ -329,7 +402,7 @@ describe('GET /me/gfs/shares (delegation list passthrough)', () => {
     expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/shares', {
       userSessionToken: 'sess-xyz',
       query: { drive: 'main', resourceId: '11111111-1111-1111-1111-111111111111' },
-      extraHeaders: { 'x-request-id': REQUEST_ID },
+      extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
     })
 
     clientMock.controlApiRequest.mockClear()

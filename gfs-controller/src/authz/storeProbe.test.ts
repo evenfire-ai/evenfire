@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  createPermissionStoreProbe,
-  type PingPool,
-  type ProbeClient,
-} from "./storeProbe.js";
+import { type PingPool, type ProbeClient, createPermissionStoreProbe } from "./storeProbe.js";
 
 /**
  * Issue #775: the readiness store check must detect a rotated database
@@ -67,8 +63,10 @@ interface FakeClientBehavior {
   canDeleteManifests?: boolean;
   canInsertResources?: boolean;
   canUpdateResources?: boolean;
-  auditSchemaReady?: boolean;
-  auditConstraintsReady?: boolean;
+  auditDecisionEvidenceSchemaReady?: boolean;
+  auditDecisionEvidenceConstraintsReady?: boolean;
+  auditActorCorrelationColumnsReady?: boolean;
+  auditActorCorrelationConstraintReady?: boolean;
   canMutateResources?: boolean;
   canMutateGrants?: boolean;
   canMutateShares?: boolean;
@@ -116,8 +114,14 @@ function fakeClientFactory(behavior: FakeClientBehavior): {
               can_delete_manifests: behavior.canDeleteManifests !== false,
               can_insert_resources: behavior.canInsertResources !== false,
               can_update_resources: behavior.canUpdateResources !== false,
-              audit_schema_ready: behavior.auditSchemaReady !== false,
-              audit_constraints_ready: behavior.auditConstraintsReady !== false,
+              audit_decision_evidence_schema_ready:
+                behavior.auditDecisionEvidenceSchemaReady !== false,
+              audit_decision_evidence_constraints_ready:
+                behavior.auditDecisionEvidenceConstraintsReady !== false,
+              audit_actor_correlation_columns_ready:
+                behavior.auditActorCorrelationColumnsReady !== false,
+              audit_actor_correlation_constraint_ready:
+                behavior.auditActorCorrelationConstraintReady !== false,
               can_mutate_resources: behavior.canMutateResources === true,
               can_mutate_grants: behavior.canMutateGrants === true,
               can_mutate_shares: behavior.canMutateShares === true,
@@ -222,19 +226,21 @@ describe("createPermissionStoreProbe", () => {
     ["manifest mutation", { canMutateManifests: true }],
     ["non-append audit mutation", { canMutateAudit: true }],
     ["audit sequence update", { canUpdateAuditSequence: true }],
-  ] satisfies Array<[string, FakeClientBehavior]>)
-  ("rejects a reader granted forbidden %s privileges", async (_privilege, behavior) => {
-    const { factory } = fakeClientFactory(behavior);
-    const probe = createPermissionStoreProbe({
-      pool: fakePool(),
-      connectionString: DSN,
-      intervalMs: INTERVAL,
-      storageRole: "reader",
-      clientFactory: factory,
-      now: () => 0,
-    });
-    await expect(probe()).rejects.toThrow(/reader has forbidden GFS mutation privileges.*0069/s);
-  });
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects a reader granted forbidden %s privileges",
+    async (_privilege, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/reader has forbidden GFS mutation privileges.*0069/s);
+    }
+  );
 
   it("does not apply reader-only negative privilege checks to the writer", async () => {
     const { factory } = fakeClientFactory({
@@ -252,15 +258,15 @@ describe("createPermissionStoreProbe", () => {
     await expect(probe()).resolves.toBeUndefined();
   });
 
-  it.each(["reader", "writer"] as const)(
-    "rejects a %s when migration 0092 audit actor-correlation columns are missing",
-    async (storageRole) => {
-      const { factory } = fakeClientFactory({ auditSchemaReady: false });
+  it.each(["actor_on_behalf_of", "desktop_user_id", "authority_source"] as const)(
+    "rejects readiness before 0092 when the required %s audit column is absent or drifted",
+    async _column => {
+      const { factory } = fakeClientFactory({ auditActorCorrelationColumnsReady: false });
       const probe = createPermissionStoreProbe({
         pool: fakePool(),
         connectionString: DSN,
         intervalMs: INTERVAL,
-        storageRole,
+        storageRole: "reader",
         clientFactory: factory,
         now: () => 0,
       });
@@ -270,8 +276,8 @@ describe("createPermissionStoreProbe", () => {
 
   it.each(["reader", "writer"] as const)(
     "rejects a %s when migration 0092 audit actor-correlation constraints are missing or unvalidated",
-    async (storageRole) => {
-      const { factory } = fakeClientFactory({ auditConstraintsReady: false });
+    async storageRole => {
+      const { factory } = fakeClientFactory({ auditActorCorrelationConstraintReady: false });
       const probe = createPermissionStoreProbe({
         pool: fakePool(),
         connectionString: DSN,
@@ -290,19 +296,21 @@ describe("createPermissionStoreProbe", () => {
     ["manifest DELETE", { canDeleteManifests: false }],
     ["resource INSERT", { canInsertResources: false }],
     ["resource UPDATE", { canUpdateResources: false }],
-  ] satisfies Array<[string, FakeClientBehavior]>)
-  ("rejects a writer missing only %s", async (_privilege, behavior) => {
-    const { factory } = fakeClientFactory(behavior);
-    const probe = createPermissionStoreProbe({
-      pool: fakePool(),
-      connectionString: DSN,
-      intervalMs: INTERVAL,
-      storageRole: "writer",
-      clientFactory: factory,
-      now: () => 0,
-    });
-    await expect(probe()).rejects.toThrow(/writer lacks.*0068/s);
-  });
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects a writer missing only %s",
+    async (_privilege, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "writer",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/writer lacks.*0068/s);
+    }
+  );
 
   it("pins the coherence canary SQL to both least-privilege grants", async () => {
     // Regression guard: gutting COHERENCE_SQL (e.g. SELECT true AS can_read...)
@@ -344,6 +352,13 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toContain("gfs_audit_record_type_fields_valid");
     expect(sql).toContain("gfs_audit_actor_correlation_valid");
     expect(sql).toContain("convalidated");
+    expect(sql).toContain("pg_get_constraintdef");
+    expect(sql).toContain("actor_on_behalf_ofISNULL");
+    expect(sql).toContain("actor_on_behalf_ofISNOTNULL");
+    expect(sql).toContain("authority_source=''user-session''");
+    expect(sql).toContain("authority_source=''linked-admin''");
+    expect(sql).toContain("desktop_user_idISNULL");
+    expect(sql).toContain("NOT attnotnull");
     expect(sql).not.toContain("can_mutate_resources");
     expect(sql).not.toContain("can_update_audit_sequence");
   });

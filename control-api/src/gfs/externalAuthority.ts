@@ -25,7 +25,10 @@ export type ExternalGfsAuthority = ExternalGfsUserAuthority | ExternalGfsLinkedA
 export class ExternalGfsAuthorityError extends Error {
   constructor(
     readonly status: 403 | 503,
-    readonly code: 'gfs_operator_link_invalid' | 'gfs_authority_unavailable',
+    readonly code:
+      | 'desktop_user_retired'
+      | 'gfs_operator_link_invalid'
+      | 'gfs_authority_unavailable',
     options?: { cause?: unknown }
   ) {
     super(code, options?.cause === undefined ? undefined : { cause: options.cause })
@@ -36,7 +39,19 @@ export class ExternalGfsAuthorityError extends Error {
 type AuthorityDependencies = {
   linkingEnabled: boolean
   resolveActiveLink(desktopUserId: string): Promise<GfsDesktopOperatorLink | null>
+  /** Optional only for isolated tests; production always supplies this guard. */
+  isDesktopUserActive?(desktopUserId: string): Promise<boolean>
 }
+
+// The production singleton always implements the lifecycle guard. The runtime
+// structural check keeps isolated callers that provide the historic read-only
+// link double from being misclassified as a database outage; it is not a
+// production fallback for a failed lifecycle lookup (those still return 503).
+const defaultDesktopUserLifecycleGuard =
+  typeof (gfsDesktopOperatorLinkService as Partial<typeof gfsDesktopOperatorLinkService>)
+    .isDesktopUserActive === 'function'
+    ? (id: string) => gfsDesktopOperatorLinkService.isDesktopUserActive(id)
+    : undefined
 
 function userAuthority(desktopUserId: string): ExternalGfsUserAuthority {
   return { kind: 'user-session', desktopUserId, tokenSubject: desktopUserId }
@@ -45,18 +60,29 @@ function userAuthority(desktopUserId: string): ExternalGfsUserAuthority {
 /**
  * Resolve the effective GFS authority for one authenticated Desktop user.
  *
- * The feature flag is checked before the persisted link is read. A disabled or
- * missing flag therefore cannot elevate a request. An absent row means an
- * ordinary user session, while any malformed, conflicting, missing-admin, or
- * inactive-admin row fails closed instead of falling back to user authority.
+ * A retired user is denied before the feature flag can select ordinary
+ * user-session authority. The flag is otherwise checked before the persisted
+ * link is read. An absent row means an ordinary user session, while any
+ * malformed, conflicting, missing-admin, or inactive-admin row fails closed.
  */
 export async function resolveExternalGfsAuthority(
   desktopUserId: string,
   dependencies: AuthorityDependencies = {
     linkingEnabled: config.desktopGfsOperatorLinkingEnabled === true,
     resolveActiveLink: id => gfsDesktopOperatorLinkService.resolveActiveLink(id),
+    isDesktopUserActive: defaultDesktopUserLifecycleGuard,
   }
 ): Promise<ExternalGfsAuthority> {
+  if (dependencies.isDesktopUserActive) {
+    try {
+      if (!(await dependencies.isDesktopUserActive(desktopUserId))) {
+        throw new ExternalGfsAuthorityError(403, 'desktop_user_retired')
+      }
+    } catch (error) {
+      if (error instanceof ExternalGfsAuthorityError) throw error
+      throw new ExternalGfsAuthorityError(503, 'gfs_authority_unavailable', { cause: error })
+    }
+  }
   if (dependencies.linkingEnabled !== true) return userAuthority(desktopUserId)
 
   let link: GfsDesktopOperatorLink | null

@@ -26,6 +26,7 @@ export type GfsDesktopOperatorLink = {
 export type GfsDesktopOperatorLinkErrorCode =
   | 'invalid_input'
   | 'desktop_user_not_found'
+  | 'desktop_user_retired'
   | 'control_admin_not_found'
   | 'control_admin_inactive'
   | 'link_conflict'
@@ -99,6 +100,14 @@ export type ReactivateGfsDesktopOperatorResult = {
   link: GfsDesktopOperatorLink | null
 }
 export type GfsDesktopOperatorParentKind = 'desktop_user' | 'control_admin'
+
+/**
+ * Lifecycle callers name their principal explicitly.  The two actor IDs are
+ * deliberately separate so a UUID is never reinterpreted as another kind.
+ */
+export type GfsDesktopOperatorLifecycleActor =
+  | { kind: 'control_admin'; controlAdminId: string }
+  | { kind: 'platform_user'; desktopUserId: string }
 
 type TransactionRunner = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
@@ -179,6 +188,31 @@ function requireUuid(value: string, field: string): string {
     throw new GfsDesktopOperatorLinkError('invalid_input', `${field} must be a UUID`)
   }
   return normalized
+}
+
+function requireLifecycleActor(
+  input: GfsDesktopOperatorLifecycleActor
+): GfsDesktopOperatorLifecycleActor {
+  if (!input || typeof input !== 'object') {
+    throw new GfsDesktopOperatorLinkError('invalid_input', 'actor is required')
+  }
+  if (input.kind === 'control_admin') {
+    return {
+      kind: 'control_admin',
+      controlAdminId: requireUuid(input.controlAdminId, 'actor.controlAdminId'),
+    }
+  }
+  if (input.kind === 'platform_user') {
+    return {
+      kind: 'platform_user',
+      desktopUserId: requireUuid(input.desktopUserId, 'actor.desktopUserId'),
+    }
+  }
+  throw new GfsDesktopOperatorLinkError('invalid_input', 'actor kind is not supported')
+}
+
+function lifecycleActorId(actor: GfsDesktopOperatorLifecycleActor): string {
+  return actor.kind === 'control_admin' ? actor.controlAdminId : actor.desktopUserId
 }
 
 function isLinkSource(value: unknown): value is GfsDesktopOperatorLinkSource {
@@ -277,7 +311,8 @@ function lifecycleChange(
   action: 'grant' | 'revoke',
   link: GfsDesktopOperatorLink,
   reason?: string,
-  lifecycleEvent?: 'link.created' | 'link.revoked' | 'link.reactivated' | 'parent.retired'
+  lifecycleEvent?: 'link.created' | 'link.revoked' | 'link.reactivated' | 'parent.retired',
+  actor?: GfsDesktopOperatorLifecycleActor
 ): ControlApiPermissionChange {
   return {
     action,
@@ -294,6 +329,9 @@ function lifecycleChange(
       link.lineageId ? `lineage_id:${link.lineageId}` : null,
       link.generation === undefined ? null : `generation:${link.generation}`,
       link.predecessorId ? `predecessor_id:${link.predecessorId}` : null,
+      actor ? `actor_type:${actor.kind}` : null,
+      actor?.kind === 'control_admin' ? `actor_control_admin_id:${actor.controlAdminId}` : null,
+      actor?.kind === 'platform_user' ? `actor_desktop_user_id:${actor.desktopUserId}` : null,
       reason ? `reason:${reason}` : null,
     ]
       .filter(Boolean)
@@ -370,7 +408,7 @@ export class GfsDesktopOperatorLinkService {
     const source = requireSource(input.source)
 
     const user = await db.query(
-      `SELECT id::text AS id
+      `SELECT id::text AS id, lifecycle_state
          FROM users
         WHERE id = $1::uuid
         FOR UPDATE`,
@@ -378,6 +416,12 @@ export class GfsDesktopOperatorLinkService {
     )
     if (user.rows.length !== 1) {
       throw new GfsDesktopOperatorLinkError('desktop_user_not_found', 'Desktop user does not exist')
+    }
+    if ((user.rows[0] as { lifecycle_state?: unknown }).lifecycle_state === 'retired') {
+      throw new GfsDesktopOperatorLinkError(
+        'desktop_user_retired',
+        'retired Desktop users cannot receive an operator link'
+      )
     }
 
     const admin = await db.query(
@@ -541,6 +585,8 @@ export class GfsDesktopOperatorLinkService {
                 revoked_at = NOW(),
                 revoked_by_type = 'control_admin',
                 revoked_by_id = $3::uuid,
+                revoked_by_control_admin_id = $3::uuid,
+                revoked_by_desktop_user_id = NULL,
                 revocation_reason = $4,
                 row_version = row_version + 1
           WHERE user_id = $1::uuid
@@ -645,19 +691,31 @@ export class GfsDesktopOperatorLinkService {
       const lineageId = requireUuid(String(previous.lineage_id || ''), 'lineageId')
       const generation = requireRowVersion(previous.generation) + 1
       const parents = await db.query(
-        `SELECT u.id IS NOT NULL AS desktop_user_exists, a.status AS control_admin_status
+        `SELECT u.id IS NOT NULL AS desktop_user_exists,
+                u.lifecycle_state AS desktop_user_lifecycle_state,
+                a.status AS control_admin_status
            FROM users u CROSS JOIN control_admin_users a
           WHERE u.id = $1::uuid AND a.id = $2::uuid
           FOR UPDATE`,
         [link.desktopUserId, controlAdminId]
       )
       const parentState = parents.rows[0] as
-        | { desktop_user_exists?: unknown; control_admin_status?: unknown }
+        | {
+            desktop_user_exists?: unknown
+            desktop_user_lifecycle_state?: unknown
+            control_admin_status?: unknown
+          }
         | undefined
       if (parentState?.desktop_user_exists !== true) {
         throw new GfsDesktopOperatorLinkError(
           'desktop_user_not_found',
           'Desktop user does not exist'
+        )
+      }
+      if (parentState.desktop_user_lifecycle_state === 'retired') {
+        throw new GfsDesktopOperatorLinkError(
+          'desktop_user_retired',
+          'retired Desktop users cannot receive an operator link'
         )
       }
       if (parentState.control_admin_status !== 'active') {
@@ -693,13 +751,16 @@ export class GfsDesktopOperatorLinkService {
     input: {
       kind: GfsDesktopOperatorParentKind
       parentId: string
-      operatorSub: string
+      actor: GfsDesktopOperatorLifecycleActor
       reason: string
       requestId?: string | null
+      /** Reuses the retirement-operation id as the governed audit operation. */
+      operationId?: string
     }
   ): Promise<boolean> {
     const parentId = requireUuid(input.parentId, 'parentId')
-    const operatorSub = requireUuid(input.operatorSub, 'operatorSub')
+    const actor = requireLifecycleActor(input.actor)
+    const operatorSub = lifecycleActorId(actor)
     const reason = requireReason(input.reason)
     const column = input.kind === 'desktop_user' ? 'user_id' : 'control_admin_id'
     const rows = await db.query(
@@ -716,10 +777,11 @@ export class GfsDesktopOperatorLinkService {
     const link = mapStoredLink(rows.rows[0])
     await this.dependencies.appendPermissionEvents(db, {
       operatorSub,
-      operatorKind: 'control_admin',
+      operatorKind: actor.kind,
       requestId: input.requestId,
+      operationId: input.operationId,
       changes: [
-        lifecycleChange('revoke', link, reason, 'link.revoked'),
+        lifecycleChange('revoke', link, reason, 'link.revoked', actor),
         {
           action: 'revoke',
           resourceClass: `gfs_desktop_operator_${input.kind}`,
@@ -730,16 +792,40 @@ export class GfsDesktopOperatorLinkService {
               : { kind: 'service', id: `control_admin:${parentId}`, principalKind: 'operator' },
           sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
           status: 'retired',
-          detailRef: `event:parent.retired;desktop_user_id:${link.desktopUserId};control_admin_id:${link.controlAdminId};source:${link.source};reason:${reason}`,
+          detailRef: [
+            'event:parent.retired',
+            `desktop_user_id:${link.desktopUserId}`,
+            `control_admin_id:${link.controlAdminId}`,
+            `source:${link.source}`,
+            `actor_type:${actor.kind}`,
+            actor.kind === 'control_admin'
+              ? `actor_control_admin_id:${actor.controlAdminId}`
+              : `actor_desktop_user_id:${actor.desktopUserId}`,
+            `reason:${reason}`,
+          ].join(';'),
         },
       ],
     })
     const updated = await db.query(
       `UPDATE gfs_desktop_operator_links
-          SET state = 'revoked', revoked_at = NOW(), revoked_by_type = 'control_admin',
-              revoked_by_id = $2::uuid, revocation_reason = $3, row_version = row_version + 1
-        WHERE ${column} = $1::uuid AND state = 'active' AND row_version = $4`,
-      [parentId, operatorSub, reason, link.rowVersion ?? 1]
+          SET state = 'revoked',
+              revoked_at = NOW(),
+              revoked_by_type = $2,
+              revoked_by_id = $3::uuid,
+              revoked_by_control_admin_id = $4::uuid,
+              revoked_by_desktop_user_id = $5::uuid,
+              revocation_reason = $6,
+              row_version = row_version + 1
+        WHERE ${column} = $1::uuid AND state = 'active' AND row_version = $7`,
+      [
+        parentId,
+        actor.kind,
+        actor.kind === 'control_admin' ? actor.controlAdminId : null,
+        actor.kind === 'control_admin' ? actor.controlAdminId : null,
+        actor.kind === 'platform_user' ? actor.desktopUserId : null,
+        reason,
+        link.rowVersion ?? 1,
+      ]
     )
     if (updated.rowCount !== 1)
       throw new GfsDesktopOperatorLinkError(
@@ -784,6 +870,33 @@ export class GfsDesktopOperatorLinkService {
       throw new GfsDesktopOperatorLinkError(
         'resolution_failed',
         'failed to resolve GFS Desktop operator link',
+        { cause: error }
+      )
+    }
+  }
+
+  /**
+   * The external-authority boundary checks lifecycle before it can fall back
+   * to ordinary user-session authority after a link is revoked.
+   */
+  async isDesktopUserActive(desktopUserIdInput: string): Promise<boolean> {
+    const desktopUserId = requireUuid(desktopUserIdInput, 'desktopUserId')
+    try {
+      const result = await this.dependencies.readDb.query(
+        `SELECT lifecycle_state
+           FROM users
+          WHERE id = $1::uuid
+          LIMIT 1`,
+        [desktopUserId]
+      )
+      return (
+        (result.rows[0] as { lifecycle_state?: unknown } | undefined)?.lifecycle_state === 'active'
+      )
+    } catch (error) {
+      if (error instanceof GfsDesktopOperatorLinkError) throw error
+      throw new GfsDesktopOperatorLinkError(
+        'resolution_failed',
+        'failed to resolve Desktop user lifecycle state',
         { cause: error }
       )
     }

@@ -176,7 +176,7 @@ describe('GfsDesktopOperatorLinkService', () => {
       service.retireParentInTransaction({ query: txQuery } as DbClient, {
         kind: 'desktop_user',
         parentId: DESKTOP_USER_ID,
-        operatorSub: OPERATOR_ID,
+        actor: { kind: 'control_admin', controlAdminId: OPERATOR_ID },
         reason: 'account_retired',
         requestId: 'request-2',
       })
@@ -186,6 +186,7 @@ describe('GfsDesktopOperatorLinkService', () => {
       expect.anything(),
       expect.objectContaining({
         operatorSub: OPERATOR_ID,
+        operatorKind: 'control_admin',
         requestId: 'request-2',
         changes: expect.arrayContaining([
           expect.objectContaining({
@@ -200,7 +201,65 @@ describe('GfsDesktopOperatorLinkService', () => {
     expect(appendPermissionEvents.mock.invocationCallOrder[0]).toBeLessThan(
       txQuery.mock.invocationCallOrder[1]!
     )
-    expect(txQuery.mock.calls[1]?.[0]).toContain('row_version = $4')
+    expect(txQuery.mock.calls[1]?.[0]).toContain('row_version = $7')
+  })
+
+  it('records a platform-user actor in separate typed revocation columns', async () => {
+    txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            ...storedLink(),
+            id: '88888888-8888-4888-8888-888888888888',
+            lineage_id: '99999999-9999-4999-8999-999999999999',
+            generation: 1,
+            state: 'active',
+            row_version: 1,
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    await expect(
+      service.retireParentInTransaction({ query: txQuery } as DbClient, {
+        kind: 'desktop_user',
+        parentId: DESKTOP_USER_ID,
+        actor: { kind: 'platform_user', desktopUserId: OTHER_DESKTOP_USER_ID },
+        reason: 'manager_retired_account',
+        requestId: 'request-3',
+        operationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      })
+    ).resolves.toBe(true)
+
+    expect(appendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: OTHER_DESKTOP_USER_ID,
+        operatorKind: 'platform_user',
+        operationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            detailRef: expect.stringContaining(`actor_desktop_user_id:${OTHER_DESKTOP_USER_ID}`),
+          }),
+          expect.objectContaining({
+            detailRef: expect.stringContaining('event:parent.retired'),
+          }),
+        ]),
+      })
+    )
+    const revokeUpdate = String(txQuery.mock.calls[1]?.[0])
+    expect(revokeUpdate).toContain('revoked_by_control_admin_id = $4::uuid')
+    expect(revokeUpdate).toContain('revoked_by_desktop_user_id = $5::uuid')
+    expect(txQuery.mock.calls[1]?.[1]).toEqual([
+      DESKTOP_USER_ID,
+      'platform_user',
+      null,
+      null,
+      OTHER_DESKTOP_USER_ID,
+      'manager_retired_account',
+      1,
+    ])
   })
 
   it.each([
@@ -251,6 +310,24 @@ describe('GfsDesktopOperatorLinkService', () => {
         source: 'initial_setup',
       })
     ).rejects.toMatchObject({ code: 'desktop_user_not_found' })
+    expect(txQuery).toHaveBeenCalledTimes(1)
+    expect(appendPermissionEvents).not.toHaveBeenCalled()
+  })
+
+  it('refuses to create a new operator generation for a retired Desktop user', async () => {
+    txQuery.mockResolvedValueOnce({
+      rows: [{ id: DESKTOP_USER_ID, lifecycle_state: 'retired' }],
+      rowCount: 1,
+    })
+
+    await expect(
+      service.link({
+        desktopUserId: DESKTOP_USER_ID,
+        controlAdminId: CONTROL_ADMIN_ID,
+        operatorSub: OPERATOR_ID,
+        source: 'initial_setup',
+      })
+    ).rejects.toMatchObject({ code: 'desktop_user_retired' })
     expect(txQuery).toHaveBeenCalledTimes(1)
     expect(appendPermissionEvents).not.toHaveBeenCalled()
   })
@@ -338,6 +415,17 @@ describe('GfsDesktopOperatorLinkService', () => {
   it('returns null only when no current-state link exists', async () => {
     readQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     await expect(service.resolveActiveLink(DESKTOP_USER_ID)).resolves.toBeNull()
+  })
+
+  it('exposes an explicit lifecycle guard so a revoked link cannot fall back to a retired user session', async () => {
+    readQuery
+      .mockResolvedValueOnce({ rows: [{ lifecycle_state: 'retired' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_state: 'active' }], rowCount: 1 })
+
+    await expect(service.isDesktopUserActive(DESKTOP_USER_ID)).resolves.toBe(false)
+    await expect(service.isDesktopUserActive(DESKTOP_USER_ID)).resolves.toBe(true)
+    expect(String(readQuery.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(String(readQuery.mock.calls[0]?.[0])).toContain('lifecycle_state')
   })
 
   it.each([

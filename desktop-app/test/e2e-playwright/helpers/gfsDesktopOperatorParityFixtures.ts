@@ -23,6 +23,9 @@ import {
 import { cleanupGfsFixture } from '../../../../tests/e2e/gfsResourceFixtures'
 import {
   GFS_OPERATOR_SETUP_PATH,
+  type GfsOperatorGenerationChainExpectation,
+  type GfsOperatorLinkGeneration,
+  assertGenerationChain as assertGenerationChainContract,
   requireGfsOperatorRunId,
 } from '../gfsDesktopOperatorParityContract'
 import { openResourcesNavItem } from '../navigationHelpers'
@@ -90,6 +93,132 @@ export interface GfsAuditRow {
   mutationOutcome: string | null
   requestId: string | null
   gfsUri: string | null
+}
+
+export interface GfsOperatorLifecycleEvent {
+  eventId: string
+  action: 'permission_grant' | 'permission_revoke'
+  outcome: string
+  operatorSub: string | null
+  targetRef: string
+  sourceAuditRef: string | null
+  status: string | null
+  detailRef: string | null
+  requestId: string | null
+  operationId: string | null
+}
+
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label} must be a JSON object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function requiredString(record: Record<string, unknown>, field: string, label: string): string {
+  const value = record[field]
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label}.${field} must be a non-empty string`)
+  }
+  return value
+}
+
+function nullableString(
+  record: Record<string, unknown>,
+  field: string,
+  label: string
+): string | null {
+  const value = record[field]
+  if (value === null) return null
+  if (typeof value !== 'string') {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label}.${field} must be a string or null`)
+  }
+  return value
+}
+
+function requiredUuid(record: Record<string, unknown>, field: string, label: string): string {
+  const value = requiredString(record, field, label)
+  if (!UUID_RE.test(value)) {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label}.${field} must be a UUID`)
+  }
+  return value
+}
+
+function nullableUuid(
+  record: Record<string, unknown>,
+  field: string,
+  label: string
+): string | null {
+  const value = nullableString(record, field, label)
+  if (value !== null && !UUID_RE.test(value)) {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label}.${field} must be a UUID or null`)
+  }
+  return value
+}
+
+function positiveInteger(record: Record<string, unknown>, field: string, label: string): number {
+  const raw = record[field]
+  const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`[GFS-OPERATOR-E2E] ${label}.${field} must be a positive integer`)
+  }
+  return value
+}
+
+function parseLinkGeneration(value: unknown): GfsOperatorLinkGeneration {
+  const row = asRecord(value, 'operator-link history')
+  const state = requiredString(row, 'state', 'operator-link history')
+  if (state !== 'active' && state !== 'revoked') {
+    throw new Error(`[GFS-OPERATOR-E2E] operator-link history.state is unsupported: ${state}`)
+  }
+  const revokedByType = nullableString(row, 'revokedByType', 'operator-link history')
+  if (
+    revokedByType !== null &&
+    revokedByType !== 'control_admin' &&
+    revokedByType !== 'platform_user'
+  ) {
+    throw new Error(
+      `[GFS-OPERATOR-E2E] operator-link history.revokedByType is unsupported: ${revokedByType}`
+    )
+  }
+  return {
+    id: requiredUuid(row, 'id', 'operator-link history'),
+    lineageId: requiredUuid(row, 'lineageId', 'operator-link history'),
+    generation: positiveInteger(row, 'generation', 'operator-link history'),
+    predecessorId: nullableUuid(row, 'predecessorId', 'operator-link history'),
+    state,
+    desktopUserId: requiredUuid(row, 'desktopUserId', 'operator-link history'),
+    controlAdminId: requiredUuid(row, 'controlAdminId', 'operator-link history'),
+    source: requiredString(row, 'source', 'operator-link history'),
+    createdByControlAdminId: requiredUuid(row, 'createdByControlAdminId', 'operator-link history'),
+    rowVersion: positiveInteger(row, 'rowVersion', 'operator-link history'),
+    revokedAt: nullableString(row, 'revokedAt', 'operator-link history'),
+    revokedByType,
+    revokedById: nullableUuid(row, 'revokedById', 'operator-link history'),
+    revokedByControlAdminId: nullableUuid(row, 'revokedByControlAdminId', 'operator-link history'),
+    revokedByDesktopUserId: nullableUuid(row, 'revokedByDesktopUserId', 'operator-link history'),
+    revocationReason: nullableString(row, 'revocationReason', 'operator-link history'),
+  }
+}
+
+function parseLifecycleEvent(value: unknown): GfsOperatorLifecycleEvent {
+  const row = asRecord(value, 'operator-link lifecycle event')
+  const action = requiredString(row, 'action', 'operator-link lifecycle event')
+  if (action !== 'permission_grant' && action !== 'permission_revoke') {
+    throw new Error(`[GFS-OPERATOR-E2E] unsupported lifecycle action: ${action}`)
+  }
+  return {
+    eventId: requiredUuid(row, 'eventId', 'operator-link lifecycle event'),
+    action,
+    outcome: requiredString(row, 'outcome', 'operator-link lifecycle event'),
+    operatorSub: nullableString(row, 'operatorSub', 'operator-link lifecycle event'),
+    targetRef: requiredString(row, 'targetRef', 'operator-link lifecycle event'),
+    sourceAuditRef: nullableString(row, 'sourceAuditRef', 'operator-link lifecycle event'),
+    status: nullableString(row, 'status', 'operator-link lifecycle event'),
+    detailRef: nullableString(row, 'detailRef', 'operator-link lifecycle event'),
+    requestId: nullableString(row, 'requestId', 'operator-link lifecycle event'),
+    operationId: nullableUuid(row, 'operationId', 'operator-link lifecycle event'),
+  }
 }
 
 export class GfsDesktopOperatorJourney {
@@ -282,6 +411,8 @@ export class GfsDesktopOperatorJourney {
          WHERE control_admin_id IN (
            SELECT id FROM control_admin_users WHERE lower(email) = lower(${sqlLiteral(this.operatorEmail)})
          )
+           AND state = 'active'
+         ORDER BY generation DESC
          LIMIT 1;
       `)
     )
@@ -293,17 +424,78 @@ export class GfsDesktopOperatorJourney {
     return { desktopUserId, controlAdminId, source }
   }
 
-  operatorLinkCount(): number {
-    if (!this.operatorLink) throw new Error('operator link is not initialized')
-    return Number(
-      firstDataLine(
-        runControlPostgresSql(`
-          SELECT count(*)::text FROM gfs_desktop_operator_links
-           WHERE user_id = ${sqlLiteral(this.operatorLink?.desktopUserId ?? '')}::uuid
-             AND control_admin_id = ${sqlLiteral(this.operatorLink?.controlAdminId ?? '')}::uuid;
-        `)
-      )
+  /** Counts current authority only; revoked generations remain readable history. */
+  countActiveLinks(): number {
+    const link = this.requireOperatorLink()
+    const value = firstDataLine(
+      runControlPostgresSql(`
+        SELECT count(*)::text
+          FROM gfs_desktop_operator_links
+         WHERE user_id = ${sqlLiteral(link.desktopUserId)}::uuid
+           AND control_admin_id = ${sqlLiteral(link.controlAdminId)}::uuid
+           AND state = 'active';
+      `)
     )
+    const count = Number(value)
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`[GFS-OPERATOR-E2E] invalid active operator-link count: ${value}`)
+    }
+    return count
+  }
+
+  /**
+   * Read-only proof for the immutable lineage after a visible lifecycle action.
+   * This is intentionally separate from countActiveLinks() so retained
+   * tombstones cannot be mistaken for present authority.
+   */
+  readLinkHistory(): GfsOperatorLinkGeneration[] {
+    const link = this.requireOperatorLink()
+    const output = runControlPostgresSql(`
+      SELECT jsonb_build_object(
+        'id', id::text,
+        'lineageId', lineage_id::text,
+        'generation', generation,
+        'predecessorId', predecessor_id::text,
+        'state', state,
+        'desktopUserId', user_id::text,
+        'controlAdminId', control_admin_id::text,
+        'source', source,
+        'createdByControlAdminId', created_by::text,
+        'rowVersion', row_version,
+        'revokedAt', revoked_at::text,
+        'revokedByType', revoked_by_type,
+        'revokedById', revoked_by_id::text,
+        'revokedByControlAdminId', revoked_by_control_admin_id::text,
+        'revokedByDesktopUserId', revoked_by_desktop_user_id::text,
+        'revocationReason', revocation_reason
+      )::text
+        FROM gfs_desktop_operator_links
+       WHERE user_id = ${sqlLiteral(link.desktopUserId)}::uuid
+         AND control_admin_id = ${sqlLiteral(link.controlAdminId)}::uuid
+       ORDER BY generation ASC, id ASC;
+    `)
+    return output
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('{') && line.endsWith('}'))
+      .map(line => parseLinkGeneration(JSON.parse(line) as unknown))
+  }
+
+  assertGenerationChain(
+    expected: Omit<
+      GfsOperatorGenerationChainExpectation,
+      'desktopUserId' | 'controlAdminId' | 'source'
+    >
+  ): GfsOperatorLinkGeneration[] {
+    const link = this.requireOperatorLink()
+    const history = this.readLinkHistory()
+    assertGenerationChainContract(history, {
+      desktopUserId: link.desktopUserId,
+      controlAdminId: link.controlAdminId,
+      source: link.source,
+      ...expected,
+    })
+    return history
   }
 
   operatorSubjectGrantCount(): number {
@@ -518,24 +710,35 @@ export class GfsDesktopOperatorJourney {
       .map(line => JSON.parse(line) as GfsAuditRow)
   }
 
-  readUnlinkLifecycleEvent(): { operatorSub: string; targetRef: string; detailRef: string } | null {
-    if (!this.operatorLink) return null
-    const targetRef = `gfs_desktop_operator_link:${this.operatorLink.desktopUserId}:${this.operatorLink.controlAdminId}`
-    const row = firstDataLine(
-      runControlPostgresSql(`
-        SELECT operator_sub, target_ref, payload_metadata->>'detail_ref'
-          FROM administrative_events
-         WHERE action = 'permission_revoke'
-           AND target_type = 'permission'
-           AND target_ref = ${sqlLiteral(targetRef)}
-           AND payload_metadata->>'status' = 'unlinked'
-         ORDER BY occurred_at DESC
-         LIMIT 1;
-      `)
-    )
-    if (!row) return null
-    const [operatorSub, persistedTargetRef, detailRef] = splitSqlRow(row)
-    return { operatorSub, targetRef: persistedTargetRef, detailRef }
+  /** Read-only governed evidence for the exact pair, ordered by occurrence. */
+  readLinkLifecycleEvents(): GfsOperatorLifecycleEvent[] {
+    const link = this.requireOperatorLink()
+    const targetRef = `gfs_desktop_operator_link:${link.desktopUserId}:${link.controlAdminId}`
+    const sourceAuditRef = `gfs_desktop_operator_link_source:${link.source}`
+    const output = runControlPostgresSql(`
+      SELECT jsonb_build_object(
+        'eventId', event_id::text,
+        'action', action,
+        'outcome', outcome,
+        'operatorSub', operator_sub,
+        'targetRef', target_ref,
+        'sourceAuditRef', source_audit_ref,
+        'status', payload_metadata->>'status',
+        'detailRef', payload_metadata->>'detail_ref',
+        'requestId', request_id,
+        'operationId', operation_id::text
+      )::text
+        FROM administrative_events
+       WHERE target_type = 'permission'
+         AND target_ref = ${sqlLiteral(targetRef)}
+         AND source_audit_ref = ${sqlLiteral(sourceAuditRef)}
+       ORDER BY occurred_at ASC, event_id ASC;
+    `)
+    return output
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('{') && line.endsWith('}'))
+      .map(line => parseLifecycleEvent(JSON.parse(line) as unknown))
   }
 
   async loginControlUi(): Promise<Page> {
@@ -651,6 +854,11 @@ export class GfsDesktopOperatorJourney {
   private requiredControlPage(): Page {
     if (!this.controlPage) throw new Error('Control UI page has not been initialized')
     return this.controlPage
+  }
+
+  private requireOperatorLink(): OperatorLinkRow {
+    if (!this.operatorLink) throw new Error('operator link is not initialized')
+    return this.operatorLink
   }
 }
 

@@ -1,7 +1,12 @@
 import type { Locator, Page } from '@playwright/test'
 import { UUID_RE } from '../../../tests/e2e/gfsFixtureCore'
 import { GFS_OPERATOR_SETUP_PATH } from './gfsDesktopOperatorParityContract'
-import { type GfsResourceRow, expect, test } from './helpers/gfsDesktopOperatorParityFixtures'
+import {
+  type GfsOperatorLifecycleEvent,
+  type GfsResourceRow,
+  expect,
+  test,
+} from './helpers/gfsDesktopOperatorParityFixtures'
 
 async function expectToast(page: Page, message: string): Promise<void> {
   await expect(page.getByRole('status', { name: message, exact: true })).toBeVisible({
@@ -73,6 +78,62 @@ async function selectOrdinarySubject(page: Page, ordinaryEmail: string): Promise
   await listbox.getByRole('option').filter({ hasText: ordinaryEmail }).click()
 }
 
+function lifecycleDetailFields(detailRef: string | null): Record<string, string> {
+  if (!detailRef) throw new Error('GFS operator lifecycle audit is missing detail_ref')
+  const fields: Record<string, string> = {}
+  for (const field of detailRef.split(';')) {
+    const [key, ...value] = field.split(':')
+    if (!key || value.length === 0) {
+      throw new Error(`malformed GFS operator lifecycle detail_ref: ${detailRef}`)
+    }
+    if (Object.hasOwn(fields, key)) {
+      throw new Error(`duplicate GFS operator lifecycle detail field: ${key}`)
+    }
+    fields[key] = value.join(':')
+  }
+  return fields
+}
+
+function expectLifecycleAudit(
+  event: GfsOperatorLifecycleEvent,
+  link: { desktopUserId: string; controlAdminId: string; source: string },
+  expected: {
+    action: 'permission_grant' | 'permission_revoke'
+    status: 'linked' | 'unlinked'
+    lifecycle: 'link.created' | 'link.revoked' | 'link.reactivated'
+    generation: number
+    predecessorId?: string
+    reason?: string
+  }
+): void {
+  expect(event).toMatchObject({
+    action: expected.action,
+    outcome: 'committed',
+    operatorSub: link.controlAdminId,
+    targetRef: `gfs_desktop_operator_link:${link.desktopUserId}:${link.controlAdminId}`,
+    sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
+    status: expected.status,
+  })
+  const detail = lifecycleDetailFields(event.detailRef)
+  expect(detail).toMatchObject({
+    event: expected.lifecycle,
+    desktop_user_id: link.desktopUserId,
+    control_admin_id: link.controlAdminId,
+    source: link.source,
+    generation: String(expected.generation),
+  })
+  if (expected.predecessorId === undefined) {
+    expect(detail.predecessor_id).toBeUndefined()
+  } else {
+    expect(detail.predecessor_id).toBe(expected.predecessorId)
+  }
+  if (expected.reason === undefined) {
+    expect(detail.reason).toBeUndefined()
+  } else {
+    expect(detail.reason).toBe(expected.reason)
+  }
+}
+
 test.describe.serial('GFS Desktop linked-operator parity', () => {
   test('@gfs-operator/setup-linked-operator setup creates the exact link before visible Desktop login', async ({
     operatorJourney,
@@ -89,6 +150,46 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     operatorJourney.operatorLink = operatorJourney.readOperatorLink()
     expect(operatorJourney.operatorLink).not.toBeNull()
     expect(operatorJourney.operatorLink?.controlAdminId).toBe(setup.controlAdminId)
+    await expect
+      .poll(() => operatorJourney.countActiveLinks(), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(1)
+    await expect
+      .poll(() => operatorJourney.readLinkHistory().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(1)
+    const [initialGeneration] = operatorJourney.assertGenerationChain({
+      activeCount: 1,
+      revokedCount: 0,
+    })
+    expect(initialGeneration).toMatchObject({
+      generation: 1,
+      predecessorId: null,
+      state: 'active',
+      desktopUserId: operatorJourney.operatorLink!.desktopUserId,
+      controlAdminId: setup.controlAdminId,
+      source: 'initial_setup',
+      createdByControlAdminId: setup.controlAdminId,
+      rowVersion: 1,
+    })
+    await expect
+      .poll(() => operatorJourney.readLinkLifecycleEvents().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(1)
+    const [createdEvent] = operatorJourney.readLinkLifecycleEvents()
+    expect(createdEvent).toBeDefined()
+    expectLifecycleAudit(createdEvent!, operatorJourney.operatorLink!, {
+      action: 'permission_grant',
+      status: 'linked',
+      lifecycle: 'link.created',
+      generation: 1,
+    })
     operatorJourney.createOrdinaryUserFixture()
     const rootResourceId = operatorJourney.readRootResourceId()
 
@@ -426,7 +527,57 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
       'Revoked'
     )
-    await expect.poll(() => operatorJourney.operatorLinkCount()).toBe(0)
+    await expect
+      .poll(() => operatorJourney.countActiveLinks(), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(0)
+    await expect
+      .poll(() => operatorJourney.readLinkHistory().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(1)
+    const [firstTombstone] = operatorJourney.assertGenerationChain({
+      activeCount: 0,
+      revokedCount: 1,
+    })
+    expect(firstTombstone).toMatchObject({
+      generation: 1,
+      predecessorId: null,
+      state: 'revoked',
+      desktopUserId: link.desktopUserId,
+      controlAdminId: link.controlAdminId,
+      source: 'initial_setup',
+      createdByControlAdminId: link.controlAdminId,
+      revokedByType: 'control_admin',
+      revokedById: link.controlAdminId,
+      revokedByControlAdminId: link.controlAdminId,
+      revokedByDesktopUserId: null,
+      revocationReason: 'control_ui_revoke',
+    })
+    expect(firstTombstone?.revokedAt).toEqual(expect.any(String))
+    await expect
+      .poll(() => operatorJourney.readLinkLifecycleEvents().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(2)
+    const firstRevokeEvents = operatorJourney
+      .readLinkLifecycleEvents()
+      .filter(event => lifecycleDetailFields(event.detailRef).event === 'link.revoked')
+    expect(firstRevokeEvents).toHaveLength(1)
+    expectLifecycleAudit(firstRevokeEvents[0]!, link, {
+      action: 'permission_revoke',
+      status: 'unlinked',
+      lifecycle: 'link.revoked',
+      generation: 1,
+      reason: 'control_ui_revoke',
+    })
+    expect(lifecycleDetailFields(firstRevokeEvents[0]!.detailRef).lineage_id).toBe(
+      firstTombstone!.lineageId
+    )
 
     operatorJourney.deniedAuditFloor = operatorJourney.auditFloor()
     // Keep the user-visible direct-access dialog open across the Control UI
@@ -475,6 +626,51 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
       'Active'
     )
+    await expect
+      .poll(() => operatorJourney.countActiveLinks(), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(1)
+    await expect
+      .poll(() => operatorJourney.readLinkHistory().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(2)
+    const [revokedPredecessor, successor] = operatorJourney.assertGenerationChain({
+      activeCount: 1,
+      revokedCount: 1,
+    })
+    expect(successor).toMatchObject({
+      generation: revokedPredecessor!.generation + 1,
+      predecessorId: revokedPredecessor!.id,
+      lineageId: revokedPredecessor!.lineageId,
+      state: 'active',
+      desktopUserId: link.desktopUserId,
+      controlAdminId: link.controlAdminId,
+      source: 'initial_setup',
+      createdByControlAdminId: link.controlAdminId,
+      rowVersion: 1,
+    })
+    await expect
+      .poll(() => operatorJourney.readLinkLifecycleEvents().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(3)
+    const reactivationEvents = operatorJourney
+      .readLinkLifecycleEvents()
+      .filter(event => lifecycleDetailFields(event.detailRef).event === 'link.reactivated')
+    expect(reactivationEvents).toHaveLength(1)
+    expectLifecycleAudit(reactivationEvents[0]!, link, {
+      action: 'permission_grant',
+      status: 'linked',
+      lifecycle: 'link.reactivated',
+      generation: successor!.generation,
+      predecessorId: revokedPredecessor!.id,
+      reason: 'control_ui_reactivate',
+    })
 
     // Retry is the user-visible next Desktop request. It cannot restore a
     // client capability; the reactivated server link must return the root.
@@ -511,7 +707,61 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
       'Revoked'
     )
-    await expect.poll(() => operatorJourney.operatorLinkCount()).toBe(0)
+    await expect
+      .poll(() => operatorJourney.countActiveLinks(), {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(0)
+    await expect
+      .poll(() => operatorJourney.readLinkHistory().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(2)
+    const [firstRevokedGeneration, secondTombstone] = operatorJourney.assertGenerationChain({
+      activeCount: 0,
+      revokedCount: 2,
+    })
+    expect(firstRevokedGeneration).toMatchObject({
+      generation: 1,
+      predecessorId: null,
+      state: 'revoked',
+    })
+    expect(secondTombstone).toMatchObject({
+      generation: firstRevokedGeneration!.generation + 1,
+      predecessorId: firstRevokedGeneration!.id,
+      lineageId: firstRevokedGeneration!.lineageId,
+      state: 'revoked',
+      desktopUserId: link.desktopUserId,
+      controlAdminId: link.controlAdminId,
+      source: 'initial_setup',
+      createdByControlAdminId: link.controlAdminId,
+      revokedByType: 'control_admin',
+      revokedById: link.controlAdminId,
+      revokedByControlAdminId: link.controlAdminId,
+      revokedByDesktopUserId: null,
+      revocationReason: 'control_ui_revoke',
+    })
+    expect(secondTombstone?.revokedAt).toEqual(expect.any(String))
+    await expect
+      .poll(() => operatorJourney.readLinkLifecycleEvents().length, {
+        timeout: 30_000,
+        intervals: [250, 500, 1_000],
+      })
+      .toBe(4)
+    const secondRevokeEvents = operatorJourney
+      .readLinkLifecycleEvents()
+      .filter(event => lifecycleDetailFields(event.detailRef).event === 'link.revoked')
+    expect(secondRevokeEvents).toHaveLength(2)
+    expectLifecycleAudit(secondRevokeEvents[1]!, link, {
+      action: 'permission_revoke',
+      status: 'unlinked',
+      lifecycle: 'link.revoked',
+      generation: secondTombstone!.generation,
+      predecessorId: firstRevokedGeneration!.id,
+      reason: 'control_ui_revoke',
+    })
   })
 
   test('@gfs-operator/audit-correlation successful and denied Desktop requests preserve exact actor and request IDs', async ({
@@ -589,13 +839,53 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     expect(
       deniedRows.filter(row => row.requestId && row.op === 'create' && row.mutationOutcome)
     ).toHaveLength(0)
-    const lifecycle = operatorJourney.readUnlinkLifecycleEvent()
-    expect(lifecycle).toMatchObject({
-      operatorSub: link.controlAdminId,
-      targetRef: `gfs_desktop_operator_link:${link.desktopUserId}:${link.controlAdminId}`,
+    const lifecycleEvents = operatorJourney.readLinkLifecycleEvents()
+    expect(lifecycleEvents).toHaveLength(4)
+    expect(new Set(lifecycleEvents.map(event => event.eventId)).size).toBe(4)
+    const [firstGeneration, secondGeneration] = operatorJourney.assertGenerationChain({
+      activeCount: 0,
+      revokedCount: 2,
     })
-    expect(lifecycle?.detailRef).toContain(`desktop_user_id:${link.desktopUserId}`)
-    expect(lifecycle?.detailRef).toContain(`control_admin_id:${link.controlAdminId}`)
-    expect(lifecycle?.detailRef).toContain('source:initial_setup')
+    const [createdEvent, firstRevokeEvent, reactivatedEvent, secondRevokeEvent] = lifecycleEvents
+    expect(createdEvent).toBeDefined()
+    expect(firstRevokeEvent).toBeDefined()
+    expect(reactivatedEvent).toBeDefined()
+    expect(secondRevokeEvent).toBeDefined()
+
+    expectLifecycleAudit(createdEvent!, link, {
+      action: 'permission_grant',
+      status: 'linked',
+      lifecycle: 'link.created',
+      generation: 1,
+    })
+    expectLifecycleAudit(firstRevokeEvent!, link, {
+      action: 'permission_revoke',
+      status: 'unlinked',
+      lifecycle: 'link.revoked',
+      generation: 1,
+      reason: 'control_ui_revoke',
+    })
+    expectLifecycleAudit(reactivatedEvent!, link, {
+      action: 'permission_grant',
+      status: 'linked',
+      lifecycle: 'link.reactivated',
+      generation: 2,
+      predecessorId: firstGeneration!.id,
+      reason: 'control_ui_reactivate',
+    })
+    expectLifecycleAudit(secondRevokeEvent!, link, {
+      action: 'permission_revoke',
+      status: 'unlinked',
+      lifecycle: 'link.revoked',
+      generation: 2,
+      predecessorId: firstGeneration!.id,
+      reason: 'control_ui_revoke',
+    })
+
+    const reactivationDetail = lifecycleDetailFields(reactivatedEvent!.detailRef)
+    const secondRevokeDetail = lifecycleDetailFields(secondRevokeEvent!.detailRef)
+    expect(secondGeneration!.predecessorId).toBe(firstGeneration!.id)
+    expect(reactivationDetail.predecessor_id).toBe(firstGeneration!.id)
+    expect(secondRevokeDetail.predecessor_id).toBe(firstGeneration!.id)
   })
 })

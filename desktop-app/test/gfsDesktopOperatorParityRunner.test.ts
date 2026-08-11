@@ -4,7 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   GFS_OPERATOR_REQUIRED_SCENARIOS,
+  type GfsOperatorLinkGeneration,
   type GfsOperatorScenarioResult,
+  assertGenerationChain,
   evaluateGfsOperatorScenarioResults,
   gfsOperatorEvidenceDirectory,
   requireGfsOperatorRunId,
@@ -13,9 +15,53 @@ import {
 } from './e2e-playwright/gfsDesktopOperatorParityContract'
 
 const evidenceRoots: string[] = []
+const DESKTOP_USER_ID = '5a50453e-04d1-4403-8473-23013eaa56c7'
+const CONTROL_ADMIN_ID = 'ef72208d-783a-4574-9181-440a6764fa27'
+const LINEAGE_ID = 'd4d2c593-6932-488e-844c-c5852b910783'
+const FIRST_GENERATION_ID = '11111111-1111-4111-8111-111111111111'
+const SECOND_GENERATION_ID = '22222222-2222-4222-8222-222222222222'
+
+function activeGeneration(
+  overrides: Partial<GfsOperatorLinkGeneration> = {}
+): GfsOperatorLinkGeneration {
+  return {
+    id: FIRST_GENERATION_ID,
+    lineageId: LINEAGE_ID,
+    generation: 1,
+    predecessorId: null,
+    state: 'active',
+    desktopUserId: DESKTOP_USER_ID,
+    controlAdminId: CONTROL_ADMIN_ID,
+    source: 'initial_setup',
+    createdByControlAdminId: CONTROL_ADMIN_ID,
+    rowVersion: 1,
+    revokedAt: null,
+    revokedByType: null,
+    revokedById: null,
+    revokedByControlAdminId: null,
+    revokedByDesktopUserId: null,
+    revocationReason: null,
+    ...overrides,
+  }
+}
+
+function controlAdminTombstone(
+  overrides: Partial<GfsOperatorLinkGeneration> = {}
+): GfsOperatorLinkGeneration {
+  return activeGeneration({
+    state: 'revoked',
+    rowVersion: 2,
+    revokedAt: '2026-08-11T09:00:00.000Z',
+    revokedByType: 'control_admin',
+    revokedById: CONTROL_ADMIN_ID,
+    revokedByControlAdminId: CONTROL_ADMIN_ID,
+    revocationReason: 'control_ui_revoke',
+    ...overrides,
+  })
+}
 
 afterEach(() => {
-  for (const root of evidenceRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+  for (const root of evidenceRoots.splice(0)) fs.rmSync(root, { recursive: true })
   delete process.env.E2E_GFS_OPERATOR_EVIDENCE_DIR
 })
 
@@ -107,5 +153,94 @@ describe('GFS Desktop operator Playwright gate', () => {
     const verdict = evaluateGfsOperatorScenarioResults(passedResults(), false)
     expect(verdict.ok).toBe(false)
     expect(verdict.errors).toContain('runtime evidence is missing')
+  })
+
+  it('keeps active authority separate from retained revoked generations across a full lifecycle', () => {
+    const firstTombstone = controlAdminTombstone()
+    assertGenerationChain([firstTombstone], {
+      desktopUserId: DESKTOP_USER_ID,
+      controlAdminId: CONTROL_ADMIN_ID,
+      source: 'initial_setup',
+      activeCount: 0,
+      revokedCount: 1,
+    })
+
+    const successor = activeGeneration({
+      id: SECOND_GENERATION_ID,
+      generation: 2,
+      predecessorId: FIRST_GENERATION_ID,
+    })
+    assertGenerationChain([firstTombstone, successor], {
+      desktopUserId: DESKTOP_USER_ID,
+      controlAdminId: CONTROL_ADMIN_ID,
+      source: 'initial_setup',
+      activeCount: 1,
+      revokedCount: 1,
+    })
+
+    const secondTombstone = controlAdminTombstone({
+      id: SECOND_GENERATION_ID,
+      generation: 2,
+      predecessorId: FIRST_GENERATION_ID,
+      rowVersion: 2,
+    })
+    assertGenerationChain([firstTombstone, secondTombstone], {
+      desktopUserId: DESKTOP_USER_ID,
+      controlAdminId: CONTROL_ADMIN_ID,
+      source: 'initial_setup',
+      activeCount: 0,
+      revokedCount: 2,
+    })
+  })
+
+  it('rejects malformed predecessor, source, active-state, and revocation-actor evidence', () => {
+    const expected = {
+      desktopUserId: DESKTOP_USER_ID,
+      controlAdminId: CONTROL_ADMIN_ID,
+      source: 'initial_setup',
+      activeCount: 0,
+      revokedCount: 2,
+    }
+    const firstTombstone = controlAdminTombstone()
+    const secondTombstone = controlAdminTombstone({
+      id: SECOND_GENERATION_ID,
+      generation: 2,
+      predecessorId: FIRST_GENERATION_ID,
+    })
+
+    expect(() =>
+      assertGenerationChain([firstTombstone, { ...secondTombstone, predecessorId: null }], expected)
+    ).toThrow('must point to generation 1')
+    expect(() =>
+      assertGenerationChain(
+        [firstTombstone, { ...secondTombstone, source: 'migrated_source' }],
+        expected
+      )
+    ).toThrow('changed source')
+    expect(() =>
+      assertGenerationChain(
+        [
+          firstTombstone,
+          {
+            ...secondTombstone,
+            state: 'active',
+            revokedAt: '2026-08-11T09:05:00.000Z',
+          },
+        ],
+        { ...expected, activeCount: 1, revokedCount: 1 }
+      )
+    ).toThrow('active generation 2 contains revocation evidence')
+    expect(() =>
+      assertGenerationChain(
+        [
+          firstTombstone,
+          {
+            ...secondTombstone,
+            revokedById: DESKTOP_USER_ID,
+          },
+        ],
+        expected
+      )
+    ).toThrow('control-admin revocation actor is malformed')
   })
 })

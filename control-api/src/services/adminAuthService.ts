@@ -564,7 +564,7 @@ export async function deleteControlAdmin(
     await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
       kind: 'control_admin',
       parentId: adminId,
-      operatorSub: actorAdminId,
+      actor: { kind: 'control_admin', controlAdminId: actorAdminId },
       reason: 'control_admin_retired',
     })
     const deletedResult = await db.query(

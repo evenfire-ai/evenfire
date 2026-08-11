@@ -38,6 +38,9 @@ vi.mock('../src/config.js', () => ({
     // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
     hostsNamespace: 'mcp-host',
     desktopGfsOperatorLinkingEnabled: false,
+    externalGfsTokenUserRlPerMin: 10,
+    externalGfsIpRlPerMin: 30,
+    externalGfsOperationRlPerMin: 30,
   },
 }))
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
@@ -453,8 +456,53 @@ describe('linked Desktop operator authority contract', () => {
 
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'gfs_operator_link_invalid' })
-    expect(mockQuery).not.toHaveBeenCalled()
+    // The boundary rate limiter is deliberately the only DB-backed work that
+    // precedes the authority resolver. A resolver failure must not invoke a
+    // route handler or any of its database queries.
+    expect(mockQuery.mock.calls.every(call => String(call[0]).includes('rate_limit_buckets'))).toBe(
+      true
+    )
     expect(mockSignGfsToken).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for an unclassified GFS path without resolving authority', async () => {
+    auth()
+    ;(config as { desktopGfsOperatorLinkingEnabled: boolean }).desktopGfsOperatorLinkingEnabled =
+      true
+    mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
+
+    const res = await request(await buildApp())
+      .post('/external/gfs/not-classified')
+      .set('x-user-session-token', 'sess')
+      .send({})
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Not Found' })
+    expect(mockResolveActiveLink).not.toHaveBeenCalled()
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('rejects a pre-resolution rate limit before resolver or route work', async () => {
+    auth()
+    ;(config as { desktopGfsOperatorLinkingEnabled: boolean }).desktopGfsOperatorLinkingEnabled =
+      true
+    mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
+    mockQuery.mockImplementation(async (text: string) => {
+      if (text.includes('rate_limit_buckets')) return { rows: [{ count: 31 }] }
+      throw new Error(`unexpected route query: ${text}`)
+    })
+
+    const res = await request(await buildApp())
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(mockResolveActiveLink).not.toHaveBeenCalled()
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    expect(mockQuery.mock.calls).toHaveLength(1)
+    expect(mockQuery.mock.calls[0]?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
   })
 
   it('does not resolve or elevate when the feature flag is off', async () => {
@@ -1602,7 +1650,7 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     expect(res.body.error).toBe('manage_acl_required')
   })
 
-  it('rate limits the delegation plane per user with retryAfterSeconds', async () => {
+  it('rate limits the grants operation class before authority resolution', async () => {
     auth()
     authority(['manage_acl', 'read'], { rateLimitCount: 31 })
     const app = await buildApp()
@@ -1610,10 +1658,12 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     expect(res.status).toBe(429)
     expect(res.body.error).toBe('Too Many Requests')
     expect(res.body.retryAfterSeconds).toBeGreaterThanOrEqual(1)
-    const bucketCall = mockQuery.mock.calls.find(call =>
-      String(call[0]).includes('rate_limit_buckets')
+    const bucketCall = mockQuery.mock.calls.find(
+      call =>
+        String(call[0]).includes('rate_limit_buckets') &&
+        String(call[1]?.[0]).startsWith('gfs-ext:pre:grants:session:')
     )
-    expect(bucketCall?.[1]?.[0]).toBe(`gfsgrants-ext:user:${U1}`)
+    expect(bucketCall?.[1]?.[0]).toMatch(/^gfs-ext:pre:grants:session:[0-9a-f]{64}$/)
   })
 
   it('keys the external delegation plane in a bucket DISTINCT from the admin plane for the same subject', async () => {
@@ -1627,8 +1677,10 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     authority(['manage_acl', 'read'])
     const externalApp = await buildApp()
     await putGrants(externalApp, { subject: { type: 'user', id: U2 } })
-    const externalKey = mockQuery.mock.calls.find(call =>
-      String(call[0]).includes('rate_limit_buckets')
+    const externalKey = mockQuery.mock.calls.find(
+      call =>
+        String(call[0]).includes('rate_limit_buckets') &&
+        String(call[1]?.[0]).startsWith('gfsgrants-ext:')
     )?.[1]?.[0]
 
     // Admin (operator) grants plane keyed off adminAuth.sub === U1 (same id).

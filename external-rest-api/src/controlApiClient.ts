@@ -2,15 +2,42 @@ import { config } from './config.js'
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
+// Response headers are an API contract only where a caller can safely act on
+// them. In particular, never relay Set-Cookie, server identity, CORS, or
+// arbitrary proxy headers from the internal control-api boundary.
+const FORWARDABLE_RESPONSE_HEADERS = [
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
+
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  constructor(message: string, status: number, body: unknown) {
+  headers: Record<string, string>
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    headers: Record<string, string> = {}
+  ) {
     super(message)
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
+    this.headers = headers
   }
+}
+
+function forwardableResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const name of FORWARDABLE_RESPONSE_HEADERS) {
+    const value = response.headers.get(name)
+    if (value) headers[name] = value
+  }
+  return headers
 }
 
 function buildUrl(path: string, query?: Record<string, string | undefined>): string {
@@ -90,7 +117,8 @@ export async function controlApiRequestWithStatus<T>(
     throw new ControlApiError(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
-      { error: 'Upstream returned non-JSON body', status: response.status }
+      { error: 'Upstream returned non-JSON body', status: response.status },
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -102,7 +130,8 @@ export async function controlApiRequestWithStatus<T>(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
-      parsed
+      parsed,
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -155,7 +184,8 @@ export async function controlApiBinaryRequestWithStatus(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -211,7 +241,8 @@ export async function controlApiStreamRequest(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      forwardableResponseHeaders(response)
     )
   }
   return response

@@ -25,6 +25,10 @@ import {
 } from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
+  externalGfsPreResolutionRateLimit,
+  externalGfsResolvedOperationRateLimit,
+} from '../../middleware/externalGfsRateLimit.js'
+import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
@@ -219,6 +223,11 @@ export function createExternalGfsRouter(): Router {
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
   router.use('/external/gfs', attachExternalGfsRequestId)
+  // This boundary deliberately precedes attachExternalGfsAuthority. A rate
+  // rejection therefore performs no operator-link lookup or route-specific
+  // database/handler work; see externalGfsRateLimit.ts for the complete
+  // session/IP and effective-actor operation-class matrix.
+  router.use('/external/gfs', externalGfsPreResolutionRateLimit)
 
   // Per-user token bucket on the DELEGATION plane only (grants + shares),
   // mirroring the admin plane's grantsRateLimit but in a DISTINCT bucket so the
@@ -273,6 +282,7 @@ export function createExternalGfsRouter(): Router {
   // Public token mint above is deliberately user-only. Effective linked-admin
   // authority is resolved only for the internal broker routes below.
   router.use('/external/gfs', asyncHandler(attachExternalGfsAuthority))
+  router.use('/external/gfs', externalGfsResolvedOperationRateLimit)
 
   // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team

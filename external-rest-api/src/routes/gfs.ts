@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
 import type { Request } from 'express'
 import { randomUUID } from 'node:crypto'
+import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
@@ -23,6 +24,13 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
 // client (a wedged gfsc looks identical to an internal bug).
 const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
+const CONTROL_API_ERROR_HEADERS = [
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
@@ -42,9 +50,21 @@ function attachGfsRequestId(req: Request, res: Response, next: NextFunction): vo
 }
 
 function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): GfsRequestOptions {
+  // The control-api is behind profile-control-funnel, which appends its own
+  // peer to X-Forwarded-For. Preserve the external-rest API's proxy-attested
+  // client address as the first value so the control-api's pre-resolution
+  // limiter can enforce its approved per-source-IP bucket. This overwrites
+  // any caller-supplied value; only req.ip (after this service's trust-proxy
+  // policy) is propagated across the authenticated service boundary.
+  const clientIp = req.ip?.trim()
+  const forwardedClientIp = clientIp && isIP(clientIp) !== 0 ? clientIp : undefined
   return {
     ...options,
-    extraHeaders: { ...options.extraHeaders, 'x-request-id': req.gfsRequestId! },
+    extraHeaders: {
+      ...options.extraHeaders,
+      'x-request-id': req.gfsRequestId!,
+      ...(forwardedClientIp ? { 'x-forwarded-for': forwardedClientIp } : {}),
+    },
   }
 }
 
@@ -59,6 +79,13 @@ function gfsControlApiRequest<T>(
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
+    // The internal client has already filtered this map. Keep the allowlist at
+    // this last hop too so a hand-constructed/mocked ControlApiError cannot
+    // accidentally turn arbitrary internal response headers into public ones.
+    for (const name of CONTROL_API_ERROR_HEADERS) {
+      const value = error.headers?.[name]
+      if (value) res.setHeader(name, value)
+    }
     const body =
       error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
     res.status(error.status).json(body)

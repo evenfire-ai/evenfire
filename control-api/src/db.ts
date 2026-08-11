@@ -2725,6 +2725,204 @@ async function evolveGfsDesktopOperatorLinksToGenerations(db: DbClient): Promise
   `)
 }
 
+/**
+ * Governed Desktop-user retirement is a state transition, not a destructive
+ * shortcut around retained operator-link history.  This remains additive so
+ * historical users are explicitly backfilled into the active lifecycle state.
+ */
+async function applyDesktopUserRetirementLifecycleSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS lifecycle_state TEXT,
+      ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS retirement_reason TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS retired_by_desktop_user_id UUID,
+      ADD COLUMN IF NOT EXISTS retirement_request_id TEXT,
+      ADD COLUMN IF NOT EXISTS retirement_operation_id UUID,
+      ADD COLUMN IF NOT EXISTS lifecycle_version BIGINT;
+
+    -- Fresh and already-existing users are both active until an explicit
+    -- governed retirement transition records actor, reason, and outcome.
+    UPDATE users
+       SET lifecycle_state = COALESCE(lifecycle_state, 'active'),
+           lifecycle_version = COALESCE(lifecycle_version, 1)
+     WHERE lifecycle_state IS NULL OR lifecycle_version IS NULL;
+
+    ALTER TABLE users
+      ALTER COLUMN lifecycle_state SET DEFAULT 'active',
+      ALTER COLUMN lifecycle_state SET NOT NULL,
+      ALTER COLUMN lifecycle_version SET DEFAULT 1,
+      ALTER COLUMN lifecycle_version SET NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      operation TEXT NOT NULL DEFAULT 'retire_desktop_user'
+        CHECK (operation = 'retire_desktop_user'),
+      actor_type TEXT NOT NULL CHECK (actor_type IN ('control_admin', 'platform_user')),
+      actor_control_admin_id UUID NULL,
+      actor_desktop_user_id UUID NULL,
+      target_user_id UUID NOT NULL,
+      idempotency_key_hash TEXT NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+      request_fingerprint TEXT NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+      reason TEXT NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 512),
+      request_id TEXT NULL CHECK (request_id IS NULL OR char_length(request_id) <= 256),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+      outcome TEXT NULL CHECK (outcome IS NULL OR outcome IN ('retired', 'deleted')),
+      lifecycle_version BIGINT NULL CHECK (lifecycle_version IS NULL OR lifecycle_version > 0),
+      lifecycle_operation_id UUID NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ NULL,
+      CHECK (
+        (actor_type = 'control_admin'
+          AND actor_control_admin_id IS NOT NULL
+          AND actor_desktop_user_id IS NULL)
+        OR
+        (actor_type = 'platform_user'
+          AND actor_control_admin_id IS NULL
+          AND actor_desktop_user_id IS NOT NULL)
+      ),
+      CHECK (
+        (status = 'pending'
+          AND outcome IS NULL
+          AND lifecycle_version IS NULL
+          AND lifecycle_operation_id IS NULL
+          AND completed_at IS NULL)
+        OR
+        (status = 'completed'
+          AND outcome IS NOT NULL
+          AND completed_at IS NOT NULL
+          AND (
+            (outcome = 'retired' AND lifecycle_version IS NOT NULL AND lifecycle_operation_id IS NOT NULL)
+            OR
+            (outcome = 'deleted' AND lifecycle_version IS NULL AND lifecycle_operation_id IS NULL)
+          ))
+      )
+    );
+
+    -- The target deliberately has no FK: a legacy-compatible hard-delete for
+    -- a user with no link history must still leave an idempotent outcome record.
+    -- Actor columns remain separate; no caller identity is inferred from UUID shape.
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_control_admin_key
+      ON desktop_user_retirement_operations
+         (operation, actor_control_admin_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'control_admin';
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_platform_user_key
+      ON desktop_user_retirement_operations
+         (operation, actor_desktop_user_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'platform_user';
+    CREATE INDEX IF NOT EXISTS desktop_user_retirement_operations_target_idx
+      ON desktop_user_retirement_operations (target_user_id, completed_at DESC);
+
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_control_admin_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_control_admin_id_fkey
+      FOREIGN KEY (retired_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_desktop_user_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_desktop_user_id_fkey
+      FOREIGN KEY (retired_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retirement_operation_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retirement_operation_id_fkey
+      FOREIGN KEY (retirement_operation_id)
+      REFERENCES desktop_user_retirement_operations(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_version_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_version_check CHECK (lifecycle_version > 0);
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_state_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_state_check CHECK (
+        (lifecycle_state = 'active'
+          AND retired_at IS NULL
+          AND retirement_reason IS NULL
+          AND retired_by_type IS NULL
+          AND retired_by_control_admin_id IS NULL
+          AND retired_by_desktop_user_id IS NULL
+          AND retirement_request_id IS NULL
+          AND retirement_operation_id IS NULL)
+        OR
+        (lifecycle_state = 'retired'
+          AND retired_at IS NOT NULL
+          AND char_length(retirement_reason) BETWEEN 1 AND 512
+          AND retirement_operation_id IS NOT NULL
+          AND (
+            (retired_by_type = 'control_admin'
+              AND retired_by_control_admin_id IS NOT NULL
+              AND retired_by_desktop_user_id IS NULL)
+            OR
+            (retired_by_type = 'platform_user'
+              AND retired_by_control_admin_id IS NULL
+              AND retired_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+    CREATE INDEX IF NOT EXISTS users_lifecycle_state_idx ON users (lifecycle_state);
+
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS revoked_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS revoked_by_desktop_user_id UUID;
+
+    -- 0093 could only record a Control Admin in revoked_by_id.  Preserve that
+    -- exact historic actor in the typed column before broadening the union.
+    UPDATE gfs_desktop_operator_links
+       SET revoked_by_control_admin_id = revoked_by_id
+     WHERE state = 'revoked'
+       AND revoked_by_type = 'control_admin'
+       AND revoked_by_control_admin_id IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_control_admin_id_fkey
+      FOREIGN KEY (revoked_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey
+      FOREIGN KEY (revoked_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+        (state = 'active'
+          AND revoked_at IS NULL
+          AND revoked_by_type IS NULL
+          AND revoked_by_id IS NULL
+          AND revoked_by_control_admin_id IS NULL
+          AND revoked_by_desktop_user_id IS NULL
+          AND revocation_reason IS NULL)
+        OR
+        (state = 'revoked'
+          AND revoked_at IS NOT NULL
+          AND revocation_reason IS NOT NULL
+          AND (
+            (revoked_by_type = 'control_admin'
+              AND revoked_by_id IS NOT NULL
+              AND revoked_by_control_admin_id = revoked_by_id
+              AND revoked_by_desktop_user_id IS NULL)
+            OR
+            (revoked_by_type = 'platform_user'
+              AND revoked_by_id IS NULL
+              AND revoked_by_control_admin_id IS NULL
+              AND revoked_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+
+    GRANT SELECT, INSERT, UPDATE ON TABLE desktop_user_retirement_operations TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE desktop_user_retirement_operations FROM control_api_runtime;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5598,6 +5796,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0093_gfs_desktop_operator_link_generations',
     apply: evolveGfsDesktopOperatorLinksToGenerations,
+  },
+  {
+    version: '0094_desktop_user_retirement_lifecycle',
+    apply: applyDesktopUserRetirementLifecycleSchema,
   },
 ]
 

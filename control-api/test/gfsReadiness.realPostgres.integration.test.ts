@@ -108,6 +108,22 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
+  it.each(['actor_on_behalf_of', 'desktop_user_id', 'authority_source'] as const)(
+    'fails GFSC readiness before 0092 when the required %s audit column is absent',
+    async column => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(`ALTER TABLE gfs_audit DROP COLUMN ${column} CASCADE`)
+        await client.query('SET LOCAL ROLE gfs_controller')
+        await expect(probeAs(client)()).rejects.toThrow(/audit actor-correlation|0092/i)
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    }
+  )
+
   it('passes GFSC writer readiness under the migrated runtime role', async () => {
     const client = await pool.connect()
     try {

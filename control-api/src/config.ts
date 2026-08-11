@@ -133,6 +133,11 @@ type Config = {
   approvalRlExternalPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  // External Desktop GFS is a separate authority plane. These values are the
+  // approved fixed budgets for its pre-resolution and resolved-operation gates.
+  externalGfsTokenUserRlPerMin: number
+  externalGfsIpRlPerMin: number
+  externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
@@ -728,6 +733,12 @@ export const config: Config = {
   approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // Approved GFS authority-boundary budgets. Keep them fixed here rather than
+  // accepting an unreviewed environment override: token minting is 10/min per
+  // Desktop user and 30/min per source IP; every other operation class is 30/min.
+  externalGfsTokenUserRlPerMin: 10,
+  externalGfsIpRlPerMin: 30,
+  externalGfsOperationRlPerMin: 30,
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
   // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in

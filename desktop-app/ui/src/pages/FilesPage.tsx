@@ -305,7 +305,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
-<<<<<<< HEAD
   // partial-success outcome. A failure propagates to the panel's catch, which
   // maps the server verdict via describeGfsGrantError. People, teams, and
   // agents share a single picker; inherit is honored for directories and is

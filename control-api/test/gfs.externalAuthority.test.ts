@@ -49,6 +49,21 @@ describe('resolveExternalGfsAuthority', () => {
     expect(resolveActiveLink).not.toHaveBeenCalled()
   })
 
+  it('denies a retired Desktop user before the flag can fall back to user-session authority', async () => {
+    const resolveActiveLink = vi.fn()
+    await expect(
+      resolveExternalGfsAuthority(DESKTOP_USER_ID, {
+        linkingEnabled: false,
+        resolveActiveLink,
+        isDesktopUserActive: vi.fn().mockResolvedValue(false),
+      })
+    ).rejects.toMatchObject<Partial<ExternalGfsAuthorityError>>({
+      status: 403,
+      code: 'desktop_user_retired',
+    })
+    expect(resolveActiveLink).not.toHaveBeenCalled()
+  })
+
   it('keeps an unlinked Desktop session on ordinary user authority', async () => {
     await expect(
       resolveExternalGfsAuthority(DESKTOP_USER_ID, {

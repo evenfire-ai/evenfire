@@ -25,6 +25,38 @@ export interface GfsOperatorScenarioResult {
   title: string
 }
 
+/**
+ * A persisted generation is deliberately more detailed than the status shown
+ * in Control UI. The E2E reads this evidence after a visible lifecycle action;
+ * it never uses it to manufacture a link or advance the browser journey.
+ */
+export interface GfsOperatorLinkGeneration {
+  id: string
+  lineageId: string
+  generation: number
+  predecessorId: string | null
+  state: 'active' | 'revoked'
+  desktopUserId: string
+  controlAdminId: string
+  source: string
+  createdByControlAdminId: string
+  rowVersion: number
+  revokedAt: string | null
+  revokedByType: 'control_admin' | 'platform_user' | null
+  revokedById: string | null
+  revokedByControlAdminId: string | null
+  revokedByDesktopUserId: string | null
+  revocationReason: string | null
+}
+
+export interface GfsOperatorGenerationChainExpectation {
+  desktopUserId: string
+  controlAdminId: string
+  source: string
+  activeCount: number
+  revokedCount: number
+}
+
 export interface GfsOperatorContractVerdict {
   ok: boolean
   errors: string[]
@@ -98,6 +130,122 @@ export function scenarioIdFromTitle(title: string): GfsOperatorScenarioId | null
     id => title === id || title.startsWith(`${id} `)
   )
   return matches.length === 1 ? (matches[0] ?? null) : null
+}
+
+/**
+ * Verifies the immutable operator-link lineage independently of UI rendering.
+ * The caller supplies rows ordered by generation so a non-contiguous or
+ * reordered history is a failure rather than being normalized away.
+ */
+export function assertGenerationChain(
+  history: readonly GfsOperatorLinkGeneration[],
+  expected: GfsOperatorGenerationChainExpectation
+): void {
+  const prefix = '[GFS-OPERATOR-E2E] generation history invariant failed:'
+  const fail = (message: string): never => {
+    throw new Error(`${prefix} ${message}`)
+  }
+  const requireCount = (name: string, value: number): void => {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      fail(`${name} must be a non-negative integer`)
+    }
+  }
+
+  requireCount('activeCount', expected.activeCount)
+  requireCount('revokedCount', expected.revokedCount)
+  if (history.length !== expected.activeCount + expected.revokedCount) {
+    fail(
+      `expected ${expected.activeCount} active and ${expected.revokedCount} revoked generations; received ${history.length} rows`
+    )
+  }
+  if (history.length === 0) fail('history must contain at least one generation')
+
+  const first = history[0]!
+  const activeRows: GfsOperatorLinkGeneration[] = []
+  const revokedRows: GfsOperatorLinkGeneration[] = []
+
+  for (const [index, row] of history.entries()) {
+    const expectedGeneration = index + 1
+    if (row.generation !== expectedGeneration) {
+      fail(
+        `expected generation ${expectedGeneration} at index ${index}, received ${row.generation}`
+      )
+    }
+    if (
+      row.desktopUserId !== expected.desktopUserId ||
+      row.controlAdminId !== expected.controlAdminId
+    ) {
+      fail(
+        `generation ${row.generation} does not preserve the exact Desktop-user/Control-Admin pair`
+      )
+    }
+    if (row.source !== expected.source) {
+      fail(`generation ${row.generation} changed source from ${expected.source} to ${row.source}`)
+    }
+    if (row.lineageId !== first.lineageId) {
+      fail(`generation ${row.generation} does not preserve lineage ${first.lineageId}`)
+    }
+    if (!Number.isSafeInteger(row.rowVersion) || row.rowVersion < 1) {
+      fail(`generation ${row.generation} has an invalid row version`)
+    }
+    if (index === 0) {
+      if (row.predecessorId !== null) fail('generation 1 must not have a predecessor')
+    } else {
+      const predecessor = history[index - 1]
+      if (!predecessor || row.predecessorId !== predecessor.id) {
+        fail(`generation ${row.generation} must point to generation ${expectedGeneration - 1}`)
+      }
+    }
+
+    if (row.state === 'active') {
+      activeRows.push(row)
+      if (
+        row.revokedAt !== null ||
+        row.revokedByType !== null ||
+        row.revokedById !== null ||
+        row.revokedByControlAdminId !== null ||
+        row.revokedByDesktopUserId !== null ||
+        row.revocationReason !== null
+      ) {
+        fail(`active generation ${row.generation} contains revocation evidence`)
+      }
+      continue
+    }
+
+    if (row.state !== 'revoked') fail(`generation ${row.generation} has invalid state ${row.state}`)
+    revokedRows.push(row)
+    if (!row.revokedAt || !row.revocationReason) {
+      fail(`revoked generation ${row.generation} is missing timestamp or reason`)
+    }
+    if (row.revokedByType === 'control_admin') {
+      if (
+        !row.revokedById ||
+        row.revokedById !== row.revokedByControlAdminId ||
+        row.revokedByDesktopUserId !== null
+      ) {
+        fail(`control-admin revocation actor is malformed for generation ${row.generation}`)
+      }
+      continue
+    }
+    if (row.revokedByType === 'platform_user') {
+      if (
+        row.revokedById !== null ||
+        row.revokedByControlAdminId !== null ||
+        !row.revokedByDesktopUserId
+      ) {
+        fail(`platform-user revocation actor is malformed for generation ${row.generation}`)
+      }
+      continue
+    }
+    fail(`revoked generation ${row.generation} has no typed revocation actor`)
+  }
+
+  if (activeRows.length !== expected.activeCount) {
+    fail(`expected ${expected.activeCount} active generations, received ${activeRows.length}`)
+  }
+  if (revokedRows.length !== expected.revokedCount) {
+    fail(`expected ${expected.revokedCount} revoked generations, received ${revokedRows.length}`)
+  }
 }
 
 export function evaluateGfsOperatorScenarioResults(

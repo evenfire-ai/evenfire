@@ -185,6 +185,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0067_llm_runtime_access_profiles'
     )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0094_desktop_user_retirement_lifecycle'
+    )
 
     await dbPool.query(`
       DELETE FROM schema_migrations
@@ -387,6 +390,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
       'gfs_desktop_operator_links',
+      'desktop_user_retirement_operations',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -404,6 +408,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
       gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
+      desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -471,12 +476,50 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
       expect(linked.rows).toEqual([{ user_id: linkUserId, control_admin_id: linkAdminId }])
 
+      const lifecycle = await linkRuntimeClient.query<{
+        lifecycle_state: string
+        lifecycle_version: string
+      }>(
+        `SELECT lifecycle_state, lifecycle_version::text AS lifecycle_version
+           FROM users
+          WHERE id = $1`,
+        [linkUserId]
+      )
+      expect(lifecycle.rows).toEqual([{ lifecycle_state: 'active', lifecycle_version: '1' }])
+
       await linkRuntimeClient.query(
         `UPDATE gfs_desktop_operator_links
             SET state = 'revoked', revoked_at = NOW(), revoked_by_type = 'control_admin',
-                revoked_by_id = $2, revocation_reason = 'privilege-test', row_version = row_version + 1
+                revoked_by_id = $2, revoked_by_control_admin_id = $2,
+                revoked_by_desktop_user_id = NULL,
+                revocation_reason = 'privilege-test', row_version = row_version + 1
           WHERE user_id = $1`,
         [linkUserId, linkAdminId]
+      )
+
+      const operation = await linkRuntimeClient.query<{ id: string }>(
+        `INSERT INTO desktop_user_retirement_operations(
+           actor_type,
+           actor_control_admin_id,
+           target_user_id,
+           idempotency_key_hash,
+           request_fingerprint,
+           reason,
+           request_id
+         )
+         VALUES ('control_admin', $1, $2, repeat('a', 64), repeat('b', 64), 'privilege-test', 'request-1')
+         RETURNING id::text AS id`,
+        [linkAdminId, linkUserId]
+      )
+      await linkRuntimeClient.query(
+        `UPDATE desktop_user_retirement_operations
+            SET status = 'completed',
+                outcome = 'retired',
+                lifecycle_version = 2,
+                lifecycle_operation_id = id,
+                completed_at = NOW()
+          WHERE id = $1::uuid`,
+        [operation.rows[0]!.id]
       )
 
       await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')

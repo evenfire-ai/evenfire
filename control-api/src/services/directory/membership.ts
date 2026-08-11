@@ -9,7 +9,7 @@ import {
   roleCanDeleteMembers,
   roleCanInviteMembers,
 } from './types.js'
-import { adminDeleteUser } from './users.js'
+import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -1756,7 +1756,11 @@ export async function deleteManagedMemberForUser(
   return { deleted }
 }
 
-export async function deleteManagedUserForUser(managerUserId: string, targetUserId: string) {
+export async function deleteManagedUserForUser(
+  managerUserId: string,
+  targetUserId: string,
+  retirement: { reason: string; idempotencyKey: string; requestId: string | null }
+) {
   const normalizedManagerUserId = managerUserId.trim()
   const normalizedTargetUserId = targetUserId.trim()
   if (!normalizedManagerUserId || !normalizedTargetUserId) {
@@ -1782,11 +1786,24 @@ export async function deleteManagedUserForUser(managerUserId: string, targetUser
     return { error: 'forbidden_uncontrolled_teams' as const }
   }
 
-  const deleted = await adminDeleteUser(normalizedTargetUserId)
-  if ('error' in deleted) {
-    return { error: 'not_found' as const }
+  try {
+    const outcome = await retireDesktopUser(
+      { kind: 'platform_user', desktopUserId: normalizedManagerUserId },
+      normalizedTargetUserId,
+      retirement.reason,
+      retirement.idempotencyKey,
+      retirement.requestId
+    )
+    return { deleted: { ok: true as const, id: outcome.id }, outcome }
+  } catch (error) {
+    if (error instanceof DesktopUserRetirementError) {
+      if (error.code === 'not_found') return { error: 'not_found' as const }
+      if (error.code === 'invalid_input') return { error: 'invalid_retirement_input' as const }
+      if (error.code === 'idempotency_conflict') return { error: 'idempotency_conflict' as const }
+      return { error: 'retirement_conflict' as const }
+    }
+    throw error
   }
-  return { deleted }
 }
 
 export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
