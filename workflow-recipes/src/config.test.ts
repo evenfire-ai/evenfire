@@ -291,7 +291,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow(new RegExp(key))
   })
 
-  it('enforces the floor <= interval < overlap invariant (fail loud)', () => {
+  it('enforces the floor <= interval <= overlap/2 invariant (fail loud)', () => {
     // floor > interval
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '40'
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
@@ -299,10 +299,21 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
   })
 
-  it('rejects an interval that is not strictly below the overlap', () => {
+  it('rejects an interval that exceeds half the overlap', () => {
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '5'
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '300'
     process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
+
+  // R1-M6 boundary: the enforced contract is `interval <= overlap/2`, so exactly
+  // overlap/2 must pass and overlap/2 + 1 must throw.
+  it('accepts interval == overlap/2 and rejects overlap/2 + 1', () => {
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '5'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '150'
+    expect(() => loadConfig()).not.toThrow()
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '151'
     expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
   })
 })

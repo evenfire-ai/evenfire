@@ -69,7 +69,7 @@ export interface ReconcileOutput {
   state: EgressState
   /** live effective entries to render as ipBlocks (== state.entries) */
   entries: EgressEntry[]
-  /** true iff the (ip,port,protocol) set changed vs previous — else NO-OP write */
+  /** true iff the (fqdn,ip,port,protocol) set changed vs previous — else NO-OP write */
   changed: boolean
   /**
    * true iff a SURVIVING entry's persisted window is within overlap/2 of lapsing
@@ -100,7 +100,7 @@ export declare function reconcileEgressState(
   config: EgressCoreConfig
 ): ReconcileOutput
 
-/** Stable change hash over (ip,port,protocol) only — excludes expiresAt (H4). */
+/** Stable change hash over (fqdn,ip,port,protocol) only — excludes expiresAt (H4). */
 export declare function stateHash(entries: EgressEntry[]): string
 
 /** Deterministic, ordered annotation map for the policy (new format + human view). */

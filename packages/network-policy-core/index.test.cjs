@@ -418,14 +418,19 @@ test('H-B: without declarations, legacy falls back to the historical 443 grace',
 // regardless of FQDN length. A fixed entry-count cap cannot bound bytes (a
 // 253-char FQDN serializes ~5× a short one); an oversized annotation 422s at the
 // apiserver and loops the reconcile.
-test('M-C byte cap: the serialized state never exceeds the byte budget', () => {
+// R1-M1 (zach88): the eviction must budget STATE **and** TARGETS together — the
+// 256KB apiserver cap is on the SUM of all annotations, and serializeState emits
+// both `egress-fqdn-state` and `egress-fqdn-targets` from the same entries. A
+// long-FQDN set that fits under a STATE-only budget can still blow the combined
+// limit and trigger the exact 422 reconcile loop the guard exists to prevent.
+test('R1-M1 byte cap: STATE + TARGETS together never exceed the 256KB apiserver limit', () => {
   const longFqdn = `${'a'.repeat(240)}.example.com` // ~252 chars
   const bigCfg = { overlapMs: 300_000, maxEntries: 4096 } // count cap won't bite first
-  // 900 distinct /32s under the long FQDN ≈ ~300KB if all kept — over the 200KB budget.
   const ips = Array.from({ length: 900 }, (_, i) => `10.${Math.floor(i / 256)}.${i % 256}.1`)
   const out = core.reconcileEgressState(core.emptyState(), [obsOk(longFqdn, ips, TTL, 443)], 1000, bigCfg)
-  const bytes = core.serializeState(out.state)[core.STATE_ANNOTATION].length
-  assert.ok(bytes <= 200 * 1000, `serialized state is ${bytes} bytes, must be <= 200000`)
+  const ann = core.serializeState(out.state)
+  const total = ann[core.STATE_ANNOTATION].length + ann[core.TARGETS_ANNOTATION].length
+  assert.ok(total <= 262144, `STATE+TARGETS = ${total} bytes, must be <= 262144 (256KB)`)
   assert.ok(out.entries.length > 0, 'not everything was evicted')
   assert.ok(out.entries.length < 900, 'byte-budget eviction dropped the overflow')
   assert.equal(out.overCap, true, 'overCap flags the eviction for the alarm/metric')

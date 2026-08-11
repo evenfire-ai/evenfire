@@ -33,7 +33,7 @@ describe('external egress sliding-window config (issue #299)', () => {
     expect(config.externalEgressMaxEntries).toBe(128)
   })
 
-  it('accepts a valid floor <= interval < overlap triple', async () => {
+  it('accepts a valid floor <= interval <= overlap/2 triple', async () => {
     const { config } = await loadConfig({
       HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC: '10',
       HCC_EXTERNAL_EGRESS_RESYNC_SEC: '30',
@@ -44,7 +44,7 @@ describe('external egress sliding-window config (issue #299)', () => {
     expect(config.externalEgressOverlapSec).toBe(120)
   })
 
-  it('fails loud when the refresh interval is NOT below the overlap', async () => {
+  it('fails loud when the refresh interval exceeds half the overlap', async () => {
     await expect(
       loadConfig({
         HCC_EXTERNAL_EGRESS_RESYNC_SEC: '300',
@@ -118,12 +118,26 @@ describe('external egress sliding-window config (issue #299)', () => {
     expect(config.externalEgressResyncIntervalSec).toBe(1800)
   })
 
-  it('fails loud when max entries exceed the 4096 cap (M-C annotation-size bound)', async () => {
-    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '4097' })).rejects.toThrow(/4096/)
+  // R1-M5: the ceiling is 1300 (aligned with WRC); the core's byte-aware
+  // eviction is the real annotation-size bound, not this count.
+  it('fails loud when max entries exceed the 1300 cap (R1-M5, aligned with WRC)', async () => {
+    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '1301' })).rejects.toThrow(/1300/)
   })
 
-  it('accepts max entries exactly at the 4096 cap', async () => {
-    const { config } = await loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '4096' })
-    expect(config.externalEgressMaxEntries).toBe(4096)
+  it('accepts max entries exactly at the 1300 cap', async () => {
+    const { config } = await loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '1300' })
+    expect(config.externalEgressMaxEntries).toBe(1300)
+  })
+
+  // R1-L1: the four knobs use a LOUD parser that rejects non-canonical values,
+  // not parseInt (which silently coerces '60.5'->60 / '60abc'->60 and lets an
+  // in-range typo slip past the range invariant).
+  it('R1-L1: fails loud on a non-integer knob value instead of silently coercing', async () => {
+    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_RESYNC_SEC: '60.5' })).rejects.toThrow(
+      /HCC_EXTERNAL_EGRESS_RESYNC_SEC/
+    )
+    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '300abc' })).rejects.toThrow(
+      /HCC_EXTERNAL_EGRESS_OVERLAP_SEC/
+    )
   })
 })

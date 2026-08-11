@@ -420,7 +420,7 @@ export function recipeHasExternalExactHostEgress(recipe: WorkflowRecipeCRD): boo
  * issue #299 §3.2/§5 — the external-egress refresh cadence in ms.
  *
  * `clamp(refreshInterval, floor)`: never tick faster than the floor. `loadConfig`
- * already enforces `floor <= interval < overlap`, but clamping here keeps the
+ * already enforces `floor <= interval <= overlap/2`, but clamping here keeps the
  * timer correct even if a caller passes an unvalidated config (tests, future
  * callers), so a sub-floor interval can never turn the timer into a busy loop.
  */

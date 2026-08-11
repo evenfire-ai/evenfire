@@ -48,22 +48,24 @@ const mocks = vi.hoisted(() => {
   }
 })
 
-vi.mock('./config', () => ({
-  config: {
-    devMode: false,
-    namespace: 'mcp-server',
-    hostNamespace: 'mcp-host',
-    rpcProxyNamespace: 'rpc-proxy',
-    channelsNamespace: 'channels',
-    port: 8081,
-    runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
-    hostK8sRequestTimeoutMs: 30_000,
-    hostResyncIntervalSec: 0,
-    externalEgressResyncIntervalSec: 0,
-    controlApiBaseUrl: 'http://control-api.test:8090',
-    governedTracingEnabled: false,
-  },
+// Mutable so a test can enable the external-egress resync timer (R1-M4); every
+// other test keeps externalEgressResyncIntervalSec: 0 (reset in afterEach).
+const mockConfig = vi.hoisted(() => ({
+  devMode: false,
+  namespace: 'mcp-server',
+  hostNamespace: 'mcp-host',
+  rpcProxyNamespace: 'rpc-proxy',
+  channelsNamespace: 'channels',
+  port: 8081,
+  runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
+  hostK8sRequestTimeoutMs: 30_000,
+  hostResyncIntervalSec: 0,
+  externalEgressResyncIntervalSec: 0,
+  externalEgressRefreshFloorSec: 5,
+  controlApiBaseUrl: 'http://control-api.test:8090',
+  governedTracingEnabled: false,
 }))
+vi.mock('./config', () => ({ config: mockConfig }))
 
 vi.mock('./administrativeOutcomeReporter', () => ({
   createAdministrativeOutcomeReporter: mocks.createAdministrativeOutcomeReporter,
@@ -222,11 +224,58 @@ describe('McpServerWatcher startup', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    mockConfig.externalEgressResyncIntervalSec = 0 // R1-M4: keep the timer off by default
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
     mocks.netPolFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.serverFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.sfsFullReconcile.mockReset().mockResolvedValue(undefined)
+  })
+
+  // R1-M4 (zach88): the self-rescheduling resync timer (only the pure delay
+  // helper was covered). Assert the behavioral invariants the comments promise:
+  // arms once, reschedules only AFTER a pass resolves, and stop() ends the chain.
+  it('R1-M4: external-egress resync timer arms once, reschedules after each pass, and stops', async () => {
+    vi.useFakeTimers()
+    mockConfig.externalEgressResyncIntervalSec = 60
+    const watcher = new McpServerWatcher()
+    for (const m of [
+      'startMcpServerWatch',
+      'startContextWatch',
+      'startSharedFileSystemWatch',
+      'startGlobalFileSystemWatch',
+      'startCommunicationChannelWatch',
+    ]) {
+      vi.spyOn(watcher as any, m).mockImplementation(async () => undefined)
+    }
+    // Control each resync pass's completion so we can prove the reschedule waits.
+    let pending = deferred()
+    const runSpy = vi
+      .spyOn(watcher as any, 'runExternalEgressResync')
+      .mockImplementation(() => pending.promise)
+
+    await watcher.start()
+    expect(runSpy).not.toHaveBeenCalled() // not until the first delay elapses
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runSpy).toHaveBeenCalledTimes(1) // armed once, fired once
+
+    // The NEXT pass must not be scheduled until this one resolves.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runSpy).toHaveBeenCalledTimes(1) // still 1 — no overlap while pending
+
+    pending.resolve()
+    await Promise.resolve()
+    pending = deferred()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runSpy).toHaveBeenCalledTimes(2) // rescheduled after the pass resolved
+
+    // stop() ends the chain — no further fires.
+    watcher.stop()
+    pending.resolve()
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(60_000 * 5)
+    expect(runSpy).toHaveBeenCalledTimes(2)
   })
 
   it('passes the governed tracing switch to the administrative reporter factory', () => {

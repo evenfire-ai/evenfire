@@ -19,8 +19,8 @@
  * Guarantees delegated to the core (see plan §0/§3/§5):
  *  - H1 fail-static: a `transient` resolver failure FREEZES that FQDN's entries
  *    (never prunes them while DNS is failing) and surfaces it in `frozenFqdns`.
- *  - H3 eviction: on overflow, evict soonest-to-expire, NEVER reject/truncate.
- *  - H4 no-op: `changed` is over (ip,port,protocol) only — a timestamp-only
+ *  - H3 eviction: on overflow, evict least-recently-observed (soonest-to-expire is only a tiebreak), NEVER reject/truncate.
+ *  - H4 no-op: `changed` is over (fqdn,ip,port,protocol) only — a timestamp-only
  *    refresh writes nothing.
  *  - H5 rehydration: previous state is parsed from the policy's annotations; an
  *    unparseable/legacy format is NOT collapsed to an empty set.
@@ -63,7 +63,7 @@ export interface AccumulateOutput {
   resolved: ResolvedExternalEgressInput[]
   /** Annotations to stamp on the policy: serialized state + resolved-at. */
   annotations: Record<string, string>
-  /** True iff the (ip,port,protocol) set changed vs the previous state. */
+  /** True iff the (fqdn,ip,port,protocol) set changed vs the previous state. */
   changed: boolean
   /** True iff the persisted window is aging and must be re-persisted (audit M1). */
   renewalDue: boolean

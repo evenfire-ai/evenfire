@@ -3896,6 +3896,113 @@ describe('WorkflowRecipeReconciler', () => {
     expect(wroteUiEgress).toBe(true)
   })
 
+  // R1-M2 (zach88): an internal-only ui-egress policy (no external[]) must reach
+  // the no-op gate on an unchanged reconcile. Before the fix the live-policy read
+  // sat inside the externals-only branch, so `existing` stayed null and the policy
+  // was rewritten every reconcile (amplified for mixed recipes by the 60s refresh).
+  it('R1-M2: an internal-only ui-egress policy is a no-op on the second reconcile', async () => {
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {})
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [
+          { id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 },
+          { id: 'backend', type: 'deployment', image: 'be:1', port: 9090 },
+        ],
+        ui: {
+          workloadRef: 'frontend',
+          port: 8080,
+          egress: { internal: [{ workloadRef: 'backend', port: 9090 }] },
+        },
+      },
+    })
+    await rec.reconcile(recipe)
+    const p1 = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => c[0].body)
+      .find(b => b?.metadata?.name === 'ui-egress-test-recipe')
+    expect(p1).toBeTruthy()
+
+    // The policy is now live; a second identical reconcile must NOT rewrite it.
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
+      Promise.resolve(
+        name === 'ui-egress-test-recipe' ? p1 : { metadata: { name, resourceVersion: '1' } }
+      )
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+    await rec.reconcile(recipe)
+
+    const wroteUiEgress =
+      mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+        c => c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      ) ||
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.some(
+        c =>
+          c[0]?.name === 'ui-egress-test-recipe' ||
+          c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      )
+    expect(wroteUiEgress).toBe(false)
+  })
+
+  // R1-M3 (zach88): the no-op gate must hold when the LIVE policy is apiserver-
+  // shaped — keys reordered ({ports,to} not {to,ports}) and protocol defaulted to
+  // TCP — which is exactly what the canonicalize/egressSignature fix motivates but
+  // R.8.24 (which feeds the builder's own output back) never exercised.
+  it('R1-M3: external egress is a no-op against an apiserver-normalized live policy', async () => {
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
+    })
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+        ui: {
+          workloadRef: 'frontend',
+          port: 8080,
+          egress: { external: [{ fqdn: 'api.example.com', port: 443 }] },
+        },
+      },
+    })
+    await rec.reconcile(recipe)
+    const p1 = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => c[0].body)
+      .find(b => b?.metadata?.name === 'ui-egress-test-recipe')
+    expect(p1).toBeTruthy()
+
+    // Reshape p1 the way the apiserver returns it: reorder each rule's keys and
+    // inject protocol:'TCP' on ports. The state annotation is preserved.
+    const live = JSON.parse(JSON.stringify(p1))
+    live.spec.egress = (live.spec.egress ?? []).map((rule: Record<string, unknown>) => ({
+      ports: ((rule.ports as Array<Record<string, unknown>>) ?? []).map(pt => ({
+        protocol: pt.protocol ?? 'TCP',
+        port: pt.port,
+      })),
+      to: (rule.to as Array<Record<string, unknown>>) ?? [],
+    }))
+
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
+      Promise.resolve(
+        name === 'ui-egress-test-recipe' ? live : { metadata: { name, resourceVersion: '1' } }
+      )
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+    await rec.reconcile(recipe) // identical resolver output → same set → no-op
+
+    const wrote =
+      mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+        c => c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      ) ||
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.some(
+        c =>
+          c[0]?.name === 'ui-egress-test-recipe' ||
+          c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      )
+    expect(wrote).toBe(false)
+  })
+
   it('fails sandbox UI external egress in required mode when cluster enforcement is not confirmed', async () => {
     const recipe = makeRecipe({
       spec: {

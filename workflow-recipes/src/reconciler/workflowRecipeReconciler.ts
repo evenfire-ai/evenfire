@@ -3985,10 +3985,15 @@ export class WorkflowRecipeReconciler {
     // annotation and losing the overlap grace when the new name later rotates.
     // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
     let egressStateChanged = false
+    // R1-M2: read the live policy for ALL cases, not only external egress, so an
+    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
+    // hit the no-op gate below instead of being rewritten on every reconcile —
+    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
+    // external egress it also seeds the accumulator's rehydration (H5).
+    existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
-      existing = await this.readNetworkPolicyOrNull(policyName, ns)
       const acc = accumulateExternalEgress({
         externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
         resolveResult: { resolved, failures },
@@ -4439,9 +4444,12 @@ export class WorkflowRecipeReconciler {
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
       const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
+      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
+      // local) workload egress policy hits the no-op gate instead of churning
+      // every reconcile; for external egress it also seeds rehydration (H5).
+      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
-        existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
         const acc = accumulateExternalEgress({
           externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
           resolveResult: { resolved: resolvedExternal, failures },
@@ -4607,10 +4615,14 @@ export class WorkflowRecipeReconciler {
       return true
     }
     // Rules are identical. Persist the new-format state annotation exactly once to
-    // migrate a policy that predates it, so a controller restart can rehydrate
-    // the accumulated window; thereafter (annotation present, egress unchanged)
-    // it is a no-op.
-    return !existing.metadata?.annotations?.[STATE_ANNOTATION]
+    // migrate an EXTERNAL-egress policy that predates it, so a controller restart
+    // can rehydrate the accumulated window; thereafter (annotation present, egress
+    // unchanged) it is a no-op. R1-M2: gate on the DESIRED carrying a state
+    // annotation — an internal-only policy never has one, so without this guard it
+    // would return true forever and be rewritten every reconcile (mirrors HCC's
+    // externalEgressWriteNeeded).
+    const desiredState = desired.metadata?.annotations?.[STATE_ANNOTATION]
+    return Boolean(desiredState) && !existing.metadata?.annotations?.[STATE_ANNOTATION]
   }
 
   /**

@@ -86,8 +86,10 @@ export interface OperatorConfig {
   // externalEgressAccumulator). `overlap` is the grace kept after the DNS TTL;
   // `refreshInterval` is the periodic requeue backstop; `refreshFloor` clamps
   // the TTL-aware advance so a TTL=0/1 cannot hot-loop; `maxEntries` is the
-  // per-policy alarm cap (evict, never reject). Invariant enforced at startup:
-  // floor <= interval < overlap.
+  // per-policy alarm cap across ALL declared FQDNs of the recipe (evict, never
+  // reject) — HCC's identical knob is per-FQDN since HCC writes one policy per
+  // binding (R1-L2). Invariant enforced at startup: floor <= interval <=
+  // overlap/2 (the renewal-write window is only overlap/2 wide, R1-M6).
   externalEgressOverlapSeconds: number
   externalEgressRefreshIntervalSeconds: number
   externalEgressRefreshFloorSeconds: number
@@ -134,9 +136,11 @@ export const MIN_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 1
 export const MAX_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 60 * 60
 export const DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES = 128
 export const MIN_EXTERNAL_EGRESS_MAX_ENTRIES = 8
-// Audit L2: at ~150 B/entry across the state + targets annotations, the cap must
-// stay well under Kubernetes' 256KB total-annotation limit or the write fails
-// permanently with a 422. 1300 entries ~= 195KB, a safe ceiling (default is 128).
+// Audit L2 + R1-M1: this is a coarse COUNT alarm cap (default 128). The real
+// bound on annotation size — STATE **and** TARGETS together under Kubernetes'
+// 256KB total-annotation limit — is enforced by the core's byte-aware eviction
+// (MAX_ANNOTATION_BYTES in network-policy-core), which trims long-FQDN sets well
+// before 1300. Kept equal to HCC's ceiling so the two controllers can't drift.
 export const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {

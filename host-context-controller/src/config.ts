@@ -246,6 +246,26 @@ function getEnvInt(key: string, defaultValue: number): number {
 }
 
 /**
+ * Loud integer env parser for the external-egress knobs (audit R1-L1). Unlike
+ * getEnvInt (parseInt), this rejects non-canonical values instead of silently
+ * coercing them: '60.5'->60 or '60abc'->60 would pass getEnvInt AND the
+ * range invariant (which re-checks the already-truncated value), letting an
+ * in-range typo through quietly. Canonical unsigned base-10 only; empty -> default.
+ */
+function getExternalEgressEnvInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be an unsigned base-10 integer (seconds), got '${raw}'`)
+  }
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${key} is out of the safe integer range, got '${raw}'`)
+  }
+  return parsed
+}
+
+/**
  * CONTEXT_MAPPER_HEARTBEAT_POLL_MS — cadence of HCC's control-api heartbeat
  * poll. Fails config load loudly on a non-positive-integer value: a silent
  * default over garbage would hide a typo'd cadence in production.
@@ -385,19 +405,23 @@ validateRemovedStatelessCommunicationChannelPolicy(
 /**
  * Enforce the external-egress sliding-window invariant (issue #299):
  *   refreshFloor >= 1, overlap > 0, maxEntries >= 1, and when the periodic
- *   resync is enabled (interval > 0): floor <= interval < overlap.
- * The interval MUST stay below the overlap so an accumulated /32 is refreshed
- * before it can expire; otherwise a gap reopens and the pod loses egress on the
- * next rotation. Fails loud at startup rather than degrading silently.
+ *   resync is enabled (interval > 0): floor <= interval <= overlap/2.
+ * The interval MUST stay at or below HALF the overlap so an accumulated /32 is
+ * refreshed before it can expire (the renewal-write window is only overlap/2
+ * wide); otherwise a gap reopens and the pod loses egress on the next rotation.
+ * Fails loud at startup rather than degrading silently.
  */
 // Upper bounds (audit M-C, port of commit 3f968956). The one-hour cadence
 // ceiling keeps every timer far below Node's signed-32-bit setTimeout limit
 // (2^31-1 ms ≈ 24.8 days) — an unbounded seconds value multiplied to ms would
 // overflow and Node clamps it to 1ms, turning the self-rescheduling resync into
-// a back-to-back DNS hot loop. The 4096 entry ceiling bounds the serialized
-// state annotation and matches WRC's accumulator contract.
+// a back-to-back DNS hot loop. The entry ceiling is a coarse COUNT alarm cap
+// matching WRC (1300); the real bound on the annotation size is the core's
+// byte-aware eviction (MAX_ANNOTATION_BYTES in network-policy-core), which trims
+// long-FQDN sets well before this count is reached (R1-M5 — the previous 4096
+// claim of "matches WRC" was false; WRC is 1300 and 4096 never bounds bytes).
 const MAX_EXTERNAL_EGRESS_CADENCE_SEC = 60 * 60
-const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 4096
+const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
 
 export function validateExternalEgressResyncInvariant(cfg: {
   externalEgressResyncIntervalSec: number
@@ -689,10 +713,13 @@ export const config: Config = {
   // it sits below the 300s overlap window: accumulated IPs are refreshed before
   // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
   // stale-snapshot risk; only for operators who explicitly opt out).
-  externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
-  externalEgressOverlapSec: getEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
-  externalEgressRefreshFloorSec: getEnvInt('HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC', 5),
-  externalEgressMaxEntries: getEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
+  externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
+  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressRefreshFloorSec: getExternalEgressEnvInt(
+    'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',
+    5
+  ),
+  externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
   // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).

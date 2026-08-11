@@ -60,7 +60,7 @@ export interface AccumulateHostEgressOutput {
   cidrs: string[]
   /** Annotations to stamp on the policy: serialized state + resolved-at. */
   annotations: Record<string, string>
-  /** True iff the (ip,port,protocol) set changed vs the previous state. */
+  /** True iff the (fqdn,ip,port,protocol) set changed vs the previous state. */
   changed: boolean
   /** True iff the persisted window is aging and must be re-persisted (audit M1). */
   renewalDue: boolean
