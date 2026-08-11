@@ -76,6 +76,14 @@ After PostgreSQL is recreated and Ready, all reset paths call the single
 `converge-control-db-after-reset.sh` entrypoint. It applies migrations,
 reconciles runtime roles, waits for Control API, opts into
 `GFS_RESTORE_ACTIVE_NOLOGIN=true`, and runs the real Service/SCRAM verifier.
+Every initial or `replacement-bound` convergence attempt first scales Control
+API to zero and waits for its Pods to terminate. PostgreSQL connection strings
+are Secret-backed environment variables captured at Pod creation, so patching
+the runtime Secret cannot repair a container that started with the pre-reset
+credential. Runtime roles and Secrets are reconciled only behind that fence;
+the saved replica count is then restored, creating Pods with the current DSN.
+Any later convergence failure reasserts the Control API fence together with the
+other database-dependent controllers.
 That reset-only restoration requires lifecycle `ready`, no candidate, the
 exact disabled-role privilege contract, and the unchanged committed DSN;
 normal deploys cannot reactivate a disabled role. The shared sequence is used

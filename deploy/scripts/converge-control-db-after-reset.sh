@@ -123,6 +123,7 @@ fail_closed() {
   if [ "$CONVERGED" != true ]; then
     set +e
     scale_rc=0
+    kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/workflow-recipes deployment/trace-maintenance-worker --replicas=0 >/dev/null || scale_rc=1
     kc -n gfs scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0 >/dev/null || scale_rc=1
@@ -154,6 +155,8 @@ esac
 # Revalidate the bound replacement and exact runtime, then retry cleanup without
 # rerunning migrations or rotating credentials.
 if [ "$STATE_PHASE" = converged ]; then
+  kc -n control-plane scale deployment/control-api --replicas="$CONTROL_API_REPLICAS" >/dev/null
+  kc -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
   kc -n gfs scale deployment/gfsc-writer --replicas="$WRITER_REPLICAS" >/dev/null
   kc -n gfs scale deployment/gfsc-reader --replicas="$READER_REPLICAS" >/dev/null
   kc -n gfs rollout status deployment/gfsc-writer --timeout=180s >/dev/null
@@ -178,6 +181,16 @@ if [ "$STATE_PHASE" = converged ]; then
   exit 0
 fi
 
+# Secret-backed environment variables are captured when a Pod is created; a
+# Secret patch does not update an existing container. Reassert this fence on
+# every replacement-bound retry, not only in the destructive reset process, so
+# no stale control-api Pod can survive runtime-role credential reconciliation.
+kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null
+CONTROL_API_PODS="$(kc -n control-plane get pods -l app=control-api -o name)"
+if [ -n "$CONTROL_API_PODS" ]; then
+  kc -n control-plane wait --for=delete pod \
+    -l app=control-api --timeout=180s >/dev/null
+fi
 kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
 HCC_PODS="$(kc -n control-plane get pods -l app=host-context-controller -o name)"
 if [ -n "$HCC_PODS" ]; then
