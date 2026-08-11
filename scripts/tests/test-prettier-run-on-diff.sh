@@ -233,13 +233,13 @@ head="$(sha_of "$fixture")"
 zero=0000000000000000000000000000000000000000
 missing=1111111111111111111111111111111111111111
 expect_diff_failure 'all-zero base fails closed' "$fixture" "$zero" "$head" direct
-if rg -q 'bounded incoming diff' "$TEST_ROOT/output.txt"; then
+if grep -q 'bounded incoming diff' "$TEST_ROOT/output.txt"; then
   pass 'all-zero base explains the bounded-range refusal'
 else
   fail 'all-zero base explains the bounded-range refusal'
 fi
 expect_diff_failure 'unavailable base fails closed' "$fixture" "$missing" "$head" direct
-if rg -q 'unavailable' "$TEST_ROOT/output.txt"; then
+if grep -q 'unavailable' "$TEST_ROOT/output.txt"; then
   pass 'unavailable base explains how to recover'
 else
   fail 'unavailable base explains how to recover'
@@ -251,7 +251,7 @@ git -C "$fixture" remote add origin "$remote"
 if (cd "$fixture" && bash "$REPO_ROOT/scripts/ci/fetch-bounded-commits.sh" \
     "$missing" "$head" >"$TEST_ROOT/output.txt" 2>&1); then
   fail 'workflow fetch helper fails closed when the remote lacks the base'
-elif rg -q 'Cannot determine a bounded incoming diff: base commit .* is unavailable' \
+elif grep -q 'Cannot determine a bounded incoming diff: base commit .* is unavailable' \
     "$TEST_ROOT/output.txt"; then
   pass 'workflow fetch helper names an unavailable bounded-range base'
 else
@@ -285,7 +285,7 @@ git -C "$fixture" add -- control-api/src/staged.ts
 if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
   && [ "$(git -C "$fixture" diff --name-only)" = '' ] \
   && [ "$(git -C "$fixture" diff --cached --name-only)" = 'control-api/src/staged.ts' ] \
-  && rg -q '^export const staged = \{ value: 1 \}$' "$fixture/control-api/src/staged.ts"; then
+  && grep -Fq 'export const staged = { value: 1 }' "$fixture/control-api/src/staged.ts"; then
   pass 'staged formatter still writes and restages exactly its eligible file'
 else
   fail 'staged formatter still writes and restages exactly its eligible file'
@@ -297,7 +297,7 @@ git -C "$fixture" add -- gfs-controller/src/ci-only.ts
 before_blob="$(git -C "$fixture" show :gfs-controller/src/ci-only.ts)"
 if (cd "$fixture" && node scripts/prettier/run-on-staged.mjs >/dev/null 2>&1) \
   && [ "$(git -C "$fixture" show :gfs-controller/src/ci-only.ts)" = "$before_blob" ] \
-  && rg -q '^export const ciOnly=\{value:1\}$' "$fixture/gfs-controller/src/ci-only.ts"; then
+  && grep -Fq 'export const ciOnly={value:1}' "$fixture/gfs-controller/src/ci-only.ts"; then
   pass 'CI-only roots do not expand the staged formatter scope'
 else
   fail 'CI-only roots do not expand the staged formatter scope'

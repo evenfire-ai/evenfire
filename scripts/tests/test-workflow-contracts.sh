@@ -30,7 +30,7 @@ perl -0pi -e 's/(name: Prettier \(incoming files\).*?permissions:\n)(\s+contents
 if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$mismatch_root" \
     >"$TEST_ROOT/mismatch.out" 2>&1; then
   fail 'permission-ceiling mutation is rejected'
-elif rg -q 'prettier-source-preflight.*actions permission|requests actions: read' \
+elif grep -Eq 'prettier-source-preflight.*actions permission|requests actions: read' \
     "$TEST_ROOT/mismatch.out"; then
   pass 'permission-ceiling mutation is rejected'
 else
@@ -45,7 +45,7 @@ perl -0pi -e 's/(mode: \$\{\{ github\.event_name == .+?\}\}\n)/$1      undeclare
 if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$input_root" \
     >"$TEST_ROOT/input.out" 2>&1; then
   fail 'undeclared-input mutation is rejected'
-elif rg -q 'supplies undeclared input undeclared_input' "$TEST_ROOT/input.out"; then
+elif grep -q 'supplies undeclared input undeclared_input' "$TEST_ROOT/input.out"; then
   pass 'undeclared-input mutation is rejected'
 else
   sed -n '1,120p' "$TEST_ROOT/input.out" >&2
@@ -59,7 +59,7 @@ perl -0pi -e 's/\n      - name: Require successful CI push run for exact SHA.*?(
 if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$helper_root" \
     >"$TEST_ROOT/helper.out" 2>&1; then
   fail 'missing-provenance-helper mutation is rejected'
-elif rg -q 'must invoke the trusted exact-SHA CI helper' "$TEST_ROOT/helper.out"; then
+elif grep -q 'must invoke the trusted exact-SHA CI helper' "$TEST_ROOT/helper.out"; then
   pass 'missing-provenance-helper mutation is rejected'
 else
   sed -n '1,120p' "$TEST_ROOT/helper.out" >&2

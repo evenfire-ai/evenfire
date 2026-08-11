@@ -9,7 +9,7 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; FAIL=1; }
 
 assert_fixed() {
   local label=$1 pattern=$2 file=$3
-  if rg -Fq -- "$pattern" "$REPO_ROOT/$file"; then
+  if grep -Fq -- "$pattern" "$REPO_ROOT/$file"; then
     pass "$label"
   else
     fail "$label"
@@ -18,7 +18,7 @@ assert_fixed() {
 
 assert_absent() {
   local label=$1 pattern=$2 file=$3
-  if rg -Fq -- "$pattern" "$REPO_ROOT/$file"; then
+  if grep -Fq -- "$pattern" "$REPO_ROOT/$file"; then
     fail "$label"
   else
     pass "$label"
@@ -119,14 +119,14 @@ for job in \
     found && /^  [A-Za-z0-9_-]+:/ { exit }
     found { print }
   ' "$REPO_ROOT/.github/workflows/ci-public.yml")"
-  if printf '%s\n' "$block" | rg -q '^    needs: prettier$'; then
+  if printf '%s\n' "$block" | grep -q '^    needs: prettier$'; then
     pass "CI job $job depends on Prettier"
   else
     fail "CI job $job depends on Prettier"
   fi
 done
 
-if rg -q -- '--write' \
+if grep -q -- '--write' \
   "$REPO_ROOT/.github/workflows/prettier-source-preflight.yml" \
   "$REPO_ROOT/scripts/prettier/run-on-diff.mjs"; then
   fail 'CI preflight never invokes Prettier with --write'
