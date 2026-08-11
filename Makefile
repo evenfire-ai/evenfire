@@ -67,7 +67,8 @@ TEST_SERVICES := \
 	mcp-servers \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
-	packages/workflow-sdk
+	packages/workflow-sdk \
+	packages/network-policy-core
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra

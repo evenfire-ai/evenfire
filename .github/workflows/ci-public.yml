@@ -79,6 +79,7 @@ jobs:
           - packages/desktop-app-links
           - packages/workflow-runtime-core
           - packages/workflow-sdk
+          - packages/network-policy-core
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -124,8 +125,11 @@ jobs:
       # project and just prints its help text. Adding a strict root tsconfig surfaces
       # ~10 pre-existing type errors in its __tests__ — worth fixing, but as its own
       # change rather than smuggled into a CI-coverage PR.
+      # network-policy-core is a hand-authored .cjs + .d.ts with no tsconfig, so
+      # `tsc --noEmit` resolves no project (like mcp-servers). Its .d.ts is kept
+      # aligned with the runtime by the "runtime exports stay aligned" node:test.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/network-policy-core'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 

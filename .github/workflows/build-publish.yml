@@ -149,6 +149,7 @@ jobs:
               - 'host-context-controller/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
+              - 'packages/network-policy-core/**'
             mcp-host:
               - 'mcp-host/**'
             mcp-proxy:
@@ -168,6 +169,7 @@ jobs:
               - 'packages/workflow-sdk/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
+              - 'packages/network-policy-core/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:
