@@ -138,7 +138,7 @@ export function enforcePolicy(
     }
 
     if (gov?.requiredSecurityLevel) {
-      const recipeLevel = recipe.spec.security?.isolationLevel ?? 'minimal'
+      const recipeLevel = recipe.spec.security?.isolationLevel ?? 'standard'
       if (SECURITY_LEVELS[recipeLevel] < SECURITY_LEVELS[gov.requiredSecurityLevel]) {
         violations.push({
           policy: policyName,

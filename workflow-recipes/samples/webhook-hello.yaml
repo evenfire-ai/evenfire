@@ -11,6 +11,9 @@ spec:
     default config — a 200 response from the default welcome page is
     enough to prove the verify+forward pipeline. Headers sent by the
     gateway show up in the nginx access log.
+  # nginx-unprivileged needs a writable rootfs; opt out of the platform 'standard' default.
+  security:
+    isolationLevel: minimal
   workloads:
     - id: handler
       type: deployment

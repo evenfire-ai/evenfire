@@ -130,11 +130,20 @@ describe('policyEnforcer.enforcePolicy', () => {
     expect(result[0].message).toContain('strict')
   })
 
-  it('defaults to minimal when recipe has no security config', () => {
-    const policy = makePolicy({ governance: { requiredSecurityLevel: 'standard' } })
-    const result = enforcePolicy(makeRecipe(), [policy])
-    expect(result).toHaveLength(1)
-    expect(result[0].rule).toBe('requiredSecurityLevel')
+  it('defaults to standard when recipe has no security config', () => {
+    // A recipe that omits spec.security now defaults to 'standard' (non-root +
+    // read-only rootfs), so it satisfies a 'standard' floor but not 'strict'.
+    const meetsStandard = enforcePolicy(makeRecipe(), [
+      makePolicy({ governance: { requiredSecurityLevel: 'standard' } }),
+    ])
+    expect(meetsStandard).toEqual([])
+
+    const belowStrict = enforcePolicy(makeRecipe(), [
+      makePolicy({ governance: { requiredSecurityLevel: 'strict' } }),
+    ])
+    expect(belowStrict).toHaveLength(1)
+    expect(belowStrict[0].rule).toBe('requiredSecurityLevel')
+    expect(belowStrict[0].message).toContain('standard')
   })
 
   // ── imageDenylist ────────────────────────────────────────────

@@ -4,6 +4,9 @@ metadata:
   name: agentic-workload-template-resolution
 spec:
   description: Agentic workflow sample that validates workload env/command/args template resolution.
+  # busybox/postgres need root/writable rootfs; opt out of the platform 'standard' default.
+  security:
+    isolationLevel: minimal
   agent:
     provider: zai
     model: glm-4.7
