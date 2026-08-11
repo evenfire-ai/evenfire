@@ -206,6 +206,8 @@ export class AccessExecutionBudget {
   private readonly reservedFromParent: AccessBudgetReservation
   private readonly reservationParentCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null
   private timer?: ReturnType<typeof setTimeout>
+  private parentSignal?: AbortSignal
+  private parentAbortListener?: () => void
 
   private constructor(
     private readonly shared: SharedAccessBudgetState,
@@ -246,9 +248,10 @@ export class AccessExecutionBudget {
     if (options.parentSignal) {
       if (options.parentSignal.aborted) controller.abort('cancelled')
       else {
-        options.parentSignal.addEventListener('abort', () => controller.abort('cancelled'), {
-          once: true,
-        })
+        const onParentAbort = () => controller.abort('cancelled')
+        budget.parentSignal = options.parentSignal
+        budget.parentAbortListener = onParentAbort
+        options.parentSignal.addEventListener('abort', onParentAbort, { once: true })
       }
     }
     return budget
@@ -382,6 +385,11 @@ export class AccessExecutionBudget {
     this.closed = true
     if (!this.localCounters) {
       if (this.timer) clearTimeout(this.timer)
+      if (this.parentSignal && this.parentAbortListener) {
+        this.parentSignal.removeEventListener('abort', this.parentAbortListener)
+        this.parentSignal = undefined
+        this.parentAbortListener = undefined
+      }
       this.shared.controller.abort('closed')
       return
     }
