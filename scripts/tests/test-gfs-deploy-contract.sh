@@ -62,7 +62,7 @@ done
 migration="$(grep -n 'run-control-api-db-migration.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 roles="$(grep -n 'provision-control-api-runtime-roles.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 control_zero="$(grep -n 'scale deployment/control-api --replicas=0' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
-control_wait="$(grep -n -- '-l app=control-api --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | head -1 | cut -d: -f1)"
+control_wait="$(grep -n -- '-l app=control-api --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 control_restore="$(grep -n 'scale deployment/control-api --replicas="\$CONTROL_API_REPLICAS"' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 restore="$(grep -n 'GFS_RESTORE_ACTIVE_NOLOGIN=true' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"

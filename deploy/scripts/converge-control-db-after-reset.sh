@@ -119,16 +119,23 @@ delete_reset_state() {
 
 CONVERGED=false
 fail_closed() {
-  local rc=$? scale_rc
+  local rc=$? scale_rc control_api_pods
   if [ "$CONVERGED" != true ]; then
     set +e
     scale_rc=0
+    control_api_pods=""
     kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/workflow-recipes deployment/trace-maintenance-worker --replicas=0 >/dev/null || scale_rc=1
     kc -n gfs scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0 >/dev/null || scale_rc=1
+    if ! control_api_pods="$(kc -n control-plane get pods -l app=control-api -o name)"; then
+      scale_rc=1
+    elif [ -n "$control_api_pods" ]; then
+      kc -n control-plane wait --for=delete pod \
+        -l app=control-api --timeout=180s >/dev/null || scale_rc=1
+    fi
     printf '[converge-control-db-after-reset] ERROR: convergence failed; DB-dependent controllers remain scaled to zero' >&2
-    [ "$scale_rc" -eq 0 ] || printf ' (failed to confirm fail-closed scale)' >&2
+    [ "$scale_rc" -eq 0 ] || printf ' (failed to confirm fail-closed quiescence)' >&2
     printf '\n' >&2
   fi
   trap - EXIT

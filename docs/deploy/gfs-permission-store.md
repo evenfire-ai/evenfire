@@ -83,7 +83,8 @@ the runtime Secret cannot repair a container that started with the pre-reset
 credential. Runtime roles and Secrets are reconciled only behind that fence;
 the saved replica count is then restored, creating Pods with the current DSN.
 Any later convergence failure reasserts the Control API fence together with the
-other database-dependent controllers.
+other database-dependent controllers and waits for the Control API Pods to
+terminate before returning.
 That reset-only restoration requires lifecycle `ready`, no candidate, the
 exact disabled-role privilege contract, and the unchanged committed DSN;
 normal deploys cannot reactivate a disabled role. The shared sequence is used

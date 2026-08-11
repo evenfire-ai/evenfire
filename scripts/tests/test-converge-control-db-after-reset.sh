@@ -153,6 +153,8 @@ fi
   || { printf 'FAIL: failure did not reassert the zero-replica state\n' >&2; exit 1; }
 [[ "$(grep -c 'scale deployment/control-api --replicas=0' "$LOG")" -eq 2 ]] \
   || { printf 'FAIL: failure did not reassert the control-api writer fence\n' >&2; exit 1; }
+[[ "$(grep -c 'wait --for=delete pod -l app=control-api' "$LOG")" -eq 2 ]] \
+  || { printf 'FAIL: failure returned before confirming control-api pod termination\n' >&2; exit 1; }
 ! grep -q 'scale deployment/gfsc-writer --replicas=3' "$LOG" \
   || { printf 'FAIL: writer replicas were restored after failure\n' >&2; exit 1; }
 ! grep -q 'scale deployment/gfsc-reader --replicas=2' "$LOG" \
