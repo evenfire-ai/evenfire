@@ -5,6 +5,7 @@ import {
   resolveLiveAuthorizationInTransaction,
 } from '../src/services/access/liveAuthorizationResolver.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import { K8sNotFoundError } from '../src/services/resourceService.js'
 
 const host = canonicalResourceIdentity({
   environmentId: 'cluster-a',
@@ -47,6 +48,26 @@ function dbFor(grants: Record<string, unknown>[], principal = principalRow()) {
 }
 
 describe('live authorization resolver', () => {
+  it('maps the repository Kubernetes not-found exception to a stable not-found result', async () => {
+    const result = await resolveLiveAuthorization(
+      {
+        principalUserId: '00000000-0000-4000-8000-000000000001',
+        requiredCapability: 'host.read',
+        resource: host,
+      },
+      {
+        gateway: {
+          getResource: vi.fn(async () => {
+            throw new K8sNotFoundError('host was deleted')
+          }),
+          listResource: vi.fn(),
+        },
+      }
+    )
+
+    expect(result).toEqual({ status: 'not_found', code: 'not_found' })
+  })
+
   it('uses every current membership and retains all direct/team provenance', async () => {
     const direct = {
       kind: 'direct',

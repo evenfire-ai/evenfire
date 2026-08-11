@@ -138,6 +138,7 @@ function operationalErrorIsNotFound(error: unknown): boolean {
       : null
   return (
     record.statusCode === 404 ||
+    record.httpStatus === 404 ||
     record.code === 404 ||
     response?.statusCode === 404 ||
     body?.code === 404
