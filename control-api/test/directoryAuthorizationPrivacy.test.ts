@@ -178,6 +178,18 @@ describe('directory privacy and atomic authorization', () => {
   })
 
   it('omits the invitation capability from managed creation results', async () => {
+    let transactionDepth = 0
+    mocks.withTransaction.mockImplementation(async work => {
+      transactionDepth += 1
+      try {
+        return await work({ query: mocks.query })
+      } finally {
+        transactionDepth -= 1
+      }
+    })
+    mocks.registerInvitation.mockImplementation(async () => {
+      expect(transactionDepth).toBe(0)
+    })
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
@@ -204,6 +216,13 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 1 }
       if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
       if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
+      if (sql.includes('INSERT INTO invitation_delivery_commands')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000300' }], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_delivery_commands c')) {
+        return { rows: [invitation], rowCount: 1 }
+      }
+      if (sql.includes('UPDATE invitation_delivery_commands')) return { rows: [], rowCount: 1 }
       if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
         return {
           rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
@@ -231,6 +250,77 @@ describe('directory privacy and atomic authorization', () => {
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(sql).not.toContain('UPDATE users')
     expect(sql).not.toContain('INSERT INTO profiles')
+  })
+
+  it('leaves a delivered draft unusable when manager authority changes before activation', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Invitee',
+      email: 'invitee@example.com',
+      role: 'member',
+      token: 'inert-until-activation',
+      status: 'draft',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    let transactionDepth = 0
+    let managerChecks = 0
+    mocks.withTransaction.mockImplementation(async work => {
+      transactionDepth += 1
+      try {
+        return await work({ query: mocks.query })
+      } finally {
+        transactionDepth -= 1
+      }
+    })
+    mocks.registerInvitation.mockImplementation(async () => {
+      expect(transactionDepth).toBe(0)
+    })
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE status = 'draft'")) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
+        managerChecks += 1
+        return managerChecks === 1
+          ? { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      }
+      if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
+      if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
+      if (sql.includes('INSERT INTO invitation_delivery_commands')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000300' }], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_delivery_commands c')) {
+        return { rows: [invitation], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+        return {
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('UPDATE invitation_delivery_commands')) return { rows: [], rowCount: 1 }
+      if (sql.includes("SET status = 'revoked'")) return { rows: [], rowCount: 1 }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    await expect(
+      createManagedInvitationForUser(
+        MANAGER,
+        invitation.email,
+        [{ teamId: TEAM_A, role: 'member' }],
+        ''
+      )
+    ).resolves.toEqual({ error: 'forbidden' })
+
+    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(managerChecks).toBe(2)
+    expect(sql).toContain("SET status = 'revoked'")
+    expect(sql).not.toContain("SET status = 'pending'")
   })
 
   it('does not apply inviter-controlled names to an existing user during acceptance', async () => {
@@ -457,6 +547,58 @@ describe('directory privacy and atomic authorization', () => {
       expect(sql).toContain("AND status = 'pending'")
       expect(sql).not.toContain('SET password_hash')
     }
+  })
+
+  it('sends a managed resend from a durable command without holding authority locks', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Invitee',
+      email: 'invitee@example.com',
+      role: 'member',
+      token: 'invitation-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    let transactionDepth = 0
+    mocks.withTransaction.mockImplementation(async work => {
+      transactionDepth += 1
+      try {
+        return await work({ query: mocks.query })
+      } finally {
+        transactionDepth -= 1
+      }
+    })
+    mocks.registerInvitation.mockImplementation(async () => {
+      expect(transactionDepth).toBe(0)
+    })
+    mocks.query
+      .mockResolvedValueOnce({ rows: [invitation], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ id: '00000000-0000-4000-8000-000000000300' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    await expect(resendManagedInvitationForUser(MANAGER, invitation.id)).resolves.toEqual({
+      resent: true,
+      id: invitation.id,
+      email: invitation.email,
+    })
+    expect(String(mocks.query.mock.calls[3]?.[0])).toContain(
+      'INSERT INTO invitation_delivery_commands'
+    )
+    expect(String(mocks.query.mock.calls[4]?.[0])).toContain('UPDATE invitation_delivery_commands')
   })
 
   it.each(['resend', 'revoke'] as const)(

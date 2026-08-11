@@ -690,6 +690,43 @@ function invitationForTeamsResponse(invitation: InvitationRow, teams: Invitation
   }
 }
 
+async function recordInvitationDeliveryCommand(
+  db: Pick<DbClient, 'query'>,
+  invitationId: string,
+  authorizedBy: string,
+  deliveryKind: 'create' | 'resend'
+): Promise<string> {
+  const result = await db.query(
+    `INSERT INTO invitation_delivery_commands(invitation_id, authorized_by, delivery_kind)
+     VALUES($1, $2, $3)
+     RETURNING id`,
+    [invitationId, authorizedBy.trim(), deliveryKind]
+  )
+  const commandId = String((result.rows[0] as { id?: string } | undefined)?.id || '')
+  if (!commandId) throw new Error('Failed to persist invitation delivery command')
+  return commandId
+}
+
+async function finishInvitationDeliveryCommand(
+  db: Pick<DbClient, 'query'>,
+  commandId: string,
+  status: 'delivered' | 'failed' | 'cancelled',
+  failureCode?: string
+): Promise<void> {
+  const result = await db.query(
+    `UPDATE invitation_delivery_commands
+        SET status = $2,
+            completed_at = NOW(),
+            failure_code = $3
+      WHERE id = $1
+        AND status = 'authorized'`,
+    [commandId, status, failureCode || null]
+  )
+  if ((result.rowCount ?? 0) === 0) {
+    throw new Error('Invitation delivery command is no longer authorized')
+  }
+}
+
 export function externalManagedInvitationResponse(
   invitation: Record<string, unknown>
 ): Record<string, unknown> {
@@ -734,6 +771,82 @@ async function deliverAndActivateInvitation(
     },
     inserted.teams
   )
+}
+
+async function deliverAndActivateManagedInvitation(
+  inserted: InvitationWithTeams,
+  commandId: string,
+  managerUserId: string
+) {
+  try {
+    await registerAndSendInvitation(
+      inserted.invitation.email,
+      inserted.invitation.token,
+      inserted.teams.length > 0
+        ? inserted.teams.map(team => team.team_name).join(', ')
+        : inserted.invitation.team_name,
+      inserted.invitation.created_at.toISOString(),
+      inserted.invitation.expires_at.toISOString(),
+      {
+        purpose: 'member_invitation',
+        teamNames: inserted.teams.map(team => team.team_name),
+      }
+    )
+  } catch (error) {
+    await withTransaction(async db => {
+      await finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
+      await db.query(
+        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
+        [inserted.invitation.id]
+      )
+    }).catch(() => undefined)
+    throw error
+  }
+
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
+              i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
+              t.name AS team_name
+         FROM invitation_delivery_commands c
+         JOIN invitations i ON i.id = c.invitation_id
+    LEFT JOIN teams t ON t.id = i.team_id
+        WHERE c.id = $1
+          AND c.invitation_id = $2
+          AND c.authorized_by = $3
+          AND c.delivery_kind = 'create'
+          AND c.status = 'authorized'
+          AND i.status = 'draft'
+        LIMIT 1
+        FOR UPDATE OF c, i`,
+      [commandId, inserted.invitation.id, managerUserId.trim()]
+    )
+    const invitation = (locked.rows[0] as InvitationRow | undefined) || null
+    if (!invitation) return { error: 'not_found' as const }
+    const teams = await loadInvitationTeams(db, invitation.id, invitation)
+    if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
+      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
+      await db.query(
+        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
+        [invitation.id]
+      )
+      return { error: 'forbidden' as const }
+    }
+
+    const activated = await db.query(
+      `UPDATE invitations
+          SET status = 'pending'
+        WHERE id = $1
+          AND status = 'draft'
+      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at,
+                expires_at, accepted_at, accepted_user_id`,
+      [invitation.id]
+    )
+    const pending = activated.rows[0] as InvitationRow | undefined
+    if (!pending) throw new Error('Failed to activate authorized invitation')
+    await finishInvitationDeliveryCommand(db, commandId, 'delivered')
+    return invitationForTeamsResponse({ ...pending, team_name: invitation.team_name }, teams)
+  })
 }
 
 async function createInvitationForTeamsRecord(
@@ -1820,7 +1933,7 @@ export async function createManagedInvitationForUser(
   }
 
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
-  const inserted = await withTransaction(async db => {
+  const authorized = await withTransaction(async db => {
     const managerRoles = await getManagerRolesForTeams(
       db,
       managerUserId.trim(),
@@ -1833,7 +1946,7 @@ export async function createManagedInvitationForUser(
       }
     }
 
-    return insertInvitationForTeams(db, {
+    const inserted = await insertInvitationForTeams(db, {
       inviteeName: normalizedInviteeName || fallbackName,
       email: normalizedEmail,
       purpose: 'member_invitation',
@@ -1841,12 +1954,23 @@ export async function createManagedInvitationForUser(
       fallbackRole: 'member',
       status: 'draft',
     })
+    const commandId = await recordInvitationDeliveryCommand(
+      db,
+      inserted.invitation.id,
+      managerUserId,
+      'create'
+    )
+    return { inserted, commandId }
   })
-  if ('error' in inserted) return inserted
+  if ('error' in authorized && authorized.error) return { error: authorized.error }
+  const delivered = await deliverAndActivateManagedInvitation(
+    authorized.inserted,
+    authorized.commandId,
+    managerUserId
+  )
+  if ('error' in delivered) return { error: delivered.error }
   return {
-    invitation: externalManagedInvitationResponse(
-      await deliverAndActivateInvitation(inserted, 'member_invitation')
-    ),
+    invitation: externalManagedInvitationResponse(delivered),
   }
 }
 
@@ -2061,22 +2185,37 @@ export async function resendManagedInvitationForUser(managerUserId: string, invi
     if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
       return { error: 'forbidden' as const }
     }
-    return { invitation, teams }
+
+    const commandId = await recordInvitationDeliveryCommand(
+      db,
+      invitation.id,
+      managerUserId,
+      'resend'
+    )
+    return { invitation, teams, commandId }
   })
   if ('error' in authorized) return authorized
-  const { invitation, teams } = authorized
+  const { invitation, teams, commandId } = authorized
 
-  await registerAndSendInvitation(
-    invitation.email,
-    invitation.token,
-    teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
-    new Date().toISOString(),
-    invitation.expires_at.toISOString(),
-    {
-      purpose: invitation.purpose,
-      teamNames: teams.map(team => team.team_name),
-    }
-  )
+  try {
+    await registerAndSendInvitation(
+      invitation.email,
+      invitation.token,
+      teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
+      new Date().toISOString(),
+      invitation.expires_at.toISOString(),
+      {
+        purpose: invitation.purpose,
+        teamNames: teams.map(team => team.team_name),
+      }
+    )
+  } catch (error) {
+    await withTransaction(db =>
+      finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
+    ).catch(() => undefined)
+    throw error
+  }
+  await withTransaction(db => finishInvitationDeliveryCommand(db, commandId, 'delivered'))
   return { resent: true as const, id: invitation.id, email: invitation.email }
 }
 

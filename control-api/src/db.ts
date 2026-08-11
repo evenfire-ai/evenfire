@@ -10,6 +10,7 @@ import {
   applyLegacySessionRevocationFoundation,
   applyUserSessionAccessFoundation,
 } from './services/access/userSessionAccessSchema.js'
+import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5479,6 +5480,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0093_access_catalog_performance_foundation',
     apply: applyAccessCatalogPerformanceFoundation,
+  },
+  {
+    version: '0094_invitation_delivery_commands',
+    apply: applyInvitationDeliveryCommandFoundation,
   },
 ]
 
