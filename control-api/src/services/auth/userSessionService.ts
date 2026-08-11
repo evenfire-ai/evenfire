@@ -345,29 +345,32 @@ export async function revokeUserSession(
 export async function revokeAllUserSessions(
   userId: string,
   reason: string,
-  db: Pick<DbClient, 'query'> = pool,
+  db?: Pick<DbClient, 'query'>,
   now = new Date()
 ): Promise<number> {
-  const revokedAt = new Date(now)
-  await db.query(
-    `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
-     VALUES($1, $2, $3, $2)
-     ON CONFLICT (user_id) DO UPDATE
-       SET valid_after = GREATEST(external_user_session_security_epochs.valid_after, EXCLUDED.valid_after),
-           reason = EXCLUDED.reason,
-           updated_at = EXCLUDED.updated_at`,
-    [userId, revokedAt, reason]
-  )
-  const result = await db.query(
-    `UPDATE external_user_sessions
-        SET revoked_at = $2,
-            revocation_reason = $3,
-            session_version = session_version + 1
-      WHERE user_id = $1
-        AND revoked_at IS NULL`,
-    [userId, revokedAt, reason]
-  )
-  return result.rowCount ?? 0
+  const work = async (transaction: Pick<DbClient, 'query'>) => {
+    const revokedAt = new Date(now)
+    await transaction.query(
+      `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
+       VALUES($1, $2, $3, $2)
+       ON CONFLICT (user_id) DO UPDATE
+         SET valid_after = GREATEST(external_user_session_security_epochs.valid_after, EXCLUDED.valid_after),
+             reason = EXCLUDED.reason,
+             updated_at = EXCLUDED.updated_at`,
+      [userId, revokedAt, reason]
+    )
+    const result = await transaction.query(
+      `UPDATE external_user_sessions
+          SET revoked_at = $2,
+              revocation_reason = $3,
+              session_version = session_version + 1
+        WHERE user_id = $1
+          AND revoked_at IS NULL`,
+      [userId, revokedAt, reason]
+    )
+    return result.rowCount ?? 0
+  }
+  return db ? work(db) : withTransaction(work)
 }
 
 function legacySessionFingerprint(token: string): string {
