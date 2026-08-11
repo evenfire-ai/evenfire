@@ -107,4 +107,18 @@ describe('AccessExecutionBudget', () => {
     expect(() => budget.statementTimeoutMs(now + 1_751)).toThrow(AccessBudgetExceededError)
     budget.close()
   })
+
+  it('releases a long-lived parent abort listener when a root budget closes', () => {
+    const parent = new AbortController()
+    const add = vi.spyOn(parent.signal, 'addEventListener')
+    const remove = vi.spyOn(parent.signal, 'removeEventListener')
+    const budget = AccessExecutionBudget.create('action', { parentSignal: parent.signal })
+
+    const listener = add.mock.calls.find(([event]) => event === 'abort')?.[1]
+    expect(listener).toBeTypeOf('function')
+
+    budget.close()
+
+    expect(remove).toHaveBeenCalledWith('abort', listener)
+  })
 })
