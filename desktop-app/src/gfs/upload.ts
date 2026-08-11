@@ -8,6 +8,9 @@ const GFS_UPLOAD_V2_PREFERRED_PART_BYTES = 8 * 1024 * 1024
 const GFS_UPLOAD_V2_MAX_PART_BYTES = 16 * 1024 * 1024
 const GFS_UPLOAD_V2_DEFAULT_CONCURRENCY = 4
 const GFS_UPLOAD_V2_FALLBACK_CONCURRENCY = 2
+const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 5 * 60 * 1000
+const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60 * 1000
+const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
 
 export interface DesktopUploadSession {
   uploadId: string
@@ -31,6 +34,7 @@ export interface DesktopUploadPart {
   partNumber: number
   offsetBytes: number
   lengthBytes: number
+  /** Canonical lowercase/uppercase-insensitive hex digest returned by status. */
   sha256: string
 }
 
@@ -80,6 +84,24 @@ interface UploadCapabilities {
       fallbackConcurrency?: number
     }
   }
+}
+
+function parseUploadCapabilities(value: unknown): UploadCapabilities {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid GFS upload capabilities response: expected a plain JSON object')
+  }
+  const upload = (value as { upload?: unknown }).upload
+  if (!upload || typeof upload !== 'object' || Array.isArray(upload)) {
+    throw new Error('invalid GFS upload capabilities response: missing upload object')
+  }
+  const resumableV2 = (upload as { resumableV2?: unknown }).resumableV2
+  if (!resumableV2 || typeof resumableV2 !== 'object' || Array.isArray(resumableV2)) {
+    throw new Error('invalid GFS upload capabilities response: missing resumableV2 object')
+  }
+  if (typeof (resumableV2 as { enabled?: unknown }).enabled !== 'boolean') {
+    throw new Error('invalid GFS upload capabilities response: resumableV2.enabled must be boolean')
+  }
+  return value as UploadCapabilities
 }
 
 export class DesktopUploadCapabilityError extends Error {
@@ -193,7 +215,10 @@ function retryable(status: number): boolean {
 function retryableError(error: unknown): boolean {
   if (error instanceof Error && error.name === 'AbortError') return false
   if (error instanceof Error && error.message.startsWith('source_changed:')) return false
+  if (error instanceof Error && error.message.startsWith('resume_part_mismatch:')) return false
   if (error instanceof Error && error.message.startsWith('stale_auth_epoch:')) return false
+  if (error instanceof Error && error.message.startsWith('upload_part_outcome_unknown:'))
+    return false
   const status =
     error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
       ? Number((error as { status: number }).status)
@@ -207,7 +232,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function checksumPart(filePath: string, start: number, end: number): Promise<string> {
+interface DesktopUploadPartChecksum {
+  base64: string
+  hex: string
+}
+
+async function checksumPart(
+  filePath: string,
+  start: number,
+  end: number
+): Promise<DesktopUploadPartChecksum> {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(filePath, {
     start,
@@ -216,7 +250,8 @@ async function checksumPart(filePath: string, start: number, end: number): Promi
   })) {
     hash.update(chunk as Buffer)
   }
-  return hash.digest('base64')
+  const digest = hash.digest()
+  return { base64: digest.toString('base64'), hex: digest.toString('hex') }
 }
 
 async function validateResumedParts(
@@ -224,7 +259,27 @@ async function validateResumedParts(
   session: DesktopUploadSession,
   parts: readonly DesktopUploadPart[]
 ): Promise<Set<number>> {
-  const committed = new Set<number>()
+  const committed = indexCommittedParts(session, parts)
+  for (const part of committed.values()) {
+    const localChecksum = await checksumPart(
+      filePath,
+      part.offsetBytes,
+      part.offsetBytes + part.lengthBytes - 1
+    )
+    if (localChecksum.hex !== part.sha256.toLowerCase()) {
+      throw new Error(
+        `source_changed: committed part ${part.partNumber} differs from the local file`
+      )
+    }
+  }
+  return new Set(committed.keys())
+}
+
+function indexCommittedParts(
+  session: DesktopUploadSession,
+  parts: readonly DesktopUploadPart[]
+): Map<number, DesktopUploadPart> {
+  const committed = new Map<number, DesktopUploadPart>()
   for (const part of parts) {
     if (
       !Number.isSafeInteger(part.partNumber) ||
@@ -247,17 +302,12 @@ async function validateResumedParts(
         `resume_part_mismatch: committed part ${part.partNumber} was returned more than once`
       )
     }
-    const localChecksum = await checksumPart(
-      filePath,
-      part.offsetBytes,
-      part.offsetBytes + part.lengthBytes - 1
-    )
-    if (localChecksum !== part.sha256) {
+    if (!/^[0-9a-f]{64}$/i.test(part.sha256)) {
       throw new Error(
-        `source_changed: committed part ${part.partNumber} differs from the local file`
+        `resume_part_mismatch: committed part ${part.partNumber} has an invalid SHA-256 digest`
       )
     }
-    committed.add(part.partNumber)
+    committed.set(part.partNumber, part)
   }
   return committed
 }
@@ -287,6 +337,145 @@ async function assertSourceIdentity(input: DesktopUploadInput): Promise<void> {
   ) {
     throw new Error('source_changed: the selected file changed during upload')
   }
+}
+
+async function loadUploadStatus(
+  input: DesktopUploadInput,
+  uploadId: string,
+  expected: {
+    drive: string
+    expectedBytes: number
+    partBytes?: number
+    partCount?: number
+  },
+  signal?: AbortSignal,
+  timeoutMs = UPLOAD_TIMEOUT_MS
+): Promise<DesktopUploadStatus> {
+  assertAuthEpoch(input)
+  await input.transport.requestJson<Envelope<undefined>>(
+    'HEAD',
+    joinUrl(
+      input.baseUrl,
+      uploadPath(expected.drive, `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}`)
+    ),
+    { token: input.token, timeoutMs, signal }
+  )
+
+  let cursor: string | undefined
+  let session: DesktopUploadSession | null = null
+  const parts: DesktopUploadPart[] = []
+  for (let page = 0; page < 8; page += 1) {
+    assertAuthEpoch(input)
+    const query = new URLSearchParams({ limit: '256' })
+    if (cursor) query.set('cursor', cursor)
+    const status = unwrap<DesktopUploadStatus>(
+      await input.transport.requestJson<Envelope<DesktopUploadStatus>>(
+        'GET',
+        joinUrl(
+          input.baseUrl,
+          uploadPath(
+            expected.drive,
+            `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}/status`,
+            query
+          )
+        ),
+        { token: input.token, timeoutMs, signal }
+      )
+    )
+    session ??= status.session
+    if (
+      session.uploadId !== status.session.uploadId ||
+      session.uploadId !== uploadId ||
+      session.expectedBytes !== status.session.expectedBytes ||
+      session.expectedBytes !== expected.expectedBytes ||
+      session.drive !== status.session.drive ||
+      session.drive !== expected.drive ||
+      (expected.partBytes !== undefined && status.session.partBytes !== expected.partBytes) ||
+      (expected.partCount !== undefined && status.session.partCount !== expected.partCount)
+    ) {
+      throw new Error('upload status changed during reconciliation')
+    }
+    parts.push(...status.parts)
+    if (!status.nextCursor) return { session, parts, nextCursor: null }
+    cursor = status.nextCursor
+    if (page === 7) throw new Error('upload status pagination exceeded the bounded page limit')
+  }
+  throw new Error('upload status pagination did not terminate')
+}
+
+function ambiguousPartResponse(status: number | undefined): boolean {
+  // A missing response, edge timeout, or proxy/server 5xx may occur after GFSC
+  // committed the part.  425/429 are explicit admission outcomes and can retry
+  // without an extra status round-trip.
+  return status === undefined || status === 408 || status >= 500
+}
+
+function partOutcomeUnknown(partNumber: number, cause?: unknown): Error {
+  return new Error(
+    `upload_part_outcome_unknown: could not prove whether part ${partNumber} committed; resume the persisted session`,
+    { cause }
+  )
+}
+
+async function reconcileAmbiguousPart(
+  input: DesktopUploadInput,
+  session: DesktopUploadSession,
+  partNumber: number,
+  start: number,
+  length: number,
+  checksum: DesktopUploadPartChecksum,
+  signal?: AbortSignal
+): Promise<'committed' | 'missing'> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS; attempt += 1) {
+    let status: DesktopUploadStatus
+    try {
+      status = await loadUploadStatus(
+        input,
+        session.uploadId,
+        {
+          drive: session.drive,
+          expectedBytes: session.expectedBytes,
+          partBytes: session.partBytes,
+          partCount: session.partCount,
+        },
+        signal,
+        GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS
+      )
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error
+      lastError = error
+      if (!retryableError(error) || attempt + 1 >= GFS_UPLOAD_V2_RECONCILE_ATTEMPTS)
+        throw partOutcomeUnknown(partNumber, error)
+      await sleep(250 * 2 ** attempt)
+      continue
+    }
+
+    const committed = indexCommittedParts(status.session, status.parts).get(partNumber)
+    if (committed) {
+      if (committed.offsetBytes !== start || committed.lengthBytes !== length) {
+        throw new Error(
+          `resume_part_mismatch: committed part ${partNumber} does not match the upload geometry`
+        )
+      }
+      if (committed.sha256.toLowerCase() !== checksum.hex) {
+        throw new Error(`source_changed: committed part ${partNumber} differs from the local file`)
+      }
+      return 'committed'
+    }
+
+    if (['aborted', 'canceling', 'failed', 'expired'].includes(status.session.state)) {
+      throw new Error(`cannot reconcile upload part in ${status.session.state}`)
+    }
+    // activePartCount is the writer's durable lease fence.  Zero plus an absent
+    // committed row proves this part is safe to retry; a positive count cannot
+    // identify which concurrent part owns the lease, so poll status rather than
+    // risking an overlapping replay.
+    if (status.session.activePartCount === 0) return 'missing'
+    lastError = new Error(`writer still reports ${status.session.activePartCount} active parts`)
+    if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS) await sleep(250 * 2 ** attempt)
+  }
+  throw partOutcomeUnknown(partNumber, lastError)
 }
 
 async function putPart(
@@ -327,17 +516,31 @@ async function putPart(
           'upload-part-number': String(partNumber),
           'upload-offset': String(start),
           'upload-chunk-length': String(length),
-          'upload-checksum': `sha256 ${checksum}`,
+          'upload-checksum': `sha256 ${checksum.base64}`,
           'content-length': String(length),
         },
         body,
-        UPLOAD_TIMEOUT_MS,
+        GFS_UPLOAD_V2_PART_TIMEOUT_MS,
         signal
       )
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error
-      if (!retryableError(error) || attempt >= 2) throw error
+      if (!retryableError(error)) throw error
       onRetryableFailure?.()
+      const reconciled = await reconcileAmbiguousPart(
+        input,
+        session,
+        partNumber,
+        start,
+        length,
+        checksum,
+        signal
+      )
+      if (reconciled === 'committed') {
+        onPartSuccess?.()
+        return
+      }
+      if (attempt >= 2) throw error
       await sleep(250 * 2 ** attempt)
       attempt += 1
       continue
@@ -350,6 +553,21 @@ async function putPart(
       throw uploadPartError(response.status, response.text)
     }
     onRetryableFailure?.()
+    if (ambiguousPartResponse(response.status)) {
+      const reconciled = await reconcileAmbiguousPart(
+        input,
+        session,
+        partNumber,
+        start,
+        length,
+        checksum,
+        signal
+      )
+      if (reconciled === 'committed') {
+        onPartSuccess?.()
+        return
+      }
+    }
     if (attempt >= 2) throw uploadPartError(response.status, response.text)
     await sleep(250 * 2 ** attempt)
     attempt += 1
@@ -737,8 +955,11 @@ export class DesktopGfsUploadJob {
     let capabilities: UploadCapabilities
     try {
       this.assertAuthEpoch()
-      capabilities = unwrap<UploadCapabilities>(
-        await this.input.transport.requestJson<Envelope<UploadCapabilities>>(
+      // GFSC capabilities are a plain JSON document. Only upload lifecycle
+      // receipts use the { ok, data, error } envelope; accepting an envelope
+      // here would hide drift between Desktop and the writer's public contract.
+      capabilities = parseUploadCapabilities(
+        await this.input.transport.requestJson<UploadCapabilities>(
           'GET',
           joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
           {
@@ -764,58 +985,13 @@ export class DesktopGfsUploadJob {
     this.input.fallbackConcurrency = resumable.fallbackConcurrency
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
-      this.assertAuthEpoch()
-      await this.input.transport.requestJson<Envelope<undefined>>(
-        'HEAD',
-        joinUrl(
-          this.input.baseUrl,
-          uploadPath(drive, `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}`)
-        ),
-        {
-          token: this.input.token,
-          timeoutMs: UPLOAD_TIMEOUT_MS,
-          signal: this.abortController.signal,
-        }
+      const status = await loadUploadStatus(
+        this.input,
+        resumeId,
+        { drive, expectedBytes: file.size },
+        this.abortController.signal
       )
-      let cursor: string | undefined
-      let session: DesktopUploadSession | null = null
-      const parts: DesktopUploadPart[] = []
-      for (let page = 0; page < 8; page += 1) {
-        this.assertAuthEpoch()
-        const query = new URLSearchParams({ limit: '256' })
-        if (cursor) query.set('cursor', cursor)
-        const status = unwrap<DesktopUploadStatus>(
-          await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
-            'GET',
-            joinUrl(
-              this.input.baseUrl,
-              uploadPath(
-                drive,
-                `/api/v1/me/gfs/uploads/${encodeURIComponent(resumeId)}/status`,
-                query
-              )
-            ),
-            {
-              token: this.input.token,
-              timeoutMs: UPLOAD_TIMEOUT_MS,
-              signal: this.abortController.signal,
-            }
-          )
-        )
-        session ??= status.session
-        if (
-          session.uploadId !== status.session.uploadId ||
-          session.expectedBytes !== status.session.expectedBytes ||
-          status.session.drive !== drive
-        )
-          throw new Error('upload status changed during resume')
-        parts.push(...status.parts)
-        if (!status.nextCursor) break
-        cursor = status.nextCursor
-        if (page === 7) throw new Error('upload status pagination exceeded the bounded page limit')
-      }
-      if (!session || session.expectedBytes !== file.size || session.drive !== drive)
-        throw new Error('selected file size differs from the upload session')
+      const { session, parts } = status
       const committed =
         session.state === 'completed'
           ? new Set<number>()
@@ -886,7 +1062,15 @@ export class DesktopGfsUploadJob {
     if (prepared.session.state === 'paused') return prepared.session
     try {
       const result = await runParts(
-        this.input,
+        {
+          ...this.input,
+          onProgress: (uploadedBytes, totalBytes) => {
+            this.uploadedBytes = uploadedBytes
+            this.totalBytes = totalBytes
+            this.emit()
+            this.input.onProgress?.(uploadedBytes, totalBytes)
+          },
+        },
         prepared.session,
         prepared.committed,
         this.abortController.signal,

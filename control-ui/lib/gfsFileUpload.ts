@@ -9,6 +9,9 @@ import { apiSend } from './api'
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
+const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
+const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
 
 export interface GfsUploadTarget {
   operation: 'create' | 'replace'
@@ -35,7 +38,7 @@ export interface UploadReceipt {
   contiguousBytes?: number
   committedBytes?: number
   committedPartCount?: number
-  activePartCount?: number
+  activePartCount: number
   expiresAt?: string
   resultResourceId?: string
   resultVersion?: number
@@ -168,9 +171,10 @@ async function requestJson<T>(
   method: 'GET' | 'POST' | 'HEAD' | 'DELETE',
   path: string,
   body?: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 600_000
 ): Promise<{ data: T; response: Response }> {
-  const timed = signalWithTimeout(signal, 600_000)
+  const timed = signalWithTimeout(signal, timeoutMs)
   try {
     const response = await fetch(endpoint(path), {
       method,
@@ -221,7 +225,14 @@ async function uploadError(
 }
 
 function assertRetryable(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === 'AbortError') return false
+  if (
+    error instanceof Error &&
+    (error.name === 'AbortError' ||
+      error.message.startsWith('source_changed:') ||
+      error.message.startsWith('upload_part_mismatch:') ||
+      error.message.startsWith('upload_part_outcome_unknown:'))
+  )
+    return false
   const status =
     typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
   return typeof status === 'number' ? RETRYABLE_STATUS.has(status) : true
@@ -253,17 +264,185 @@ function digestBase64(bytes: ArrayBuffer): string {
   return btoa(binary)
 }
 
+function digestHex(bytes: ArrayBuffer): string {
+  return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('')
+}
+
+interface GfsPartChecksum {
+  base64: string
+  hex: string
+}
+
+async function sha256Part(blob: Blob): Promise<GfsPartChecksum> {
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
+  return { base64: digestBase64(digest), hex: digestHex(digest) }
+}
+
+function indexCommittedParts(
+  session: UploadReceipt,
+  parts: readonly GfsUploadPartReceipt[]
+): Map<number, GfsUploadPartReceipt> {
+  const committed = new Map<number, GfsUploadPartReceipt>()
+  for (const part of parts) {
+    if (
+      !Number.isSafeInteger(part.partNumber) ||
+      part.partNumber < 0 ||
+      part.partNumber >= session.partCount
+    )
+      throw new Error(
+        `upload_part_mismatch: part number ${part.partNumber} is outside the upload geometry`
+      )
+    const expectedOffset = part.partNumber * session.partBytes
+    const expectedLength = Math.min(session.partBytes, session.expectedBytes - expectedOffset)
+    if (part.offsetBytes !== expectedOffset || part.lengthBytes !== expectedLength)
+      throw new Error(
+        `upload_part_mismatch: part ${part.partNumber} does not match the upload geometry`
+      )
+    if (committed.has(part.partNumber))
+      throw new Error(`upload_part_mismatch: part ${part.partNumber} was returned more than once`)
+    if (!/^[0-9a-f]{64}$/i.test(part.sha256))
+      throw new Error(`upload_part_mismatch: part ${part.partNumber} has an invalid SHA-256 digest`)
+    committed.set(part.partNumber, part)
+  }
+  return committed
+}
+
+async function loadUploadStatus(
+  uploadId: string,
+  expected: { expectedBytes: number; partBytes?: number; partCount?: number },
+  signal?: AbortSignal,
+  timeoutMs = 600_000
+): Promise<{ status: GfsUploadStatus; head: Response }> {
+  const head = await requestJson<undefined>(
+    'HEAD',
+    `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}`,
+    undefined,
+    signal,
+    timeoutMs
+  )
+  const declaredLengthHeader = head.response.headers.get('upload-length')
+  if (declaredLengthHeader !== null) {
+    const declaredLength = Number(declaredLengthHeader)
+    if (Number.isSafeInteger(declaredLength) && declaredLength !== expected.expectedBytes)
+      throw new Error('selected file size differs from the persisted upload session')
+  }
+
+  let cursor: string | undefined
+  let session: UploadReceipt | null = null
+  const parts: GfsUploadPartReceipt[] = []
+  for (let page = 0; page < 8; page += 1) {
+    const query = cursor ? `?limit=256&cursor=${encodeURIComponent(cursor)}` : '?limit=256'
+    const response = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
+      'GET',
+      `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}/status${query}`,
+      undefined,
+      signal,
+      timeoutMs
+    )
+    const current = receiptFromResponse(response)
+    session ??= current.session
+    if (
+      session.uploadId !== current.session.uploadId ||
+      session.uploadId !== uploadId ||
+      session.expectedBytes !== current.session.expectedBytes ||
+      session.expectedBytes !== expected.expectedBytes ||
+      session.partBytes !== current.session.partBytes ||
+      session.partCount !== current.session.partCount ||
+      (expected.partBytes !== undefined && current.session.partBytes !== expected.partBytes) ||
+      (expected.partCount !== undefined && current.session.partCount !== expected.partCount)
+    )
+      throw new Error('upload status changed during reconciliation')
+    parts.push(...current.parts)
+    if (!current.nextCursor)
+      return { status: { session, parts, nextCursor: null }, head: head.response }
+    cursor = current.nextCursor
+    if (page === 7) throw new Error('upload status pagination exceeded the bounded page limit')
+  }
+  throw new Error('upload status pagination did not terminate')
+}
+
+function ambiguousPartResponse(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status >= 500
+}
+
+function partOutcomeUnknown(partNumber: number, cause?: unknown): Error {
+  return new Error(
+    `upload_part_outcome_unknown: could not prove whether part ${partNumber} committed; resume the persisted session`,
+    { cause }
+  )
+}
+
+async function reconcileAmbiguousPart(
+  file: File,
+  session: UploadReceipt,
+  part: { partNumber: number; offsetBytes: number; lengthBytes: number },
+  checksum: GfsPartChecksum,
+  signal?: AbortSignal
+): Promise<'committed' | 'missing'> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS; attempt += 1) {
+    let status: GfsUploadStatus
+    try {
+      status = (
+        await loadUploadStatus(
+          session.uploadId,
+          {
+            expectedBytes: file.size,
+            partBytes: session.partBytes,
+            partCount: session.partCount,
+          },
+          signal,
+          GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS
+        )
+      ).status
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error
+      lastError = error
+      if (!assertRetryable(error) || attempt + 1 >= GFS_UPLOAD_V2_RECONCILE_ATTEMPTS)
+        throw partOutcomeUnknown(part.partNumber, error)
+      await delay(250 * 2 ** attempt, signal)
+      continue
+    }
+
+    const committed = indexCommittedParts(status.session, status.parts).get(part.partNumber)
+    if (committed) {
+      if (committed.offsetBytes !== part.offsetBytes || committed.lengthBytes !== part.lengthBytes)
+        throw new Error(
+          `upload_part_mismatch: part ${part.partNumber} does not match the upload geometry`
+        )
+      if (committed.sha256.toLowerCase() !== checksum.hex)
+        throw new Error(
+          `source_changed: committed part ${part.partNumber} differs from the selected file`
+        )
+      return 'committed'
+    }
+
+    if (['aborted', 'canceling', 'failed', 'expired'].includes(status.session.state))
+      throw new Error(`cannot reconcile upload part in ${status.session.state}`)
+    const activePartCount = status.session.activePartCount
+    if (!Number.isSafeInteger(activePartCount) || activePartCount < 0)
+      throw partOutcomeUnknown(
+        part.partNumber,
+        new Error('writer returned an invalid activePartCount during reconciliation')
+      )
+    if (activePartCount === 0) return 'missing'
+    lastError = new Error(`writer still reports ${activePartCount} active parts`)
+    if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS) await delay(250 * 2 ** attempt, signal)
+  }
+  throw partOutcomeUnknown(part.partNumber, lastError)
+}
+
 async function putPart(
   uploadId: string,
   file: File,
   part: { partNumber: number; offsetBytes: number; lengthBytes: number },
   partCount: number,
+  blob: Blob,
+  checksumBase64: string,
   signal: AbortSignal | undefined,
   onByteProgress?: (progress: GfsUploadProgress) => void
 ): Promise<void> {
-  const blob = file.slice(part.offsetBytes, part.offsetBytes + part.lengthBytes)
-  const checksum = digestBase64(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))
-  const timed = signalWithTimeout(signal, 600_000)
+  const timed = signalWithTimeout(signal, GFS_UPLOAD_V2_PART_TIMEOUT_MS)
   try {
     await new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -279,7 +458,7 @@ async function putPart(
       xhr.setRequestHeader('Upload-Part-Number', String(part.partNumber))
       xhr.setRequestHeader('Upload-Offset', String(part.offsetBytes))
       xhr.setRequestHeader('Upload-Chunk-Length', String(part.lengthBytes))
-      xhr.setRequestHeader('Upload-Checksum', `sha256 ${checksum}`)
+      xhr.setRequestHeader('Upload-Checksum', `sha256 ${checksumBase64}`)
       xhr.upload.onprogress = event => {
         if (!event.lengthComputable) return
         onByteProgress?.({
@@ -301,7 +480,12 @@ async function putPart(
         reject(error)
       }
       xhr.onerror = () => reject(new Error('GFS upload network error'))
-      xhr.onabort = () => reject(abortError('GFS upload request aborted'))
+      xhr.onabort = () =>
+        reject(
+          signal?.aborted
+            ? abortError('GFS upload request aborted')
+            : new Error('GFS upload response timed out')
+        )
       timed.signal.addEventListener('abort', abort, { once: true })
       xhr.send(blob)
     })
@@ -311,7 +495,7 @@ async function putPart(
 }
 
 async function uploadPartWithRetries(
-  uploadId: string,
+  session: UploadReceipt,
   file: File,
   part: { partNumber: number; offsetBytes: number; lengthBytes: number },
   partCount: number,
@@ -320,16 +504,35 @@ async function uploadPartWithRetries(
   onRetryableFailure?: () => void,
   onPartSuccess?: () => void
 ): Promise<void> {
+  const blob = file.slice(part.offsetBytes, part.offsetBytes + part.lengthBytes)
+  const checksum = await sha256Part(blob)
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await putPart(uploadId, file, part, partCount, signal, onByteProgress)
+      await putPart(
+        session.uploadId,
+        file,
+        part,
+        partCount,
+        blob,
+        checksum.base64,
+        signal,
+        onByteProgress
+      )
       onPartSuccess?.()
       return
     } catch (error) {
       lastError = error
+      if (signal?.aborted) throw signal.reason ?? error
       if (!assertRetryable(error)) throw error
       onRetryableFailure?.()
+      if (ambiguousPartResponse(statusOf(error))) {
+        const reconciled = await reconcileAmbiguousPart(file, session, part, checksum, signal)
+        if (reconciled === 'committed') {
+          onPartSuccess?.()
+          return
+        }
+      }
       if (attempt === 2) throw error
       await delay(Math.min(1000, 150 * (attempt + 1)), signal)
     }
@@ -338,7 +541,7 @@ async function uploadPartWithRetries(
 }
 
 async function runParts(
-  uploadId: string,
+  session: UploadReceipt,
   file: File,
   parts: Array<{ partNumber: number; offsetBytes: number; lengthBytes: number }>,
   concurrency: number,
@@ -386,7 +589,7 @@ async function runParts(
         const part = work[index]!
         try {
           await uploadPartWithRetries(
-            uploadId,
+            session,
             file,
             part,
             parts.length,
@@ -626,44 +829,17 @@ export class GfsUploadJob {
     const resumable = upload.resumableV2!
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
-      const head = await requestJson<undefined>(
-        'HEAD',
-        `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(resumeId)}`,
-        undefined,
-        this.abortController.signal
-      )
-      const length = Number(head.response.headers.get('upload-length'))
-      if (Number.isSafeInteger(length) && length !== this.input.file.size)
-        throw new Error('selected file size differs from the persisted upload session')
-      let cursor: string | undefined
-      let session: UploadReceipt | null = null
-      const parts: GfsUploadPartReceipt[] = []
-      for (let page = 0; page < 8; page += 1) {
-        const query = cursor ? `?limit=256&cursor=${encodeURIComponent(cursor)}` : '?limit=256'
-        const statusResponse = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
-          'GET',
-          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(resumeId)}/status${query}`,
-          undefined,
+      const { session, parts } = (
+        await loadUploadStatus(
+          resumeId,
+          { expectedBytes: this.input.file.size },
           this.abortController.signal
         )
-        const status = receiptFromResponse(statusResponse)
-        session ??= status.session
-        if (
-          session.uploadId !== status.session.uploadId ||
-          session.expectedBytes !== status.session.expectedBytes
-        )
-          throw new Error('upload status changed during resume')
-        parts.push(...status.parts)
-        if (!status.nextCursor) break
-        cursor = status.nextCursor
-        if (page === 7) throw new Error('upload status pagination exceeded the bounded page limit')
-      }
-      if (!session || session.expectedBytes !== this.input.file.size)
-        throw new Error('selected file size differs from the upload session')
+      ).status
       if (['completed', 'aborted', 'failed'].includes(session.state))
         return { session, committed: new Set(), resumable }
-      await this.validateCommittedParts(session, parts)
-      return { session, committed: new Set(parts.map(part => part.partNumber)), resumable }
+      const committed = await this.validateCommittedParts(session, parts)
+      return { session, committed, resumable }
     }
     const createBody = {
       operation: this.input.target.operation,
@@ -709,29 +885,16 @@ export class GfsUploadJob {
   private async validateCommittedParts(
     session: UploadReceipt,
     parts: GfsUploadPartReceipt[]
-  ): Promise<void> {
-    for (const part of parts) {
-      const expectedOffset = part.partNumber * session.partBytes
-      const expectedLength = Math.min(session.partBytes, this.input.file.size - expectedOffset)
-      if (
-        part.offsetBytes !== expectedOffset ||
-        part.lengthBytes !== expectedLength ||
-        part.partNumber < 0 ||
-        part.partNumber >= session.partCount
-      ) {
-        throw new Error('upload status contains invalid part geometry')
-      }
-      const checksum = digestBase64(
-        await crypto.subtle.digest(
-          'SHA-256',
-          await this.input.file
-            .slice(part.offsetBytes, part.offsetBytes + part.lengthBytes)
-            .arrayBuffer()
-        )
+  ): Promise<Set<number>> {
+    const committed = indexCommittedParts(session, parts)
+    for (const part of committed.values()) {
+      const checksum = await sha256Part(
+        this.input.file.slice(part.offsetBytes, part.offsetBytes + part.lengthBytes)
       )
-      if (checksum !== part.sha256)
+      if (checksum.hex !== part.sha256.toLowerCase())
         throw new Error(`upload part ${part.partNumber} does not match the selected file`)
     }
+    return new Set(committed.keys())
   }
 
   private async run(): Promise<UploadReceipt> {
@@ -797,7 +960,7 @@ export class GfsUploadJob {
       const fallbackConcurrency =
         Number(prepared.resumable.fallbackConcurrency) || GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY
       const result = await runParts(
-        prepared.session.uploadId,
+        prepared.session,
         this.input.file,
         pending,
         concurrency,

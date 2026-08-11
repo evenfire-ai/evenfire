@@ -1,4 +1,4 @@
-import type { Download, Locator, Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { expect } from '@playwright/test'
 import { createHash } from 'node:crypto'
 import {
@@ -21,16 +21,186 @@ import { openResourcesNavItem } from './navigationHelpers'
 
 test.describe.configure({ mode: 'serial' })
 
-async function hashDownload(download: Download): Promise<{ bytes: number; sha256: string }> {
-  const stream = await download.createReadStream()
-  if (!stream) throw new Error(`download stream unavailable for ${download.suggestedFilename()}`)
-  const hash = createHash('sha256')
-  let bytes = 0
-  for await (const chunk of stream) {
-    bytes += chunk.length
-    hash.update(chunk)
+async function selectFileThroughVisibleAction(
+  page: Page,
+  trigger: Locator,
+  filePath: string
+): Promise<void> {
+  const fileChooserPromise = page.waitForEvent('filechooser')
+  await trigger.click()
+  const fileChooser = await fileChooserPromise
+  await fileChooser.setFiles(filePath)
+}
+
+async function observeProgressOrCompletion(
+  page: Page,
+  progress: Locator,
+  completedText: string,
+  timeout = 900_000
+): Promise<void> {
+  const values = new Set<string>()
+  const completed = page.getByText(completedText, { exact: true })
+  const errorToast = page.getByRole('alert').filter({ hasText: /file|gfs|upload/i })
+  let outcome: 'waiting' | 'progress' | 'error' | `completed:${number}` = 'waiting'
+  await expect
+    .poll(
+      async () => {
+        if ((await progress.count()) > 0) {
+          const value = await progress.getAttribute('aria-valuenow', { timeout: 250 })
+          if (value !== null) values.add(value)
+        }
+        outcome = values.size >= 2 ? 'progress' : outcome
+        if (outcome === 'waiting' && (await completed.isVisible().catch(() => false))) {
+          outcome = `completed:${values.size}`
+        }
+        if (outcome === 'waiting' && (await errorToast.isVisible().catch(() => false))) {
+          outcome = 'error'
+        }
+        return outcome !== 'waiting'
+      },
+      { timeout, intervals: [50, 250, 1_000] }
+    )
+    .toBeTruthy()
+
+  if (outcome === 'progress') return
+  if (outcome === 'error') {
+    throw new Error(
+      `Desktop rejected the selected local file before two progress values: ${(await errorToast.textContent())?.trim() || 'Unknown Desktop upload error'}`
+    )
   }
-  return { bytes, sha256: hash.digest('hex') }
+  if (outcome.startsWith('completed:')) return
+  throw new Error(`Desktop upload progress observation ended unexpectedly (${outcome})`)
+}
+
+function fileResourceControls(browser: Locator, resourceName: string) {
+  return {
+    name: browser.getByRole('button', { name: resourceName, exact: true }),
+    options: browser.getByRole('button', {
+      name: `Options for ${resourceName}`,
+      exact: true,
+    }),
+    download: browser.getByRole('button', {
+      name: `Download ${resourceName}`,
+      exact: true,
+    }),
+  }
+}
+
+async function returnToFolder(browser: Locator, folderName: string): Promise<void> {
+  const location = browser.getByRole('navigation', { name: 'File location' })
+  const sharedRoot = location.getByRole('button', { name: 'Shared with me', exact: true })
+  await expect(sharedRoot).toBeEnabled()
+  await sharedRoot.click()
+  const folder = browser.getByRole('button', { name: folderName, exact: true })
+  await expect(folder).toBeVisible({ timeout: 60_000 })
+  await folder.click()
+  await expect(location.getByRole('button', { name: folderName, exact: true })).toBeDisabled({
+    timeout: 30_000,
+  })
+}
+
+async function installGfsDownloadCapture(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    type CapturedGfsDownload = {
+      filename: string
+      blob: Blob
+    }
+    const win = window as Window & {
+      __clerumE2eGfsDownloads?: CapturedGfsDownload[]
+      __clerumE2eGfsDownloadCaptureInstalled?: boolean
+    }
+    if (win.__clerumE2eGfsDownloadCaptureInstalled) return
+    win.__clerumE2eGfsDownloadCaptureInstalled = true
+    win.__clerumE2eGfsDownloads = []
+
+    // Observe the Blob produced from the real preload/IPC response while
+    // preserving both production APIs. This does not replace or mock GFS.
+    const blobByUrl = new Map<string, Blob>()
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL)
+    URL.createObjectURL = (object: Blob | MediaSource) => {
+      const url = originalCreateObjectURL(object)
+      if (object instanceof Blob) blobByUrl.set(url, object)
+      return url
+    }
+
+    const originalAnchorClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      const filename = this.download
+      const blob = blobByUrl.get(this.href)
+      if (filename && blob) win.__clerumE2eGfsDownloads?.push({ filename, blob })
+      return originalAnchorClick.call(this)
+    }
+  })
+}
+
+async function hashCapturedGfsDownload(
+  page: Page,
+  filename: string,
+  bytes: number
+): Promise<string> {
+  const hash = createHash('sha256')
+  const chunkBytes = 8 * 1024 * 1024
+  for (let offset = 0; offset < bytes; offset += chunkBytes) {
+    const encoded = await page.evaluate(
+      async ({ filenameToFind, start, end }) => {
+        const downloads =
+          (
+            window as Window & {
+              __clerumE2eGfsDownloads?: Array<{ filename: string; blob: Blob }>
+            }
+          ).__clerumE2eGfsDownloads ?? []
+        const download = downloads.find(item => item.filename === filenameToFind)
+        if (!download) throw new Error(`captured GFS download not found: ${filenameToFind}`)
+        const chunk = new Uint8Array(await download.blob.slice(start, end).arrayBuffer())
+        let binary = ''
+        for (let index = 0; index < chunk.length; index += 0x8000) {
+          binary += String.fromCharCode(...chunk.subarray(index, index + 0x8000))
+        }
+        return btoa(binary)
+      },
+      { filenameToFind: filename, start: offset, end: Math.min(bytes, offset + chunkBytes) }
+    )
+    hash.update(Buffer.from(encoded, 'base64'))
+  }
+  return hash.digest('hex')
+}
+
+async function expectGfsDownload(
+  page: Page,
+  button: Locator,
+  filename: string,
+  expected: { bytes: number; sha256: string }
+): Promise<void> {
+  await installGfsDownloadCapture(page)
+  await expect(button).toBeVisible()
+  await button.click()
+  await expect(page.getByText(`Downloaded ${filename}`, { exact: true })).toBeVisible({
+    timeout: 300_000,
+  })
+  await expect
+    .poll(
+      () =>
+        page.evaluate(filenameToFind => {
+          const downloads =
+            (
+              window as Window & {
+                __clerumE2eGfsDownloads?: Array<{
+                  filename: string
+                  blob: Blob
+                }>
+              }
+            ).__clerumE2eGfsDownloads ?? []
+          const download = downloads.find(item => item.filename === filenameToFind)
+          return download ? { filename: download.filename, bytes: download.blob.size } : null
+        }, filename),
+      {
+        timeout: 300_000,
+        intervals: [100, 500, 1_000],
+        message: `Desktop should expose the real GFS IPC bytes for ${filename}`,
+      }
+    )
+    .toEqual({ filename, bytes: expected.bytes })
+  expect(await hashCapturedGfsDownload(page, filename, expected.bytes)).toBe(expected.sha256)
 }
 
 async function openFolder(
@@ -45,15 +215,23 @@ async function openFolder(
   await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible({
     timeout: 30_000,
   })
-  const shared = page.getByRole('region', { name: 'GFS resources shared with you' })
-  await expect(shared.getByRole('button', { name: folderName, exact: true })).toBeVisible({
+  const browser = page.getByRole('region', { name: 'Global File System browser' })
+  await expect(browser.getByRole('button', { name: folderName, exact: true })).toBeVisible({
     timeout: 60_000,
   })
-  await shared.getByRole('button', { name: folderName, exact: true }).click()
-  const browser = page.getByRole('region', { name: 'Global File System browser' })
+  await browser.getByRole('button', { name: folderName, exact: true }).click()
   await expect(browser).toBeVisible({ timeout: 30_000 })
-  await expect(browser.getByRole('button', { name: `Options for ${folderName}` })).toBeVisible()
-  await browser.getByRole('button', { name: `Options for ${folderName}` }).click()
+  await expect(
+    browser
+      .getByRole('navigation', { name: 'File location' })
+      .getByRole('button', { name: folderName, exact: true })
+  ).toBeDisabled({ timeout: 30_000 })
+  const currentFolderOptions = browser.getByRole('button', {
+    name: `Options for ${folderName}`,
+    exact: true,
+  })
+  await expect(currentFolderOptions).toBeVisible()
+  await currentFolderOptions.click()
   await browser.getByRole('menuitem', { name: 'Manage', exact: true }).click()
   const manageDialog = page.getByRole('dialog', {
     name: `Manage folder ${folderName}`,
@@ -61,20 +239,6 @@ async function openFolder(
   })
   await expect(manageDialog).toBeVisible()
   return { browser, manageDialog }
-}
-
-async function observeTwoProgressValues(progress: Locator, timeout = 900_000): Promise<void> {
-  const values = new Set<string>()
-  await expect
-    .poll(
-      async () => {
-        const value = await progress.getAttribute('aria-valuenow')
-        if (value !== null) values.add(value)
-        return values.size
-      },
-      { timeout, intervals: [250, 1_000] }
-    )
-    .toBeGreaterThanOrEqual(2)
 }
 
 async function grantFolderToE2eUser(resourceId: string): Promise<void> {
@@ -95,24 +259,22 @@ async function exerciseCreate(page: Page, byteLength: number): Promise<void> {
   const source = await createDiskUploadFixture(byteLength, '.parquet', fixtureName)
   try {
     const { browser, manageDialog } = await openFolder(page, fixture.name)
-    const uploadResponsePromise = page.waitForResponse(
-      response => response.request().method() === 'GET' && response.url().includes('/external/gfs')
+    await selectFileThroughVisibleAction(
+      page,
+      manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+      source.filePath
     )
-    await manageDialog.getByRole('button', { name: 'Upload file', exact: true }).click()
-    await page.getByLabel('Upload file', { exact: true }).setInputFiles(source.filePath)
-    await uploadResponsePromise.catch(() => undefined)
     const progress = browser.getByRole('progressbar', {
       name: `GFS upload progress for ${source.fileName}`,
     })
-    await expect(progress).toBeVisible({ timeout: 30_000 })
-    await observeTwoProgressValues(progress)
+    await observeProgressOrCompletion(page, progress, `Uploaded ${source.fileName}`)
     await expect(page.getByText(`Uploaded ${source.fileName}`, { exact: true })).toBeVisible({
       timeout: 1_200_000,
     })
     await page.getByRole('button', { name: 'Close manage dialog' }).click()
-    const row = browser.getByRole('listitem').filter({ hasText: source.fileName })
-    await expect(row).toBeVisible({ timeout: 60_000 })
-    await expect(row).toContainText('200.0 MB')
+    const resource = fileResourceControls(browser, source.fileName)
+    await expect(resource.name).toBeVisible({ timeout: 60_000 })
+    await expect(browser.getByText(/^200\.0 MB · v\d+$/)).toBeVisible()
     await expect
       .poll(
         () =>
@@ -123,9 +285,7 @@ async function exerciseCreate(page: Page, byteLength: number): Promise<void> {
         { timeout: 60_000, intervals: [250, 1_000] }
       )
       .toMatchObject({ kind: 'file', bytes: byteLength, deleted: false })
-    const downloadPromise = page.waitForEvent('download')
-    await row.getByRole('button', { name: `Download ${source.fileName}` }).click()
-    expect(await hashDownload(await downloadPromise)).toEqual({
+    await expectGfsDownload(page, resource.download, source.fileName, {
       bytes: byteLength,
       sha256: source.sha256,
     })
@@ -149,30 +309,29 @@ async function exerciseReplace(page: Page, byteLength: number): Promise<void> {
     })
     expect(before).toMatchObject({ kind: 'file', deleted: false })
     await page.getByRole('button', { name: 'Close manage dialog' }).click()
-    const fileRow = browser.getByRole('listitem').filter({ hasText: fixture.fileName })
-    await expect(fileRow).toBeVisible({ timeout: 30_000 })
-    await fileRow.getByRole('button', { name: `Options for ${fixture.fileName}` }).click()
+    const resource = fileResourceControls(browser, fixture.fileName)
+    await expect(resource.name).toBeVisible({ timeout: 30_000 })
+    await resource.options.click()
     await browser.getByRole('menuitem', { name: 'Manage', exact: true }).click()
     const manageFile = page.getByRole('dialog', {
       name: `Manage file ${fixture.fileName}`,
       exact: true,
     })
     await expect(manageFile).toBeVisible()
-    const uploadResponsePromise = page.waitForResponse(
-      response => response.request().method() === 'GET' && response.url().includes('/external/gfs')
+    await selectFileThroughVisibleAction(
+      page,
+      manageFile.getByRole('button').filter({ hasText: /^Replace file$/ }),
+      source.filePath
     )
-    await manageFile.getByRole('button', { name: 'Replace file', exact: true }).click()
-    await page.getByLabel('Replace file', { exact: true }).setInputFiles(source.filePath)
-    await uploadResponsePromise.catch(() => undefined)
     const progress = browser.getByRole('progressbar', {
-      name: `GFS upload progress for ${source.fileName}`,
+      name: `GFS upload progress for ${fixture.fileName}`,
     })
-    await expect(progress).toBeVisible({ timeout: 30_000 })
-    await observeTwoProgressValues(progress)
+    await observeProgressOrCompletion(page, progress, `Replaced ${fixture.fileName}`)
     await expect(page.getByText(`Replaced ${fixture.fileName}`, { exact: true })).toBeVisible({
       timeout: 1_200_000,
     })
     await page.getByRole('button', { name: 'Close manage dialog' }).click()
+    await returnToFolder(browser, fixture.name)
     await expect
       .poll(
         () =>
@@ -188,10 +347,9 @@ async function exerciseReplace(page: Page, byteLength: number): Promise<void> {
         version: (before?.version ?? 0) + 1,
         deleted: false,
       })
-    await expect(fileRow).toContainText('200.0 MB')
-    const downloadPromise = page.waitForEvent('download')
-    await fileRow.getByRole('button', { name: `Download ${fixture.fileName}` }).click()
-    expect(await hashDownload(await downloadPromise)).toEqual({
+    await expect(resource.name).toBeVisible({ timeout: 60_000 })
+    await expect(browser.getByText(/^200\.0 MB · v\d+$/)).toBeVisible()
+    await expectGfsDownload(page, resource.download, fixture.fileName, {
       bytes: byteLength,
       sha256: source.sha256,
     })

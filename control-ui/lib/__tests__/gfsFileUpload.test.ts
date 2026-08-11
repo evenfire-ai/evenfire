@@ -17,6 +17,7 @@ describe('assertGfsFileUploadSize', () => {
 class FakeXhr {
   static requests: FakeXhr[] = []
   static statuses: number[] = []
+  static responseLosses = 0
   upload: { onprogress: ((event: { lengthComputable: boolean; loaded: number }) => void) | null } =
     { onprogress: null }
   status = 204
@@ -41,6 +42,11 @@ class FakeXhr {
         loaded: Math.max(1, Math.floor(body.size / 2)),
       })
       this.upload.onprogress?.({ lengthComputable: true, loaded: body.size })
+      if (FakeXhr.responseLosses > 0) {
+        FakeXhr.responseLosses -= 1
+        this.onerror?.()
+        return
+      }
       this.onload?.()
     })
   }
@@ -53,6 +59,7 @@ describe('GfsUploadJob', () => {
   beforeEach(() => {
     FakeXhr.requests = []
     FakeXhr.statuses = []
+    FakeXhr.responseLosses = 0
     vi.stubGlobal('XMLHttpRequest', FakeXhr)
   })
 
@@ -64,7 +71,7 @@ describe('GfsUploadJob', () => {
   it('resumes only the missing part and emits visible progress before completion', async () => {
     const file = new File([new Uint8Array([1, 2, 3, 4])], 'payload.bin', { lastModified: 12 })
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([1, 2])))
-    const part0 = btoa(String.fromCharCode(...digest))
+    const part0 = [...digest].map(value => value.toString(16).padStart(2, '0')).join('')
     const responses: Array<{ status: number; body?: unknown }> = []
     const status: GfsUploadStatus = {
       session: {
@@ -121,9 +128,234 @@ describe('GfsUploadJob', () => {
     expect(result.state).toBe('completed')
     expect(FakeXhr.requests).toHaveLength(1)
     expect(FakeXhr.requests[0]?.headers.get('Upload-Part-Number')).toBe('1')
+    const part1Digest = new Uint8Array(
+      await crypto.subtle.digest('SHA-256', new Uint8Array([3, 4]))
+    )
+    expect(FakeXhr.requests[0]?.headers.get('Upload-Checksum')).toBe(
+      `sha256 ${btoa(String.fromCharCode(...part1Digest))}`
+    )
     expect(progress.some(value => value < 4)).toBe(true)
     expect(progress.at(-1)).toBe(4)
     expect(responses).toHaveLength(0)
+  })
+
+  it('adopts a status-confirmed committed part after its XHR response is lost', async () => {
+    const file = new File([new Uint8Array([5, 6, 7, 8])], 'response-loss.bin', {
+      lastModified: 13,
+    })
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))
+    const sha256 = [...digest].map(value => value.toString(16).padStart(2, '0')).join('')
+    const uploadId = '15151515-1515-4151-8151-151515151515'
+    const session = {
+      uploadId,
+      expectedBytes: file.size,
+      partBytes: file.size,
+      partCount: 1,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    let statusCalls = 0
+    let completeCalls = 0
+    FakeXhr.responseLosses = 1
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status')) {
+          statusCalls += 1
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session: {
+                  ...session,
+                  state: 'uploading',
+                  contiguousBytes: file.size,
+                  committedBytes: file.size,
+                  committedPartCount: 1,
+                },
+                parts: [
+                  {
+                    partNumber: 0,
+                    offsetBytes: 0,
+                    lengthBytes: file.size,
+                    sha256,
+                  },
+                ],
+              },
+            }),
+            { status: 200 }
+          )
+        }
+        if (method === 'POST' && url.endsWith('/complete')) {
+          completeCalls += 1
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                ...session,
+                state: 'completed',
+                contiguousBytes: file.size,
+                committedBytes: file.size,
+                committedPartCount: 1,
+              },
+            }),
+            { status: 200 }
+          )
+        }
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-response-loss' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+
+    expect(FakeXhr.requests).toHaveLength(1)
+    expect(statusCalls).toBe(1)
+    expect(completeCalls).toBe(1)
+  })
+
+  it('persists an unresolved response-loss session without replaying its part', async () => {
+    const file = new File([new Uint8Array([9, 10])], 'outcome-unknown.bin', {
+      lastModified: 14,
+    })
+    const session = {
+      uploadId: '16161616-1616-4161-8161-161616161616',
+      expectedBytes: file.size,
+      partBytes: file.size,
+      partCount: 1,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    let reconcileStatusCalls = 0
+    let completeCalls = 0
+    let persisted = 0
+    FakeXhr.responseLosses = 1
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status')) {
+          reconcileStatusCalls += 1
+          throw new Error('status transport unavailable')
+        }
+        if (method === 'POST' && url.endsWith('/complete')) {
+          completeCalls += 1
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 200 })
+        }
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-outcome-unknown' },
+        onPersist: () => {
+          persisted += 1
+        },
+      }).start()
+    ).rejects.toThrow('One or more upload parts could not be committed.')
+
+    expect(persisted).toBe(1)
+    expect(FakeXhr.requests).toHaveLength(1)
+    expect(reconcileStatusCalls).toBe(3)
+    expect(completeCalls).toBe(0)
+  })
+
+  it('fails closed when response-loss status omits or corrupts activePartCount', async () => {
+    const file = new File([new Uint8Array([11, 12])], 'invalid-active-count.bin', {
+      lastModified: 15,
+    })
+    const invalidCounts: unknown[] = [undefined, 0.5, -1]
+
+    for (const [index, activePartCount] of invalidCounts.entries()) {
+      const session = {
+        uploadId: `17171717-1717-4171-8171-17171717171${index}`,
+        expectedBytes: file.size,
+        partBytes: file.size,
+        partCount: 1,
+        state: 'initiated',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        ...(activePartCount === undefined ? {} : { activePartCount }),
+      }
+      let statusCalls = 0
+      let completeCalls = 0
+      FakeXhr.requests = []
+      FakeXhr.statuses = []
+      FakeXhr.responseLosses = 1
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const method = init?.method ?? 'GET'
+          const url = String(_input)
+          if (method === 'GET' && url.endsWith('/capabilities'))
+            return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+              status: 200,
+            })
+          if (method === 'POST' && url.endsWith('/uploads'))
+            return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+          if (method === 'HEAD') return new Response(null, { status: 204 })
+          if (method === 'GET' && url.includes('/status')) {
+            statusCalls += 1
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                data: { session: { ...session, state: 'uploading' }, parts: [] },
+              }),
+              { status: 200 }
+            )
+          }
+          if (method === 'POST' && url.endsWith('/complete')) {
+            completeCalls += 1
+            return new Response(JSON.stringify({ ok: true, data: session }), { status: 200 })
+          }
+          throw new Error(`unexpected ${method} ${url}`)
+        })
+      )
+
+      await expect(
+        new GfsUploadJob({
+          file,
+          name: file.name,
+          target: { operation: 'create', parentRid: `parent-invalid-active-${index}` },
+        }).start()
+      ).rejects.toThrow('One or more upload parts could not be committed.')
+
+      expect(FakeXhr.requests).toHaveLength(1)
+      expect(statusCalls).toBe(1)
+      expect(completeCalls).toBe(0)
+    }
   })
 
   it('rejects a committed status part whose checksum does not match the selected file before PUT', async () => {
@@ -166,7 +398,7 @@ describe('GfsUploadJob', () => {
         target: { operation: 'create', parentRid: 'parent-2' },
         resumeUploadId: '22222222-2222-4222-8222-222222222222',
       }).start()
-    ).rejects.toThrow(/does not match/)
+    ).rejects.toThrow(/invalid SHA-256|does not match/)
     expect(FakeXhr.requests).toHaveLength(0)
   })
 
@@ -213,6 +445,28 @@ describe('GfsUploadJob', () => {
             { status: 201 }
           )
         }
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && String(_input).includes('/status'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session: {
+                  uploadId: '33333333-3333-4333-8333-333333333333',
+                  expectedBytes: 8,
+                  partBytes: 2,
+                  partCount: 4,
+                  state: 'uploading',
+                  contiguousBytes: 0,
+                  committedBytes: 0,
+                  committedPartCount: 0,
+                  activePartCount: 0,
+                },
+                parts: [],
+              },
+            }),
+            { status: 200 }
+          )
         if (method === 'POST' && String(_input).endsWith('/complete')) {
           completeCalls += 1
           return new Response(
