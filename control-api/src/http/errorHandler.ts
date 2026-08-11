@@ -27,11 +27,16 @@ function extractErrorStatus(err: unknown): number | undefined {
     status?: unknown
     statusCode?: unknown
     code?: unknown
+    httpStatus?: unknown
     response?: { statusCode?: unknown; status?: unknown }
   }
   if (typeof maybe.status === 'number') return maybe.status
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
   if (typeof maybe.code === 'number') return maybe.code
+  // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
+  // service-layer K8sNotFoundError/K8sConflictError expose their status there,
+  // so read it after code/statusCode or their 404/409 collapses to 500.
+  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
   if (maybe.response && typeof maybe.response.statusCode === 'number') {
     return maybe.response.statusCode
   }

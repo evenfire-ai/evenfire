@@ -4,6 +4,7 @@ import type { Request } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { K8sNotFoundError } from '../src/services/resourceService.js'
 
 /**
  * UT-2a (FIX-B): the global error handler must forward a K8s error's real 4xx
@@ -58,6 +59,25 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
 
   it('preserves the legacy `.status` path (404)', async () => {
     const res = await request(appThrowing({ status: 404, message: 'not found' })).get('/boom')
+    expect(res.status).toBe(404)
+  })
+
+  /**
+   * R4-M3: the service-layer K8sNotFoundError/K8sConflictError expose their
+   * status ONLY on `.httpStatus` (no `.status` / `.statusCode` / `.code`). The
+   * handler's status chain must read `.httpStatus`, otherwise a real 404
+   * collapses to 500. Fixture derived from the real producer (T1): an actual
+   * `K8sNotFoundError` instance, not a hand-built `{ httpStatus }` object.
+   */
+  it('forwards a K8sNotFoundError (status only on `.httpStatus`) as 404', async () => {
+    const err = new K8sNotFoundError('host "product-agent" not found')
+    // Sanity: the real producer carries its status on `.httpStatus` alone.
+    expect((err as unknown as { httpStatus: number }).httpStatus).toBe(404)
+    expect((err as unknown as { status?: unknown }).status).toBeUndefined()
+    expect((err as unknown as { statusCode?: unknown }).statusCode).toBeUndefined()
+    expect((err as unknown as { code?: unknown }).code).toBeUndefined()
+
+    const res = await request(appThrowing(err)).get('/boom')
     expect(res.status).toBe(404)
   })
 
