@@ -395,6 +395,7 @@ cluster_fingerprint="$(
     fingerprint_dir mcp-host
     fingerprint_dir host-context-controller
     fingerprint_dir packages/workflow-runtime-core
+    fingerprint_dir packages/network-policy-core
 	    fingerprint_dir workflow-recipes
 	    fingerprint_dir packages/workflow-sdk
 	    fingerprint_dir tests/e2e/fixtures/custom-workflow-coordinator
@@ -431,6 +432,9 @@ fi
 
 run_if_changed packages/workflow-runtime-core "npm test && npm run build"
 ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"
+# @clerum/network-policy-core is a file: dependency of workflow-recipes and
+# host-context-controller (issue #299). Run its node:test suite when it changes.
+run_if_changed packages/network-policy-core "npm test"
 run_if_changed control-api "npm test"
 run_if_changed external-rest-api "npm test"
 run_if_changed rpc-proxy "npm test"

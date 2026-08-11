@@ -49,7 +49,8 @@
       "source_paths": [
         "host-context-controller/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/network-policy-core/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -135,6 +136,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -152,6 +154,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -168,6 +171,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -185,6 +189,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
