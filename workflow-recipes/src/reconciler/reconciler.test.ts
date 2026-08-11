@@ -3841,6 +3841,61 @@ describe('WorkflowRecipeReconciler', () => {
     expect(npCall.body.spec.egress).toHaveLength(2) // internal + external
   })
 
+  // H-E (audit): a rename of the external FQDN onto the SAME resolved IP/port
+  // renders identical spec.egress, so the egress-signature gate alone would no-op
+  // and discard the re-attributed state annotation. acc.changed must force the
+  // write. This guards the reconciler WIRING of egressStateChanged (the closing
+  // Fable cert flagged the gate term as untested). Uses the reconciler's own
+  // first-reconcile output as the live policy — no hand-built fixture.
+  it('R.8.24 — H-E: renaming the external FQDN onto the same IP re-persists the policy', async () => {
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
+    })
+    const uiWith = (fqdn: string) =>
+      makeRecipe({
+        spec: {
+          workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: { external: [{ fqdn, port: 443 }] },
+          },
+        },
+      })
+
+    // First reconcile authors the live ui-egress policy (IP pinned under old fqdn).
+    await rec.reconcile(uiWith('old.example.com'))
+    const p1 = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => c[0].body)
+      .find(b => b?.metadata?.name === 'ui-egress-test-recipe')
+    expect(p1).toBeTruthy()
+
+    // That policy is now live; the next reconcile renames the FQDN onto the SAME IP.
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
+      Promise.resolve(
+        name === 'ui-egress-test-recipe' ? p1 : { metadata: { name, resourceVersion: '1' } }
+      )
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+    await rec.reconcile(uiWith('new.example.com'))
+
+    const wroteUiEgress =
+      mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+        c => c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      ) ||
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.some(
+        c =>
+          c[0]?.name === 'ui-egress-test-recipe' ||
+          c[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+      )
+    // Rendered egress is byte-identical (same /32, same port); only acc.changed
+    // (old→new attribution) forces this write. Reverting the gate term no-ops it.
+    expect(wroteUiEgress).toBe(true)
+  })
+
   it('fails sandbox UI external egress in required mode when cluster enforcement is not confirmed', async () => {
     const recipe = makeRecipe({
       spec: {

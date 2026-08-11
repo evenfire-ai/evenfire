@@ -82,7 +82,12 @@ export function accumulateHostExactHostEgress(
 ): AccumulateHostEgressOutput {
   const { fqdn, port, protocol, resolution, previousAnnotations, now, config } = input
 
-  const previous = previousAnnotations ? parseState(previousAnnotations, now, config) : emptyState()
+  // This policy owns exactly one exact-host binding, so its declared identity is
+  // (fqdn,port,protocol). Pass it so a legacy (portless) migration keeps that
+  // port instead of guessing 443 and drops any other stale FQDN (H-B).
+  const previous = previousAnnotations
+    ? parseState(previousAnnotations, now, config, [{ fqdn, port, protocol }])
+    : emptyState()
 
   let observation: Observation
   if (resolution.kind === 'ok') {

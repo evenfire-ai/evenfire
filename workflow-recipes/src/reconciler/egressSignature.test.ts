@@ -69,4 +69,32 @@ describe('egressSignature (issue #299 audit H1/R2-1)', () => {
       egressSignature({ spec: { podSelector: {}, policyTypes: ['Egress'] } } as k8s.V1NetworkPolicy)
     )
   })
+
+  // H-C: the signature must project the FULL managed enforcement spec, not just
+  // spec.egress — a policy whose podSelector or policyTypes drifted out-of-band
+  // (same destination rules) must be treated as changed so the reconcile re-owns
+  // it, instead of leaving external egress applied to the wrong pods.
+  const sameEgress = [
+    { to: [{ ipBlock: { cidr: '1.2.3.4/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+  ]
+  const withSpec = (podSelector: unknown, policyTypes: string[]): k8s.V1NetworkPolicy =>
+    ({ spec: { podSelector, policyTypes, egress: sameEgress } }) as k8s.V1NetworkPolicy
+
+  it('H-C: DETECTS a podSelector drift even when egress rules are identical', () => {
+    expect(egressSignature(withSpec({ matchLabels: { app: 'scanner' } }, ['Egress']))).not.toBe(
+      egressSignature(withSpec({ matchLabels: { app: 'attacker' } }, ['Egress']))
+    )
+  })
+
+  it('H-C: DETECTS a policyTypes change even when egress rules are identical', () => {
+    expect(egressSignature(withSpec({}, ['Egress']))).not.toBe(
+      egressSignature(withSpec({}, ['Egress', 'Ingress']))
+    )
+  })
+
+  it('H-C: policyTypes order does not matter (Egress,Ingress == Ingress,Egress)', () => {
+    expect(egressSignature(withSpec({}, ['Egress', 'Ingress']))).toBe(
+      egressSignature(withSpec({}, ['Ingress', 'Egress']))
+    )
+  })
 })

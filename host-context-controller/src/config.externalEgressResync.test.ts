@@ -92,4 +92,38 @@ describe('external egress sliding-window config (issue #299)', () => {
       /HCC_EXTERNAL_EGRESS_RESYNC_SEC/
     )
   })
+
+  // M-C prong 1: cadence knobs must be capped at 3600s. An unbounded value like
+  // 2_200_000 exceeds Node's signed-32-bit setTimeout limit (2^31-1 ms) and is
+  // clamped to 1ms → a back-to-back DNS-resync hot loop. Port of commit 3f968956.
+  it('fails loud when the overlap exceeds the 3600s cap (M-C timer overflow)', async () => {
+    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '3601' })).rejects.toThrow(/3600/)
+  })
+
+  it('fails loud when the resync interval exceeds the 3600s cap (M-C timer overflow)', async () => {
+    await expect(
+      loadConfig({
+        HCC_EXTERNAL_EGRESS_RESYNC_SEC: '3601',
+        HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '3600',
+      })
+    ).rejects.toThrow(/3600/)
+  })
+
+  it('accepts the cadence knobs exactly at the 3600s cap', async () => {
+    const { config } = await loadConfig({
+      HCC_EXTERNAL_EGRESS_RESYNC_SEC: '1800',
+      HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '3600',
+    })
+    expect(config.externalEgressOverlapSec).toBe(3600)
+    expect(config.externalEgressResyncIntervalSec).toBe(1800)
+  })
+
+  it('fails loud when max entries exceed the 4096 cap (M-C annotation-size bound)', async () => {
+    await expect(loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '4097' })).rejects.toThrow(/4096/)
+  })
+
+  it('accepts max entries exactly at the 4096 cap', async () => {
+    const { config } = await loadConfig({ HCC_EXTERNAL_EGRESS_MAX_ENTRIES: '4096' })
+    expect(config.externalEgressMaxEntries).toBe(4096)
+  })
 })

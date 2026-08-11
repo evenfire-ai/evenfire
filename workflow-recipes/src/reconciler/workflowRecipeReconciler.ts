@@ -660,11 +660,23 @@ function canonicalize(value: unknown): unknown {
  * and would defeat the no-churn gate. Unlike the earlier tuple-only signature,
  * this captures the FULL rule — including `namespaceSelector`/`podSelector` `to`
  * entries for internal/cluster-local egress (audit H1): a tuple signature over
- * ipBlock only was blind to selector changes, stranding a stale policy. Mirrors
- * HCC's `egressSignature`.
+ * ipBlock only was blind to selector changes, stranding a stale policy.
+ *
+ * It also projects `podSelector` and `policyTypes` (audit H-C), not just
+ * `spec.egress`: a policy whose selector or policy types drifted out-of-band —
+ * with the same destination rules — must count as changed so the reconcile
+ * re-owns it, rather than leaving external egress applied to the wrong pods.
+ * `policyTypes` is order-insensitive (sorted). Mirrors HCC's `egressSignature`.
  */
 export function egressSignature(policy: k8s.V1NetworkPolicy): string {
-  return JSON.stringify(canonicalize(policy.spec?.egress ?? []))
+  const spec = policy.spec
+  return JSON.stringify(
+    canonicalize({
+      podSelector: spec?.podSelector ?? {},
+      policyTypes: [...(spec?.policyTypes ?? [])].sort(),
+      egress: spec?.egress ?? [],
+    })
+  )
 }
 
 export class WorkflowRecipeReconciler {
@@ -3967,6 +3979,12 @@ export class WorkflowRecipeReconciler {
     let stateAnnotations: Record<string, string> | undefined
     let existing: k8s.V1NetworkPolicy | null = null
     let egressRenewalDue = false
+    // H-E: the write gate compares rendered spec.egress (ipBlock cidr+port, no
+    // fqdn), so a rename old.example.com→new.example.com onto the SAME ip/port is
+    // spec-identical and would be skipped, discarding the re-attributed state
+    // annotation and losing the overlap grace when the new name later rotates.
+    // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
+    let egressStateChanged = false
     if (externals.length > 0) {
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
@@ -4007,6 +4025,7 @@ export class WorkflowRecipeReconciler {
       )
       stateAnnotations = acc.annotations
       egressRenewalDue = acc.renewalDue
+      egressStateChanged = acc.changed
 
       this.assertClusterEnforcesExternalEgress(
         recipe,
@@ -4034,7 +4053,7 @@ export class WorkflowRecipeReconciler {
     // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
     // write when the persisted window is aging (renewalDue, audit M1), even if
     // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
-    if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue) {
+    if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue && !egressStateChanged) {
       console.log(
         `[WR-Reconciler] NetworkPolicy "${policyName}" in ${ns} egress set unchanged — no-op`
       )
@@ -4418,6 +4437,7 @@ export class WorkflowRecipeReconciler {
       let wlStateAnnotations: Record<string, string> | undefined
       let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
+      let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
       const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
       if (externalDeclared.length > 0) {
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
@@ -4446,6 +4466,7 @@ export class WorkflowRecipeReconciler {
         )
         wlStateAnnotations = acc.annotations
         wlEgressRenewalDue = acc.renewalDue
+        wlEgressStateChanged = acc.changed
 
         this.assertClusterEnforcesExternalEgress(
           recipe,
@@ -4466,7 +4487,11 @@ export class WorkflowRecipeReconciler {
       }
       // issue #299: NO-OP when the accumulated set and rules are already live —
       // but still write when the persisted window is aging (renewalDue, M1).
-      if (!this.egressWriteNeeded(existingWlPolicy, policy) && !wlEgressRenewalDue) {
+      if (
+        !this.egressWriteNeeded(existingWlPolicy, policy) &&
+        !wlEgressRenewalDue &&
+        !wlEgressStateChanged
+      ) {
         console.log(
           `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
         )

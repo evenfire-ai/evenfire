@@ -243,6 +243,30 @@ describe('accumulateExternalEgress — H4 no-op', () => {
     expect(out.changed).toBe(false)
     expect(out.resolved.map(r => r.cidr)).toEqual(['160.79.104.10/32'])
   })
+
+  // H-E: a rename onto the SAME ip/port renders an identical ipBlock, so the
+  // reconciler's egress-signature gate alone would skip the write and discard the
+  // re-attributed state. The accumulator must report changed=true (the signal the
+  // gate now also consumes) and persist the IP under the NEW fqdn, so a later
+  // rotation of the new name keeps the carried-over IP's overlap grace.
+  it('H-E: a rename onto the same IP/port reports changed=true and re-attributes state', () => {
+    const prev = previousAnnotations(
+      [{ fqdn: 'old.example.com', port: 443, ip: '1.2.3.4', ttlSeconds: 300 }],
+      NOW
+    )
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'new.example.com', port: 443 }],
+      resolveResult: okResolve([
+        { fqdn: 'new.example.com', port: 443, ip: '1.2.3.4', ttlSeconds: 300 },
+      ]),
+      previousAnnotations: prev,
+      now: NOW + 10_000,
+      config: CONFIG,
+    })
+    expect(out.changed).toBe(true)
+    expect(out.resolved.map(r => r.cidr)).toEqual(['1.2.3.4/32'])
+    expect(out.entries.map(e => e.fqdn)).toEqual(['new.example.com'])
+  })
 })
 
 describe('accumulateExternalEgress — H5 rehydration', () => {

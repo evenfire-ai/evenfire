@@ -139,7 +139,11 @@ function buildObservations(
 export function accumulateExternalEgress(input: AccumulateInput): AccumulateOutput {
   const { externals, resolveResult, previousAnnotations, now, config } = input
 
-  const previous = previousAnnotations ? parseState(previousAnnotations, now, config) : emptyState()
+  // Pass the declared externals so a legacy (portless) migration takes the
+  // current declared port, not a guessed 443, and drops undeclared FQDNs (H-B).
+  const previous = previousAnnotations
+    ? parseState(previousAnnotations, now, config, externals)
+    : emptyState()
 
   const observations = buildObservations(externals, resolveResult)
   const out = reconcileEgressState(previous, observations, now, config)

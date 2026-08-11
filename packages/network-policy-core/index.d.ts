@@ -112,11 +112,18 @@ export declare function serializeState(state: EgressState): Record<string, strin
  * view (rehydrated with a bounded grace = now + overlapMs since TTL is unknown).
  * Returns an empty state only when nothing parses — the caller then keeps the
  * existing live policy rather than blanking egress.
+ *
+ * `declarations` (H-B): the currently-declared external targets. The legacy
+ * annotation is portless, so when supplied, each migrated entry takes the
+ * port/protocol of its current declaration (not a guessed 443/TCP) and pairs for
+ * no-longer-declared FQDNs are dropped. Omit it only from callers that cannot
+ * supply the declarations, which then fall back to the historical 443/TCP grace.
  */
 export declare function parseState(
   annotations: Record<string, string>,
   now: number,
-  config: EgressCoreConfig
+  config: EgressCoreConfig,
+  declarations?: ReadonlyArray<{ fqdn: string; port: number; protocol?: string }>
 ): EgressState
 
 export declare const STATE_ANNOTATION: string

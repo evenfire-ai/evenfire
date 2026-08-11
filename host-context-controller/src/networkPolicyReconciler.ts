@@ -131,12 +131,23 @@ function canonicalize(value: unknown): unknown {
  * (deep key-sorted) JSON of `spec.egress`. Decides whether a write is needed
  * WITHOUT the key-ordering fragility of a raw JSON.stringify (audit R2-1). Unlike
  * the earlier tuple-only signature (ipBlock cidr/port), this captures the FULL
- * rule including selector-based `to` entries (audit H1). HCC external-egress
- * policies are ipBlock-only today, so H1 does not bite here, but this keeps the
- * gate correct and mirrors WRC's `egressSignature`.
+ * rule including selector-based `to` entries (audit H1). It also projects
+ * `podSelector` and `policyTypes` (audit H-C), not just `spec.egress`, so a
+ * policy whose selector or policy types drifted out-of-band (same destination
+ * rules) counts as changed and the reconcile re-owns it instead of leaving
+ * egress applied to the wrong pods. `policyTypes` is order-insensitive (sorted).
+ * HCC external-egress policies are ipBlock-only today, so H1 does not bite here,
+ * but this keeps the gate correct and mirrors WRC's `egressSignature`.
  */
 export function egressSignature(policy: k8s.V1NetworkPolicy): string {
-  return JSON.stringify(canonicalize(policy.spec?.egress ?? []))
+  const spec = policy.spec
+  return JSON.stringify(
+    canonicalize({
+      podSelector: spec?.podSelector ?? {},
+      policyTypes: [...(spec?.policyTypes ?? [])].sort(),
+      egress: spec?.egress ?? [],
+    })
+  )
 }
 
 function isPublicDnsHostname(host: string): boolean {
@@ -863,6 +874,11 @@ export class NetworkPolicyReconciler {
       // (audit M1): we must re-persist even if the ip-set is unchanged so a
       // stable-then-rotated IP keeps its overlap grace.
       let egressRenewalDue = false
+      // H-E: a rename onto the same ip/port is spec-identical, so the rendered
+      // egress gate would skip it and discard the re-attributed state annotation.
+      // accumulated.changed is over (fqdn,ip,port,protocol), so it forces the
+      // write that re-persists the identity and preserves the overlap grace.
+      let egressStateChanged = false
       const name = this.externalEgressPolicyName(server.name, binding)
       if (!name) {
         failures.push('exact-host external egress bindings must declare dns or cidr')
@@ -1023,6 +1039,7 @@ export class NetworkPolicyReconciler {
           cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
           stateAnnotations = accumulated.annotations
           egressRenewalDue = accumulated.renewalDue
+          egressStateChanged = accumulated.changed
           resolvedEgressIPs.push({
             dns: binding.dns,
             ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
@@ -1061,6 +1078,7 @@ export class NetworkPolicyReconciler {
           // A freeze keeps the SAME set as the live policy → changed=false → no
           // write (no churn while DNS is failing); a genuine change still writes.
           egressRenewalDue = accumulated.renewalDue
+          egressStateChanged = accumulated.changed
           resolvedEgressIPs.push({
             dns: binding.dns,
             ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
@@ -1107,7 +1125,11 @@ export class NetworkPolicyReconciler {
       // Write only when the enforced rules changed / the policy is new / drifted
       // (audit F2 no-churn + L1 self-heal), OR when the DNS window is aging and
       // must be re-persisted (audit M1). A pure timestamp refresh is a no-op.
-      if (this.externalEgressWriteNeeded(existingPolicy, policy) || egressRenewalDue) {
+      if (
+        this.externalEgressWriteNeeded(existingPolicy, policy) ||
+        egressRenewalDue ||
+        egressStateChanged
+      ) {
         await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
       } else {
         console.log(`[NetPol] External egress "${name}" unchanged — no-op (issue #299 no-churn)`)

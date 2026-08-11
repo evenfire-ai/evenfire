@@ -390,6 +390,15 @@ validateRemovedStatelessCommunicationChannelPolicy(
  * before it can expire; otherwise a gap reopens and the pod loses egress on the
  * next rotation. Fails loud at startup rather than degrading silently.
  */
+// Upper bounds (audit M-C, port of commit 3f968956). The one-hour cadence
+// ceiling keeps every timer far below Node's signed-32-bit setTimeout limit
+// (2^31-1 ms ≈ 24.8 days) — an unbounded seconds value multiplied to ms would
+// overflow and Node clamps it to 1ms, turning the self-rescheduling resync into
+// a back-to-back DNS hot loop. The 4096 entry ceiling bounds the serialized
+// state annotation and matches WRC's accumulator contract.
+const MAX_EXTERNAL_EGRESS_CADENCE_SEC = 60 * 60
+const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 4096
+
 export function validateExternalEgressResyncInvariant(cfg: {
   externalEgressResyncIntervalSec: number
   externalEgressOverlapSec: number
@@ -401,24 +410,31 @@ export function validateExternalEgressResyncInvariant(cfg: {
   const floor = cfg.externalEgressRefreshFloorSec
   const max = cfg.externalEgressMaxEntries
 
-  if (!Number.isInteger(overlap) || overlap <= 0) {
+  if (!Number.isInteger(overlap) || overlap <= 0 || overlap > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
     throw new Error(
-      `HCC_EXTERNAL_EGRESS_OVERLAP_SEC must be a positive integer (seconds), got '${overlap}'`
+      `HCC_EXTERNAL_EGRESS_OVERLAP_SEC must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (seconds), got '${overlap}'`
     )
   }
-  if (!Number.isInteger(floor) || floor < 1) {
+  if (!Number.isInteger(floor) || floor < 1 || floor > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
     throw new Error(
-      `HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC must be an integer >= 1 (seconds), got '${floor}'`
+      `HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (seconds), got '${floor}'`
     )
   }
-  if (!Number.isInteger(max) || max < 1) {
-    throw new Error(`HCC_EXTERNAL_EGRESS_MAX_ENTRIES must be an integer >= 1, got '${max}'`)
+  if (!Number.isInteger(max) || max < 1 || max > MAX_EXTERNAL_EGRESS_MAX_ENTRIES) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_MAX_ENTRIES must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_MAX_ENTRIES}, got '${max}'`
+    )
   }
   // A negative interval is a typo, not "disabled" — reject it loudly so it can't
   // silently reinstate the #299 drift bug (audit F4). 0 = explicitly disabled.
-  if (!Number.isInteger(interval) || interval < 0) {
+  // The upper cap (M-C) prevents a signed-32-bit setTimeout overflow.
+  if (!Number.isInteger(interval) || interval < 0 || interval > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
     throw new Error(
-      `HCC_EXTERNAL_EGRESS_RESYNC_SEC must be an integer >= 0 (0 disables), got '${interval}'`
+      `HCC_EXTERNAL_EGRESS_RESYNC_SEC must be an integer between 0 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (0 disables), got '${interval}'`
     )
   }
   // interval 0 disables periodic resync; only enforce ordering when enabled.

@@ -333,3 +333,100 @@ test('classifyDnsError defaults unknown/undefined codes to permanent (matches WR
   assert.equal(core.classifyDnsError('ESOMETHINGWEIRD'), 'permanent')
   assert.equal(core.classifyDnsError(new Error('no code')), 'permanent')
 })
+
+// ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
+// The state map is keyed by (fqdn,ip,port,protocol) but classification used to be
+// keyed by fqdn only, so an entry whose declared PORT was removed survived under
+// the still-declared fqdn's `ok` branch (and was frozen forever under a transient
+// failure). Revocation must track the full declared identity.
+test('H-A: changing a declared port REVOKES the old-port entry immediately', () => {
+  let s = core.reconcileEgressState(core.emptyState(), [obsOk('gh', ['1.2.3.4'], TTL, 443)], 1000, CFG)
+    .state
+  assert.deepEqual(
+    s.entries.map(e => `${e.ip}:${e.port}`),
+    ['1.2.3.4:443']
+  )
+  // gh is re-declared on 8443 ONLY (443 removed); same IP resolves.
+  const out = core.reconcileEgressState(s, [obsOk('gh', ['1.2.3.4'], TTL, 8443)], 2000, CFG)
+  assert.deepEqual(
+    out.entries.map(e => `${e.ip}:${e.port}`).sort(),
+    ['1.2.3.4:8443'],
+    'the removed port 443 must be revoked; only the still-declared 8443 remains'
+  )
+})
+
+test('H-A: a removed port is revoked even while the still-declared port DNS-fails', () => {
+  const s = core.reconcileEgressState(core.emptyState(), [obsOk('gh', ['1.2.3.4'], TTL, 443)], 1000, CFG)
+    .state
+  // 443 removed from the spec; 8443 declared but DNS transiently failing.
+  const out = core.reconcileEgressState(s, [obsTransient('gh', 8443)], 2000, CFG)
+  assert.deepEqual(
+    out.entries.map(e => `${e.ip}:${e.port}`),
+    [],
+    'the removed 443 identity is revoked; the transient freeze only protects the declared 8443'
+  )
+})
+
+test('H-A: a transient failure still freezes the SAME declared identity', () => {
+  const s = core.reconcileEgressState(core.emptyState(), [obsOk('gh', ['1.2.3.4'], TTL, 443)], 1000, CFG)
+    .state
+  // gh:443 is still declared; DNS transiently fails → freeze, do not prune.
+  const out = core.reconcileEgressState(s, [obsTransient('gh', 443)], 2000, CFG)
+  assert.deepEqual(
+    out.entries.map(e => `${e.ip}:${e.port}`),
+    ['1.2.3.4:443'],
+    'the declared identity is frozen (H1) while its own DNS fails'
+  )
+  assert.deepEqual(out.frozenFqdns, ['gh'])
+})
+
+// ─── H-B: legacy migration derives port/protocol from the declaration ─────────
+// The portless `egress-fqdn-targets` legacy annotation must migrate to the port
+// the target is CURRENTLY declared on, not a guessed 443/TCP, and must drop pairs
+// for FQDNs that are no longer declared.
+test('H-B: legacy targets migrate to the DECLARED port, not a guessed 443', () => {
+  const legacy = { [core.TARGETS_ANNOTATION]: 'db.example.com=10.0.0.5/32' }
+  const declarations = [{ fqdn: 'db.example.com', port: 5432 }]
+  const back = core.parseState(legacy, 1000, CFG, declarations)
+  assert.deepEqual(
+    back.entries.map(e => `${e.ip}:${e.port}`),
+    ['10.0.0.5:5432'],
+    'migrated at the declared 5432, NOT widened to 443'
+  )
+})
+
+test('H-B: legacy targets for an UNDECLARED fqdn are dropped', () => {
+  const legacy = {
+    [core.TARGETS_ANNOTATION]: 'gone.example.com=10.0.0.9/32,db.example.com=10.0.0.5/32',
+  }
+  const declarations = [{ fqdn: 'db.example.com', port: 5432 }]
+  const back = core.parseState(legacy, 1000, CFG, declarations)
+  assert.deepEqual(
+    back.entries.map(e => `${e.fqdn}:${e.port}`),
+    ['db.example.com:5432'],
+    'the undeclared gone.example.com is dropped; only the declared db survives'
+  )
+})
+
+test('H-B: without declarations, legacy falls back to the historical 443 grace', () => {
+  const legacy = { [core.TARGETS_ANNOTATION]: 'gh=140.82.112.3/32' }
+  const back = core.parseState(legacy, 1000, CFG)
+  assert.deepEqual(back.entries.map(e => `${e.ip}:${e.port}`), ['140.82.112.3:443'])
+})
+
+// M-C prong 2: the serialized state annotation must stay under the byte budget
+// regardless of FQDN length. A fixed entry-count cap cannot bound bytes (a
+// 253-char FQDN serializes ~5× a short one); an oversized annotation 422s at the
+// apiserver and loops the reconcile.
+test('M-C byte cap: the serialized state never exceeds the byte budget', () => {
+  const longFqdn = `${'a'.repeat(240)}.example.com` // ~252 chars
+  const bigCfg = { overlapMs: 300_000, maxEntries: 4096 } // count cap won't bite first
+  // 900 distinct /32s under the long FQDN ≈ ~300KB if all kept — over the 200KB budget.
+  const ips = Array.from({ length: 900 }, (_, i) => `10.${Math.floor(i / 256)}.${i % 256}.1`)
+  const out = core.reconcileEgressState(core.emptyState(), [obsOk(longFqdn, ips, TTL, 443)], 1000, bigCfg)
+  const bytes = core.serializeState(out.state)[core.STATE_ANNOTATION].length
+  assert.ok(bytes <= 200 * 1000, `serialized state is ${bytes} bytes, must be <= 200000`)
+  assert.ok(out.entries.length > 0, 'not everything was evicted')
+  assert.ok(out.entries.length < 900, 'byte-budget eviction dropped the overflow')
+  assert.equal(out.overCap, true, 'overCap flags the eviction for the alarm/metric')
+})
