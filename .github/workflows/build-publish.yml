@@ -40,9 +40,9 @@ on:
 
 # Least-privilege default: only build-push and merge need to write packages
 # (build-push pushes per-arch digests, merge pushes the combined manifest
-# list). detect (runs the third-party paths-filter action) and notify-infra
-# get read-only, so a compromised action in those jobs cannot push images to
-# ghcr.
+# list). The source preflight, detect (runs the third-party paths-filter
+# action), and notify-infra get read-only permissions, so a compromised action
+# in those jobs cannot push images to ghcr.
 permissions:
   contents: read
 
@@ -51,13 +51,31 @@ env:
   NAMESPACE: evenfire-ai
 
 jobs:
+  # This intentionally repeats the cheap incoming-diff Prettier check from CI:
+  # the publishing workflow is an independent enforcement boundary. Manual
+  # dispatches have no bounded push range, so they require a successful CI push
+  # run for the exact selected commit instead.
+  preflight:
+    name: Source preflight
+    if: github.repository == 'evenfire-ai/evenfire'
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/prettier-source-preflight.yml
+    with:
+      allowed_branches: dev
+      base_sha: ${{ github.event.before || '' }}
+      head_sha: ${{ github.sha }}
+      mode: ${{ github.event_name == 'workflow_dispatch' && 'exact-ci' || 'direct' }}
+
   detect:
     name: Detect changed images
+    needs: preflight
     runs-on: ubuntu-latest
     # Publishing targets ghcr.io/evenfire-ai/*, which forks cannot write to.
-    # Guarding the entry job cascades: build-push needs detect, merge needs
-    # build-push, notify-infra needs merge, so a fork skips the whole
-    # workflow cleanly.
+    # Guarding the preflight and this entry job cascades: build-push needs
+    # detect, merge needs build-push, and notify-infra needs merge, so a fork
+    # skips the whole workflow cleanly.
     if: github.repository == 'evenfire-ai/evenfire'
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}

@@ -21,8 +21,45 @@ permissions:
   contents: read
 
 jobs:
+  resolve-release-ref:
+    name: Resolve release commit
+    if: github.repository == 'evenfire-ai/evenfire'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Peel release ref to its commit
+        id: resolve
+        env:
+          RELEASE_REF: ${{ github.event.inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --verify --end-of-options "${RELEASE_REF}^{commit}")"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  preflight:
+    name: Source preflight
+    needs: resolve-release-ref
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/prettier-source-preflight.yml
+    with:
+      allowed_branches: main
+      head_sha: ${{ needs.resolve-release-ref.outputs.sha }}
+      mode: exact-ci
+
   promote:
     name: Promote images
+    needs: [resolve-release-ref, preflight]
     runs-on: ubuntu-latest
     # Forks cannot write to ghcr.io/evenfire-ai/*, and a fork's v* tag would
     # otherwise produce a red run against a namespace it does not own.
@@ -37,6 +74,8 @@ jobs:
           # `git diff` against a commit that may be far back on dev. A shallow
           # checkout has neither.
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.resolve-release-ref.outputs.sha }}
 
       - name: Install crane
         run: |
@@ -63,4 +102,5 @@ jobs:
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
           RELEASE_REF: ${{ github.event.inputs.ref || github.ref_name }}
+          TAG_SHA: ${{ needs.resolve-release-ref.outputs.sha }}
         run: bash scripts/release/promote-release-images.sh

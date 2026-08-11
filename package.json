@@ -6,6 +6,7 @@
     "commitlint": "commitlint",
     "format": "node scripts/prettier/run-all.mjs --write",
     "format:check": "node scripts/prettier/run-all.mjs --check",
+    "format:diff": "node scripts/prettier/run-on-diff.mjs",
     "format:staged": "node scripts/prettier/run-on-staged.mjs",
     "profile": "make -C profile-ui dev",
     "postinstall": "npm run install-git-hooks",
