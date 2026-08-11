@@ -83,7 +83,7 @@ type OperationalAuthorizationContext = {
   relationships: Array<{ type: string; targetResourceId: string }>
   relatedContextNames: string[]
   relatedHostNames: string[]
-  filesystemScopes: Map<string, string>
+  filesystemScopes: Map<string, string[]>
 }
 
 type OperationalAuthorizationLookup =
@@ -342,7 +342,7 @@ async function loadOperationalAuthorizationContext(
       gateway.listResource('contexts', config.contextsNamespace),
     ])
     if (!isCurrentOperationalResource(filesystem, identity)) return { status: 'not_found' }
-    const filesystemScopes = new Map<string, string>()
+    const filesystemScopes = new Map<string, string[]>()
     const contextNames: string[] = []
     for (const context of activeOperationalResources(rawContexts, config.contextsNamespace)) {
       const contextName = context.metadata?.name?.trim()
@@ -352,14 +352,13 @@ async function loadOperationalAuthorizationContext(
         const mountPath = reference.mountPath?.trim()
         if (name !== identity.name || !mountPath) continue
         contextNames.push(contextName)
-        filesystemScopes.set(
-          contextName,
-          sharedFilesystemScopeRef({
-            contextLogicalId: scopedLogicalId(config.contextsNamespace, contextName),
-            filesystemLogicalId: input.resource.logicalId,
-            mountPath,
-          })
-        )
+        const scope = sharedFilesystemScopeRef({
+          contextLogicalId: scopedLogicalId(config.contextsNamespace, contextName),
+          filesystemLogicalId: input.resource.logicalId,
+          mountPath,
+        })
+        const current = filesystemScopes.get(contextName) ?? []
+        filesystemScopes.set(contextName, [...new Set([...current, scope])].sort())
       }
     }
     return {
@@ -802,13 +801,15 @@ async function loadGrantCandidates(
       if (!candidate) return []
       if (input.resource.type === 'mcp_server') {
         candidate.grantId = `${candidate.grantId}:mcp-server:${resourceName}`
-      } else {
-        const scope = operational.filesystemScopes.get(sourceId)
-        if (sourceType !== 'context' || !scope) return []
-        candidate.grantId = `${candidate.grantId}:shared-filesystem:${resourceName}`
-        candidate.filesystemScopeRef = scope
+        return [candidate]
       }
-      return [candidate]
+      const scopes = operational.filesystemScopes.get(sourceId) ?? []
+      if (sourceType !== 'context' || scopes.length === 0) return []
+      return scopes.map(scope => ({
+        ...candidate,
+        grantId: `${candidate.grantId}:shared-filesystem:${resourceName}`,
+        filesystemScopeRef: scope,
+      }))
     })
     return {
       exists: candidates.length > 0,

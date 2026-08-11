@@ -618,7 +618,19 @@ function rowToSeed(row: DbSeedRow, environmentId: string, userId: string): Catal
 }
 
 function pathSeedKey(path: CatalogPathSeed): string {
-  return JSON.stringify([path.kind, path.teamId ?? '', path.grantId])
+  return JSON.stringify([
+    path.kind,
+    path.teamId ?? '',
+    path.grantId,
+    normalizeCapabilities(path.behavior.capabilities),
+    path.behavior.budgetRef,
+    path.behavior.credentialPolicyRef,
+    path.behavior.approvalPolicyRef,
+    path.behavior.filesystemScopeRef,
+    path.behavior.runtimeRef,
+    path.behavior.providerModelPolicyRef,
+    path.behavior.auditSubject,
+  ])
 }
 
 function pathSeedProjection(path: CatalogPathSeed): string {

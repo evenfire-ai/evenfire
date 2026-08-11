@@ -75,6 +75,21 @@ export function resourceAuthorizationRevision(input: {
   resourceRevision: number | string
   candidates: readonly AuthorizationGrantCandidate[]
 }): string {
+  const candidateProjection = input.candidates.map(candidate => [
+    candidate.kind,
+    candidate.grantId,
+    candidate.teamId ?? null,
+    candidate.currentRole ?? null,
+    normalizeCapabilities(candidate.capabilities),
+    candidate.budgetRef,
+    candidate.credentialPolicyRef,
+    candidate.approvalPolicyRef,
+    candidate.filesystemScopeRef,
+    candidate.runtimeRef,
+    candidate.providerModelPolicyRef,
+    candidate.auditSubject,
+  ])
+
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -92,26 +107,9 @@ export function resourceAuthorizationRevision(input: {
         input.resource.type,
         input.resource.logicalId,
         String(input.resourceRevision),
-        [...input.candidates]
-          .sort((left, right) =>
-            JSON.stringify([left.kind, left.teamId ?? '', left.grantId]).localeCompare(
-              JSON.stringify([right.kind, right.teamId ?? '', right.grantId])
-            )
-          )
-          .map(candidate => [
-            candidate.kind,
-            candidate.grantId,
-            candidate.teamId ?? null,
-            candidate.currentRole ?? null,
-            normalizeCapabilities(candidate.capabilities),
-            candidate.budgetRef,
-            candidate.credentialPolicyRef,
-            candidate.approvalPolicyRef,
-            candidate.filesystemScopeRef,
-            candidate.runtimeRef,
-            candidate.providerModelPolicyRef,
-            candidate.auditSubject,
-          ]),
+        candidateProjection.sort((left, right) =>
+          JSON.stringify(left).localeCompare(JSON.stringify(right))
+        ),
       ])
     )
     .digest('base64url')

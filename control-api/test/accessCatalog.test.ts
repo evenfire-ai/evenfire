@@ -8,7 +8,10 @@ import {
   catalogAuthoritySourceTypes,
   invalidateAccessCatalogOperationalCache,
 } from '../src/services/access/accessCatalog.js'
-import { resolveLiveAuthorizationInTransaction } from '../src/services/access/liveAuthorizationResolver.js'
+import {
+  resolveLiveAuthorization,
+  resolveLiveAuthorizationInTransaction,
+} from '../src/services/access/liveAuthorizationResolver.js'
 import { sharedFilesystemScopeRef } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
@@ -38,6 +41,7 @@ const state = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   failAuthority: false,
   queryCount: 0,
+  resolverRows: [] as Record<string, unknown>[],
 }))
 
 vi.mock('../src/db.js', () => ({
@@ -50,6 +54,9 @@ vi.mock('../src/db.js', () => ({
             throw new Error('secret-like database endpoint /var/run/postgresql')
           if (sql.startsWith('SET TRANSACTION')) return { rows: [], rowCount: 0 }
           if (sql.includes('AS session_live')) return { rows: [state.snapshot], rowCount: 1 }
+          if (sql.includes('WITH requested AS') || sql.includes('WITH context_names AS')) {
+            return { rows: state.resolverRows, rowCount: state.resolverRows.length }
+          }
           if (sql.includes('catalog_paths AS'))
             return { rows: state.rows, rowCount: state.rows.length }
           throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
@@ -99,7 +106,7 @@ function row(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function gateway(options: { fail?: string } = {}) {
+function gateway(options: { fail?: string; duplicateMounts?: boolean } = {}) {
   const resources: Record<string, unknown[]> = {
     hosts: [
       {
@@ -117,7 +124,12 @@ function gateway(options: { fail?: string } = {}) {
         spec: {
           contextId: 'ctx-a',
           mcpServers: ['github'],
-          sharedFileSystems: [{ name: 'shared-a', mountPath: '/workspace' }],
+          sharedFileSystems: options.duplicateMounts
+            ? [
+                { name: 'shared-a', mountPath: '/workspace/b' },
+                { name: 'shared-a', mountPath: '/workspace/a' },
+              ]
+            : [{ name: 'shared-a', mountPath: '/workspace' }],
         },
       },
     ],
@@ -144,6 +156,14 @@ function gateway(options: { fail?: string } = {}) {
       if (options.fail === plural) throw new Error(`secret upstream failure for ${plural}`)
       return resources[plural] ?? []
     }),
+    getResource: vi.fn(async (plural: string, name: string, namespace: string) => {
+      const found = resources[plural]?.find(resource => {
+        const row = resource as { metadata?: { name?: string; namespace?: string } }
+        return row.metadata?.name === name && row.metadata?.namespace === namespace
+      })
+      if (!found) throw Object.assign(new Error('not found'), { httpStatus: 404 })
+      return found
+    }),
   }
 }
 
@@ -169,6 +189,7 @@ describe('aggregate access catalog', () => {
     state.rows = []
     state.failAuthority = false
     state.queryCount = 0
+    state.resolverRows = []
   })
 
   it('pushes final resource filters down to only their authority source families', () => {
@@ -463,11 +484,13 @@ describe('aggregate access catalog', () => {
               ? [
                   [
                     'ctx-a',
-                    sharedFilesystemScopeRef({
-                      contextLogicalId: 'mcp-server/ctx-a',
-                      filesystemLogicalId: 'mcp-host/shared-a',
-                      mountPath: '/workspace',
-                    }),
+                    [
+                      sharedFilesystemScopeRef({
+                        contextLogicalId: 'mcp-server/ctx-a',
+                        filesystemLogicalId: 'mcp-host/shared-a',
+                        mountPath: '/workspace',
+                      }),
+                    ],
                   ],
                 ]
               : []
@@ -480,6 +503,69 @@ describe('aggregate access catalog', () => {
     expect(connectorResult.status).toBe('allowed')
     const filesystemResult = await resolveDerived(filesystem, 'shared_filesystem.read')
     expect(filesystemResult.status).toBe('allowed')
+  })
+
+  it('preserves and re-resolves every mount when one filesystem is mounted twice', async () => {
+    state.snapshot.memberships = []
+    state.rows = [
+      row({
+        resource_type: 'context',
+        logical_id: 'ctx-a',
+        display_name: 'ctx-a',
+        grant_id: 'user_contexts:user-1:ctx-a',
+        capabilities: ['context.read'],
+      }),
+    ]
+    state.resolverRows = [
+      {
+        kind: 'direct',
+        grant_id: 'user_contexts:user-1:ctx-a',
+        source_id: 'ctx-a',
+        source_type: 'context',
+        authorization_resource_revision: 1,
+      },
+    ]
+    const producer = gateway({ duplicateMounts: true })
+    const catalog = await buildAccessCatalog(claims, producer as never)
+    const filesystem = catalog.items.find(
+      item => item.resource.id === 'shared_filesystem:mcp-host/shared-a'
+    )!
+
+    expect(filesystem.accessPaths).toHaveLength(2)
+    expect(
+      new Set(filesystem.accessPaths.map(path => path.behaviorDescriptors.filesystemScope)).size
+    ).toBe(2)
+
+    const authorizationInput = {
+      principalUserId: claims.userId,
+      sid: claims.sid,
+      requiredCapability: 'shared_filesystem.read' as const,
+      resource: canonicalResourceIdentity({
+        environmentId: filesystem.resource.environmentId,
+        type: 'shared_filesystem',
+        logicalId: 'mcp-host/shared-a',
+        displayName: 'shared-a',
+      }),
+    }
+    const discovery = await resolveLiveAuthorization(authorizationInput, {
+      gateway: producer as never,
+    })
+    expect(discovery.status).toBe('access_path_required')
+    if (discovery.status !== 'access_path_required') return
+    expect(discovery.safePathDescriptors.map(path => path.id).sort()).toEqual(
+      filesystem.accessPaths.map(path => path.accessPathId).sort()
+    )
+
+    for (const path of filesystem.accessPaths) {
+      const result = await resolveLiveAuthorization(
+        {
+          ...authorizationInput,
+          requestedAccessPathId: path.accessPathId,
+        },
+        { gateway: producer as never }
+      )
+      expect(result.status).toBe('allowed')
+    }
   })
 
   it('emits run, approval, and notification paths reconstructible from live rows', async () => {
