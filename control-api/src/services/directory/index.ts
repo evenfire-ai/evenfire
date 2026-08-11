@@ -27,6 +27,7 @@ export {
   acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
+  acceptInvitationForEmailInTransaction,
   getInvitationByToken,
   addMemberToTeam,
   createPasswordSetupInvitationForUser,

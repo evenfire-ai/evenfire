@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 
 type AuthContext = {
   userId: string
@@ -69,12 +69,13 @@ export async function acceptInvitation(
     })
     return { data }
   } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(400)')) return { error: 'invalid' }
-    if (message.includes('(404)')) return { error: 'not_found' }
-    if (message.includes('(403)')) return { error: 'forbidden' }
-    if (message.includes('(410)')) return { error: 'expired' }
-    return { error: 'not_pending' }
+    if (!(error instanceof ControlApiError)) throw error
+    if (error.status === 400) return { error: 'invalid' }
+    if (error.status === 404) return { error: 'not_found' }
+    if (error.status === 403) return { error: 'forbidden' }
+    if (error.status === 410) return { error: 'expired' }
+    if (error.status === 409) return { error: 'not_pending' }
+    throw error
   }
 }
 
@@ -151,11 +152,53 @@ export async function setupInvitationPassword(
     )
     return { data }
   } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(404)')) return { error: 'not_found' }
-    if (message.includes('(403)')) return { error: 'forbidden' }
-    if (message.includes('(409)')) return { error: 'not_accepted' }
-    if (message.includes('(410)')) return { error: 'expired' }
-    return { error: 'invalid_password' }
+    if (!(error instanceof ControlApiError)) throw error
+    if (error.status === 404) return { error: 'not_found' }
+    if (error.status === 403) return { error: 'forbidden' }
+    if (error.status === 409) return { error: 'not_accepted' }
+    if (error.status === 410) return { error: 'expired' }
+    if (error.status === 400) return { error: 'invalid_password' }
+    throw error
+  }
+}
+
+export async function setupInvitationPasswordWithToken(input: {
+  token: string
+  email: string
+  invitationId: string
+  password: string
+  sessionContract?: 'v2'
+}): Promise<{
+  error?:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_password'
+  data?: InvitationPreview & { passwordUpdated: boolean }
+}> {
+  try {
+    const data = await controlApiRequest<
+      InvitationPreview & { passwordUpdated: boolean; token?: string }
+    >('POST', '/external/invitations/password-token', {
+      body: {
+        token: input.token,
+        email: input.email,
+        invitationId: input.invitationId,
+        password: input.password,
+        ...(input.sessionContract ? { sessionContract: input.sessionContract } : {}),
+      },
+    })
+    const { token: _discardedSessionRepresentation, ...safe } = data
+    return { data: safe }
+  } catch (error) {
+    if (!(error instanceof ControlApiError)) throw error
+    if (error.status === 404) return { error: 'not_found' }
+    if (error.status === 403) return { error: 'forbidden' }
+    if (error.status === 409) return { error: 'not_accepted' }
+    if (error.status === 410) return { error: 'expired' }
+    if (error.status === 400) return { error: 'invalid_password' }
+    throw error
   }
 }

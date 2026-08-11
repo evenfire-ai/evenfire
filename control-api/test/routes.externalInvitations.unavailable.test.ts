@@ -14,7 +14,7 @@ const flow = vi.hoisted(() => ({
 vi.mock('../src/services/invitationFlowRegistrationService.js', () => flow)
 
 const directory = vi.hoisted(() => ({
-  acceptInvitationForEmail: vi.fn(),
+  acceptInvitationForEmailInTransaction: vi.fn(),
   getInvitationByToken: vi.fn(),
   listPendingInvitations: vi.fn(),
   setInvitationPasswordForEmail: vi.fn(),
@@ -22,6 +22,12 @@ const directory = vi.hoisted(() => ({
   verifyUserPassword: vi.fn(),
 }))
 vi.mock('../src/services/directory/index.js', () => directory)
+
+const database = vi.hoisted(() => ({
+  query: vi.fn(),
+  withTransaction: vi.fn(),
+}))
+vi.mock('../src/db.js', () => ({ withTransaction: database.withTransaction }))
 
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
@@ -43,8 +49,11 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: vi.fn(() => 'session-token'),
 }))
+const userSessions = vi.hoisted(() => ({
+  create: vi.fn(async () => ({ token: 'session-token' })),
+}))
 vi.mock('../src/services/auth/userSessionService.js', () => ({
-  createUserSession: vi.fn(async () => ({ token: 'session-token' })),
+  createUserSession: userSessions.create,
   validateUserSessionClaims: vi.fn(),
 }))
 
@@ -69,6 +78,7 @@ function app(): express.Express {
 describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    database.withTransaction.mockImplementation(async work => work({ query: database.query }))
   })
 
   it('GET token lookup returns 503 member_registration_unavailable, NOT 400 invalid_invitation', async () => {
@@ -85,6 +95,61 @@ describe('external invitation routes when the hub is unavailable', () => {
       .send({ email: 'a@b.c', token: 't' })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('member_registration_unavailable')
+  })
+
+  it('never issues a session when an invitation is already consumed or is a password reset', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: '00000000-0000-4000-8000-000000000200',
+    })
+    directory.acceptInvitationForEmailInTransaction.mockResolvedValue({
+      error: 'not_pending',
+    })
+
+    for (const token of ['already-accepted-flow', 'password-reset-flow']) {
+      const res = await request(app())
+        .post('/external/invitations/accept')
+        .send({ email: 'a@b.c', token, sessionContract: 'v2' })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'not_pending' })
+    }
+    expect(userSessions.create).not.toHaveBeenCalled()
+    expect(database.query).not.toHaveBeenCalled()
+  })
+
+  it('issues one session only for the transaction that consumes a pending invitation', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: '00000000-0000-4000-8000-000000000200',
+    })
+    directory.acceptInvitationForEmailInTransaction
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+        },
+      })
+      .mockResolvedValueOnce({ error: 'not_pending' })
+    database.query.mockResolvedValue({
+      rows: [{ id: '00000000-0000-4000-8000-000000000001' }],
+      rowCount: 1,
+    })
+
+    const first = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'single-use-flow', sessionContract: 'v2' })
+    const replay = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'single-use-flow', sessionContract: 'v2' })
+
+    expect(first.status).toBe(200)
+    expect(first.body.token).toBe('session-token')
+    expect(replay.status).toBe(400)
+    expect(replay.body).toEqual({ error: 'not_pending' })
+    expect(userSessions.create).toHaveBeenCalledTimes(1)
   })
 
   it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {

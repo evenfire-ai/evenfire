@@ -1228,12 +1228,12 @@ export async function setInvitationPasswordForUser(
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
     }
+    if (invitation.expires_at.getTime() <= Date.now()) {
+      return { error: 'expired' as const }
+    }
     if (invitation.purpose === 'password_reset') {
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
-      }
-      if (invitation.expires_at.getTime() <= Date.now()) {
-        return { error: 'expired' as const }
       }
     } else if (
       invitation.purpose === 'member_invitation' ||
@@ -1322,18 +1322,21 @@ export async function setInvitationPasswordForEmail(
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
     }
+    const pendingMembershipSetup =
+      invitation.status === 'pending' &&
+      (invitation.purpose === 'member_invitation' || invitation.purpose === 'admin_desktop_access')
+    if (invitation.expires_at.getTime() <= Date.now()) {
+      return { error: 'expired' as const }
+    }
     if (invitation.purpose === 'password_reset') {
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
-      }
-      if (invitation.expires_at.getTime() <= Date.now()) {
-        return { error: 'expired' as const }
       }
     } else if (
       invitation.purpose === 'member_invitation' ||
       invitation.purpose === 'admin_desktop_access'
     ) {
-      if (invitation.status !== 'accepted') {
+      if (invitation.status !== 'accepted' && !pendingMembershipSetup) {
         return { error: 'not_accepted' as const }
       }
     } else {
@@ -1344,7 +1347,11 @@ export async function setInvitationPasswordForEmail(
     if (invitation.purpose !== 'password_reset' && user.password_hash) {
       return { error: 'password_already_set' as const }
     }
-    if (invitation.purpose === 'password_reset') {
+    if (pendingMembershipSetup) {
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.purpose === 'password_reset') {
       const consumed = await db.query(
         `UPDATE invitations
             SET status = 'accepted',
@@ -1367,7 +1374,11 @@ export async function setInvitationPasswordForEmail(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose !== 'password_reset' && !invitation.accepted_user_id) {
+    if (
+      invitation.purpose !== 'password_reset' &&
+      !pendingMembershipSetup &&
+      !invitation.accepted_user_id
+    ) {
       await db.query(
         `UPDATE invitations SET accepted_user_id = $2
           WHERE id = $1 AND accepted_user_id IS NULL`,
@@ -1406,13 +1417,10 @@ export async function acceptInvitation(
     if (invitation.email.toLowerCase() !== email.toLowerCase()) {
       return { error: 'forbidden' as const }
     }
-    if (invitation.status === 'revoked') {
+    if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
       return { error: 'not_pending' as const }
     }
-    if (invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
+    if (invitation.expires_at.getTime() <= Date.now()) {
       return { error: 'expired' as const }
     }
 
@@ -1421,16 +1429,8 @@ export async function acceptInvitation(
       return { error: 'forbidden' as const }
     }
 
-    if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-        return { error: 'not_pending' as const }
-      }
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(
-        `UPDATE invitations SET accepted_user_id = $2
-          WHERE id = $1 AND accepted_user_id IS NULL`,
-        [invitation.id, user.id]
-      )
+    if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+      return { error: 'not_pending' as const }
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
@@ -1449,53 +1449,54 @@ export async function acceptInvitation(
   })
 }
 
-export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
-      lock: true,
-    })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-
-    if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-        return { error: 'not_pending' as const }
-      }
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(
-        `UPDATE invitations SET accepted_user_id = $2
-          WHERE id = $1 AND accepted_user_id IS NULL`,
-        [invitation.id, user.id]
-      )
-    }
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        userId: user.id,
-      },
-    }
+export async function acceptInvitationForEmailInTransaction(
+  db: Pick<DbClient, 'query'>,
+  email: string,
+  token: string,
+  invitationId = ''
+) {
+  const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
+    lock: true,
   })
+  if (!invitation) {
+    return { error: 'not_found' as const }
+  }
+  if (invitation.email.toLowerCase() !== email.toLowerCase()) {
+    return { error: 'forbidden' as const }
+  }
+  if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
+    return { error: 'not_pending' as const }
+  }
+  if (invitation.expires_at.getTime() <= Date.now()) {
+    return { error: 'expired' as const }
+  }
+
+  const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+
+  if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+    return { error: 'not_pending' as const }
+  }
+
+  const refreshed = await getInvitationRecordByToken(db, invitation.token)
+  if (!refreshed) {
+    return { error: 'not_found' as const }
+  }
+  const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+  const payload = invitationResponse(refreshed, user, teams)
+
+  return {
+    data: {
+      accepted: true as const,
+      ...payload,
+      userId: user.id,
+    },
+  }
+}
+
+export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
+  return withTransaction(db =>
+    acceptInvitationForEmailInTransaction(db, email, token, invitationId)
+  )
 }
 
 export async function acceptInvitationById(email: string, invitationId: string) {

@@ -401,6 +401,83 @@ describe('directory privacy and atomic authorization', () => {
     expect(sql).not.toContain('UPDATE profiles')
   })
 
+  it('allows exactly one general invitation acceptance and rejects password-reset use', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Target',
+      email: 'target@example.com',
+      role: 'member',
+      token: 'single-use-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    let status = invitation.status
+    let membershipWrites = 0
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE ($1 <> '' AND i.token = $1)")) {
+        return { rows: [{ ...invitation, status }], rowCount: 1 }
+      }
+      if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
+        return {
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'Target',
+              picture: null,
+              password_hash: null,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+      if (sql.includes("SET status = 'accepted'")) {
+        if (status !== 'pending') return { rows: [], rowCount: 0 }
+        status = 'accepted'
+        return { rows: [{ id: invitation.id }], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+        return {
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO team_members')) {
+        membershipWrites += 1
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('WHERE i.token = $1')) {
+        return {
+          rows: [{ ...invitation, status, accepted_user_id: TARGET }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    await expect(
+      acceptInvitationForEmail(invitation.email, invitation.token)
+    ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET } })
+    await expect(acceptInvitationForEmail(invitation.email, invitation.token)).resolves.toEqual({
+      error: 'not_pending',
+    })
+    expect(membershipWrites).toBe(1)
+
+    status = 'pending'
+    const passwordReset = { ...invitation, purpose: 'password_reset' }
+    mocks.query.mockImplementationOnce(async () => ({ rows: [passwordReset], rowCount: 1 }))
+    await expect(acceptInvitationForEmail(invitation.email, invitation.token)).resolves.toEqual({
+      error: 'not_pending',
+    })
+  })
+
   it('serializes invitation acceptance behind a concurrent manager revocation', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
@@ -547,6 +624,86 @@ describe('directory privacy and atomic authorization', () => {
       expect(sql).toContain("AND status = 'pending'")
       expect(sql).not.toContain('SET password_hash')
     }
+  })
+
+  it('atomically accepts a pending member invitation with first password setup', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'New user',
+      email: 'new-user@example.com',
+      role: 'member',
+      token: 'member-setup-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      created_at: new Date(),
+      expires_at: new Date(Date.now() + 60_000),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    let status = invitation.status
+    let passwordHash: string | null = null
+    let membershipWrites = 0
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+        return {
+          rows: [
+            { ...invitation, status, accepted_user_id: status === 'accepted' ? TARGET : null },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
+        return {
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'New user',
+              picture: null,
+              password_hash: passwordHash,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+      if (sql.includes("SET status = 'accepted'")) {
+        if (status !== 'pending') return { rows: [], rowCount: 0 }
+        status = 'accepted'
+        return { rows: [{ id: invitation.id }], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+        return {
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO team_members')) {
+        membershipWrites += 1
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('SET password_hash = $2')) {
+        passwordHash = 'stored-hash'
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('external_user_session_security_epochs')) return { rows: [], rowCount: 1 }
+      if (sql.includes('UPDATE external_user_sessions')) return { rows: [], rowCount: 0 }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    await expect(
+      setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password')
+    ).resolves.toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
+    expect(status).toBe('accepted')
+    expect(passwordHash).not.toBeNull()
+    expect(membershipWrites).toBe(1)
+
+    await expect(
+      setInvitationPasswordForEmail(invitation.email, invitation.id, 'another-password')
+    ).resolves.toEqual({ error: 'password_already_set' })
+    expect(membershipWrites).toBe(1)
   })
 
   it('sends a managed resend from a durable command without holding authority locks', async () => {
