@@ -35,10 +35,19 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     next: express.NextFunction
   ) => next(),
   requireValidExternalSessionToken: (
-    _req: express.Request,
+    req: express.Request & { externalAuth?: Record<string, unknown> },
     _res: express.Response,
     next: express.NextFunction
-  ) => next(),
+  ) => {
+    req.externalAuth = {
+      userId: 'caller-user',
+      email: 'caller@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 4_102_444_800,
+    }
+    next()
+  },
 }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: vi.fn(() => 'session-token'),
@@ -81,6 +90,16 @@ describe('external invitation routes when the hub is unavailable', () => {
       .send({ email: 'a@b.c', token: 't' })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('member_registration_unavailable')
+  })
+
+  it('lists invitations only for the authenticated email', async () => {
+    directory.listPendingInvitations.mockResolvedValue([])
+
+    const res = await request(app()).get('/external/invitations/pending?email=victim@example.com')
+
+    expect(res.status).toBe(200)
+    expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
+    expect(directory.listPendingInvitations).not.toHaveBeenCalledWith('victim@example.com')
   })
 
   it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {
