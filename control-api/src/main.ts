@@ -4,6 +4,7 @@ import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
 import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
@@ -43,6 +44,8 @@ import {
   stopWorkflowScheduleWorker,
 } from './services/workflowScheduleWorkerCron.js'
 import { validateStartupGuards } from './startupGuards.js'
+
+let stopOperationalAccessIndexer: (() => void) | null = null
 
 async function main(): Promise<void> {
   console.log('[ControlAPI] Starting')
@@ -91,6 +94,20 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  if (config.operationalAccessIndexerEnabled) {
+    const operationalIndexer = new OperationalAccessIndexer(gateway, undefined, {
+      retryDelayMs: config.operationalAccessIndexerRetryMs,
+    })
+    const runningIndexer = operationalIndexer.start()
+    stopOperationalAccessIndexer = runningIndexer.stop
+    void runningIndexer.completion.catch(error => {
+      console.error('[ControlAPI] Operational access index stopped unexpectedly:', error)
+    })
+    console.log('[ControlAPI] Operational access indexer enabled')
+  } else {
+    console.log('[ControlAPI] Operational access indexer disabled')
+  }
 
   // Assert the platform image-pull credential up front and then on a timer. WRC injects
   // the reference for ANY WorkflowRecipe, including ones created by `kubectl apply` or the
@@ -172,6 +189,7 @@ main().catch(error => {
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
   stopWorkflowApprovalTraceProjector()
+  stopOperationalAccessIndexer?.()
   void pool.end()
   process.exit(1)
 })

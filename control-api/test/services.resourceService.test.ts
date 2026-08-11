@@ -89,6 +89,95 @@ describe('ResourceService.getResource', () => {
   })
 })
 
+describe('ResourceService bounded operational reads', () => {
+  it('passes a bounded keyset page request and preserves continuation metadata', async () => {
+    const listNamespacedCustomObject = vi.fn().mockResolvedValue({
+      items: [{ metadata: { name: 'host-a' } }],
+      metadata: { continue: 'next-page', resourceVersion: '42' },
+    })
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+    const controller = new AbortController()
+
+    await expect(
+      service.listResourcePage('hosts', 'mcp-host', {
+        limit: 100,
+        continueToken: 'prior-page',
+        timeoutSeconds: 5,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual({
+      items: [{ metadata: { name: 'host-a' } }],
+      continueToken: 'next-page',
+      resourceVersion: '42',
+    })
+    expect(listNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: 'mcp-host',
+        plural: 'hosts',
+        limit: 100,
+        _continue: 'prior-page',
+        timeoutSeconds: 5,
+      })
+    )
+  })
+
+  it('rejects invalid limits before calling Kubernetes', async () => {
+    const listNamespacedCustomObject = vi.fn()
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+
+    await expect(
+      service.listResourcePage('hosts', 'mcp-host', {
+        limit: 101,
+        timeoutSeconds: 5,
+        signal: new AbortController().signal,
+      })
+    ).rejects.toThrow('between 1 and 100')
+    expect(listNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('rejects the caller promptly when the shared request is cancelled', async () => {
+    let resolveList!: (value: unknown) => void
+    const listNamespacedCustomObject = vi.fn(
+      () =>
+        new Promise(resolve => {
+          resolveList = resolve
+        })
+    )
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+    const controller = new AbortController()
+    const pending = service.listResourcePage('hosts', 'mcp-host', {
+      limit: 1,
+      timeoutSeconds: 5,
+      signal: controller.signal,
+    })
+
+    controller.abort('test-cancel')
+    await expect(pending).rejects.toBe('test-cancel')
+    resolveList({ items: [], metadata: { resourceVersion: '43' } })
+  })
+
+  it('uses exact namespace/name lookup and maps a Kubernetes 404', async () => {
+    const getNamespacedCustomObject = vi.fn().mockRejectedValue(makeNotFoundError())
+    const service = new ResourceService({ getNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+
+    await expect(
+      service.getResourceExact('hosts', 'host-a', 'mcp-host', {
+        timeoutSeconds: 2,
+        signal: new AbortController().signal,
+      })
+    ).rejects.toBeInstanceOf(K8sNotFoundError)
+    expect(getNamespacedCustomObject).toHaveBeenCalledOnce()
+  })
+})
+
 describe('ResourceService.updateResource', () => {
   it('refetches and retries once when Kubernetes reports a resourceVersion conflict', async () => {
     const customApi = {

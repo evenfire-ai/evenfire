@@ -6,9 +6,15 @@ import {
   type AllowedModelsConfigMapMaterializer,
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
-import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
+import {
+  type ResourceListPage,
+  ResourceService,
+  mergeAnnotationsForReplace,
+} from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
 import {
+  CLERUM_GROUP,
+  CLERUM_VERSION,
   ClerumResourceType,
   HostOverview,
   SecretPreconditions,
@@ -220,6 +226,90 @@ export class K8sGateway {
 
   async listResource(plural: ClerumResourceType, namespace = '*'): Promise<unknown[]> {
     return this.resources.listResource(plural, namespace)
+  }
+
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    options: {
+      limit: number
+      continueToken?: string
+      resourceVersion?: string
+      timeoutSeconds: number
+      signal: AbortSignal
+    }
+  ): Promise<ResourceListPage> {
+    return this.resources.listResourcePage(plural, namespace, options)
+  }
+
+  async getResourceExact(
+    plural: ClerumResourceType,
+    name: string,
+    namespace: string,
+    options: { timeoutSeconds: number; signal: AbortSignal }
+  ): Promise<unknown> {
+    return this.resources.getResourceExact(plural, name, namespace, options)
+  }
+
+  async watchResource(
+    plural: ClerumResourceType,
+    namespace: string,
+    resourceVersion: string,
+    signal: AbortSignal,
+    onEvent: (phase: string, object: unknown) => void | Promise<void>
+  ): Promise<void> {
+    this.resources.assertNamespaceAllowed(namespace)
+    const watch = new k8s.Watch(this.kc)
+    const path = `/apis/${CLERUM_GROUP}/${CLERUM_VERSION}/namespaces/${encodeURIComponent(
+      namespace
+    )}/${plural}`
+    await new Promise<void>((resolve, reject) => {
+      let controller: AbortController | null = null
+      let settled = false
+      let eventQueue = Promise.resolve()
+      let handlerError: unknown
+      const finish = (error?: unknown) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        void eventQueue.then(
+          () => {
+            const finalError = handlerError ?? error
+            if (finalError && !signal.aborted) reject(finalError)
+            else resolve()
+          },
+          queueError => {
+            if (!signal.aborted) reject(queueError)
+            else resolve()
+          }
+        )
+      }
+      const onAbort = () => {
+        controller?.abort()
+        finish()
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      void watch
+        .watch(
+          path,
+          { resourceVersion, allowWatchBookmarks: true },
+          (phase, object) => {
+            if (signal.aborted || handlerError) return
+            eventQueue = eventQueue
+              .then(() => onEvent(phase, object))
+              .catch(error => {
+                handlerError = error
+                controller?.abort()
+              })
+          },
+          error => finish(error)
+        )
+        .then(value => {
+          controller = value
+          if (signal.aborted) onAbort()
+        })
+        .catch(finish)
+    })
   }
 
   async getResource(

@@ -169,6 +169,8 @@ type Config = {
   // SharedFileSystem — namespace housing both the CRD and the per-SFS
   // workspace-files-controller Service.
   sharedFilesystemsNamespace: string
+  operationalAccessIndexerEnabled: boolean
+  operationalAccessIndexerRetryMs: number
   // Audience claim used by browsing JWTs; must match WSF_JWT_AUDIENCE on
   // the per-SFS wfc Deployment. The signing key is reused from rpcJwtPrivateKey.
   wfcJwtAudience: string
@@ -804,6 +806,16 @@ export const config: Config = {
   // CONTROL_API_SHARED_FILESYSTEMS_NAMESPACE override still wins when set.
   sharedFilesystemsNamespace:
     process.env.CONTROL_API_SHARED_FILESYSTEMS_NAMESPACE || HOSTS_NAMESPACE,
+  // The operational resource index stores provider lifecycle/relationships only. It is not an
+  // effective-access cache. Keep the worker opt-in until the controlled list/watch measurements
+  // in Task 106 are accepted; catalog/action rollout remains independently disabled.
+  operationalAccessIndexerEnabled:
+    (process.env.CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED ?? 'false') === 'true',
+  operationalAccessIndexerRetryMs: intervalMsFromEnv(
+    'CONTROL_API_OPERATIONAL_ACCESS_INDEXER_RETRY_MS',
+    5_000,
+    100
+  ),
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),
   gfsTokenAudience: process.env.CONTROL_API_GFS_JWT_AUDIENCE || 'gfs-controller',
