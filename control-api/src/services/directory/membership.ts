@@ -1815,28 +1815,6 @@ export async function createManagedInvitationForUser(
       }
     }
 
-    if (normalizedInviteeName) {
-      const updatedUser = await db.query(
-        `UPDATE users
-            SET name = $2,
-                updated_at = NOW()
-          WHERE email = $1
-      RETURNING id`,
-        [normalizedEmail, normalizedInviteeName]
-      )
-      const userId = String((updatedUser.rows[0] as { id?: string } | undefined)?.id || '')
-      if (userId) {
-        await db.query(
-          `INSERT INTO profiles(user_id, display_name)
-           VALUES($1, $2)
-           ON CONFLICT (user_id)
-           DO UPDATE SET display_name = EXCLUDED.display_name,
-                         updated_at = NOW()`,
-          [userId, normalizedInviteeName]
-        )
-      }
-    }
-
     return insertInvitationForTeams(db, {
       inviteeName: normalizedInviteeName || fallbackName,
       email: normalizedEmail,

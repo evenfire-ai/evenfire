@@ -195,6 +195,10 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
         return { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
       }
+      if (sql.includes('UPDATE users') && sql.includes('SET name')) {
+        return { rows: [{ id: TARGET }], rowCount: 1 }
+      }
+      if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 1 }
       if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
       if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
       if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
@@ -213,7 +217,7 @@ describe('directory privacy and atomic authorization', () => {
       MANAGER,
       invitation.email,
       [{ teamId: TEAM_A, role: 'member' }],
-      ''
+      'Untrusted inviter label'
     )
 
     expect(result).toMatchObject({ invitation: { id: invitation.id, status: 'pending' } })
@@ -221,6 +225,9 @@ describe('directory privacy and atomic authorization', () => {
     expect((result as { invitation: Record<string, unknown> }).invitation).not.toHaveProperty(
       'token'
     )
+    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(sql).not.toContain('UPDATE users')
+    expect(sql).not.toContain('INSERT INTO profiles')
   })
 
   it.each(['resend', 'revoke'] as const)(
