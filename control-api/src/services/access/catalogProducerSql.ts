@@ -39,8 +39,9 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'host'
                AND resource.logical_id = $5::text || '/' || ta.agent_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
+      WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
       orderBy: 'source_key',
+      distinctCanonicalBy: 'source_key',
     },
   ]),
   context: boundedKeyUnionSql([
@@ -62,12 +63,14 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
                AND resource.logical_id = $6::text || '/' || tc.context_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
+      WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
       orderBy: 'source_key',
+      distinctCanonicalBy: 'source_key',
     },
   ]),
   mcp_server: boundedKeyUnionSql([
-    `SELECT edge.target_id AS logical_id
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
@@ -84,7 +87,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-    `SELECT edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
@@ -102,7 +108,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
-    `SELECT mcp_edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT mcp_edge.target_id AS logical_id
        FROM user_agents ua
        JOIN operational_resource_relationships host_edge
          ON host_edge.environment_id = $3
@@ -129,7 +138,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE ua.user_id = $1 AND mcp_edge.target_id > $2`,
-    `SELECT mcp_edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT mcp_edge.target_id AS logical_id
        FROM team_agents ta
        JOIN team_members tm ON tm.team_id = ta.team_id
        JOIN operational_resource_relationships host_edge
@@ -157,6 +169,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND mcp_edge.target_id > $2`,
+      distinctCanonicalBy: 'logical_id',
+    },
   ]),
   workflow_recipe: boundedKeyUnionSql([
     {
@@ -178,9 +192,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'workflow_recipe'
                AND resource.logical_id = twt.recipe_namespace || '/' || twt.recipe_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE tm.user_id = $1 AND tm.status = 'active'
+      WHERE tm.user_id = $1 AND tm.status = 'active'
                AND (twt.recipe_namespace || '/' || twt.recipe_name) > $2`,
       orderBy: 'logical_id',
+      distinctCanonicalBy: 'logical_id',
     },
   ]),
   workflow_run: boundedKeyUnionSql([
@@ -284,56 +299,77 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
   ]),
   gfs_resource: boundedKeyUnionSql([
     {
-      sql: `SELECT g.resource_id::text AS logical_id, g.resource_id AS cursor_id
-       FROM gfs_grants g
-       JOIN gfs_resources resource
-         ON resource.resource_id = g.resource_id AND resource.deleted_at IS NULL
-      WHERE g.subject_type = 'user' AND g.subject_id = $1::text
-        AND g.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
+      sql: `SELECT resource.resource_id::text AS logical_id,
+                  resource.resource_id AS cursor_id
+       FROM gfs_resources resource
+      WHERE resource.deleted_at IS NULL
+        AND resource.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
+        AND (
+          SELECT TRUE
+            FROM gfs_grants g
+           WHERE g.resource_id = resource.resource_id
+             AND g.drive = resource.drive
+             AND g.subject_type = 'user' AND g.subject_id = $1::text
+           LIMIT 1
+        ) IS TRUE`,
       orderBy: 'cursor_id',
     },
     {
-      sql: `SELECT g.resource_id::text AS logical_id, g.resource_id AS cursor_id
-       FROM gfs_grants g
-      JOIN gfs_resources resource
-         ON resource.resource_id = g.resource_id AND resource.deleted_at IS NULL
-      WHERE g.subject_type = 'team'
-        AND g.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
-        AND EXISTS (
-          SELECT 1
-            FROM team_members tm
-           WHERE tm.team_id::text = g.subject_id
+      sql: `SELECT resource.resource_id::text AS logical_id,
+                  resource.resource_id AS cursor_id
+       FROM gfs_resources resource
+      WHERE resource.deleted_at IS NULL
+        AND resource.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
+        AND (
+          SELECT TRUE
+            FROM gfs_grants g
+            JOIN team_members tm ON tm.team_id::text = g.subject_id
+           WHERE g.resource_id = resource.resource_id
+             AND g.drive = resource.drive
+             AND g.subject_type = 'team'
              AND tm.user_id = $1::uuid AND tm.status = 'active'
-        )`,
+           LIMIT 1
+        ) IS TRUE`,
       orderBy: 'cursor_id',
     },
     {
-      sql: `SELECT share.resource_id::text AS logical_id, share.resource_id AS cursor_id
-       FROM gfs_shares share
-       JOIN gfs_resources resource
-         ON resource.resource_id = share.resource_id AND resource.deleted_at IS NULL
-      WHERE share.subject_type = 'user' AND share.subject_id = $1::text
-        AND share.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
+      sql: `SELECT resource.resource_id::text AS logical_id,
+                  resource.resource_id AS cursor_id
+       FROM gfs_resources resource
+      WHERE resource.deleted_at IS NULL
+        AND resource.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
+        AND (
+          SELECT TRUE
+            FROM gfs_shares share
+           WHERE share.resource_id = resource.resource_id
+             AND share.drive = resource.drive
+             AND share.subject_type = 'user' AND share.subject_id = $1::text
+           LIMIT 1
+        ) IS TRUE`,
       orderBy: 'cursor_id',
     },
     {
-      sql: `SELECT share.resource_id::text AS logical_id, share.resource_id AS cursor_id
-       FROM gfs_shares share
-       JOIN gfs_resources resource
-         ON resource.resource_id = share.resource_id AND resource.deleted_at IS NULL
-      WHERE share.subject_type = 'team'
-        AND share.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
-        AND EXISTS (
-          SELECT 1
-            FROM team_members tm
-           WHERE tm.team_id::text = share.subject_id
+      sql: `SELECT resource.resource_id::text AS logical_id,
+                  resource.resource_id AS cursor_id
+       FROM gfs_resources resource
+      WHERE resource.deleted_at IS NULL
+        AND resource.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
+        AND (
+          SELECT TRUE
+            FROM gfs_shares share
+            JOIN team_members tm ON tm.team_id::text = share.subject_id
+           WHERE share.resource_id = resource.resource_id
+             AND share.drive = resource.drive
+             AND share.subject_type = 'team'
              AND tm.user_id = $1::uuid AND tm.status = 'active'
-        )`,
+           LIMIT 1
+        ) IS TRUE`,
       orderBy: 'cursor_id',
     },
   ]),
   shared_filesystem: boundedKeyUnionSql([
-    `SELECT edge.target_id AS logical_id
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
@@ -351,7 +387,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-    `SELECT edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
@@ -370,6 +409,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
+      distinctCanonicalBy: 'logical_id',
+    },
   ]),
   sandbox_app: boundedKeyUnionSql([
     `SELECT edge.target_id AS logical_id
