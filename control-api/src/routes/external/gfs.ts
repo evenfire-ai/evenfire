@@ -278,7 +278,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsResourceRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: config.externalGfsReadRlPerMin,
     standardHeaders: false,
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('resource'),
@@ -286,7 +286,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsProxyReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: config.externalGfsReadRlPerMin,
     standardHeaders: false,
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('proxy-read'),

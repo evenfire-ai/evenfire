@@ -23,7 +23,8 @@ vi.mock('../src/config.js', () => ({
     externalGfsIngressRlPerMin: 1800,
     externalGfsTokenUserRlPerMin: 10,
     externalGfsTokenIpRlPerMin: 600,
-    externalGfsIpRlPerMin: 30,
+    externalGfsIpRlPerMin: 1200,
+    externalGfsReadRlPerMin: 120,
     externalGfsOperationRlPerMin: 30,
   },
 }))
@@ -37,13 +38,13 @@ const DESKTOP_USER_ID = '11111111-aaaa-4aaa-8aaa-111111111111'
 const CONTROL_ADMIN_ID = '22222222-bbbb-4bbb-8bbb-222222222222'
 const RESOURCE_ID = '33333333-cccc-4ccc-8ccc-333333333333'
 
-function allowed(remaining = 29) {
+function allowed(limit = 30, remaining = limit - 1) {
   return {
     allowed: true,
     remaining,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
-    count: 30 - remaining,
+    count: limit - remaining,
   }
 }
 
@@ -172,7 +173,7 @@ describe('external GFS rate boundary', () => {
   })
 
   it('rejects before resolution and handler work when the pre-resolution session bucket is exhausted', async () => {
-    checkAndIncrement.mockResolvedValueOnce(denied())
+    checkAndIncrement.mockResolvedValueOnce(denied(120))
     const { app, resolver, handler } = buildApp()
 
     const response = await request(app)
@@ -180,10 +181,10 @@ describe('external GFS rate boundary', () => {
       .set('x-user-session-token', 'session-one')
 
     expect(response.status).toBe(429)
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-limit']).toBe('120')
     expect(checkAndIncrement).toHaveBeenCalledWith(
       expect.stringMatching(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/),
-      30
+      120
     )
     expect(resolver).not.toHaveBeenCalled()
     expect(handler).not.toHaveBeenCalled()
@@ -230,7 +231,7 @@ describe('external GFS rate boundary', () => {
   })
 
   it('enforces the fixed 600/min token source-IP ceiling after an allowed token user bucket', async () => {
-    checkAndIncrement.mockResolvedValueOnce(allowed(9)).mockResolvedValueOnce(denied())
+    checkAndIncrement.mockResolvedValueOnce(allowed(600, 599)).mockResolvedValueOnce(denied(600))
     const { app, resolver, handler } = buildApp()
 
     const response = await request(app)
@@ -292,17 +293,75 @@ describe('external GFS rate boundary', () => {
       .set('x-user-session-token', 'session-two')
 
     const keys = checkAndIncrement.mock.calls.map(call => String(call[0]))
+    const limits = checkAndIncrement.mock.calls.map(call => Number(call[1]))
     expect(keys).toContainEqual(
       expect.stringMatching(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
     )
     expect(keys).toContainEqual(expect.stringMatching(/^gfs-ext:pre:resource:ip:[0-9a-f]{64}$/))
+    expect(keys).toContainEqual(expect.stringMatching(/^gfs-ext:pre:ip:[0-9a-f]{64}$/))
     expect(keys).toContain(`gfs-ext:resolved:resource:actor:linked-admin:${CONTROL_ADMIN_ID}`)
     expect(keys).toContainEqual(
       expect.stringMatching(/^gfs-ext:pre:proxy-read:session:[0-9a-f]{64}$/)
     )
     expect(keys).toContainEqual(expect.stringMatching(/^gfs-ext:pre:proxy-read:ip:[0-9a-f]{64}$/))
     expect(keys).toContain(`gfs-ext:resolved:proxy-read:actor:linked-admin:${CONTROL_ADMIN_ID}`)
-    expect(new Set(keys).size).toBe(keys.length)
+    expect(limits.filter(limit => limit === 120).length).toBe(6)
+    expect(limits.filter(limit => limit === 1200).length).toBe(2)
+    expect(limits.filter(limit => limit === 30).length).toBe(0)
+  })
+
+  it('keeps read and mutation budgets independent at every limiter phase', async () => {
+    const { app } = buildApp()
+
+    await request(app).get('/external/gfs/resources').set('x-user-session-token', 'session-read')
+    await request(app)
+      .patch(`/external/gfs/resources/${RESOURCE_ID}`)
+      .set('x-user-session-token', 'session-mutation')
+
+    const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:resource:session:/), 120])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:pre:resource-mutation:session:/),
+      30,
+    ])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:resolved:resource:actor:/), 120])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:resolved:resource-mutation:actor:/),
+      30,
+    ])
+    expect(calls.filter(([, limit]) => limit === 1200)).toHaveLength(2)
+  })
+
+  it('enforces the 1200/min aggregate IP ceiling after the 120/min read buckets', async () => {
+    checkAndIncrement.mockImplementation((key: string, limit: number) => {
+      if (key.startsWith('gfs-ext:pre:ip:')) return denied(1200)
+      return allowed(limit, limit - 1)
+    })
+    const { app, resolver, handler } = buildApp()
+
+    const response = await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'session-one')
+
+    expect(response.status).toBe(429)
+    expect(response.headers['x-ratelimit-limit']).toBe('1200')
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/),
+      120
+    )
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/^gfs-ext:pre:resource:ip:[0-9a-f]{64}$/),
+      120
+    )
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(
+      3,
+      expect.stringMatching(/^gfs-ext:pre:ip:[0-9a-f]{64}$/),
+      1200
+    )
+    expect(resolver).not.toHaveBeenCalled()
+    expect(handler).not.toHaveBeenCalled()
   })
 
   it('keeps the resolved actor bucket stable when a Desktop session is renewed', async () => {

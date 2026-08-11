@@ -144,6 +144,12 @@ function sourceIpDigest(req: Request): string {
   return digest(externalGfsSourceIp(req))
 }
 
+function operationLimit(operationClass: ExternalGfsOperationClass): number {
+  return operationClass === 'resource' || operationClass === 'proxy-read'
+    ? config.externalGfsReadRlPerMin
+    : config.externalGfsOperationRlPerMin
+}
+
 function applyRateLimitHeaders(
   res: Response,
   result: RateLimitCheck,
@@ -278,11 +284,15 @@ export function externalGfsPreResolutionRateLimit(
         : [
             {
               key: `gfs-ext:pre:${operation.operationClass}:session:${sessionDigest}`,
-              maxPerMinute: config.externalGfsOperationRlPerMin,
+              maxPerMinute: operationLimit(operation.operationClass),
             },
             {
               key: `gfs-ext:pre:${operation.operationClass}:ip:${sourceIpDigest(req)}`,
-              maxPerMinute: config.externalGfsOperationRlPerMin,
+              maxPerMinute: operationLimit(operation.operationClass),
+            },
+            {
+              key: `gfs-ext:pre:ip:${sourceIpDigest(req)}`,
+              maxPerMinute: config.externalGfsIpRlPerMin,
             },
           ]
 
@@ -313,7 +323,7 @@ export function externalGfsResolvedOperationRateLimit(
     }
     const bucket: Bucket = {
       key: `gfs-ext:resolved:${operation.operationClass}:actor:${authority.kind}:${authority.tokenSubject}`,
-      maxPerMinute: config.externalGfsOperationRlPerMin,
+      maxPerMinute: operationLimit(operation.operationClass),
     }
     if (
       await enforceBuckets({

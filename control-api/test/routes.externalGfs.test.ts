@@ -41,7 +41,8 @@ vi.mock('../src/config.js', () => ({
     externalGfsIngressRlPerMin: 1800,
     externalGfsTokenUserRlPerMin: 10,
     externalGfsTokenIpRlPerMin: 600,
-    externalGfsIpRlPerMin: 30,
+    externalGfsIpRlPerMin: 1200,
+    externalGfsReadRlPerMin: 120,
     externalGfsOperationRlPerMin: 30,
   },
 }))
@@ -297,6 +298,45 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
 
     expect(exhausted.status).toBe(429)
     expect(mockSignGfsToken).toHaveBeenCalledTimes(10)
+  })
+
+  it('uses the dedicated 120/min read route ceiling without widening mutation ceilings', async () => {
+    const previousReadLimit = (config as { externalGfsReadRlPerMin: number })
+      .externalGfsReadRlPerMin
+    const previousOperationLimit = (config as { externalGfsOperationRlPerMin: number })
+      .externalGfsOperationRlPerMin
+    ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = 2
+    ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin = 2
+    try {
+      auth()
+      dbReturning([])
+      const app = await buildApp()
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await request(app)
+          .get('/external/gfs/resources')
+          .set('x-user-session-token', 'read-session')
+          .expect(200)
+      }
+      const exhaustedRead = await request(app)
+        .get('/external/gfs/resources')
+        .set('x-user-session-token', 'read-session')
+      expect(exhaustedRead.status).toBe(429)
+      expect(
+        exhaustedRead.headers['ratelimit-limit'] ?? exhaustedRead.headers['x-ratelimit-limit']
+      ).toBe('2')
+
+      // A mutation has its own class budget; exhausting reads must not consume it.
+      const mutation = await request(app)
+        .patch(`/external/gfs/resources/${R}`)
+        .set('x-user-session-token', 'mutation-0')
+        .send({ name: 'rename' })
+      expect(mutation.status).not.toBe(429)
+    } finally {
+      ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = previousReadLimit
+      ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin =
+        previousOperationLimit
+    }
   })
 
   it('mints a gfs token for the user with the EXISTING signGfsToken (sub=users.id)', async () => {
@@ -556,7 +596,7 @@ describe('linked Desktop operator authority contract', () => {
       true
     mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
     mockQuery.mockImplementation(async (text: string) => {
-      if (text.includes('rate_limit_buckets')) return { rows: [{ count: 31 }] }
+      if (text.includes('rate_limit_buckets')) return { rows: [{ count: 121 }] }
       throw new Error(`unexpected route query: ${text}`)
     })
 
@@ -566,7 +606,7 @@ describe('linked Desktop operator authority contract', () => {
 
     expect(res.status).toBe(429)
     expect(res.body.error).toBe('Too Many Requests')
-    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('120')
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
     expect(mockSignGfsToken).not.toHaveBeenCalled()
     expect(mockQuery.mock.calls).toHaveLength(1)

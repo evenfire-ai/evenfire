@@ -141,7 +141,14 @@ type Config = {
   externalGfsIngressRlPerMin: number
   externalGfsTokenUserRlPerMin: number
   externalGfsTokenIpRlPerMin: number
+  // Aggregate source-IP ceiling before authority resolution. This is a
+  // defense-in-depth ceiling across authenticated non-token GFS traffic; it
+  // is intentionally wider than the per-class/session/actor budgets.
   externalGfsIpRlPerMin: number
+  // Read waterfalls have a separate budget from mutations. A Desktop root
+  // refresh legitimately performs more reads than a mutation burst, while
+  // mutation/grant/share ceilings remain deliberately narrow.
+  externalGfsReadRlPerMin: number
   externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
@@ -740,12 +747,14 @@ export const config: Config = {
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
   // Approved GFS authority-boundary budgets. Keep them fixed here rather than
   // accepting an unreviewed environment override. The 1800/min ingress guard
-  // is only a coarse process-local backstop; token/user, token/IP, operation/IP,
-  // and resolved session/actor buckets remain independently bounded below.
+  // is only a coarse process-local backstop; the aggregate source-IP ceiling,
+  // read buckets, token buckets, and mutation/delegation buckets remain
+  // independently bounded below.
   externalGfsIngressRlPerMin: 1_800,
   externalGfsTokenUserRlPerMin: 10,
   externalGfsTokenIpRlPerMin: 600,
-  externalGfsIpRlPerMin: 30,
+  externalGfsIpRlPerMin: 1_200,
+  externalGfsReadRlPerMin: 120,
   externalGfsOperationRlPerMin: 30,
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
