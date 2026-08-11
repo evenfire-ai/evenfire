@@ -175,12 +175,12 @@ export function scheduleAccessCatalogShadow(input: {
   scope?: CatalogShadowScope
 }): void {
   if (!input.session || configuredUserAccessIntent.catalogMode === 'off') return
+  if (shadowInFlight >= SHADOW_MAX_IN_FLIGHT) {
+    record(input.family, 'skipped_capacity')
+    return
+  }
+  shadowInFlight += 1
   setImmediate(() => {
-    if (shadowInFlight >= SHADOW_MAX_IN_FLIGHT) {
-      record(input.family, 'skipped_capacity')
-      return
-    }
-    shadowInFlight += 1
     void compareAccessCatalogShadow({ ...input, session: input.session! }).finally(() => {
       shadowInFlight = Math.max(0, shadowInFlight - 1)
     })
