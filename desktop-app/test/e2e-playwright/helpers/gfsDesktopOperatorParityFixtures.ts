@@ -864,9 +864,29 @@ export class GfsDesktopOperatorJourney {
   }
 
   async loginDesktop(page: Page, email: string, password: string): Promise<void> {
+    // macOS keytar is shared across Electron user-data directories. A previous
+    // visible login can therefore restore an authenticated shell in the next
+    // isolated journey even though its filesystem profile is fresh. Resolve
+    // that supported session state through the real logout UI; never mutate
+    // keychain/storage from the E2E harness.
     const emailInput = page.locator('#email-input')
     const passwordInput = page.locator('#password-input')
-    await expect(emailInput).toBeVisible({ timeout: 30_000 })
+    const settingsMenu = page.getByTestId('nav-settings-menu')
+    const authenticatedShell = settingsMenu
+      .or(page.getByRole('textbox', { name: 'Agent message composer' }))
+      .first()
+
+    await expect(page.locator('.boot-overlay')).toBeHidden({ timeout: 30_000 })
+    await expect(emailInput.or(authenticatedShell)).toBeVisible({ timeout: 30_000 })
+    if (!(await emailInput.isVisible().catch(() => false))) {
+      if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') {
+        await settingsMenu.click()
+      }
+      const logoutButton = page.getByTestId('logout-btn')
+      await expect(logoutButton).toBeVisible({ timeout: 15_000 })
+      await logoutButton.click()
+      await expect(emailInput).toBeVisible({ timeout: 30_000 })
+    }
     await expect(passwordInput).toBeVisible()
     await emailInput.fill(email)
     await passwordInput.fill(password)
