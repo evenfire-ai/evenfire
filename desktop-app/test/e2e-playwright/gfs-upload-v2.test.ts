@@ -41,7 +41,12 @@ async function observeProgressOrCompletion(
   const values = new Set<string>()
   const completed = page.getByText(completedText, { exact: true })
   const errorToast = page.getByRole('alert').filter({ hasText: /file|gfs|upload/i })
-  let outcome: 'waiting' | 'progress' | 'error' | `completed:${number}` = 'waiting'
+  let outcome:
+    | 'waiting'
+    | 'progress'
+    | 'error'
+    | `completed:${number}`
+    | `invalid_completion:${number}` = 'waiting'
   await expect
     .poll(
       async () => {
@@ -51,7 +56,8 @@ async function observeProgressOrCompletion(
         }
         outcome = values.size >= 2 ? 'progress' : outcome
         if (outcome === 'waiting' && (await completed.isVisible().catch(() => false))) {
-          outcome = `completed:${values.size}`
+          outcome =
+            values.size >= 2 ? `completed:${values.size}` : `invalid_completion:${values.size}`
         }
         if (outcome === 'waiting' && (await errorToast.isVisible().catch(() => false))) {
           outcome = 'error'
@@ -66,6 +72,11 @@ async function observeProgressOrCompletion(
   if (outcome === 'error') {
     throw new Error(
       `Desktop rejected the selected local file before two progress values: ${(await errorToast.textContent())?.trim() || 'Unknown Desktop upload error'}`
+    )
+  }
+  if (outcome.startsWith('invalid_completion:')) {
+    throw new Error(
+      `Desktop completed before two visible progress values (observed ${outcome.slice('invalid_completion:'.length)})`
     )
   }
   if (outcome.startsWith('completed:')) return
