@@ -1141,6 +1141,23 @@ describe('routes/profile', () => {
     expect(userSessionServiceMock.createUserSession).not.toHaveBeenCalled()
   })
 
+  it('does not rotate v2 sessions while v2 acceptance is disabled', async () => {
+    userAccessRolloutMock.sessionV2Acceptance = false
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(
+      request(app)
+        .post('/external/auth/session/renew')
+        .set('x-user-session-token', 'disabled-v2-token')
+    )
+
+    expect(response.status).toBe(401)
+    expect(response.body.error.code).toBe('invalid_session')
+    expect(userSessionServiceMock.renewUserSessionToken).not.toHaveBeenCalled()
+  })
+
   it('can retire legacy switching independently with a bounded public error', async () => {
     userAccessRolloutMock.legacySwitchEndpoint = false
     const app = express()

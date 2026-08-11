@@ -17,6 +17,9 @@ describe('revoke-all transaction boundary', () => {
     mocks.query.mockReset()
     mocks.query
       .mockImplementationOnce(async () => {
+        return { rows: [{ id: 'user-1' }], rowCount: 1 }
+      })
+      .mockImplementationOnce(async () => {
         mocks.committedEpoch = true
         return { rows: [], rowCount: 1 }
       })
@@ -37,7 +40,8 @@ describe('revoke-all transaction boundary', () => {
     )
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
-    expect(mocks.query).toHaveBeenCalledTimes(2)
+    expect(mocks.query).toHaveBeenCalledTimes(3)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(mocks.committedEpoch).toBe(false)
   })
 })

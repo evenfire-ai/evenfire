@@ -267,6 +267,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post('/external/auth/session/renew', async (req, res, next) => {
     try {
+      if (!userAccessRollout.sessionV2Acceptance) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
       const token = String(req.header('x-user-session-token') || req.body?.token || '').trim()
       if (!token || token.length > 4096) {
         sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')

@@ -64,6 +64,7 @@ describe('legacy session revocation compatibility', () => {
       query: vi
         .fn()
         .mockResolvedValueOnce({ rows: [{ token_hash: 'hash' }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ id: claims.userId }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 2 }),
     }
@@ -73,7 +74,8 @@ describe('legacy session revocation compatibility', () => {
     ).resolves.toBe(2)
 
     expect(String(db.query.mock.calls[0]?.[0])).toContain('external_v1_session_revocations')
-    expect(String(db.query.mock.calls[1]?.[0])).toContain('external_user_session_security_epochs')
-    expect(String(db.query.mock.calls[2]?.[0])).toContain('external_user_sessions')
+    expect(String(db.query.mock.calls[1]?.[0])).toContain('FOR UPDATE')
+    expect(String(db.query.mock.calls[2]?.[0])).toContain('external_user_session_security_epochs')
+    expect(String(db.query.mock.calls[3]?.[0])).toContain('external_user_sessions')
   })
 })

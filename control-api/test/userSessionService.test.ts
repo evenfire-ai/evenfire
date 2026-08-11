@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import {
   USER_SESSION_ABSOLUTE_LIFETIME_SECONDS,
   USER_SESSION_IDLE_LIFETIME_SECONDS,
+  USER_SESSION_MAX_ACTIVE_PER_USER,
   USER_SESSION_RENEWAL_OVERLAP_SECONDS,
   createUserSession,
   renewUserSession,
@@ -53,10 +54,16 @@ function claimsFor(value: ReturnType<typeof row>, jti = String(value.current_jti
 describe('user session state machine', () => {
   it('creates one session with the frozen idle and absolute bounds', async () => {
     const inserted = row()
-    const query = vi.fn(async (_sql: string, values?: unknown[]) => ({
-      rows: [{ ...inserted, sid: values?.[0], user_id: values?.[1], current_jti: values?.[2] }],
-      rowCount: 1,
-    }))
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM users')) return { rows: [{ id: inserted.user_id }], rowCount: 1 }
+      if (sql.includes('INSERT INTO external_user_sessions')) {
+        return {
+          rows: [{ ...inserted, sid: values?.[0], user_id: values?.[1], current_jti: values?.[2] }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
 
     const issued = await createUserSession(
       {
@@ -67,7 +74,10 @@ describe('user session state machine', () => {
       { db: { query }, now }
     )
 
-    const values = query.mock.calls[0]?.[1] as unknown[]
+    const insertCall = query.mock.calls.find(call =>
+      String(call[0]).includes('INSERT INTO external_user_sessions')
+    )!
+    const values = insertCall[1] as unknown[]
     expect((values[4] as Date).getTime() - now.getTime()).toBe(
       USER_SESSION_IDLE_LIFETIME_SECONDS * 1000
     )
@@ -80,6 +90,10 @@ describe('user session state machine', () => {
       jti: values[2],
       sv: 1,
     })
+    expect(String(query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(query.mock.calls[1]?.[0])).toContain('DELETE FROM external_user_sessions')
+    expect(String(query.mock.calls[2]?.[0])).toContain('OFFSET $3')
+    expect(query.mock.calls[2]?.[1]?.[2]).toBe(USER_SESSION_MAX_ACTIVE_PER_USER - 1)
   })
 
   it('rotates the representation and returns the same successor to an overlapping renewal', async () => {

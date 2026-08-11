@@ -11,6 +11,7 @@ import {
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 export const USER_SESSION_ABSOLUTE_LIFETIME_SECONDS = 30 * 24 * 60 * 60
 export const USER_SESSION_RENEWAL_OVERLAP_SECONDS = 10
+export const USER_SESSION_MAX_ACTIVE_PER_USER = 20
 
 type SessionRow = {
   sid: string
@@ -191,15 +192,47 @@ export async function createUserSession(
   },
   options: SessionClock & { db?: Pick<DbClient, 'query'> } = {}
 ): Promise<IssuedUserSession> {
-  const db = options.db ?? pool
   const now = atSecond(options.now ?? new Date())
   const authenticatedAt = atSecond(input.authenticatedAt ?? now)
   const sid = randomUUID()
   const jti = randomUUID()
   const idleExpiresAt = plusSeconds(now, USER_SESSION_IDLE_LIFETIME_SECONDS)
   const absoluteExpiresAt = plusSeconds(now, USER_SESSION_ABSOLUTE_LIFETIME_SECONDS)
-  const result = await db.query(
-    `INSERT INTO external_user_sessions(
+  const work = async (db: Pick<DbClient, 'query'>) => {
+    const user = await db.query(
+      `SELECT id
+         FROM users
+        WHERE id = $1
+        FOR UPDATE`,
+      [input.userId]
+    )
+    if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
+    await db.query(
+      `DELETE FROM external_user_sessions
+        WHERE user_id = $1
+          AND (revoked_at IS NOT NULL OR absolute_expires_at <= $2)`,
+      [input.userId, now]
+    )
+    await db.query(
+      `WITH overflow AS (
+         SELECT sid
+           FROM external_user_sessions
+          WHERE user_id = $1
+            AND revoked_at IS NULL
+            AND absolute_expires_at > $2
+          ORDER BY last_used_at DESC, created_at DESC, sid
+         OFFSET $3
+       )
+       UPDATE external_user_sessions sessions
+          SET revoked_at = $2,
+              revocation_reason = 'session_limit',
+              session_version = session_version + 1
+         FROM overflow
+        WHERE sessions.sid = overflow.sid`,
+      [input.userId, now, USER_SESSION_MAX_ACTIVE_PER_USER - 1]
+    )
+    const result = await db.query(
+      `INSERT INTO external_user_sessions(
        sid, user_id, session_version, current_jti, current_issued_at,
        created_at, last_used_at, idle_expires_at, absolute_expires_at,
        authentication_methods, authenticated_at
@@ -209,25 +242,27 @@ export async function createUserSession(
                current_jti, current_issued_at, prior_jti, prior_jti_expires_at,
                created_at, last_used_at, idle_expires_at, absolute_expires_at,
                revoked_at, revocation_reason, authentication_methods, authenticated_at`,
-    [
-      sid,
-      input.userId,
-      jti,
-      now,
-      idleExpiresAt,
-      absoluteExpiresAt,
-      input.authenticationMethods,
-      authenticatedAt,
-      input.email.trim().toLowerCase(),
-    ]
-  )
-  const row = result.rows[0] as SessionRow | undefined
-  if (!row) throw new Error('user session insert did not return a row')
-  return {
-    token: tokenFromRow(row),
-    expiresInSeconds: USER_SESSION_V2_TTL_SECONDS,
-    identity: identityFromRow(row),
+      [
+        sid,
+        input.userId,
+        jti,
+        now,
+        idleExpiresAt,
+        absoluteExpiresAt,
+        input.authenticationMethods,
+        authenticatedAt,
+        input.email.trim().toLowerCase(),
+      ]
+    )
+    const row = result.rows[0] as SessionRow | undefined
+    if (!row) throw new Error('user session insert did not return a row')
+    return {
+      token: tokenFromRow(row),
+      expiresInSeconds: USER_SESSION_V2_TTL_SECONDS,
+      identity: identityFromRow(row),
+    }
   }
+  return options.db ? work(options.db) : withTransaction(work)
 }
 
 export async function validateUserSessionClaims(
@@ -350,6 +385,14 @@ export async function revokeAllUserSessions(
 ): Promise<number> {
   const work = async (transaction: Pick<DbClient, 'query'>) => {
     const revokedAt = new Date(now)
+    const user = await transaction.query(
+      `SELECT id
+         FROM users
+        WHERE id = $1
+        FOR UPDATE`,
+      [userId]
+    )
+    if ((user.rowCount ?? 0) === 0) return 0
     await transaction.query(
       `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
        VALUES($1, $2, $3, $2)
