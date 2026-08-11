@@ -66,20 +66,7 @@ describe('external user-access contracts', () => {
         desktopAllTeamMode: false,
         profileV2Mode: false,
         minimumClientEnforced: false,
-        catalogFamilies: [
-          'user',
-          'team',
-          'host',
-          'context',
-          'mcp_server',
-          'workflow_recipe',
-          'workflow_run',
-          'workflow_approval',
-          'notification',
-          'gfs_resource',
-          'shared_filesystem',
-          'sandbox_app',
-        ],
+        catalogFamilies: [],
       })
     )
   })

@@ -7,8 +7,8 @@ import {
 import {
   type EffectiveUserAccessPolicy,
   compareSemanticVersions,
-  effectiveUserAccessPolicy,
 } from '../access/userAccessPolicy.js'
+import { resolveEffectiveUserAccessPolicy } from '../access/userAccessRuntimePolicy.js'
 import {
   type IssuedUserSession,
   renewUserSession,
@@ -36,6 +36,7 @@ export type ExternalSessionAuthentication =
       claims: AuthClaims
       contract: 'v1' | 'v2'
       authorityContext: ExternalSessionAuthorityContext
+      policy: EffectiveUserAccessPolicy
     }
   | { status: 'invalid' | 'expired' | 'revoked'; reason: string }
   | { status: 'upgrade_required'; reason: string }
@@ -131,7 +132,7 @@ export async function authenticateExternalUserSession(
   token: string,
   options: AuthenticationOptions
 ): Promise<ExternalSessionAuthentication> {
-  const policy = options.policy ?? effectiveUserAccessPolicy
+  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
   if (
     purposeRequiresMinimumClient(options.purpose) &&
     !clientMeetsMinimum(options.client, policy)
@@ -157,6 +158,7 @@ export async function authenticateExternalUserSession(
         jti: v2Claims.jti,
         sessionVersion: v2Claims.sv,
       }),
+      policy,
     }
   }
 
@@ -177,6 +179,7 @@ export async function authenticateExternalUserSession(
       tokenHash: validation.identity.jti,
       issuedAt: v1Claims.iat!,
     }),
+    policy,
   }
 }
 
@@ -184,7 +187,7 @@ export async function renewExternalUserSession(
   token: string,
   options: Omit<AuthenticationOptions, 'purpose'> = {}
 ): Promise<ExternalSessionRenewal> {
-  const policy = options.policy ?? effectiveUserAccessPolicy
+  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
   if (!clientMeetsMinimum(options.client, policy)) {
     return { status: 'upgrade_required', reason: 'minimum_client_version' }
   }
