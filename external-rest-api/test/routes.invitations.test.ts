@@ -13,6 +13,7 @@ const invitationsServiceMock = vi.hoisted(() => ({
   getInvitationByToken: vi.fn(),
   listPendingInvitations: vi.fn(),
   setupInvitationPassword: vi.fn(),
+  setupInvitationPasswordWithToken: vi.fn(),
 }))
 
 vi.mock('../src/authToken.js', () => authTokenMock)
@@ -32,24 +33,14 @@ describe('routes/invitations', () => {
     return app
   }
 
-  it('sets invitation password by minting an invitation session from the link token', async () => {
-    invitationsServiceMock.acceptInvitation.mockResolvedValue({
-      data: {
-        accepted: true,
-        userId: 'user-1',
-        email: 'invitee@example.com',
-        teamId: null,
-        teamName: null,
-        role: 'member',
-        token: 'invited-session-token',
-      },
-    })
-    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+  it('clears the revoked invitation session after setting the password', async () => {
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
       data: { id: 'inv-1', passwordUpdated: true },
     })
 
     const res = await request(makeApp())
       .post('/invitations/password')
+      .set('x-evenfire-session-contract', 'v2')
       .send({
         token: 'invitation-link-token',
         email: 'invitee@example.com',
@@ -58,39 +49,29 @@ describe('routes/invitations', () => {
       })
       .expect(200)
 
-    expect(res.body).toEqual({ id: 'inv-1', passwordUpdated: true })
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=invited-session-token')
+    expect(res.body).toEqual({
+      id: 'inv-1',
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(String(res.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(res.headers['set-cookie'])).not.toContain('invited-session-token')
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
-    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledWith(
-      'invitation-link-token',
-      'invitee@example.com'
-    )
-    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
-      {
-        userId: 'user-1',
-        email: 'invitee@example.com',
-        sessionToken: 'invited-session-token',
-      },
-      'inv-1',
-      'user123!'
-    )
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith({
+      token: 'invitation-link-token',
+      email: 'invitee@example.com',
+      invitationId: 'inv-1',
+      password: 'user123!',
+      sessionContract: 'v2',
+    })
   })
 
   it('falls back to invitation token flow when an old bearer token is invalid', async () => {
     authTokenMock.verifyToken.mockReturnValue(null)
-    invitationsServiceMock.acceptInvitation.mockResolvedValue({
-      data: {
-        accepted: true,
-        userId: 'user-1',
-        email: 'invitee@example.com',
-        teamId: null,
-        teamName: null,
-        role: 'member',
-        token: 'fresh-session-token',
-      },
-    })
-    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
       data: { id: 'inv-1', passwordUpdated: true },
     })
 
@@ -106,11 +87,14 @@ describe('routes/invitations', () => {
       .expect(200)
 
     expect(authTokenMock.verifyToken).toHaveBeenCalledWith('stale-token')
-    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionToken: 'fresh-session-token' }),
-      'inv-1',
-      'user123!'
-    )
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith({
+      token: 'invitation-link-token',
+      email: 'invitee@example.com',
+      invitationId: 'inv-1',
+      password: 'user123!',
+      sessionContract: undefined,
+    })
   })
 
   it('sets invitation password with a valid bearer token without accepting again', async () => {
@@ -186,6 +170,7 @@ describe('routes/invitations', () => {
 
     expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
     expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
   })
 
   it('rate limits repeated invitation password attempts', async () => {

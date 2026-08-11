@@ -14,7 +14,7 @@ const flow = vi.hoisted(() => ({
 vi.mock('../src/services/invitationFlowRegistrationService.js', () => flow)
 
 const directory = vi.hoisted(() => ({
-  acceptInvitationForEmail: vi.fn(),
+  acceptInvitationForEmailInTransaction: vi.fn(),
   getInvitationByToken: vi.fn(),
   listPendingInvitations: vi.fn(),
   setInvitationPasswordForEmail: vi.fn(),
@@ -22,6 +22,12 @@ const directory = vi.hoisted(() => ({
   verifyUserPassword: vi.fn(),
 }))
 vi.mock('../src/services/directory/index.js', () => directory)
+
+const database = vi.hoisted(() => ({
+  query: vi.fn(),
+  withTransaction: vi.fn(),
+}))
+vi.mock('../src/db.js', () => ({ withTransaction: database.withTransaction }))
 
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
@@ -49,8 +55,9 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     next()
   },
 }))
+const tokenSigner = vi.hoisted(() => ({ sign: vi.fn(() => 'session-token') }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  signExternalSessionToken: vi.fn(() => 'session-token'),
+  signExternalSessionToken: tokenSigner.sign,
 }))
 
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
@@ -74,6 +81,7 @@ function app(): express.Express {
 describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    database.withTransaction.mockImplementation(async work => work({ query: database.query }))
   })
 
   it('GET token lookup returns 503 member_registration_unavailable, NOT 400 invalid_invitation', async () => {
@@ -90,6 +98,79 @@ describe('external invitation routes when the hub is unavailable', () => {
       .send({ email: 'a@b.c', token: 't' })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('member_registration_unavailable')
+  })
+
+  it('issues only for the transaction that consumes a pending invitation', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-capability',
+    })
+    directory.acceptInvitationForEmailInTransaction
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+        },
+      })
+      .mockResolvedValueOnce({ error: 'not_pending' })
+      .mockResolvedValueOnce({ error: 'not_pending' })
+    database.query.mockResolvedValue({
+      rows: [{ id: '00000000-0000-4000-8000-000000000001' }],
+      rowCount: 1,
+    })
+
+    const first = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'one-use-flow' })
+    const replay = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'one-use-flow' })
+    const passwordReset = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'password-reset-flow' })
+
+    expect(first.status).toBe(200)
+    expect(first.body.token).toBe('session-token')
+    expect(replay.status).toBe(400)
+    expect(replay.body).toEqual({ error: 'not_pending' })
+    expect(passwordReset.status).toBe(400)
+    expect(passwordReset.body).toEqual({ error: 'not_pending' })
+    expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
+  })
+
+  it('binds the secret capability to the public id and never issues on password setup', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-secret-capability',
+    })
+    directory.setInvitationPasswordForEmail.mockResolvedValue({
+      data: {
+        id: '00000000-0000-4000-8000-000000000200',
+        userId: '00000000-0000-4000-8000-000000000001',
+        passwordUpdated: true,
+      },
+    })
+
+    const response = await request(app()).post('/external/invitations/password-token').send({
+      email: 'a@b.c',
+      token: 'member-registration-flow-token',
+      invitationId: '00000000-0000-4000-8000-000000000200',
+      password: 'valid-password',
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body.reauthenticationRequired).toBe(true)
+    expect(response.body).not.toHaveProperty('token')
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
+      'a@b.c',
+      'database-secret-capability',
+      '00000000-0000-4000-8000-000000000200',
+      'valid-password'
+    )
+    expect(tokenSigner.sign).not.toHaveBeenCalled()
   })
 
   it('lists invitations only for the authenticated email', async () => {
