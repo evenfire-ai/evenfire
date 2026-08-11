@@ -16,6 +16,7 @@ import {
   cancelControlAdminInvitation,
   deleteControlAdmin,
   getControlAdmins,
+  reactivateControlAdminGfsOperatorLink,
   revokeControlAdminGfsOperatorLink,
 } from '@lib/api'
 import type { ControlAdminsPanelProps } from './types'
@@ -47,6 +48,7 @@ export function ControlAdminsPanel({
   const [cancellingInvitationId, setCancellingInvitationId] = useState<string | null>(null)
   const [deletingAdminId, setDeletingAdminId] = useState<string | null>(null)
   const [revokingGfsLinkAdminId, setRevokingGfsLinkAdminId] = useState<string | null>(null)
+  const [reactivatingGfsLinkAdminId, setReactivatingGfsLinkAdminId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const normalizedSearch = searchInput.trim().toLowerCase()
 
@@ -195,13 +197,27 @@ export function ControlAdminsPanel({
     setRevokingGfsLinkAdminId(admin.id)
     setError('')
     try {
-      const result = await revokeControlAdminGfsOperatorLink(admin.id)
+      const link = admin.gfsOperatorLink
+      if (!link || link.status !== 'active' || !Number.isInteger(link.rowVersion)) {
+        throw new Error('The current GFS operator-link version is unavailable; refresh and retry.')
+      }
+      const result = await revokeControlAdminGfsOperatorLink(admin.id, {
+        rowVersion: link.rowVersion,
+        reason: 'control_ui_revoke',
+      })
       setAdmins(current =>
         current.map(item =>
           item.id === admin.id
             ? {
                 ...item,
-                gfsOperatorLink: null,
+                gfsOperatorLink: item.gfsOperatorLink
+                  ? {
+                      ...item.gfsOperatorLink,
+                      status: 'revoked',
+                      rowVersion:
+                        result.rowVersion ?? Number(item.gfsOperatorLink.rowVersion ?? 0) + 1,
+                    }
+                  : null,
                 gfsOperatorLinkStatus: 'revoked',
               }
             : item
@@ -221,6 +237,63 @@ export function ControlAdminsPanel({
       )
     } finally {
       setRevokingGfsLinkAdminId(null)
+    }
+  }
+
+  async function handleReactivateGfsOperatorLink(admin: ControlAdminListItem) {
+    const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
+    const shouldReactivate = await confirm({
+      title: 'Reactivate Desktop GFS operator access',
+      message: `Reactivate Desktop GFS operator access for ${label}? This creates a new audited link generation without changing passwords or unrelated access.`,
+      confirmLabel: 'Reactivate access',
+      tone: 'default',
+    })
+    if (!shouldReactivate) return
+
+    const link = admin.gfsOperatorLink
+    if (!link || link.status !== 'revoked' || !Number.isInteger(link.rowVersion)) {
+      setError('The revoked GFS operator-link version is unavailable; refresh and retry.')
+      return
+    }
+    setReactivatingGfsLinkAdminId(admin.id)
+    setError('')
+    try {
+      const result = await reactivateControlAdminGfsOperatorLink(admin.id, {
+        rowVersion: link.rowVersion,
+        reason: 'control_ui_reactivate',
+      })
+      setAdmins(current =>
+        current.map(item =>
+          item.id === admin.id
+            ? {
+                ...item,
+                gfsOperatorLink: item.gfsOperatorLink
+                  ? {
+                      ...item.gfsOperatorLink,
+                      status: result.gfsOperatorLinkStatus === 'active' ? 'active' : 'revoked',
+                      generation: result.generation ?? item.gfsOperatorLink.generation,
+                      rowVersion: result.rowVersion ?? item.gfsOperatorLink.rowVersion,
+                    }
+                  : null,
+                gfsOperatorLinkStatus: result.gfsOperatorLinkStatus,
+              }
+            : item
+        )
+      )
+      showToast(
+        result.reactivated
+          ? 'Desktop GFS operator access reactivated.'
+          : 'Desktop GFS operator access remains revoked.',
+        { tone: 'success' }
+      )
+    } catch (reactivateError) {
+      setError(
+        reactivateError instanceof Error
+          ? reactivateError.message
+          : 'Failed to reactivate Desktop GFS operator access'
+      )
+    } finally {
+      setReactivatingGfsLinkAdminId(null)
     }
   }
 
@@ -331,7 +404,9 @@ export function ControlAdminsPanel({
                               ? 'Active'
                               : admin.gfsOperatorLink.status === 'inactive_admin'
                                 ? 'Inactive admin'
-                                : 'Error'}
+                                : admin.gfsOperatorLink.status === 'revoked'
+                                  ? 'Revoked'
+                                  : 'Error'}
                           </div>
                           <div className="cu-table__cell-muted">
                             Desktop user: {admin.gfsOperatorLink.desktopUserId}
@@ -341,6 +416,9 @@ export function ControlAdminsPanel({
                           </div>
                           <div className="cu-table__cell-muted">
                             Source: {admin.gfsOperatorLink.source}
+                          </div>
+                          <div className="cu-table__cell-muted">
+                            Generation: {admin.gfsOperatorLink.generation ?? 'Unknown'}
                           </div>
                         </div>
                       ) : (
@@ -372,7 +450,7 @@ export function ControlAdminsPanel({
                         >
                           <IconUsers />
                         </button>
-                        {admin.gfsOperatorLink && admin.gfsOperatorLink.status !== 'error' ? (
+                        {admin.gfsOperatorLink?.status === 'active' ? (
                           <button
                             type="button"
                             className="cu-btn cu-btn--danger"
@@ -386,6 +464,24 @@ export function ControlAdminsPanel({
                             title="Remove only GFS operator authority; keep the admin and passwords"
                           >
                             {revokingGfsLinkAdminId === admin.id ? 'Revoking...' : 'Revoke GFS'}
+                          </button>
+                        ) : null}
+                        {admin.gfsOperatorLink?.status === 'revoked' ? (
+                          <button
+                            type="button"
+                            className="cu-btn"
+                            disabled={reactivatingGfsLinkAdminId === admin.id}
+                            onClick={() => void handleReactivateGfsOperatorLink(admin)}
+                            aria-label={
+                              reactivatingGfsLinkAdminId === admin.id
+                                ? `Reactivating Desktop GFS operator access for ${label}`
+                                : `Reactivate Desktop GFS operator access for ${label}`
+                            }
+                            title="Create a new audited GFS operator-link generation"
+                          >
+                            {reactivatingGfsLinkAdminId === admin.id
+                              ? 'Reactivating...'
+                              : 'Reactivate GFS'}
                           </button>
                         ) : null}
                         {currentAdmin ? (

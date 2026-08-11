@@ -81,6 +81,14 @@ identity, or alter unrelated Control Plane permissions. The next GFS request
 from the Desktop session is denied, while ordinary user behavior remains
 subject to its existing user-plane authorization.
 
+Revocation is a retained lifecycle state, not a row deletion. The same Control
+UI surface may explicitly **Reactivate Desktop GFS operator access** after a
+confirmation; reactivation creates the next link generation and preserves the
+revoked generation and its audit evidence. A stale generation or retired parent
+is rejected rather than silently recreated or reassigned. Retiring a linked
+Control Admin revokes its active generation and disables the admin in the same
+transaction; physical purge is a separately governed retention operation.
+
 This initial-setup link is deliberately separate from invitations and ordinary
 member provisioning. Those flows do not create, repair, or reassign an operator
 link.

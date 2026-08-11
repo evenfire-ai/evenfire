@@ -54,6 +54,7 @@ export interface GfsCrumb {
 }
 
 export type GfsBrowserView = 'operator' | 'shared'
+export type GfsBrowserAccessState = 'active' | 'revoked'
 
 export interface GfsBrowserFailure {
   kind: 'uninitialized' | 'unauthorized' | 'upstream'
@@ -158,6 +159,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  // This is deliberately session-local. A 403 never becomes a persisted client
+  // capability decision: a later server-backed request is the only way out.
+  const [accessState, setAccessState] = useState<GfsBrowserAccessState>('active')
   const previousSessionScopeRef = useRef<string | null>(null)
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
@@ -179,6 +183,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (previous !== null) {
       setCrumbs([])
       setOpenError(null)
+      setAccessState('active')
       void queryClient.removeQueries({ queryKey: [...desktopQueryKeys.gfsRoot, previous] })
     }
   }, [queryClient, sessionScope])
@@ -192,7 +197,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       return listAccessible(DRIVE, pageParam)
     },
-    enabled: Boolean(sessionScope) && canListAccessibleResources,
+    enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -243,7 +248,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
     enabled:
-      Boolean(sessionScope) && Boolean(current) && currentIsDirectory && !current?.isDriveRoot,
+      Boolean(sessionScope) &&
+      Boolean(current) &&
+      currentIsDirectory &&
+      !current?.isDriveRoot &&
+      accessState === 'active',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -255,7 +264,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(current),
+    enabled: Boolean(sessionScope) && Boolean(current) && accessState === 'active',
   })
   const refreshAffordances = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -275,7 +284,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => window.clerum.gfs.listGrants(current!.resourceId, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(current) && grantsListEnabled,
+    enabled:
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
   const refreshGrants = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -296,8 +306,36 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => window.clerum.gfs.listShares(current!.resourceId, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(current) && grantsListEnabled,
+    enabled:
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
+  const revokeAccess = useCallback(() => {
+    setAccessState('revoked')
+    setCrumbs([])
+    setOpenError(null)
+    // Remove every GFS response for this Desktop session. In particular, never
+    // leave an operator root, ACL list, or affordance cached after a server
+    // revocation response.
+    queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+  }, [queryClient])
+  const retryAccess = useCallback(() => {
+    // This does not restore a local capability. It only permits the normal
+    // discovery request to run again, so an explicit server-side reactivation
+    // remains the sole authority that can restore the operator root.
+    setAccessState('active')
+  }, [])
+  const queryAuthorizationError = [
+    accessibleQuery.error,
+    childrenQuery.error,
+    affordancesQuery.error,
+    grantsQuery.error,
+    sharesQuery.error,
+  ]
+    .map(error => (error ? toMessage(error) : null))
+    .find(error => error !== null && describeGfsBrowserFailure(error).kind === 'unauthorized')
+  useEffect(() => {
+    if (queryAuthorizationError && accessState !== 'revoked') revokeAccess()
+  }, [accessState, queryAuthorizationError, revokeAccess])
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
@@ -379,7 +417,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const grants = useMemo<GfsGrantListItem[]>(() => grantsQuery.data ?? [], [grantsQuery.data])
   const shares = useMemo<GfsShareListItem[]>(() => sharesQuery.data ?? [], [sharesQuery.data])
   const accessibleErrorMessage =
-    rootContractError ?? (accessibleQuery.error ? toMessage(accessibleQuery.error) : null)
+    accessState === 'revoked'
+      ? 'operator_link_inactive'
+      : (rootContractError ?? (accessibleQuery.error ? toMessage(accessibleQuery.error) : null))
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -443,13 +483,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         )
         return crumb
       } catch (error) {
-        setOpenError(toMessage(error))
+        const message = toMessage(error)
+        if (describeGfsBrowserFailure(message).kind === 'unauthorized') revokeAccess()
+        else setOpenError(message)
         return false
       } finally {
         setResolving(false)
       }
     },
-    [operatorRoot]
+    [operatorRoot, revokeAccess]
   )
 
   const openChild = useCallback((child: GfsBrowserChild) => {
@@ -523,6 +565,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     crumbs,
     current,
     view,
+    accessState,
     isOperatorRoot: Boolean(current?.isDriveRoot),
     accessibleResources,
     items,
@@ -553,6 +596,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     openChild,
     goToCrumb,
     reset,
+    revokeAccess,
+    retryAccess,
     refreshAffordances,
     grant,
     grants,

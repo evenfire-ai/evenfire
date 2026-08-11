@@ -552,7 +552,10 @@ export type ControlAdminListItem = {
     controlAdminId: string
     source: 'initial_setup' | 'unknown'
     createdAt: string | null
-    status: 'active' | 'inactive_admin' | 'error'
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation?: number | null
+    rowVersion?: number | null
+    revocationReason?: string | null
   } | null
   gfsOperatorLinkStatus?: 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
@@ -644,20 +647,53 @@ export async function deleteControlAdmin(adminId: string): Promise<{ deleted: tr
   }>
 }
 
-export async function revokeControlAdminGfsOperatorLink(adminId: string): Promise<{
+export async function revokeControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion?: number | null; reason?: string } = {}
+): Promise<{
   revoked: boolean
   gfsOperatorLinkStatus: 'revoked'
   controlAdminId: string
   desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
 }> {
   return apiSend(
     'DELETE',
-    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`,
+    payload
   ) as Promise<{
     revoked: boolean
     gfsOperatorLinkStatus: 'revoked'
     controlAdminId: string
     desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
+  }>
+}
+
+export async function reactivateControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion: number; reason: string }
+): Promise<{
+  reactivated: boolean
+  gfsOperatorLinkStatus: 'active' | 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link/reactivate`,
+    payload
+  ) as Promise<{
+    reactivated: boolean
+    gfsOperatorLinkStatus: 'active' | 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
   }>
 }
 

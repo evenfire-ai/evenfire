@@ -245,8 +245,9 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
   registerAdminUserAccessRoutes(router, gateway)
 
   /**
-   * Hard-delete user profile, memberships, and personal context/agent links (DB CASCADE).
-   * Teams are retained even when this leaves them with no members.
+   * Retire a user through the existing account-management contract. Accounts
+   * with retained GFS operator-link history are rejected here so a legacy
+   * hard-delete cannot bypass the governed lifecycle or erase evidence.
    */
   router.delete('/admin/users/:userId', async (req, res, next) => {
     try {
@@ -254,6 +255,10 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
       if ('error' in result) {
         if (result.error === 'not_found') {
           res.status(404).json({ error: 'not_found' })
+          return
+        }
+        if (result.error === 'gfs_operator_link_history_retained') {
+          res.status(409).json({ error: result.error })
           return
         }
         const exhaustive: never = result.error

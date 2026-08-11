@@ -13,8 +13,19 @@ describe('0092_gfs_audit_actor_correlation migration', () => {
       candidate => candidate.version === '0092_gfs_audit_actor_correlation'
     )
     expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS.at(-2)?.version).toBe('0091_gfs_desktop_operator_links')
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(migration?.version)
+    const linkMigrationIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0091_gfs_desktop_operator_links'
+    )
+    const auditMigrationIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0092_gfs_audit_actor_correlation'
+    )
+    const generationsMigrationIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0093_gfs_desktop_operator_link_generations'
+    )
+    expect(linkMigrationIndex).toBeGreaterThanOrEqual(0)
+    expect(auditMigrationIndex).toBe(linkMigrationIndex + 1)
+    expect(generationsMigrationIndex).toBe(auditMigrationIndex + 1)
+    expect(CONTROL_API_MIGRATIONS[auditMigrationIndex]?.version).toBe(migration?.version)
 
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     await migration!.apply({ query })

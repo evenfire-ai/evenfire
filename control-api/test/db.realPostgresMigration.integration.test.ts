@@ -403,7 +403,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
-      gfs_desktop_operator_links: ['DELETE', 'INSERT', 'SELECT'],
+      gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -447,19 +447,20 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           ORDER BY privilege.privilege_name`
       )
       expect(privilegeState.rows).toEqual([
-        { privilege_name: 'DELETE', allowed: true },
+        { privilege_name: 'DELETE', allowed: false },
         { privilege_name: 'INSERT', allowed: true },
         { privilege_name: 'REFERENCES', allowed: false },
         { privilege_name: 'SELECT', allowed: true },
         { privilege_name: 'TRIGGER', allowed: false },
         { privilege_name: 'TRUNCATE', allowed: false },
-        { privilege_name: 'UPDATE', allowed: false },
+        { privilege_name: 'UPDATE', allowed: true },
       ])
 
       await linkRuntimeClient.query('SET LOCAL ROLE control_api_runtime')
       await linkRuntimeClient.query(
-        `INSERT INTO gfs_desktop_operator_links (user_id, control_admin_id, source)
-         VALUES ($1, $2, 'initial_setup')`,
+        `INSERT INTO gfs_desktop_operator_links
+           (id, lineage_id, generation, user_id, control_admin_id, state, source, created_by, row_version)
+         VALUES (gen_random_uuid(), gen_random_uuid(), 1, $1, $2, 'active', 'initial_setup', $2, 1)`,
         [linkUserId, linkAdminId]
       )
       const linked = await linkRuntimeClient.query<{ user_id: string; control_admin_id: string }>(
@@ -470,16 +471,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
       expect(linked.rows).toEqual([{ user_id: linkUserId, control_admin_id: linkAdminId }])
 
-      await linkRuntimeClient.query('SAVEPOINT deny_link_update')
-      await expect(
-        linkRuntimeClient.query(
-          `UPDATE gfs_desktop_operator_links
-              SET source = 'initial_setup'
-            WHERE user_id = $1`,
-          [linkUserId]
-        )
-      ).rejects.toThrow(/permission denied/)
-      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_update')
+      await linkRuntimeClient.query(
+        `UPDATE gfs_desktop_operator_links
+            SET state = 'revoked', revoked_at = NOW(), revoked_by_type = 'control_admin',
+                revoked_by_id = $2, revocation_reason = 'privilege-test', row_version = row_version + 1
+          WHERE user_id = $1`,
+        [linkUserId, linkAdminId]
+      )
 
       await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')
       await expect(
@@ -487,11 +485,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       ).rejects.toThrow(/permission denied/)
       await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_truncate')
 
-      await linkRuntimeClient.query(
-        `DELETE FROM gfs_desktop_operator_links
-          WHERE user_id = $1`,
-        [linkUserId]
-      )
+      await linkRuntimeClient.query('SAVEPOINT deny_link_delete')
+      await expect(
+        linkRuntimeClient.query(`DELETE FROM gfs_desktop_operator_links WHERE user_id = $1`, [
+          linkUserId,
+        ])
+      ).rejects.toThrow(/permission denied/)
+      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_delete')
     } finally {
       await linkRuntimeClient.query('ROLLBACK')
       linkRuntimeClient.release()

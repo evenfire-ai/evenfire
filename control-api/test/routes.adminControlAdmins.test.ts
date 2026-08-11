@@ -25,7 +25,9 @@ const controlAdminInvitationRegistrationSvc = vi.hoisted(() => ({
 
 const operatorLinkSvc = vi.hoisted(() => ({
   getLinkForControlAdmin: vi.fn(),
+  getActiveRowVersionForControlAdmin: vi.fn(),
   unlink: vi.fn(),
+  reactivate: vi.fn(),
 }))
 
 const uiAuth = vi.hoisted(() => ({
@@ -122,6 +124,9 @@ describe('routes/adminControlAdmins', () => {
       controlAdminId: targetAdminId,
       source: 'initial_setup',
       createdAt: new Date('2026-08-10T12:00:00.000Z'),
+      state: 'active',
+      rowVersion: 1,
+      generation: 1,
     })
     operatorLinkSvc.unlink.mockResolvedValue({
       unlinked: true,
@@ -135,7 +140,7 @@ describe('routes/adminControlAdmins', () => {
 
     const res = await request(createTestApp())
       .delete(`/admin/control-admins/${targetAdminId}/gfs-operator-link`)
-      .send({ desktopUserId: 'client-supplied-id' })
+      .send({ desktopUserId: 'client-supplied-id', rowVersion: 1, reason: 'test-revoke' })
       .expect(200)
 
     expect(res.body).toEqual({
@@ -143,12 +148,42 @@ describe('routes/adminControlAdmins', () => {
       gfsOperatorLinkStatus: 'revoked',
       controlAdminId: targetAdminId,
       desktopUserId,
+      generation: 1,
+      rowVersion: null,
     })
     expect(operatorLinkSvc.getLinkForControlAdmin).toHaveBeenCalledWith(targetAdminId)
     expect(operatorLinkSvc.unlink).toHaveBeenCalledWith({
       desktopUserId,
       controlAdminId: targetAdminId,
       operatorSub: 'current-admin-id',
+      rowVersion: 1,
+      reason: 'test-revoke',
+    })
+  })
+
+  it('exposes the latest generation and tombstone version to the Control UI', async () => {
+    operatorLinkSvc.getLinkForControlAdmin.mockResolvedValue({
+      desktopUserId: 'desktop-user-id',
+      controlAdminId: 'target-admin-id',
+      source: 'initial_setup',
+      createdAt: new Date('2026-08-10T12:00:00.000Z'),
+      state: 'revoked',
+      generation: 1,
+      rowVersion: 2,
+      revocationReason: 'control-ui-revoke',
+    })
+
+    const res = await request(createTestApp())
+      .get('/admin/control-admins/target-admin-id/gfs-operator-link')
+      .expect(200)
+
+    expect(res.body).toEqual({
+      gfsOperatorLinkStatus: 'revoked',
+      controlAdminId: 'target-admin-id',
+      desktopUserId: 'desktop-user-id',
+      generation: 1,
+      rowVersion: 2,
+      revocationReason: 'control-ui-revoke',
     })
   })
 
@@ -166,7 +201,44 @@ describe('routes/adminControlAdmins', () => {
       gfsOperatorLinkStatus: 'revoked',
       controlAdminId: targetAdminId,
       desktopUserId: null,
+      generation: null,
+      rowVersion: null,
     })
     expect(operatorLinkSvc.unlink).not.toHaveBeenCalled()
+  })
+
+  it('reactivates the server-resolved revoked generation with its row version', async () => {
+    operatorLinkSvc.reactivate.mockResolvedValue({
+      reactivated: true,
+      link: {
+        desktopUserId: 'desktop-user-id',
+        controlAdminId: 'target-admin-id',
+        source: 'initial_setup',
+        createdAt: new Date('2026-08-10T12:00:00.000Z'),
+        state: 'active',
+        generation: 2,
+        rowVersion: 1,
+      },
+    })
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admins/target-admin-id/gfs-operator-link/reactivate')
+      .send({ rowVersion: 2, reason: 'control-ui-reactivate' })
+      .expect(200)
+
+    expect(res.body).toEqual({
+      reactivated: true,
+      gfsOperatorLinkStatus: 'active',
+      controlAdminId: 'target-admin-id',
+      desktopUserId: 'desktop-user-id',
+      generation: 2,
+      rowVersion: 1,
+    })
+    expect(operatorLinkSvc.reactivate).toHaveBeenCalledWith({
+      controlAdminId: 'target-admin-id',
+      operatorSub: 'current-admin-id',
+      rowVersion: 2,
+      reason: 'control-ui-reactivate',
+    })
   })
 })

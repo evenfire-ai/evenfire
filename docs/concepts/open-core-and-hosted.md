@@ -22,8 +22,9 @@ and not held back:
   packaging to ship the desktop app to your users.
 - **Self-hosted initial-admin GFS parity** — the Desktop identity created for
   the first Control Admin during setup is linked directly for GFS operator
-  access, and that link can be revoked from Control UI without changing the
-  admin account or its credentials.
+  access. Control UI can revoke that authority without changing the admin
+  account or its credentials and can explicitly reactivate it as a new audited
+  link generation when the retained identities remain active.
 - The **registry client**: connect to a registry to install and publish
   connectors and recipes.
 - The **cluster E2E suites**.

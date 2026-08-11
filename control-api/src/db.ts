@@ -2647,6 +2647,84 @@ async function applyGfsAuditActorCorrelationSchema(db: DbClient): Promise<void> 
   `)
 }
 
+/** Preserve operator-link history while making revocation a state transition. */
+async function evolveGfsDesktopOperatorLinksToGenerations(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS id UUID,
+      ADD COLUMN IF NOT EXISTS lineage_id UUID,
+      ADD COLUMN IF NOT EXISTS generation INTEGER,
+      ADD COLUMN IF NOT EXISTS predecessor_id UUID,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS created_by UUID,
+      ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS revoked_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS revoked_by_id UUID,
+      ADD COLUMN IF NOT EXISTS revocation_reason TEXT,
+      ADD COLUMN IF NOT EXISTS row_version BIGINT;
+
+    UPDATE gfs_desktop_operator_links
+       SET id = COALESCE(id, gen_random_uuid()),
+           lineage_id = COALESCE(lineage_id, gen_random_uuid()),
+           generation = COALESCE(generation, 1),
+           state = COALESCE(state, 'active'),
+           created_by = COALESCE(created_by, control_admin_id),
+           row_version = COALESCE(row_version, 1)
+     WHERE id IS NULL OR lineage_id IS NULL OR generation IS NULL OR state IS NULL
+        OR created_by IS NULL OR row_version IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      ALTER COLUMN id SET NOT NULL,
+      ALTER COLUMN lineage_id SET NOT NULL,
+      ALTER COLUMN generation SET NOT NULL,
+      ALTER COLUMN state SET NOT NULL,
+      ALTER COLUMN created_by SET NOT NULL,
+      ALTER COLUMN row_version SET NOT NULL;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_pkey;
+    ALTER TABLE gfs_desktop_operator_links ADD PRIMARY KEY (id);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_id_fkey
+      FOREIGN KEY (predecessor_id) REFERENCES gfs_desktop_operator_links(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_control_admin_id_fkey
+      FOREIGN KEY (control_admin_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_created_by_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_id_fkey
+      FOREIGN KEY (revoked_by_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_generation_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_generation_check CHECK (generation > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_row_version_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_row_version_check CHECK (row_version > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_state_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_state_check CHECK (state IN ('active', 'revoked'));
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+      (state = 'active' AND revoked_at IS NULL AND revoked_by_type IS NULL AND revoked_by_id IS NULL AND revocation_reason IS NULL)
+      OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_type = 'control_admin' AND revoked_by_id IS NOT NULL AND revocation_reason IS NOT NULL)
+    );
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_check CHECK (
+      (generation = 1 AND predecessor_id IS NULL) OR (generation > 1 AND predecessor_id IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_lineage_generation_key ON gfs_desktop_operator_links(lineage_id, generation);
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_predecessor_key ON gfs_desktop_operator_links(predecessor_id) WHERE predecessor_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_user_key ON gfs_desktop_operator_links(user_id) WHERE state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_admin_key ON gfs_desktop_operator_links(control_admin_id) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS gfs_desktop_operator_links_revoked_at_idx
+      ON gfs_desktop_operator_links(revoked_at) WHERE state = 'revoked';
+    GRANT SELECT, INSERT, UPDATE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE gfs_desktop_operator_links FROM control_api_runtime;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5516,6 +5594,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0092_gfs_audit_actor_correlation',
     apply: applyGfsAuditActorCorrelationSchema,
+  },
+  {
+    version: '0093_gfs_desktop_operator_link_generations',
+    apply: evolveGfsDesktopOperatorLinksToGenerations,
   },
 ]
 

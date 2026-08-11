@@ -192,14 +192,31 @@ export async function updateAdminUserContext(
 }
 
 /**
- * Hard-delete a user account. Teams are retained even when this delete leaves them with zero
- * active members. Memberships are removed via CASCADE when the user row is deleted.
+ * Retire a user account through the existing account-management contract.
+ * Teams are retained even when this leaves them with zero active members.
+ * Accounts with retained operator-link history are intentionally not purged.
  */
 export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
   return withTransaction(async db => {
     const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
     if ((exists.rowCount ?? 0) === 0) {
       return { error: 'not_found' }
+    }
+
+    // Operator-link generations are retained for audit and are protected by
+    // ON DELETE RESTRICT. Refuse the legacy hard-delete operation explicitly
+    // rather than relying on a late FK error or silently erasing the lifecycle
+    // history. A future actor-aware account-retirement flow must revoke the
+    // active generation and use the governed retention process before purge.
+    const operatorLinkHistory = await db.query(
+      `SELECT 1
+         FROM gfs_desktop_operator_links
+        WHERE user_id = $1
+        LIMIT 1`,
+      [userId]
+    )
+    if ((operatorLinkHistory.rowCount ?? 0) > 0) {
+      return { error: 'gfs_operator_link_history_retained' }
     }
 
     await db.query(

@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { gfsDesktopOperatorLinkService } from './gfsDesktopOperatorLinkService.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 import { AdministrativeEventService } from './tracing/administrativeEvents.js'
 import { CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1 } from './tracing/controlApiLocalAdministrativeBindingResolver.js'
@@ -32,6 +33,17 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation: number | null
+    rowVersion: number | null
+    revocationReason: string | null
+  } | null
+  gfsOperatorLinkStatus?: 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -549,8 +561,15 @@ export async function deleteControlAdmin(
         LIMIT 1`,
       [actorAdminId]
     )
+    await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
+      kind: 'control_admin',
+      parentId: adminId,
+      operatorSub: actorAdminId,
+      reason: 'control_admin_retired',
+    })
     const deletedResult = await db.query(
-      `DELETE FROM control_admin_users
+      `UPDATE control_admin_users
+          SET status = 'disabled', session_version = session_version + 1, updated_at = NOW()
         WHERE id = $1
         RETURNING id, username, email`,
       [adminId]
@@ -652,13 +671,23 @@ export async function listControlAdmins(): Promise<{
               gfs_link.control_admin_id AS gfs_operator_admin_id,
               gfs_link.source AS gfs_operator_source,
               gfs_link.created_at AS gfs_operator_link_created_at,
+              gfs_link.state AS gfs_operator_link_state,
+              gfs_link.generation AS gfs_operator_link_generation,
+              gfs_link.row_version AS gfs_operator_link_row_version,
+              gfs_link.revocation_reason AS gfs_operator_link_revocation_reason,
               a.status,
               a.last_login_at,
               a.created_at
          FROM control_admin_users a
     LEFT JOIN users u ON lower(u.email) = lower(a.email)
-    LEFT JOIN gfs_desktop_operator_links gfs_link
-       ON gfs_link.control_admin_id = a.id
+    LEFT JOIN LATERAL (
+      SELECT user_id, control_admin_id, source, created_at, state, generation,
+             row_version, revocation_reason
+        FROM gfs_desktop_operator_links
+       WHERE control_admin_id = a.id
+       ORDER BY generation DESC NULLS LAST, created_at DESC
+       LIMIT 1
+    ) gfs_link ON TRUE
         ORDER BY a.created_at ASC`
     ),
     pool.query(
@@ -688,6 +717,10 @@ export async function listControlAdmins(): Promise<{
           gfs_operator_admin_id: string | null
           gfs_operator_source: 'initial_setup' | null
           gfs_operator_link_created_at: Date | null
+          gfs_operator_link_state: 'active' | 'revoked' | null
+          gfs_operator_link_generation: number | null
+          gfs_operator_link_row_version: number | null
+          gfs_operator_link_revocation_reason: string | null
           status: 'active' | 'disabled'
           last_login_at: Date | null
           created_at: Date
@@ -701,27 +734,41 @@ export async function listControlAdmins(): Promise<{
             ? {
                 desktopUserId: record.gfs_operator_user_id,
                 controlAdminId: record.gfs_operator_admin_id || 'unknown',
-                source:
-                  record.gfs_operator_source === 'initial_setup' ? 'initial_setup' : 'unknown',
+                source: (record.gfs_operator_source === 'initial_setup'
+                  ? 'initial_setup'
+                  : 'unknown') as 'initial_setup' | 'unknown',
                 createdAt: record.gfs_operator_link_created_at
                   ? record.gfs_operator_link_created_at.toISOString()
                   : null,
-                status:
-                  record.gfs_operator_source === 'initial_setup' &&
-                  record.gfs_operator_link_created_at
+                status: (record.gfs_operator_link_state === 'revoked'
+                  ? 'revoked'
+                  : record.gfs_operator_source === 'initial_setup' &&
+                      record.gfs_operator_link_created_at
                     ? record.status === 'active'
                       ? 'active'
                       : 'inactive_admin'
-                    : 'error',
+                    : 'error') as 'active' | 'inactive_admin' | 'revoked' | 'error',
+                generation:
+                  record.gfs_operator_link_generation === null
+                    ? null
+                    : Number(record.gfs_operator_link_generation),
+                rowVersion:
+                  record.gfs_operator_link_row_version === null
+                    ? null
+                    : Number(record.gfs_operator_link_row_version),
+                revocationReason: record.gfs_operator_link_revocation_reason ?? null,
               }
             : null,
-          gfsOperatorLinkStatus: record.gfs_operator_user_id
-            ? record.gfs_operator_source === 'initial_setup' && record.gfs_operator_link_created_at
-              ? record.status === 'active'
-                ? 'active'
-                : 'inactive_admin'
-              : 'error'
-            : 'revoked',
+          gfsOperatorLinkStatus: (record.gfs_operator_user_id
+            ? record.gfs_operator_link_state === 'revoked'
+              ? 'revoked'
+              : record.gfs_operator_source === 'initial_setup' &&
+                  record.gfs_operator_link_created_at
+                ? record.status === 'active'
+                  ? 'active'
+                  : 'inactive_admin'
+                : 'error'
+            : 'revoked') as 'active' | 'inactive_admin' | 'revoked' | 'error',
           status: record.status,
           lastLoginAt: record.last_login_at ? record.last_login_at.toISOString() : null,
           createdAt: record.created_at.toISOString(),

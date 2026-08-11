@@ -1482,7 +1482,8 @@ assert_control_api_runtime_access_contract_is_exact() {
      [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
      [[ "$migration_script" == *"expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle')"* ]] && \
      [[ "$migration_script" == *"expected.access_profile IN ('legacy_dml', 'link_lifecycle')"* ]] && \
-     [[ "$migration_script" == *"('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert'))"* ]] && \
+     [[ "$migration_script" == *"('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))"* ]] && \
+     [[ "$migration_script" == *"('DELETE', expected.access_profile IN ('legacy_dml'))"* ]] && \
      [[ "$migration_script" == *"('TRUNCATE', false)"* ]] && \
      [[ "$migration_script" == *"('REFERENCES', false)"* ]] && \
      [[ "$migration_script" == *"('TRIGGER', false)"* ]]; then

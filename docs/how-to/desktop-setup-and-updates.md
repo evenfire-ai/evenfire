@@ -23,8 +23,12 @@ provisioned for that admin is linked directly for GFS operator access when the
 self-hosted deployment enables the operator-link setting. Control UI displays
 the exact pair and provides **Revoke/disable Desktop GFS operator access**;
 revoking it removes only GFS authority and preserves the admin account,
-passwords, identities, and unrelated permissions. Invitations and ordinary
-member provisioning do not create or repair this link.
+passwords, identities, and unrelated permissions. The same surface provides an
+explicit **Reactivate Desktop GFS operator access** action that creates a new
+generation from retained history; it never restores a revoked row in place.
+Retiring the linked Control Admin revokes the active generation before the
+admin is disabled. Invitations and ordinary member provisioning do not create,
+repair, or reassign this link.
 
 ## The environment model
 

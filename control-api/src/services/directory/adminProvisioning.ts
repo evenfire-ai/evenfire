@@ -97,6 +97,8 @@ export async function provisionAdminDesktopWorkspace(input: {
   contextIds: string[]
   /** Narrow self-hosted setup switch; false keeps the existing Desktop user path unchanged. */
   linkDesktopOperator: boolean
+  /** Correlates the initial link event with the public setup request. */
+  requestId?: string | null
   /** When false, skip writing users.password_hash — the desktop password then
    *  comes only from the invitation flow (managed installs). Defaults to
    *  true: the Control-UI human first-run keeps one credential for both apps. */
@@ -138,6 +140,7 @@ export async function provisionAdminDesktopWorkspace(input: {
         controlAdminId: input.controlAdminId,
         operatorSub: input.controlAdminId,
         source: 'initial_setup',
+        requestId: input.requestId,
       })
     }
 

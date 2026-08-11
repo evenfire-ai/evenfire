@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { getControlAdmins, revokeControlAdminGfsOperatorLink } from '@lib/api'
+import {
+  getControlAdmins,
+  reactivateControlAdminGfsOperatorLink,
+  revokeControlAdminGfsOperatorLink,
+} from '@lib/api'
 import { ControlAdminsPanel } from '../ControlAdminsPanel'
 
 const confirmMock = vi.hoisted(() => vi.fn())
@@ -35,6 +39,7 @@ vi.mock('@lib/api', async () => {
   return {
     ...actual,
     getControlAdmins: vi.fn(),
+    reactivateControlAdminGfsOperatorLink: vi.fn(),
     revokeControlAdminGfsOperatorLink: vi.fn(),
   }
 })
@@ -45,6 +50,9 @@ const LINK = {
   source: 'initial_setup' as const,
   createdAt: '2026-08-10T12:00:00.000Z',
   status: 'active' as const,
+  generation: 1,
+  rowVersion: 1,
+  revocationReason: null,
 }
 
 describe('ControlAdminsPanel GFS operator link lifecycle', () => {
@@ -71,6 +79,16 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
       gfsOperatorLinkStatus: 'revoked',
       controlAdminId: 'admin-1',
       desktopUserId: LINK.desktopUserId,
+      generation: 1,
+      rowVersion: 2,
+    })
+    vi.mocked(reactivateControlAdminGfsOperatorLink).mockResolvedValue({
+      reactivated: true,
+      gfsOperatorLinkStatus: 'active',
+      controlAdminId: 'admin-1',
+      desktopUserId: LINK.desktopUserId,
+      generation: 2,
+      rowVersion: 1,
     })
   })
 
@@ -96,7 +114,12 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
       })
     )
 
-    await waitFor(() => expect(revokeControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1'))
+    await waitFor(() =>
+      expect(revokeControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1', {
+        rowVersion: 1,
+        reason: 'control_ui_revoke',
+      })
+    )
     expect(showToastMock).toHaveBeenCalledWith('Desktop GFS operator access revoked.', {
       tone: 'success',
     })
@@ -114,5 +137,41 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalled())
     expect(revokeControlAdminGfsOperatorLink).not.toHaveBeenCalled()
+  })
+
+  it('reactivates a retained revoked generation through the visible Control UI action', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'admin-1',
+          username: 'initial-admin',
+          email: 'admin@example.com',
+          memberId: LINK.desktopUserId,
+          status: 'active',
+          gfsOperatorLink: { ...LINK, status: 'revoked', rowVersion: 2 },
+          gfsOperatorLinkStatus: 'revoked',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+
+    render(<ControlAdminsPanel />)
+    const reactivateButton = await screen.findByRole('button', {
+      name: 'Reactivate Desktop GFS operator access for initial-admin (admin@example.com)',
+    })
+    fireEvent.click(reactivateButton)
+
+    await waitFor(() =>
+      expect(reactivateControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1', {
+        rowVersion: 2,
+        reason: 'control_ui_reactivate',
+      })
+    )
+    expect(showToastMock).toHaveBeenCalledWith('Desktop GFS operator access reactivated.', {
+      tone: 'success',
+    })
+    expect(screen.getByTestId('gfs-operator-link-admin-1')).toHaveTextContent('Active')
   })
 })

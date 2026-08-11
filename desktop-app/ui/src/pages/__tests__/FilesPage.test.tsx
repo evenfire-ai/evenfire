@@ -24,6 +24,7 @@ function baseController() {
     current: null,
     crumbs: [],
     view: 'shared' as const,
+    accessState: 'active' as const,
     isOperatorRoot: false,
     accessibleResources: [],
     items: [],
@@ -68,6 +69,8 @@ function baseController() {
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
+    revokeAccess: vi.fn(),
+    retryAccess: vi.fn(),
     refreshAffordances: vi.fn(),
   }
 }
@@ -134,6 +137,35 @@ describe('FilesPage', () => {
     ).toBeTruthy()
     expect(screen.queryByText(/Automatic GFS discovery is not available/i)).toBeNull()
     expect(screen.queryByText(/Error invoking remote method/i)).toBeNull()
+  })
+
+  it('renders a stable revoked state without cached operator controls and retries through the controller', () => {
+    const retryAccess = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      view: 'operator',
+      accessState: 'revoked',
+      isOperatorRoot: false,
+      accessibleResources: [],
+      affordances: {
+        held: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        canDelegate: true,
+        grantableBits: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        canCreateShare: true,
+      },
+      retryAccess,
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByTestId('gfs-error-unauthorized').getAttribute('aria-label')).toBe(
+      'File access is not authorized'
+    )
+    expect(screen.queryByTestId('gfs-create-folder-action')).toBeNull()
+    expect(screen.queryByTestId('gfs-upload-action')).toBeNull()
+    expect(screen.queryByTestId('gfs-manage-access-action')).toBeNull()
+    fireEvent.click(screen.getByTestId('gfs-retry-access-action'))
+    expect(retryAccess).toHaveBeenCalledOnce()
   })
 
   it('renders the real operator root with visible root create and upload actions', async () => {

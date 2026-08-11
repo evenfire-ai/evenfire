@@ -86,6 +86,7 @@ function Probe() {
       <div data-testid="current-version">{ctrl.current?.version ?? 'none'}</div>
       <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
       <div data-testid="view">{ctrl.view}</div>
+      <div data-testid="access-state">{ctrl.accessState}</div>
       <div data-testid="operator-root">{ctrl.isOperatorRoot ? 'yes' : 'no'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
@@ -109,6 +110,9 @@ function Probe() {
       </button>
       <button type="button" onClick={() => ctrl.reset()}>
         reset browser
+      </button>
+      <button type="button" onClick={() => ctrl.retryAccess()}>
+        retry access
       </button>
       <button type="button" onClick={() => void ctrl.createFolder('Root docs')}>
         create folder current
@@ -419,6 +423,49 @@ describe('useGfsBrowserController', () => {
       expect(screen.getByTestId('accessible-error').textContent).toContain('operator_root_missing')
     )
     expect(screen.getByTestId('current').textContent).toBe('none')
+  })
+
+  it('clears cached operator state after a 403 and retries only through fresh server discovery', async () => {
+    const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    let active = true
+    const listAccessible = vi.fn(async () => {
+      if (!active) throw new Error('403 operator_link_inactive')
+      return { items: [], nextCursor: null, rootResourceId, view: 'operator' as const }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write'],
+            canDelegate: true,
+            grantableBits: ['read', 'write'],
+            canCreateShare: true,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
+
+    active = false
+    await act(async () => {
+      screen.getByRole('button', { name: 'reset browser' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+
+    active = true
+    await act(async () => {
+      screen.getByRole('button', { name: 'retry access' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
+    expect(listAccessible).toHaveBeenCalledTimes(3)
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {

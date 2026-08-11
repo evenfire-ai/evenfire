@@ -59,6 +59,7 @@ describe('GfsDesktopOperatorLinkService', () => {
       controlAdminId: CONTROL_ADMIN_ID,
       operatorSub: OPERATOR_ID,
       source: 'initial_setup',
+      requestId: 'request-1',
     })
 
     expect(result).toEqual({
@@ -78,6 +79,7 @@ describe('GfsDesktopOperatorLinkService', () => {
     expect(appendPermissionEvents).toHaveBeenCalledWith(expect.anything(), {
       operatorSub: OPERATOR_ID,
       operatorKind: 'control_admin',
+      requestId: 'request-1',
       changes: [
         {
           action: 'grant',
@@ -86,7 +88,7 @@ describe('GfsDesktopOperatorLinkService', () => {
           subject: { kind: 'user', id: DESKTOP_USER_ID },
           sourceAuditRef: 'gfs_desktop_operator_link_source:initial_setup',
           status: 'linked',
-          detailRef: `desktop_user_id:${DESKTOP_USER_ID};control_admin_id:${CONTROL_ADMIN_ID};source:initial_setup`,
+          detailRef: `event:link.created;desktop_user_id:${DESKTOP_USER_ID};control_admin_id:${CONTROL_ADMIN_ID};source:initial_setup`,
         },
       ],
     })
@@ -119,6 +121,86 @@ describe('GfsDesktopOperatorLinkService', () => {
     })
     expect(txQuery).toHaveBeenCalledTimes(3)
     expect(appendPermissionEvents).not.toHaveBeenCalled()
+  })
+
+  it('does not recreate a generation from retained history; reactivation is explicit', async () => {
+    txQuery
+      .mockResolvedValueOnce({ rows: [{ id: DESKTOP_USER_ID }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: CONTROL_ADMIN_ID, status: 'active' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            ...storedLink(),
+            id: '66666666-6666-4666-8666-666666666666',
+            lineage_id: '77777777-7777-4777-8777-777777777777',
+            generation: 1,
+            state: 'revoked',
+            row_version: 2,
+            revoked_at: new Date('2026-08-10T12:05:00.000Z'),
+            revocation_reason: 'control_ui_revoke',
+          },
+        ],
+        rowCount: 1,
+      })
+
+    await expect(
+      service.link({
+        desktopUserId: DESKTOP_USER_ID,
+        controlAdminId: CONTROL_ADMIN_ID,
+        operatorSub: OPERATOR_ID,
+        source: 'initial_setup',
+      })
+    ).rejects.toMatchObject({ code: 'link_conflict' })
+    expect(appendPermissionEvents).not.toHaveBeenCalled()
+    expect(txQuery).toHaveBeenCalledTimes(3)
+  })
+
+  it('retires a parent only after appending the governed revoke evidence', async () => {
+    txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            ...storedLink(),
+            id: '88888888-8888-4888-8888-888888888888',
+            lineage_id: '99999999-9999-4999-8999-999999999999',
+            generation: 1,
+            state: 'active',
+            row_version: 1,
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    await expect(
+      service.retireParentInTransaction({ query: txQuery } as DbClient, {
+        kind: 'desktop_user',
+        parentId: DESKTOP_USER_ID,
+        operatorSub: OPERATOR_ID,
+        reason: 'account_retired',
+        requestId: 'request-2',
+      })
+    ).resolves.toBe(true)
+
+    expect(appendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: OPERATOR_ID,
+        requestId: 'request-2',
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            detailRef: expect.stringContaining('event:link.revoked'),
+          }),
+          expect.objectContaining({
+            detailRef: expect.stringContaining('event:parent.retired'),
+          }),
+        ]),
+      })
+    )
+    expect(appendPermissionEvents.mock.invocationCallOrder[0]).toBeLessThan(
+      txQuery.mock.invocationCallOrder[1]!
+    )
+    expect(txQuery.mock.calls[1]?.[0]).toContain('row_version = $4')
   })
 
   it.each([
@@ -347,6 +429,40 @@ describe('GfsDesktopOperatorLinkService', () => {
     })
   })
 
+  it('preserves generation metadata and normalizes PostgreSQL bigint row versions', async () => {
+    const tombstoneId = '66666666-6666-4666-8666-666666666666'
+    const lineageId = '77777777-7777-4777-8777-777777777777'
+    readQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: tombstoneId,
+          lineage_id: lineageId,
+          generation: 2,
+          predecessor_id: '88888888-8888-4888-8888-888888888888',
+          row_version: '3',
+          state: 'revoked',
+          revoked_at: new Date('2026-08-10T12:30:00.000Z'),
+          revocation_reason: 'control_ui_revoke',
+          ...storedLink(),
+          desktop_user_exists: true,
+          control_admin_exists: true,
+          control_admin_status: 'active',
+        },
+      ],
+      rowCount: 1,
+    })
+
+    await expect(service.getLinkForControlAdmin(CONTROL_ADMIN_ID)).resolves.toMatchObject({
+      id: tombstoneId,
+      lineageId,
+      generation: 2,
+      predecessorId: '88888888-8888-4888-8888-888888888888',
+      state: 'revoked',
+      rowVersion: 3,
+      revocationReason: 'control_ui_revoke',
+    })
+  })
+
   it('returns null for an unlinked Control Admin and fails closed on a mismatched row', async () => {
     readQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     await expect(service.getLinkForControlAdmin(CONTROL_ADMIN_ID)).resolves.toBeNull()
@@ -367,7 +483,7 @@ describe('GfsDesktopOperatorLinkService', () => {
     })
   })
 
-  it('appends the governed unlink evidence before deleting current state', async () => {
+  it('appends governed revoke evidence before transitioning the active generation to revoked', async () => {
     txQuery
       .mockResolvedValueOnce({ rows: [storedLink()], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -378,13 +494,16 @@ describe('GfsDesktopOperatorLinkService', () => {
         controlAdminId: CONTROL_ADMIN_ID,
         operatorSub: OPERATOR_ID,
       })
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       unlinked: true,
       link: {
         desktopUserId: DESKTOP_USER_ID,
         controlAdminId: CONTROL_ADMIN_ID,
         source: 'initial_setup',
         createdAt: CREATED_AT,
+        state: 'revoked',
+        rowVersion: 2,
+        revocationReason: 'operator_revoked',
       },
     })
 
@@ -405,7 +524,8 @@ describe('GfsDesktopOperatorLinkService', () => {
     expect(appendPermissionEvents.mock.invocationCallOrder[0]).toBeLessThan(
       txQuery.mock.invocationCallOrder[1]!
     )
-    expect(txQuery.mock.calls[1]?.[0]).toContain('DELETE FROM gfs_desktop_operator_links')
+    expect(txQuery.mock.calls[1]?.[0]).toContain('UPDATE gfs_desktop_operator_links')
+    expect(txQuery.mock.calls[1]?.[0]).toContain("state = 'revoked'")
   })
 
   it('does not delete current state when governed unlink evidence fails', async () => {
@@ -434,5 +554,112 @@ describe('GfsDesktopOperatorLinkService', () => {
     ).resolves.toEqual({ unlinked: false, link: null })
     expect(appendPermissionEvents).not.toHaveBeenCalled()
     expect(txQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('reactivates from the latest tombstone by inserting generation N+1', async () => {
+    const tombstoneId = '66666666-6666-4666-8666-666666666666'
+    const lineageId = '77777777-7777-4777-8777-777777777777'
+    const successorId = '99999999-9999-4999-8999-999999999999'
+    txQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: tombstoneId,
+            lineage_id: lineageId,
+            generation: 1,
+            row_version: '2',
+            user_id: DESKTOP_USER_ID,
+            control_admin_id: CONTROL_ADMIN_ID,
+            source: 'initial_setup',
+            state: 'revoked',
+            created_at: CREATED_AT,
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ desktop_user_exists: true, control_admin_status: 'active' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: successorId,
+            lineage_id: lineageId,
+            generation: 2,
+            predecessor_id: tombstoneId,
+            row_version: 1,
+            user_id: DESKTOP_USER_ID,
+            control_admin_id: CONTROL_ADMIN_ID,
+            source: 'initial_setup',
+            state: 'active',
+            created_at: CREATED_AT,
+          },
+        ],
+        rowCount: 1,
+      })
+
+    await expect(
+      service.reactivate({
+        controlAdminId: CONTROL_ADMIN_ID,
+        operatorSub: OPERATOR_ID,
+        rowVersion: 2,
+        reason: 'control_ui_reactivate',
+      })
+    ).resolves.toMatchObject({
+      reactivated: true,
+      link: {
+        id: successorId,
+        lineageId,
+        generation: 2,
+        predecessorId: tombstoneId,
+        state: 'active',
+        rowVersion: 1,
+      },
+    })
+    expect(txQuery.mock.calls[3]?.[0]).toContain('INSERT INTO gfs_desktop_operator_links')
+    expect(appendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: OPERATOR_ID,
+        changes: [
+          expect.objectContaining({ detailRef: expect.stringContaining('event:link.reactivated') }),
+        ],
+      })
+    )
+  })
+
+  it('rejects a stale reactivation replay after a successor is already active', async () => {
+    const predecessorId = '66666666-6666-4666-8666-666666666666'
+    txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: '99999999-9999-4999-8999-999999999999',
+            lineage_id: '77777777-7777-4777-8777-777777777777',
+            generation: 2,
+            predecessor_id: predecessorId,
+            row_version: 1,
+            state: 'active',
+            user_id: DESKTOP_USER_ID,
+            control_admin_id: CONTROL_ADMIN_ID,
+            source: 'initial_setup',
+            created_at: CREATED_AT,
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ state: 'revoked', row_version: '4' }], rowCount: 1 })
+
+    await expect(
+      service.reactivate({
+        controlAdminId: CONTROL_ADMIN_ID,
+        operatorSub: OPERATOR_ID,
+        rowVersion: 2,
+        reason: 'control_ui_reactivate',
+      })
+    ).rejects.toMatchObject({ code: 'link_conflict' })
+    expect(appendPermissionEvents).not.toHaveBeenCalled()
   })
 })

@@ -36,6 +36,7 @@ export interface GfsOperatorContractVerdict {
 }
 
 const RUN_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+export const GFS_OPERATOR_SETUP_PATH = '/api/v1/admin/auth/setup'
 
 export function requireGfsOperatorRunId(value = process.env.E2E_GFS_OPERATOR_RUN_ID): string {
   const runId = value?.trim() ?? ''
@@ -62,6 +63,34 @@ export function gfsOperatorRuntimeEvidencePath(runId = requireGfsOperatorRunId()
 
 export function gfsOperatorResultSummaryPath(runId = requireGfsOperatorRunId()): string {
   return path.join(gfsOperatorEvidenceDirectory(runId), 'required-scenarios.json')
+}
+
+/**
+ * Creates the evidence directory exactly once. A run id is an immutable
+ * reservation, not a filename prefix: reusing it must fail before a browser,
+ * runtime-evidence record, or Playwright report can replace prior evidence.
+ */
+export function reserveGfsOperatorEvidenceRun(runId = requireGfsOperatorRunId()): string {
+  const evidenceDirectory = gfsOperatorEvidenceDirectory(runId)
+  fs.mkdirSync(path.dirname(evidenceDirectory), { recursive: true })
+  try {
+    fs.mkdirSync(evidenceDirectory)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(
+        `[GFS-OPERATOR-E2E] evidence run id ${runId} is already reserved at ${evidenceDirectory}; choose a new E2E_GFS_OPERATOR_RUN_ID.`
+      )
+    }
+    throw error
+  }
+  writeJsonAtomically(path.join(evidenceDirectory, 'attempt-manifest.json'), {
+    schemaVersion: 1,
+    suite: 'gfs-desktop-operator-parity',
+    runId,
+    reservedAt: new Date().toISOString(),
+    immutable: true,
+  })
+  return evidenceDirectory
 }
 
 export function scenarioIdFromTitle(title: string): GfsOperatorScenarioId | null {
@@ -120,8 +149,16 @@ export function evaluateGfsOperatorScenarioResults(
 }
 
 export function writeJsonAtomically(filePath: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
   const temporaryPath = `${filePath}.${process.pid}.tmp`
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-  fs.renameSync(temporaryPath, filePath)
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    })
+    // `link` provides an exclusive finalization step. Unlike rename(2), it
+    // never replaces a pre-existing destination if a second attempt races us.
+    fs.linkSync(temporaryPath, filePath)
+  } finally {
+    if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath)
+  }
 }

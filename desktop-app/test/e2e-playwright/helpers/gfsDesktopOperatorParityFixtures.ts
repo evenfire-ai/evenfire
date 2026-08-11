@@ -21,7 +21,10 @@ import {
   sqlLiteral,
 } from '../../../../tests/e2e/gfsFixtureCore'
 import { cleanupGfsFixture } from '../../../../tests/e2e/gfsResourceFixtures'
-import { requireGfsOperatorRunId } from '../gfsDesktopOperatorParityContract'
+import {
+  GFS_OPERATOR_SETUP_PATH,
+  requireGfsOperatorRunId,
+} from '../gfsDesktopOperatorParityContract'
 import { openResourcesNavItem } from '../navigationHelpers'
 
 const DESKTOP_APP_ROOT = path.resolve(__dirname, '../../..')
@@ -239,7 +242,7 @@ export class GfsDesktopOperatorJourney {
     // The service base remains root-scoped so the global setup can probe
     // /health; application routes are mounted under the production /api/v1
     // prefix and must use that supported path explicitly.
-    const response = await fetch(`${this.controlApiUrl}/api/v1/admin/auth/setup`, {
+    const response = await fetch(`${this.controlApiUrl}${GFS_OPERATOR_SETUP_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -256,12 +259,12 @@ export class GfsDesktopOperatorJourney {
     }
     if (response.status === 409) {
       throw new Error(
-        '[GFS-OPERATOR-E2E] /admin/auth/setup returned 409. This one-shot journey requires a fresh, branch-owned profile whose bootstrap has not been consumed; no database reset or link insertion is performed by the suite.'
+        `[GFS-OPERATOR-E2E] ${GFS_OPERATOR_SETUP_PATH} returned 409. This one-shot journey requires a fresh, branch-owned profile whose bootstrap has not been consumed; no database reset or link insertion is performed by the suite.`
       )
     }
     if (response.status !== 200 || !UUID_RE.test(body.me?.id ?? '')) {
       throw new Error(
-        `[GFS-OPERATOR-E2E] /admin/auth/setup returned HTTP ${response.status}: ${body.error ?? JSON.stringify(body)}`
+        `[GFS-OPERATOR-E2E] ${GFS_OPERATOR_SETUP_PATH} returned HTTP ${response.status}: ${body.error ?? JSON.stringify(body)}`
       )
     }
     expect(body.me).toMatchObject({

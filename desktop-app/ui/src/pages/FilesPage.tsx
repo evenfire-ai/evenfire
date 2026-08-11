@@ -207,8 +207,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     [ctrl.sharesError]
   )
   const mutationUnauthorized = mutationFailure?.kind === 'unauthorized'
-  const canWriteCurrent = !mutationUnauthorized && hasBit(affordances, 'write')
-  const canDeleteCurrent = !mutationUnauthorized && !isOperatorRoot && hasBit(affordances, 'delete')
+  const accessRevoked = ctrl.accessState === 'revoked'
+  const canWriteCurrent = !accessRevoked && !mutationUnauthorized && hasBit(affordances, 'write')
+  const canDeleteCurrent =
+    !accessRevoked && !mutationUnauthorized && !isOperatorRoot && hasBit(affordances, 'delete')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
@@ -240,10 +242,23 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     setMutationFailure(null)
   }, [current?.resourceId, view])
 
+  useEffect(() => {
+    if (!accessRevoked) return
+    // A permission transition invalidates every operator-only surface in this
+    // Electron session. A later retry is server-backed through the controller.
+    setManageOpen(false)
+    setOpenLinkOpen(false)
+    setCreateFolderOpen(false)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+    setFilePreview(null)
+  }, [accessRevoked])
+
   const surfaceContentMutationError = (mutationError: unknown) => {
     const raw = mutationError instanceof Error ? mutationError.message : String(mutationError)
     const failure = describeGfsBrowserFailure(raw)
     if (failure.kind === 'unauthorized') {
+      ctrl.revokeAccess()
       setMutationFailure(failure)
       pushToast?.(failure.message, 'error')
       return
@@ -290,11 +305,22 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
-  // partial-success outcome. People, teams, and agents share a single picker;
-  // agents are capped to read/write inside the panel. Inherit is honored for
-  // directories (default ON) and forced false for files.
+<<<<<<< HEAD
+  // partial-success outcome. A failure propagates to the panel's catch, which
+  // maps the server verdict via describeGfsGrantError. People, teams, and
+  // agents share a single picker; inherit is honored for directories and is
+  // forced false for files by the panel.
+  const failClosedOnAuthorizationError = (error: unknown): never => {
+    const message = error instanceof Error ? error.message : String(error)
+    if (describeGfsBrowserFailure(message).kind === 'unauthorized') ctrl.revokeAccess()
+    throw error
+  }
   const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
-    await ctrl.grant(subjectKeys, bits, inherit)
+    try {
+      await ctrl.grant(subjectKeys, bits, inherit)
+    } catch (error) {
+      failClosedOnAuthorizationError(error)
+    }
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
@@ -308,12 +334,18 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeGrant(grantId)
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
+      if (describeGfsBrowserFailure(String(revokeError)).kind === 'unauthorized')
+        ctrl.revokeAccess()
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
 
   const handleCreateShare = async (subjectKeys: string[]) => {
-    await ctrl.createShare(subjectKeys)
+    try {
+      await ctrl.createShare(subjectKeys)
+    } catch (error) {
+      failClosedOnAuthorizationError(error)
+    }
     pushToast?.(
       `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
       'success'
@@ -326,6 +358,8 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeShare(shareId)
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
+      if (describeGfsBrowserFailure(String(revokeError)).kind === 'unauthorized')
+        ctrl.revokeAccess()
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -530,7 +564,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       : !current
         ? accessibleError
         : null
-  const visibleFailure = visibleError ? describeGfsBrowserFailure(visibleError) : null
+  const visibleFailure = accessRevoked
+    ? describeGfsBrowserFailure('operator_link_inactive')
+    : visibleError
+      ? describeGfsBrowserFailure(visibleError)
+      : null
   const hasMoreVisible = isOperatorRoot
     ? ctrl.hasMoreAccessible
     : currentIsFolder
@@ -735,6 +773,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               aria-label={visibleFailure.title}
             >
               <EmptyState title={visibleFailure.title} body={visibleFailure.message} />
+              {accessRevoked ? (
+                <Button
+                  data-testid="gfs-retry-access-action"
+                  onClick={() => ctrl.retryAccess()}
+                  size="sm"
+                  variant="outline"
+                >
+                  Retry file access
+                </Button>
+              ) : null}
             </div>
           ) : visibleLoading ? (
             <div

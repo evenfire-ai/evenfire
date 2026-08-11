@@ -1,5 +1,6 @@
 import type { Locator, Page } from '@playwright/test'
 import { UUID_RE } from '../../../tests/e2e/gfsFixtureCore'
+import { GFS_OPERATOR_SETUP_PATH } from './gfsDesktopOperatorParityContract'
 import { type GfsResourceRow, expect, test } from './helpers/gfsDesktopOperatorParityFixtures'
 
 async function expectToast(page: Page, message: string): Promise<void> {
@@ -81,7 +82,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       .poll(() => operatorJourney.readOperatorLink(), {
         timeout: 30_000,
         intervals: [250, 500, 1_000],
-        message: 'waiting for /admin/auth/setup to persist its exact Desktop operator link',
+        message: `waiting for ${GFS_OPERATOR_SETUP_PATH} to persist its exact Desktop operator link`,
       })
       .toMatchObject({ controlAdminId: setup.controlAdminId, source: 'initial_setup' })
 
@@ -428,18 +429,27 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect.poll(() => operatorJourney.operatorLinkCount()).toBe(0)
 
     operatorJourney.deniedAuditFloor = operatorJourney.auditFloor()
-    await page.getByTestId('gfs-create-folder-action').click()
-    const form = page.getByRole('form', { name: 'Create folder' })
-    await form.getByLabel('Folder name').fill(operatorJourney.names.deniedFolder)
-    await form.getByRole('button', { name: 'Create folder' }).click()
-    const denial = page.getByTestId('gfs-mutation-error-unauthorized')
+    // Keep the user-visible direct-access dialog open across the Control UI
+    // action. Its resolve request is the next same-session Desktop request and
+    // must close the dialog while clearing all stale operator controls.
+    await page.getByRole('button', { name: 'Open GFS link' }).click()
+    const linkDialog = page.getByRole('dialog', { name: 'Open GFS link' })
+    await expect(linkDialog).toBeVisible()
+    await linkDialog
+      .getByLabel('gfs URI')
+      .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
+    await linkDialog.getByRole('button', { name: 'Open', exact: true }).click()
+
+    const denial = page.getByTestId('gfs-error-unauthorized')
     await expect(denial).toBeVisible({ timeout: 30_000 })
     await expect(denial).toHaveAttribute('aria-label', 'File access is not authorized')
     await expect(denial).toContainText(
       'Your current Desktop session cannot access this location. Sign in again or contact an administrator.'
     )
+    await expect(linkDialog).toHaveCount(0)
     await expect(page.getByTestId('gfs-create-folder-action')).toHaveCount(0)
     await expect(page.getByTestId('gfs-upload-action')).toHaveCount(0)
+    await expect(page.getByTestId('gfs-manage-access-action')).toHaveCount(0)
     await expect
       .poll(() =>
         operatorJourney.readResource(
@@ -448,15 +458,67 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
         )
       )
       .toBeNull()
+
+    const reactivate = controlPage.getByRole('button', {
+      name: `Reactivate Desktop GFS operator access for ${operatorJourney.operatorUsername} (${operatorJourney.operatorEmail})`,
+    })
+    await expect(reactivate).toBeVisible()
+    await reactivate.click()
+    const reactivateConfirm = controlPage.getByRole('alertdialog', {
+      name: 'Reactivate Desktop GFS operator access',
+    })
+    await expect(reactivateConfirm).toBeVisible()
+    await reactivateConfirm.getByRole('button', { name: 'Reactivate access', exact: true }).click()
+    await expect(
+      controlPage.getByText('Desktop GFS operator access reactivated.', { exact: true })
+    ).toBeVisible({ timeout: 30_000 })
+    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
+      'Active'
+    )
+
+    // Retry is the user-visible next Desktop request. It cannot restore a
+    // client capability; the reactivated server link must return the root.
+    await page.getByTestId('gfs-retry-access-action').click()
+    await expect(page.getByTestId('gfs-view-operator')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByTestId('gfs-root-operator')).toHaveAttribute(
+      'data-resource-id',
+      operatorJourney.rootResourceId!
+    )
+    await expect(page.getByTestId('gfs-create-folder-action')).toBeVisible()
+    const restoredFolder = await createRootFolder(
+      page,
+      operatorJourney.names.auditDeniedFolder,
+      () =>
+        operatorJourney.readResource(
+          operatorJourney.rootResourceId!,
+          operatorJourney.names.auditDeniedFolder
+        )
+    )
+    operatorJourney.resources.set('auditDeniedFolder', restoredFolder)
+
+    const secondRevoke = controlPage.getByRole('button', {
+      name: `Revoke Desktop GFS operator access for ${operatorJourney.operatorUsername} (${operatorJourney.operatorEmail})`,
+    })
+    await expect(secondRevoke).toBeVisible()
+    await secondRevoke.click()
+    await controlPage
+      .getByRole('alertdialog', { name: 'Revoke Desktop GFS operator access' })
+      .getByRole('button', { name: 'Revoke access', exact: true })
+      .click()
+    await expect(
+      controlPage.getByText('Desktop GFS operator access revoked.', { exact: true })
+    ).toBeVisible({ timeout: 30_000 })
+    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
+      'Revoked'
+    )
+    await expect.poll(() => operatorJourney.operatorLinkCount()).toBe(0)
   })
 
   test('@gfs-operator/audit-correlation successful and denied Desktop requests preserve exact actor and request IDs', async ({
     operatorJourney,
   }) => {
     const link = operatorJourney.operatorLink!
-    const page = operatorJourney.operatorPage!
     const controlPage = operatorJourney.controlPage!
-    await expect(page.getByTestId('gfs-mutation-error-unauthorized')).toBeVisible()
     await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
     await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
       'Revoked'
@@ -510,7 +572,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
                 row.actorOnBehalfOf === null &&
                 row.desktopUserId === link.desktopUserId &&
                 row.authoritySource === 'user-session' &&
-                row.op === 'write' &&
+                row.op === 'read' &&
                 row.outcome === 'deny' &&
                 row.recordType === 'authorization_decision' &&
                 row.mutationOutcome === null &&

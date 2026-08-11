@@ -1,4 +1,4 @@
-import { type DbClient, pool } from '../db.js'
+import type { DbClient } from '../db.js'
 import {
   type ControlApiPermissionChange,
   appendControlApiPermissionEventsInTransaction,
@@ -9,10 +9,18 @@ export const GFS_DESKTOP_OPERATOR_LINK_SOURCES = ['initial_setup'] as const
 export type GfsDesktopOperatorLinkSource = (typeof GFS_DESKTOP_OPERATOR_LINK_SOURCES)[number]
 
 export type GfsDesktopOperatorLink = {
+  id?: string
+  lineageId?: string
+  generation?: number
+  predecessorId?: string | null
   desktopUserId: string
   controlAdminId: string
   source: GfsDesktopOperatorLinkSource
+  state?: 'active' | 'revoked'
+  rowVersion?: number
   createdAt: Date
+  revokedAt?: Date | null
+  revocationReason?: string | null
 }
 
 export type GfsDesktopOperatorLinkErrorCode =
@@ -51,6 +59,8 @@ export type LinkGfsDesktopOperatorInput = {
   source: GfsDesktopOperatorLinkSource
   /** Authenticated Control Admin responsible for this lifecycle mutation. */
   operatorSub: string
+  /** Request correlation for the governed lifecycle event. */
+  requestId?: string | null
 }
 
 export type UnlinkGfsDesktopOperatorInput = {
@@ -58,6 +68,21 @@ export type UnlinkGfsDesktopOperatorInput = {
   controlAdminId: string
   /** Authenticated Control Admin responsible for this lifecycle mutation. */
   operatorSub: string
+  /** Optimistic-concurrency token returned by the Control UI read surface. */
+  rowVersion?: number
+  reason?: string
+  /** Request correlation for the governed lifecycle event. */
+  requestId?: string | null
+}
+
+export type ReactivateGfsDesktopOperatorInput = {
+  controlAdminId: string
+  operatorSub: string
+  /** The revoked generation being reactivated; prevents stale UI writes. */
+  rowVersion: number
+  reason: string
+  /** Request correlation for the governed lifecycle event. */
+  requestId?: string | null
 }
 
 export type LinkGfsDesktopOperatorResult = {
@@ -68,6 +93,12 @@ export type LinkGfsDesktopOperatorResult = {
 export type UnlinkGfsDesktopOperatorResult =
   | { unlinked: false; link: null }
   | { unlinked: true; link: GfsDesktopOperatorLink }
+
+export type ReactivateGfsDesktopOperatorResult = {
+  reactivated: boolean
+  link: GfsDesktopOperatorLink | null
+}
+export type GfsDesktopOperatorParentKind = 'desktop_user' | 'control_admin'
 
 type TransactionRunner = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
@@ -83,6 +114,10 @@ const defaultTransaction: TransactionRunner = async work => {
   return withTransaction(work)
 }
 
+const defaultReadDb: Pick<DbClient, 'query'> = {
+  query: (text, values) => import('../db.js').then(({ pool }) => pool.query(text, values)),
+}
+
 type GfsDesktopOperatorLinkServiceDependencies = {
   transaction: TransactionRunner
   readDb: Pick<DbClient, 'query'>
@@ -90,10 +125,42 @@ type GfsDesktopOperatorLinkServiceDependencies = {
 }
 
 type StoredLinkRow = {
+  id?: unknown
+  lineage_id?: unknown
+  generation?: unknown
+  predecessor_id?: unknown
+  row_version?: unknown
+  state?: unknown
+  revoked_at?: unknown
+  revocation_reason?: unknown
   user_id: unknown
   control_admin_id: unknown
   source: unknown
   created_at: unknown
+}
+
+function requireRowVersion(value: unknown): number {
+  const normalized =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isSafeInteger(normalized) || normalized < 1) {
+    throw new GfsDesktopOperatorLinkError('invalid_input', 'rowVersion must be a positive integer')
+  }
+  return normalized
+}
+
+function requireReason(value: unknown): string {
+  const reason = String(value || '').trim()
+  if (!reason || reason.length > 512) {
+    throw new GfsDesktopOperatorLinkError(
+      'invalid_input',
+      'reason is required and must be at most 512 characters'
+    )
+  }
+  return reason
 }
 
 type ResolvedLinkRow = StoredLinkRow & {
@@ -154,17 +221,63 @@ function mapStoredLink(row: unknown): GfsDesktopOperatorLink {
   ) {
     throw new GfsDesktopOperatorLinkError('malformed_link', 'operator-link row is malformed')
   }
+  const id =
+    stored.id === undefined || stored.id === null ? undefined : requireUuid(String(stored.id), 'id')
+  const lineageId =
+    stored.lineage_id === undefined || stored.lineage_id === null
+      ? undefined
+      : requireUuid(String(stored.lineage_id), 'lineageId')
+  const predecessorId =
+    stored.predecessor_id === undefined || stored.predecessor_id === null
+      ? null
+      : requireUuid(String(stored.predecessor_id), 'predecessorId')
+  const generation =
+    stored.generation === undefined || stored.generation === null
+      ? undefined
+      : requireRowVersion(stored.generation)
+  const rowVersion =
+    stored.row_version === undefined || stored.row_version === null
+      ? undefined
+      : requireRowVersion(stored.row_version)
+  const state = stored.state === undefined || stored.state === null ? undefined : stored.state
+  if (state !== undefined && state !== 'active' && state !== 'revoked') {
+    throw new GfsDesktopOperatorLinkError('malformed_link', 'operator-link state is malformed')
+  }
+  const revokedAt =
+    stored.revoked_at === undefined || stored.revoked_at === null
+      ? null
+      : stored.revoked_at instanceof Date
+        ? stored.revoked_at
+        : null
+  if (stored.revoked_at !== undefined && stored.revoked_at !== null && !revokedAt) {
+    throw new GfsDesktopOperatorLinkError(
+      'malformed_link',
+      'operator-link revocation timestamp is malformed'
+    )
+  }
   return {
+    ...(id ? { id } : {}),
+    ...(lineageId ? { lineageId } : {}),
+    ...(generation === undefined ? {} : { generation }),
+    ...(stored.predecessor_id === undefined ? {} : { predecessorId }),
     desktopUserId,
     controlAdminId,
     source: stored.source,
+    ...(state === undefined ? {} : { state }),
+    ...(rowVersion === undefined ? {} : { rowVersion }),
     createdAt,
+    ...(stored.revoked_at === undefined ? {} : { revokedAt }),
+    ...(stored.revocation_reason === undefined
+      ? {}
+      : { revocationReason: stored.revocation_reason as string | null }),
   }
 }
 
 function lifecycleChange(
   action: 'grant' | 'revoke',
-  link: GfsDesktopOperatorLink
+  link: GfsDesktopOperatorLink,
+  reason?: string,
+  lifecycleEvent?: 'link.created' | 'link.revoked' | 'link.reactivated' | 'parent.retired'
 ): ControlApiPermissionChange {
   return {
     action,
@@ -173,7 +286,18 @@ function lifecycleChange(
     subject: { kind: 'user', id: link.desktopUserId },
     sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
     status: action === 'grant' ? 'linked' : 'unlinked',
-    detailRef: `desktop_user_id:${link.desktopUserId};control_admin_id:${link.controlAdminId};source:${link.source}`,
+    detailRef: [
+      lifecycleEvent ? `event:${lifecycleEvent}` : null,
+      `desktop_user_id:${link.desktopUserId}`,
+      `control_admin_id:${link.controlAdminId}`,
+      `source:${link.source}`,
+      link.lineageId ? `lineage_id:${link.lineageId}` : null,
+      link.generation === undefined ? null : `generation:${link.generation}`,
+      link.predecessorId ? `predecessor_id:${link.predecessorId}` : null,
+      reason ? `reason:${reason}` : null,
+    ]
+      .filter(Boolean)
+      .join(';'),
   }
 }
 
@@ -225,7 +349,7 @@ export class GfsDesktopOperatorLinkService {
   constructor(dependencies: Partial<GfsDesktopOperatorLinkServiceDependencies> = {}) {
     this.dependencies = {
       transaction: dependencies.transaction ?? defaultTransaction,
-      readDb: dependencies.readDb ?? pool,
+      readDb: dependencies.readDb ?? defaultReadDb,
       appendPermissionEvents:
         dependencies.appendPermissionEvents ?? appendControlApiPermissionEventsInTransaction,
     }
@@ -275,31 +399,36 @@ export class GfsDesktopOperatorLinkService {
     }
 
     const current = await db.query(
-      `SELECT user_id::text AS user_id,
+      `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
+              predecessor_id::text AS predecessor_id, state, row_version,
+              revoked_at, revocation_reason,
+              user_id::text AS user_id,
               control_admin_id::text AS control_admin_id,
               source,
               created_at
-         FROM gfs_desktop_operator_links
-        WHERE user_id = $1::uuid
-           OR control_admin_id = $2::uuid
+        FROM gfs_desktop_operator_links
+        WHERE (user_id = $1::uuid
+           OR control_admin_id = $2::uuid)
         ORDER BY user_id::text, control_admin_id::text
         FOR UPDATE`,
       [desktopUserId, controlAdminId]
     )
     const links = current.rows.map(mapStoredLink)
-    const exact = links.find(
+    const activeLinks = links.filter(link => link.state === undefined || link.state === 'active')
+    const revokedLinks = links.filter(link => link.state === 'revoked')
+    const exact = activeLinks.find(
       link => link.desktopUserId === desktopUserId && link.controlAdminId === controlAdminId
     )
-    if (exact && links.length === 1) return { created: false, link: exact }
-    if (exact || links.length > 2) {
+    if (exact && activeLinks.length === 1) return { created: false, link: exact }
+    if (exact || activeLinks.length > 2) {
       throw new GfsDesktopOperatorLinkError(
         'malformed_link',
         'operator-link uniqueness invariant is violated'
       )
     }
 
-    const desktopUserConflict = links.some(link => link.desktopUserId === desktopUserId)
-    const controlAdminConflict = links.some(link => link.controlAdminId === controlAdminId)
+    const desktopUserConflict = activeLinks.some(link => link.desktopUserId === desktopUserId)
+    const controlAdminConflict = activeLinks.some(link => link.controlAdminId === controlAdminId)
     if (desktopUserConflict || controlAdminConflict) {
       const conflictIdentity: GfsDesktopOperatorLinkConflictIdentity =
         desktopUserConflict && controlAdminConflict
@@ -313,15 +442,23 @@ export class GfsDesktopOperatorLinkService {
         { conflictIdentity }
       )
     }
+    if (revokedLinks.length > 0) {
+      throw new GfsDesktopOperatorLinkError(
+        'link_conflict',
+        'GFS Desktop operator-link history already exists; use explicit reactivation'
+      )
+    }
 
     const inserted = await db.query(
-      `INSERT INTO gfs_desktop_operator_links(user_id, control_admin_id, source)
-       VALUES($1::uuid, $2::uuid, $3)
-       RETURNING user_id::text AS user_id,
+      `INSERT INTO gfs_desktop_operator_links(id, lineage_id, generation, user_id, control_admin_id, state, source, created_by, row_version)
+       VALUES(gen_random_uuid(), gen_random_uuid(), 1, $1::uuid, $2::uuid, 'active', $3, $4::uuid, 1)
+       RETURNING id::text AS id, lineage_id::text AS lineage_id, generation,
+                 state, row_version,
+                 user_id::text AS user_id,
                  control_admin_id::text AS control_admin_id,
                  source,
                  created_at`,
-      [desktopUserId, controlAdminId, source]
+      [desktopUserId, controlAdminId, source, operatorSub]
     )
     if (inserted.rows.length !== 1) {
       throw new GfsDesktopOperatorLinkError(
@@ -333,7 +470,8 @@ export class GfsDesktopOperatorLinkService {
     await this.dependencies.appendPermissionEvents(db, {
       operatorSub,
       operatorKind: 'control_admin',
-      changes: [lifecycleChange('grant', link)],
+      requestId: input.requestId,
+      changes: [lifecycleChange('grant', link, undefined, 'link.created')],
     })
     return { created: true, link }
   }
@@ -345,13 +483,17 @@ export class GfsDesktopOperatorLinkService {
 
     return this.dependencies.transaction(async db => {
       const current = await db.query(
-        `SELECT user_id::text AS user_id,
+        `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
+                predecessor_id::text AS predecessor_id, state, row_version,
+                revoked_at, revocation_reason,
+                user_id::text AS user_id,
                 control_admin_id::text AS control_admin_id,
                 source,
                 created_at
            FROM gfs_desktop_operator_links
-          WHERE user_id = $1::uuid
-             OR control_admin_id = $2::uuid
+          WHERE (user_id = $1::uuid
+             OR control_admin_id = $2::uuid)
+            AND state = 'active'
           ORDER BY user_id::text, control_admin_id::text
           FOR UPDATE`,
         [desktopUserId, controlAdminId]
@@ -378,34 +520,243 @@ export class GfsDesktopOperatorLinkService {
         )
       }
 
-      // Evidence is appended before current state is removed. Both operations
-      // still commit atomically because they share this transaction.
+      const rowVersion =
+        input.rowVersion === undefined
+          ? exact.rowVersion === undefined
+            ? 1
+            : exact.rowVersion
+          : requireRowVersion(input.rowVersion)
+      const reason = input.reason === undefined ? 'operator_revoked' : requireReason(input.reason)
+      // Evidence is appended before the immutable generation is revoked. Both
+      // operations still commit atomically because they share this transaction.
       await this.dependencies.appendPermissionEvents(db, {
         operatorSub,
         operatorKind: 'control_admin',
-        changes: [lifecycleChange('revoke', exact)],
+        requestId: input.requestId,
+        changes: [lifecycleChange('revoke', exact, reason, 'link.revoked')],
       })
       const removed = await db.query(
-        `DELETE FROM gfs_desktop_operator_links
+        `UPDATE gfs_desktop_operator_links
+            SET state = 'revoked',
+                revoked_at = NOW(),
+                revoked_by_type = 'control_admin',
+                revoked_by_id = $3::uuid,
+                revocation_reason = $4,
+                row_version = row_version + 1
           WHERE user_id = $1::uuid
-            AND control_admin_id = $2::uuid`,
-        [desktopUserId, controlAdminId]
+            AND control_admin_id = $2::uuid
+            AND state = 'active'
+            AND row_version = $5`,
+        [desktopUserId, controlAdminId, operatorSub, reason, rowVersion]
       )
       if (removed.rowCount !== 1) {
         throw new GfsDesktopOperatorLinkError(
           'malformed_link',
-          'operator-link disappeared during unlink'
+          'operator-link was changed by another request'
         )
       }
-      return { unlinked: true as const, link: exact }
+      return {
+        unlinked: true as const,
+        link: {
+          ...exact,
+          state: 'revoked' as const,
+          rowVersion: rowVersion + 1,
+          revokedAt: new Date(),
+          revocationReason: reason,
+        },
+      }
     })
+  }
+
+  /**
+   * Reactivation always creates a successor generation; the revoked row is
+   * retained as the predecessor and is never modified again.
+   */
+  async reactivate(
+    input: ReactivateGfsDesktopOperatorInput
+  ): Promise<ReactivateGfsDesktopOperatorResult> {
+    const controlAdminId = requireUuid(input.controlAdminId, 'controlAdminId')
+    const operatorSub = requireUuid(input.operatorSub, 'operatorSub')
+    const rowVersion = requireRowVersion(input.rowVersion)
+    const reason = requireReason(input.reason)
+    return this.dependencies.transaction(async db => {
+      // A replay after a committed reactivation is idempotent. Lock the active
+      // row before reading the tombstone so no second successor can be made.
+      const active = await db.query(
+        `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
+                predecessor_id::text AS predecessor_id, state, row_version,
+                user_id::text AS user_id, control_admin_id::text AS control_admin_id,
+                source, created_at
+           FROM gfs_desktop_operator_links
+          WHERE control_admin_id = $1::uuid AND state = 'active'
+          LIMIT 1 FOR UPDATE`,
+        [controlAdminId]
+      )
+      if (active.rows.length === 1) {
+        const activeLink = mapStoredLink(active.rows[0])
+        // A replay is idempotent only when it names the tombstone that
+        // produced the currently active successor. A stale request for a
+        // different generation must not be silently accepted.
+        if (!activeLink.predecessorId) {
+          return { reactivated: false, link: activeLink }
+        }
+        const predecessor = await db.query(
+          `SELECT state, row_version
+             FROM gfs_desktop_operator_links
+            WHERE id = $1::uuid
+            FOR UPDATE`,
+          [activeLink.predecessorId]
+        )
+        const predecessorRow = predecessor.rows[0] as
+          | { state?: unknown; row_version?: unknown }
+          | undefined
+        if (
+          predecessorRow?.state !== 'revoked' ||
+          requireRowVersion(predecessorRow.row_version) !== rowVersion
+        ) {
+          throw new GfsDesktopOperatorLinkError(
+            'link_conflict',
+            'operator-link reactivation replay is stale'
+          )
+        }
+        return { reactivated: true, link: activeLink }
+      }
+      const prior = await db.query(
+        `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
+                predecessor_id::text AS predecessor_id, state, row_version, revoked_at,
+                revocation_reason, user_id::text AS user_id, control_admin_id::text AS control_admin_id,
+                source, created_at
+           FROM gfs_desktop_operator_links
+          WHERE control_admin_id = $1::uuid AND state = 'revoked'
+          ORDER BY generation DESC
+          LIMIT 1 FOR UPDATE`,
+        [controlAdminId]
+      )
+      if (prior.rows.length === 0) return { reactivated: false, link: null }
+      const previous = prior.rows[0] as StoredLinkRow
+      const link = mapStoredLink(previous)
+      if (requireRowVersion(previous.row_version) !== rowVersion) {
+        throw new GfsDesktopOperatorLinkError(
+          'link_conflict',
+          'operator-link was changed by another request'
+        )
+      }
+      const predecessorId = requireUuid(String(previous.id || ''), 'predecessorId')
+      const lineageId = requireUuid(String(previous.lineage_id || ''), 'lineageId')
+      const generation = requireRowVersion(previous.generation) + 1
+      const parents = await db.query(
+        `SELECT u.id IS NOT NULL AS desktop_user_exists, a.status AS control_admin_status
+           FROM users u CROSS JOIN control_admin_users a
+          WHERE u.id = $1::uuid AND a.id = $2::uuid
+          FOR UPDATE`,
+        [link.desktopUserId, controlAdminId]
+      )
+      const parentState = parents.rows[0] as
+        | { desktop_user_exists?: unknown; control_admin_status?: unknown }
+        | undefined
+      if (parentState?.desktop_user_exists !== true) {
+        throw new GfsDesktopOperatorLinkError(
+          'desktop_user_not_found',
+          'Desktop user does not exist'
+        )
+      }
+      if (parentState.control_admin_status !== 'active') {
+        throw new GfsDesktopOperatorLinkError(
+          'control_admin_inactive',
+          'Control Admin is not active'
+        )
+      }
+      const inserted = await db.query(
+        `INSERT INTO gfs_desktop_operator_links
+           (id, lineage_id, generation, predecessor_id, user_id, control_admin_id, state, source, created_by, row_version)
+         VALUES (gen_random_uuid(), $1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, 'active', 'initial_setup', $6::uuid, 1)
+         RETURNING id::text AS id, lineage_id::text AS lineage_id, generation,
+                   predecessor_id::text AS predecessor_id, state, row_version,
+                   user_id::text AS user_id, control_admin_id::text AS control_admin_id,
+                   source, created_at`,
+        [lineageId, generation, predecessorId, link.desktopUserId, controlAdminId, operatorSub]
+      )
+      const successor = mapStoredLink(inserted.rows[0])
+      await this.dependencies.appendPermissionEvents(db, {
+        operatorSub,
+        operatorKind: 'control_admin',
+        requestId: input.requestId,
+        changes: [lifecycleChange('grant', successor, reason, 'link.reactivated')],
+      })
+      return { reactivated: true, link: successor }
+    })
+  }
+
+  /** Shared parent-retirement seam: evidence precedes every tombstone update. */
+  async retireParentInTransaction(
+    db: DbClient,
+    input: {
+      kind: GfsDesktopOperatorParentKind
+      parentId: string
+      operatorSub: string
+      reason: string
+      requestId?: string | null
+    }
+  ): Promise<boolean> {
+    const parentId = requireUuid(input.parentId, 'parentId')
+    const operatorSub = requireUuid(input.operatorSub, 'operatorSub')
+    const reason = requireReason(input.reason)
+    const column = input.kind === 'desktop_user' ? 'user_id' : 'control_admin_id'
+    const rows = await db.query(
+      `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
+              predecessor_id::text AS predecessor_id, state, row_version,
+              user_id::text AS user_id, control_admin_id::text AS control_admin_id,
+              source, created_at
+         FROM gfs_desktop_operator_links
+        WHERE ${column} = $1::uuid AND state = 'active'
+        LIMIT 1 FOR UPDATE`,
+      [parentId]
+    )
+    if (rows.rows.length === 0) return false
+    const link = mapStoredLink(rows.rows[0])
+    await this.dependencies.appendPermissionEvents(db, {
+      operatorSub,
+      operatorKind: 'control_admin',
+      requestId: input.requestId,
+      changes: [
+        lifecycleChange('revoke', link, reason, 'link.revoked'),
+        {
+          action: 'revoke',
+          resourceClass: `gfs_desktop_operator_${input.kind}`,
+          resourceRef: `${input.kind}:${parentId}`,
+          subject:
+            input.kind === 'desktop_user'
+              ? { kind: 'user', id: parentId }
+              : { kind: 'service', id: `control_admin:${parentId}`, principalKind: 'operator' },
+          sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
+          status: 'retired',
+          detailRef: `event:parent.retired;desktop_user_id:${link.desktopUserId};control_admin_id:${link.controlAdminId};source:${link.source};reason:${reason}`,
+        },
+      ],
+    })
+    const updated = await db.query(
+      `UPDATE gfs_desktop_operator_links
+          SET state = 'revoked', revoked_at = NOW(), revoked_by_type = 'control_admin',
+              revoked_by_id = $2::uuid, revocation_reason = $3, row_version = row_version + 1
+        WHERE ${column} = $1::uuid AND state = 'active' AND row_version = $4`,
+      [parentId, operatorSub, reason, link.rowVersion ?? 1]
+    )
+    if (updated.rowCount !== 1)
+      throw new GfsDesktopOperatorLinkError(
+        'link_conflict',
+        'parent link changed during retirement'
+      )
+    return true
   }
 
   async resolveActiveLink(desktopUserIdInput: string): Promise<GfsDesktopOperatorLink | null> {
     const desktopUserId = requireUuid(desktopUserIdInput, 'desktopUserId')
     try {
       const result = await this.dependencies.readDb.query(
-        `SELECT links.user_id::text AS user_id,
+        `SELECT links.id::text AS id, links.lineage_id::text AS lineage_id,
+                links.generation, links.predecessor_id::text AS predecessor_id,
+                links.state, links.row_version, links.revoked_at, links.revocation_reason,
+                links.user_id::text AS user_id,
                 links.control_admin_id::text AS control_admin_id,
                 links.source,
                 links.created_at,
@@ -415,7 +766,8 @@ export class GfsDesktopOperatorLinkService {
            FROM gfs_desktop_operator_links links
            LEFT JOIN users ON users.id = links.user_id
            LEFT JOIN control_admin_users admins ON admins.id = links.control_admin_id
-          WHERE links.user_id = $1::uuid`,
+          WHERE links.user_id = $1::uuid
+            AND links.state = 'active'`,
         [desktopUserId]
       )
       if (result.rows.length === 0) return null
@@ -444,7 +796,15 @@ export class GfsDesktopOperatorLinkService {
     const controlAdminId = requireUuid(controlAdminIdInput, 'controlAdminId')
     try {
       const result = await this.dependencies.readDb.query(
-        `SELECT links.user_id::text AS user_id,
+        `SELECT links.id::text AS id,
+                links.lineage_id::text AS lineage_id,
+                links.generation,
+                links.predecessor_id::text AS predecessor_id,
+                links.state,
+                links.row_version,
+                links.revoked_at,
+                links.revocation_reason,
+                links.user_id::text AS user_id,
                 links.control_admin_id::text AS control_admin_id,
                 links.source,
                 links.created_at,
@@ -452,9 +812,11 @@ export class GfsDesktopOperatorLinkService {
                 admins.id IS NOT NULL AS control_admin_exists,
                 admins.status AS control_admin_status
            FROM gfs_desktop_operator_links links
-           LEFT JOIN users ON users.id = links.user_id
-           LEFT JOIN control_admin_users admins ON admins.id = links.control_admin_id
-          WHERE links.control_admin_id = $1::uuid`,
+          LEFT JOIN users ON users.id = links.user_id
+          LEFT JOIN control_admin_users admins ON admins.id = links.control_admin_id
+          WHERE links.control_admin_id = $1::uuid
+          ORDER BY links.generation DESC
+          LIMIT 1`,
         [controlAdminId]
       )
       if (result.rows.length === 0) return null
@@ -478,10 +840,9 @@ export class GfsDesktopOperatorLinkService {
           'operator link references a missing Control Admin'
         )
       }
-      // Status reads deliberately preserve a structurally valid link for a
-      // disabled admin so the authenticated revoke path can remove stale
-      // current state. Request-time authority still uses resolveActiveLink(),
-      // which rejects every non-active admin.
+      // Status reads deliberately preserve a structurally valid tombstone for
+      // the Control UI. Request-time authority still uses resolveActiveLink(),
+      // which rejects every non-active generation or admin.
       return link
     } catch (error) {
       if (error instanceof GfsDesktopOperatorLinkError) throw error
@@ -491,6 +852,19 @@ export class GfsDesktopOperatorLinkService {
         { cause: error }
       )
     }
+  }
+
+  async getActiveRowVersionForControlAdmin(controlAdminIdInput: string): Promise<number | null> {
+    const controlAdminId = requireUuid(controlAdminIdInput, 'controlAdminId')
+    const result = await this.dependencies.readDb.query(
+      `SELECT row_version
+         FROM gfs_desktop_operator_links
+        WHERE control_admin_id = $1::uuid AND state = 'active'
+        LIMIT 1`,
+      [controlAdminId]
+    )
+    if (result.rows.length === 0) return null
+    return requireRowVersion((result.rows[0] as { row_version?: unknown }).row_version)
   }
 }
 

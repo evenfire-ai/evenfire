@@ -95,6 +95,19 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
+  it('fails GFSC readiness while the 0092 audit actor-correlation constraint is absent', async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('ALTER TABLE gfs_audit DROP CONSTRAINT gfs_audit_actor_correlation_valid')
+      await client.query('SET LOCAL ROLE gfs_controller')
+      await expect(probeAs(client)()).rejects.toThrow(/audit actor-correlation|0092/i)
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
   it('passes GFSC writer readiness under the migrated runtime role', async () => {
     const client = await pool.connect()
     try {

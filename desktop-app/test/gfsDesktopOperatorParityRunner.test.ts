@@ -1,11 +1,23 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   GFS_OPERATOR_REQUIRED_SCENARIOS,
   type GfsOperatorScenarioResult,
   evaluateGfsOperatorScenarioResults,
+  gfsOperatorEvidenceDirectory,
   requireGfsOperatorRunId,
+  reserveGfsOperatorEvidenceRun,
   scenarioIdFromTitle,
 } from './e2e-playwright/gfsDesktopOperatorParityContract'
+
+const evidenceRoots: string[] = []
+
+afterEach(() => {
+  for (const root of evidenceRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+  delete process.env.E2E_GFS_OPERATOR_EVIDENCE_DIR
+})
 
 function passedResults(): GfsOperatorScenarioResult[] {
   return GFS_OPERATOR_REQUIRED_SCENARIOS.map(id => ({ id, status: 'passed', title: id }))
@@ -17,6 +29,23 @@ describe('GFS Desktop operator Playwright gate', () => {
     expect(() => requireGfsOperatorRunId('../escape')).toThrow(/must match/)
     expect(() => requireGfsOperatorRunId('run one')).toThrow(/must match/)
     expect(requireGfsOperatorRunId('run_1-fresh')).toBe('run_1-fresh')
+  })
+
+  it('reserves an immutable evidence run and rejects a colliding run id before execution', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-operator-e2e-'))
+    evidenceRoots.push(root)
+    process.env.E2E_GFS_OPERATOR_EVIDENCE_DIR = root
+
+    const directory = reserveGfsOperatorEvidenceRun('collision-proof')
+    expect(directory).toBe(gfsOperatorEvidenceDirectory('collision-proof'))
+    expect(fs.existsSync(path.join(directory, 'attempt-manifest.json'))).toBe(true)
+    expect(() => reserveGfsOperatorEvidenceRun('collision-proof')).toThrow(/already reserved/)
+    expect(
+      JSON.parse(fs.readFileSync(path.join(directory, 'attempt-manifest.json'), 'utf8'))
+    ).toMatchObject({
+      runId: 'collision-proof',
+      immutable: true,
+    })
   })
 
   it('recognizes only one exact required scenario prefix', () => {

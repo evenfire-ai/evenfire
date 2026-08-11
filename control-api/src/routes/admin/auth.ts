@@ -181,6 +181,7 @@ export function createAdminAuthRouter(): Router {
           contextIds: config.adminDefaultContextIds,
           seedPassword: seedDesktopPassword,
           linkDesktopOperator: config.desktopGfsOperatorLinkingEnabled,
+          requestId: req.correlationId ?? null,
         })
       } catch (err) {
         // Intentionally logs only err + email — never passwordHash.

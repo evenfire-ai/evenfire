@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
+  GFS_OPERATOR_SETUP_PATH,
   gfsOperatorRuntimeEvidencePath,
   requireGfsOperatorRunId,
+  reserveGfsOperatorEvidenceRun,
   writeJsonAtomically,
 } from './gfsDesktopOperatorParityContract'
 import { validateBaseUrls } from './global-setup'
@@ -100,6 +102,7 @@ function assertRepositoryHarness(): Array<{
 
 export default async function globalSetup(): Promise<void> {
   const runId = requireGfsOperatorRunId()
+  reserveGfsOperatorEvidenceRun(runId)
   const profile = requiredEnvironment('MINIKUBE_PROFILE', [process.env.MINIKUBE_PROFILE])
   const context = requiredEnvironment('E2E_K8S_CONTEXT', [process.env.E2E_K8S_CONTEXT])
   if (profile !== context) {
@@ -248,7 +251,7 @@ export default async function globalSetup(): Promise<void> {
       files: artifactFiles,
     },
     bootstrap: {
-      entryPoint: '/admin/auth/setup',
+      entryPoint: GFS_OPERATOR_SETUP_PATH,
       expectedStatus: 200,
       singleUse: true,
       positiveUiEvidence: false,

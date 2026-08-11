@@ -89,12 +89,14 @@ const BASE_COHERENCE_SQL =
   "has_column_privilege(current_user, 'gfs_resources', 'blob_key', 'SELECT') AS can_read_blob_key, " +
   "has_column_privilege(current_user, 'gfs_resources', 'content_sha256', 'SELECT') AS can_read_digest, " +
   "EXISTS (SELECT 1 FROM (SELECT blob_key, content_sha256 FROM gfs_resources WHERE false) AS resource_probe) = false AS resource_schema_ready, " +
-  "(SELECT count(*) = 5 AND bool_and(atttypid = 'text'::regtype) " +
+  "(SELECT count(*) = 8 " +
+  "AND bool_and(attname <> 'desktop_user_id' OR atttypid = 'uuid'::regtype) " +
+  "AND bool_and(attname = 'desktop_user_id' OR atttypid = 'text'::regtype) " +
   "AND bool_and(attname <> 'record_type' OR attnotnull) FROM pg_attribute " +
   "WHERE attrelid = 'gfs_audit'::regclass AND attnum > 0 AND NOT attisdropped " +
-  "AND attname = ANY (ARRAY['record_type', 'matched_subject', 'authorization_source', 'cached_authorization_source', 'mutation_outcome'])) AS audit_schema_ready, " +
-  "(SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = 'gfs_audit'::regclass " +
-  "AND conname = ANY (ARRAY['gfs_audit_record_type_valid', 'gfs_audit_authorization_source_valid', 'gfs_audit_cached_authorization_source_valid', 'gfs_audit_mutation_outcome_valid', 'gfs_audit_record_type_fields_valid']) " +
+  "AND attname = ANY (ARRAY['actor_on_behalf_of', 'desktop_user_id', 'authority_source', 'record_type', 'matched_subject', 'authorization_source', 'cached_authorization_source', 'mutation_outcome'])) AS audit_schema_ready, " +
+  "(SELECT count(*) = 6 FROM pg_constraint WHERE conrelid = 'gfs_audit'::regclass " +
+  "AND conname = ANY (ARRAY['gfs_audit_actor_correlation_valid', 'gfs_audit_record_type_valid', 'gfs_audit_authorization_source_valid', 'gfs_audit_cached_authorization_source_valid', 'gfs_audit_mutation_outcome_valid', 'gfs_audit_record_type_fields_valid']) " +
   "AND contype = 'c' AND convalidated) AS audit_constraints_ready";
 
 // The reader is deliberately read-only except for append-only audit records.
@@ -223,8 +225,8 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       }
       if (row?.audit_schema_ready !== true || row?.audit_constraints_ready !== true) {
         throw new Error(
-          "permission store coherence check failed: GFS audit decision evidence schema is missing " +
-            "(control-api migration 0070 not applied?)"
+          "permission store coherence check failed: GFS audit actor-correlation schema is missing " +
+            "(control-api migration 0092 not applied?)"
         );
       }
       if (

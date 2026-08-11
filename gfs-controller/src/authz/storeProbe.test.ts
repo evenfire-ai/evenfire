@@ -253,7 +253,7 @@ describe("createPermissionStoreProbe", () => {
   });
 
   it.each(["reader", "writer"] as const)(
-    "rejects a %s when migration 0070 audit columns are missing",
+    "rejects a %s when migration 0092 audit actor-correlation columns are missing",
     async (storageRole) => {
       const { factory } = fakeClientFactory({ auditSchemaReady: false });
       const probe = createPermissionStoreProbe({
@@ -264,12 +264,12 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/migration 0070/);
+      await expect(probe()).rejects.toThrow(/migration 0092/);
     }
   );
 
   it.each(["reader", "writer"] as const)(
-    "rejects a %s when migration 0070 audit constraints are missing or unvalidated",
+    "rejects a %s when migration 0092 audit actor-correlation constraints are missing or unvalidated",
     async (storageRole) => {
       const { factory } = fakeClientFactory({ auditConstraintsReady: false });
       const probe = createPermissionStoreProbe({
@@ -280,7 +280,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/migration 0070/);
+      await expect(probe()).rejects.toThrow(/migration 0092/);
     }
   );
 
@@ -330,6 +330,9 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toMatch(/gfs_resources'\s*,\s*'UPDATE'/);
     expect(sql).toContain("FROM pg_attribute");
     expect(sql).toContain("'record_type'");
+    expect(sql).toContain("'actor_on_behalf_of'");
+    expect(sql).toContain("'desktop_user_id'");
+    expect(sql).toContain("'authority_source'");
     expect(sql).toContain("'matched_subject'");
     expect(sql).toContain("'authorization_source'");
     expect(sql).toContain("'cached_authorization_source'");
@@ -339,6 +342,7 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toContain("gfs_audit_cached_authorization_source_valid");
     expect(sql).toContain("gfs_audit_mutation_outcome_valid");
     expect(sql).toContain("gfs_audit_record_type_fields_valid");
+    expect(sql).toContain("gfs_audit_actor_correlation_valid");
     expect(sql).toContain("convalidated");
     expect(sql).not.toContain("can_mutate_resources");
     expect(sql).not.toContain("can_update_audit_sequence");
