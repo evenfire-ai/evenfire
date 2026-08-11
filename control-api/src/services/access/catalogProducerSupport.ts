@@ -34,6 +34,7 @@ export async function catalogQuery(
 export type BoundedKeyArm = Readonly<{
   sql: string
   orderBy?: string
+  distinctCanonicalBy?: string
   hasValidUntil?: boolean
 }>
 
@@ -43,11 +44,19 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
   const sources = arms
     .map((arm, index) => {
       const definition = typeof arm === 'string' ? { sql: arm } : arm
+      if (definition.distinctCanonicalBy && definition.hasValidUntil) {
+        throw new CatalogProducerContractError('distinct_valid_until_requires_aggregation')
+      }
+      const boundedSql = definition.distinctCanonicalBy
+        ? `SELECT DISTINCT ON (${definition.distinctCanonicalBy}) distinct_arm.*
+             FROM (${definition.sql}) distinct_arm
+            ORDER BY ${definition.distinctCanonicalBy}`
+        : definition.sql
       return `${names[index]} AS MATERIALIZED (
           SELECT bounded_arm.logical_id,
                  ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
                    AS valid_until
-            FROM (${definition.sql}) bounded_arm
+            FROM (${boundedSql}) bounded_arm
           ORDER BY ${definition.orderBy ?? 'logical_id'}
           LIMIT $4
         )`
