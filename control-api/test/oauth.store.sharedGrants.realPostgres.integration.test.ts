@@ -125,6 +125,32 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
     expect(b?.bootstrappedByUserId).toBe('user-9')
   })
 
+  // mini-spec 05 §4 — the audit-integrity CHECK: a `shared` row with a NULL
+  // `bootstrapped_by_user_id` (or NULL `context_id`) is REJECTED by the schema,
+  // so team activity is never uninspectable. The layer under test is the real
+  // migration/schema stood up by initDb (T1: the constraint's real producer),
+  // driven by an adversarial raw INSERT — not a hand-built fixture fed into code.
+  it('CHECK rejects a shared row with NULL bootstrapped_by_user_id or NULL context_id', async () => {
+    const insertShared = (contextId: string | null, bootstrappedBy: string | null) =>
+      dbPool.query(
+        `INSERT INTO oauth_grants (
+           owner_kind, recipe_namespace, recipe_name, user_id, context_id,
+           oauth_client_id, grant_kind, bootstrapped_by_user_id,
+           provider, access_token_encrypted, refresh_token_encrypted,
+           access_token_expires_at, updated_at
+         ) VALUES ('mcpserver', $1, 'gdrive-check', NULL, $2, 'google-drive',
+           'shared', $3, 'google', 'enc', NULL, NULL, NOW())`,
+        [config.mcpServersNamespace, contextId, bootstrappedBy]
+      )
+
+    // NULL bootstrapped_by_user_id → violates oauth_grants_kind_userid_check.
+    await expect(insertShared('ctx-chk', null)).rejects.toThrow(/oauth_grants_kind_userid_check/)
+    // NULL context_id → same CHECK (shared identity has no coordinate).
+    await expect(insertShared(null, 'user-1')).rejects.toThrow(/oauth_grants_kind_userid_check/)
+    // Control: both present → accepted.
+    await expect(insertShared('ctx-chk', 'user-1')).resolves.toBeTruthy()
+  })
+
   it('a user grant and a shared grant of the same server do not collide', async () => {
     const server = 'gdrive-c'
     await upsertOAuthGrant(db, KEY, {

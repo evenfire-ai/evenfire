@@ -128,6 +128,41 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
     expect(await list(g, 'bob')).toEqual(['gdrive-s'])
   })
 
+  // mini-spec 04 §5c literal "with OR without the caller's own user grant": the
+  // "without" half is the test above (alice never consented). This is the "with"
+  // half — a member who ALSO holds a stray per-user grant on the same server is
+  // servable BECAUSE the shared grant exists (not because of their user grant).
+  it('context-flavor: a member holding a stray user grant is still servable via the shared grant', async () => {
+    const g = gatewayWith([{ name: 'gdrive-w', grantScope: 'context', contextRef: 'ctx-1' }])
+    // dave happens to also carry a per-user grant on this (context-flavor) server.
+    await upsertOAuthGrant(db, KEY, {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: NS,
+      recipeName: 'gdrive-w',
+      userId: 'dave',
+      oauthClientId: CLIENT_ID,
+      provider: 'google',
+      accessToken: 'U',
+    })
+    // The user grant alone does not make a context server invocable.
+    expect(await list(g, 'dave')).toEqual([])
+
+    // Once the shared grant is bootstrapped (by anyone), dave is servable —
+    // driven by the SHARED key, with his own user grant present and irrelevant.
+    await bootstrapSharedOAuthGrant(db, KEY, {
+      ownerKind: 'mcpserver',
+      recipeNamespace: NS,
+      recipeName: 'gdrive-w',
+      contextId: 'ctx-1',
+      oauthClientId: CLIENT_ID,
+      bootstrappedByUserId: 'erin',
+      provider: 'google',
+      accessToken: 'S',
+    })
+    expect(await list(g, 'dave')).toEqual(['gdrive-w'])
+  })
+
   it('a user grant does NOT satisfy a context-flavor server (disjoint keyspaces)', async () => {
     const g = gatewayWith([{ name: 'gdrive-x', grantScope: 'context', contextRef: 'ctx-1' }])
     // A stray user grant on the same server/client for the caller.

@@ -228,6 +228,67 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(grantQuery).toBeUndefined()
   })
 
+  // Happy-negative for the context branch (U1 dispatch, U6 activation): when NO
+  // shared grant exists for the server's authoritative contextRef, the broker
+  // returns 404 no_grant — the same fail-closed outcome the user branch gives,
+  // driven through the REAL shared getOAuthGrant SQL (mockPoolQuery → 0 rows).
+  it('context flavor: 404 no_grant when no shared grant exists for spec.contextRef', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    // Default mock already resolves { rows: [], rowCount: 0 } → getOAuthGrant null.
+    const res = await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${controlToken()}`)
+      .send({ mcpServerName: 'gdrive', userId: 'user-2' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('no_grant')
+    expect(res.body.token).toBeUndefined()
+    // The lookup that ran was the SHARED coordinate keyed by contextRef, no userId.
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' &&
+        sql.includes('FROM oauth_grants') &&
+        sql.includes("grant_kind = 'shared'")
+    )
+    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+  })
+
+  // Fail-closed: a context-flavor server that is missing its CRD-required
+  // spec.contextRef must NOT resolve to any grant. The broker rejects with 400
+  // server_missing_context BEFORE any DB lookup (mini-spec 05 §2 — the shared
+  // key coordinate is unresolvable, so there is nothing safe to query).
+  it('context flavor: 400 server_missing_context when spec.contextRef is absent, no grant lookup', async () => {
+    void gateway.createResource(
+      'mcpservers',
+      {
+        metadata: { name: 'no-ctx' },
+        spec: {
+          // contextRef deliberately omitted.
+          auth: { type: 'oauth' },
+          oauth: {
+            id: 'google-drive',
+            provider: 'google',
+            clientIdRef: { name: 'google-creds', key: 'client-id' },
+            clientSecretRef: { name: 'google-creds', key: 'client-secret' },
+            grantScope: 'context',
+          },
+        },
+      },
+      MCP_NS
+    )
+    const res = await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${controlToken()}`)
+      .send({ mcpServerName: 'no-ctx', userId: 'user-2' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('server_missing_context')
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+    )
+    expect(grantQuery).toBeUndefined()
+  })
+
   it('accepts a body contextId that matches spec.contextRef', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
     const future = new Date(Date.now() + 3600_000)
