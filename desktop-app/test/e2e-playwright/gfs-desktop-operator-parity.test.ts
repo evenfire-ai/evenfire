@@ -301,6 +301,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       page.getByRole('article', { name: `Markdown preview of ${nestedFile.name}` })
     ).toContainText('nested version one')
     await page.getByRole('button', { name: 'Close Markdown preview' }).click()
+    await expect(preview).toBeHidden({ timeout: 15_000 })
 
     dialog = await openResourceManage(page, nestedFile)
     await dialog.getByRole('button', { name: `Options for ${nestedFile.name}` }).click()
