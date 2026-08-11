@@ -83,6 +83,15 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
     CREATE INDEX IF NOT EXISTS authorization_resource_revisions_updated_idx
       ON authorization_resource_revisions (environment_id, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS authorization_catalog_revision (
+      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+      revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    INSERT INTO authorization_catalog_revision(singleton)
+    VALUES(TRUE)
+    ON CONFLICT (singleton) DO NOTHING;
+
     CREATE TABLE IF NOT EXISTS operational_catalog_source_state (
       environment_id TEXT NOT NULL,
       source_family TEXT NOT NULL,
@@ -197,6 +206,14 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
       ON user_workflow_triggers (recipe_namespace, recipe_name, user_id);
     CREATE INDEX IF NOT EXISTS team_workflow_triggers_recipe_team_idx
       ON team_workflow_triggers (recipe_namespace, recipe_name, team_id);
+    CREATE INDEX IF NOT EXISTS user_workflow_triggers_catalog_key_idx
+      ON user_workflow_triggers (
+        user_id, ((recipe_namespace || '/'::text) || recipe_name)
+      );
+    CREATE INDEX IF NOT EXISTS team_workflow_triggers_catalog_key_idx
+      ON team_workflow_triggers (
+        ((recipe_namespace || '/'::text) || recipe_name), team_id
+      );
 
     CREATE INDEX IF NOT EXISTS workflow_runs_actor_catalog_idx
       ON workflow_runs (actor_id, run_id)
@@ -301,6 +318,21 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
 
 async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
   await db.query(`
+    CREATE OR REPLACE FUNCTION authorization_bump_catalog_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      UPDATE authorization_catalog_revision
+         SET revision = revision + 1,
+             updated_at = clock_timestamp()
+       WHERE singleton = TRUE;
+      RETURN NULL;
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_team_membership_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -455,6 +487,34 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     END;
     $$;
 
+    DO $$
+    DECLARE table_name TEXT;
+    DECLARE trigger_name TEXT;
+    BEGIN
+      FOREACH table_name IN ARRAY ARRAY[
+        'users', 'teams', 'team_members',
+        'user_contexts', 'team_contexts', 'user_agents', 'team_agents',
+        'user_workflow_triggers', 'team_workflow_triggers',
+        'workflow_runs', 'workflow_approval_requests', 'notification_deliveries',
+        'gfs_resources', 'gfs_grants', 'gfs_shares',
+        'operational_resource_index', 'operational_resource_relationships',
+        'operational_catalog_source_state'
+      ]
+      LOOP
+        trigger_name := table_name || '_catalog_revision';
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = trigger_name) THEN
+          EXECUTE format(
+            'CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %I '
+            || 'FOR EACH STATEMENT EXECUTE FUNCTION authorization_bump_catalog_revision()',
+            trigger_name,
+            table_name
+          );
+        END IF;
+      END LOOP;
+    END;
+    $$;
+
+    REVOKE ALL ON FUNCTION authorization_bump_catalog_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_membership_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_user_grant_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_grant_revision() FROM PUBLIC;
@@ -472,6 +532,7 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       authorization_user_revisions,
       authorization_team_revisions,
       authorization_resource_revisions,
+      authorization_catalog_revision,
       operational_catalog_source_state,
       operational_resource_index,
       operational_resource_relationships,
@@ -495,5 +556,7 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       authorization_team_revisions,
       authorization_resource_revisions
       TO control_api_runtime;
+
+    GRANT SELECT ON TABLE authorization_catalog_revision TO control_api_runtime;
   `)
 }
