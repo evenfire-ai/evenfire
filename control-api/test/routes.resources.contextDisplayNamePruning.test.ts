@@ -23,9 +23,12 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     updateResource: ResourceService['updateResource']
     createResource: ResourceService['createResource']
     deleteResource: ResourceService['deleteResource']
+    listResource: ResourceService['listResource']
+    deleteSecret: ReturnType<typeof vi.fn>
   }
   store: Map<string, Record<string, unknown>>
   deleteNamespacedCustomObject: ReturnType<typeof vi.fn>
+  deleteSecret: ReturnType<typeof vi.fn>
 } {
   const ns = config.contextsNamespace
   let rv = 0
@@ -81,21 +84,33 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     const existed = store.delete(name)
     return { deleted: existed }
   })
+  // ResourceService.listResource unwraps `.items` from the list response, so the
+  // spy must return the store contents under that key.
+  const listNamespacedCustomObject = vi.fn(async () => ({
+    items: Array.from(store.values()),
+  }))
 
   const customApi = {
     getNamespacedCustomObject,
     replaceNamespacedCustomObject,
     createNamespacedCustomObject,
     deleteNamespacedCustomObject,
+    listNamespacedCustomObject,
   } as unknown as ConstructorParameters<typeof ResourceService>[0]
   const svc = new ResourceService(customApi, ns, { contexts: ns })
+  // deleteSecret lives on K8sGateway (not ResourceService); the mcp-server DELETE
+  // handler invokes it for the `<name>-credentials` secret. It is orthogonal to
+  // the allowlist-pruning path under test, so a no-op spy suffices.
+  const deleteSecret = vi.fn(async () => ({ deleted: true }))
   const gateway = {
     getResource: svc.getResource.bind(svc),
     updateResource: svc.updateResource.bind(svc),
     createResource: svc.createResource.bind(svc),
     deleteResource: svc.deleteResource.bind(svc),
+    listResource: svc.listResource.bind(svc),
+    deleteSecret,
   }
-  return { gateway, store, deleteNamespacedCustomObject }
+  return { gateway, store, deleteNamespacedCustomObject, deleteSecret }
 }
 
 function makeApp(gateway: ReturnType<typeof realServiceGateway>['gateway']): express.Express {
@@ -192,5 +207,37 @@ describe('routes/resources — context spec.displayName deploy-order guard (R1-M
       .put('/admin/contexts/ctx-nodisplay')
       .send({ spec: { contextId: 'ctx-nodisplay', mcpServers: ['a'] } })
       .expect(200)
+  })
+
+  it('deleting an McpServer preserves spec.displayName on referencing contexts (R4-B2)', async () => {
+    // CRD is up to date (displayName round-trips): the loss under test is NOT
+    // apiserver pruning but the DELETE handler rebuilding the context spec by
+    // hand and dropping every field it does not enumerate.
+    const { gateway, store } = realServiceGateway({ pruneDisplayName: false })
+    await gateway.createResource(
+      'contexts',
+      {
+        metadata: { name: 'ctx-keep' },
+        spec: {
+          contextId: 'ctx-keep',
+          mcpServers: ['srv-target', 'srv-other'],
+          displayName: 'Keep Me',
+        },
+      },
+      config.contextsNamespace
+    )
+    const app = makeApp(gateway)
+
+    await request(app).delete('/admin/mcp-servers/srv-target').expect(200)
+
+    // Observable result (T4): re-read the persisted context and assert the whole
+    // relevant spec — displayName survived, and only the deleted server was
+    // pruned from the allowlist.
+    const ctx = (await gateway.getResource('contexts', 'ctx-keep', config.contextsNamespace)) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other'])
+    expect(store.get('ctx-keep')).toBeDefined()
   })
 })
