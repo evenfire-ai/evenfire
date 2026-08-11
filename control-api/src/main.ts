@@ -2,8 +2,11 @@ import { config } from './config.js'
 import { assertDbReady, pool, rateLimitPool } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
+import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
+import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
@@ -51,6 +54,8 @@ import {
 } from './services/workflowScheduleWorkerCron.js'
 import { validateStartupGuards } from './startupGuards.js'
 
+let stopOperationalAccessIndexer: (() => void) | null = null
+
 async function main(): Promise<void> {
   console.log('[ControlAPI] Starting')
   console.log(`[ControlAPI] Namespace: ${config.namespace}`)
@@ -62,6 +67,8 @@ async function main(): Promise<void> {
 
   await assertDbReady()
   console.log('[ControlAPI] Database schema ready')
+  const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
+  console.log(`[ControlAPI] User-access policy ready: ${userAccessPolicy.policyRevision}`)
 
   // Observability only (never fatal): report whether this self-hosted deployment
   // holds a registry identity. Auth is derived from credential presence, so a
@@ -98,6 +105,23 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  if (config.operationalAccessIndexerEnabled) {
+    const operationalIndexer = new OperationalAccessIndexer(gateway, undefined, {
+      retryDelayMs: config.operationalAccessIndexerRetryMs,
+    })
+    const runningIndexer = operationalIndexer.start()
+    stopOperationalAccessIndexer = runningIndexer.stop
+    void runningIndexer.completion.catch(error => {
+      rootLogger.error(
+        { err: error, event: 'operational_access_indexer_stopped' },
+        'operational access index stopped unexpectedly'
+      )
+    })
+    console.log('[ControlAPI] Operational access indexer enabled')
+  } else {
+    console.log('[ControlAPI] Operational access indexer disabled')
+  }
 
   // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
   // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
@@ -227,6 +251,7 @@ main().catch(error => {
   stopLlmCatalogSyncCron()
   stopSubscriptionCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
+  stopOperationalAccessIndexer?.()
   void pool.end()
   void rateLimitPool.end()
   process.exit(1)
