@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { TeamAgentsResponse, TeamRole } from '../types.js'
 
 type AuthContext = {
@@ -28,8 +28,9 @@ export async function getCurrentTeam(auth: AuthContext) {
       `/external/teams/${auth.teamId}/users/${auth.userId}/current`,
       { userSessionToken: auth.sessionToken }
     )
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 404) return null
+    throw error
   }
 }
 
@@ -87,8 +88,14 @@ export async function renameTeam(
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' as const }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' as const }
+    }
+    throw error
   }
 
   return {
@@ -144,8 +151,14 @@ export async function updateMemberRole(
       `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
       { userSessionToken: auth.sessionToken }
     )
-  } catch {
-    return { error: 'not_found' }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' }
+    }
+    throw error
   }
   const updated = await controlApiRequest<unknown>(
     'PATCH',
@@ -196,8 +209,14 @@ export async function deleteMember(auth: AuthContext, userId: string) {
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' as const }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' as const }
+    }
+    throw error
   }
   return { deleted }
 }
