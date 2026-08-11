@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
-import { accessCatalogGrantSql } from '../src/services/access/accessCatalog.js'
+import type { AuthClaims } from '../src/profileTypes.js'
+import { accessCatalogGrantSql, buildAccessCatalog } from '../src/services/access/accessCatalog.js'
+import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
+import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -91,6 +94,61 @@ describeRealPostgres('aggregate access catalog real PostgreSQL producer', () => 
       `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${accessCatalogGrantSql()}`,
       [userId, 'test:postgres', 'mcp-host', 'mcp-server', [], 10_000, 50_000]
     )
-    expect(explain.rows[0]?.['QUERY PLAN']).toBeDefined()
+    const plan = explain.rows[0]?.['QUERY PLAN']?.[0]
+    expect(plan).toBeDefined()
+    expect(Number(plan?.['Execution Time'])).toBeLessThan(3_000)
+    expect(Number(plan?.Plan?.['Actual Rows'])).toBeLessThanOrEqual(50_001)
+  })
+
+  it('round-trips a real direct and team grant from producer through catalog path resolution', async () => {
+    const claims: AuthClaims = {
+      userId,
+      email: 'catalog@example.com',
+      teamId: null,
+      role: 'member',
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+      iat: Math.floor(Date.now() / 1000),
+      sessionContract: 'v1',
+    }
+    const host = {
+      metadata: {
+        name: 'shared-host',
+        namespace: 'mcp-host',
+        uid: 'producer-host',
+        resourceVersion: '1',
+      },
+      spec: { host: 'Shared host' },
+    }
+    const gateway = {
+      listResourcePage: async () => ({ items: [host] }),
+      listResource: async () => [host],
+      getResource: async () => host,
+    }
+
+    const catalog = await buildAccessCatalog(claims, gateway as never, {
+      resourceTypes: ['host'],
+    })
+    const item = catalog.items.find(
+      candidate => candidate.resource.id === 'host:mcp-host/shared-host'
+    )
+    expect(item?.accessPaths.map(path => path.kind).sort()).toEqual(['direct', 'team', 'team'])
+
+    for (const path of item!.accessPaths) {
+      const resolution = await resolveLiveAuthorization(
+        {
+          principalUserId: userId,
+          requiredCapability: 'host.read',
+          requestedAccessPathId: path.accessPathId,
+          resource: canonicalResourceIdentity({
+            environmentId: item!.resource.environmentId,
+            type: 'host',
+            logicalId: 'mcp-host/shared-host',
+            displayName: item!.resource.displayName,
+          }),
+        },
+        { gateway: gateway as never }
+      )
+      expect(resolution.status, path.kind).toBe('allowed')
+    }
   })
 })

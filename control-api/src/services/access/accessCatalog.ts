@@ -24,6 +24,7 @@ export const ACCESS_CATALOG_MAX_PAGE_SIZE = 100
 export const ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES = 10_000
 export const ACCESS_CATALOG_MAX_SNAPSHOT_PATHS = 50_000
 export const ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE = 10_000
+export const ACCESS_CATALOG_STATEMENT_TIMEOUT_MS = 3_000
 export const ACCESS_CATALOG_RESOURCE_TYPES = [
   'user',
   'team',
@@ -118,6 +119,7 @@ type AuthoritySnapshot = {
   userId: string
   sessionVersion: number
   userRevision: number
+  resourceRevisionWatermark: string
   memberships: Array<{
     teamId: string
     teamName: string
@@ -237,7 +239,8 @@ function parseMemberships(value: unknown): AuthoritySnapshot['memberships'] {
 
 async function loadAuthoritySnapshot(
   db: Pick<DbClient, 'query'>,
-  claims: AuthClaims
+  claims: AuthClaims,
+  environmentId: string
 ): Promise<AuthoritySnapshot | null> {
   const result = await db.query(
     `WITH active_memberships AS (
@@ -254,6 +257,14 @@ async function loadAuthoritySnapshot(
      )
      SELECT u.id AS user_id,
             COALESCE(aur.revision, 1) AS user_revision,
+            COALESCE(
+              (
+                SELECT MAX(arr.updated_at)::text
+                  FROM authorization_resource_revisions arr
+                 WHERE arr.environment_id = $3
+              ),
+              ''
+            ) AS resource_revision_watermark,
             CASE
               WHEN $2::text IS NULL THEN 0
               ELSE s.session_version
@@ -282,7 +293,7 @@ async function loadAuthoritySnapshot(
   LEFT JOIN active_memberships am ON TRUE
       WHERE u.id = $1
    GROUP BY u.id, aur.revision, s.session_version, s.sid`,
-    [claims.userId, claims.sessionContract === 'v2' ? (claims.sid ?? null) : null]
+    [claims.userId, claims.sessionContract === 'v2' ? (claims.sid ?? null) : null, environmentId]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
   if (!row || row.session_live !== true) return null
@@ -290,6 +301,7 @@ async function loadAuthoritySnapshot(
     userId: String(row.user_id),
     sessionVersion: Number(row.session_version || 0),
     userRevision: Number(row.user_revision || 1),
+    resourceRevisionWatermark: String(row.resource_revision_watermark || ''),
     memberships: parseMemberships(row.memberships),
   }
 }
@@ -729,44 +741,138 @@ function providerProjection(resource: K8sShape): string {
 }
 
 type OperationalSourceResult =
-  | { sourceCode: string; status: 'fulfilled'; resources: K8sShape[] }
+  | {
+      sourceCode: string
+      status: 'fulfilled'
+      resources: K8sShape[]
+      capacityExceeded: boolean
+    }
   | { sourceCode: string; status: 'rejected' }
 
 const OPERATIONAL_CATALOG_CACHE_MS = 5_000
 const operationalCatalogCache = new WeakMap<
   K8sGateway,
-  { expiresAt: number; value: Promise<OperationalSourceResult[]> }
+  Map<string, { expiresAt: number; value: Promise<OperationalSourceResult[]> }>
 >()
+const ACCESS_CATALOG_SNAPSHOT_CACHE_MS = 30_000
+const ACCESS_CATALOG_SNAPSHOT_CACHE_ENTRIES_PER_GATEWAY = 8
+type CachedCatalogSnapshot = {
+  expiresAt: number
+  authorizationRevision: string
+  hydrated: CatalogSeed[]
+  partialErrors: AccessCatalogPartialError[]
+}
+const catalogSnapshotCache = new WeakMap<K8sGateway, Map<string, CachedCatalogSnapshot>>()
 
 export function invalidateAccessCatalogOperationalCache(gateway: K8sGateway): void {
   operationalCatalogCache.delete(gateway)
+  catalogSnapshotCache.delete(gateway)
 }
 
-async function loadOperationalSources(gateway: K8sGateway): Promise<OperationalSourceResult[]> {
-  const now = Date.now()
-  const cached = operationalCatalogCache.get(gateway)
-  if (cached && cached.expiresAt > now) return cached.value
-  const sources = [
-    { sourceCode: 'hosts', plural: 'hosts' as const, namespace: config.hostsNamespace },
-    { sourceCode: 'contexts', plural: 'contexts' as const, namespace: config.contextsNamespace },
-    {
+type OperationalSourceDefinition = {
+  sourceCode: string
+  plural: 'hosts' | 'contexts' | 'mcpservers' | 'workflowrecipes' | 'sharedfilesystems'
+  namespace: string
+}
+
+function operationalSourceDefinitions(
+  resourceTypes: readonly ResourceType[]
+): OperationalSourceDefinition[] {
+  const requested = new Set(resourceTypes)
+  const all = requested.size === 0
+  const sources: OperationalSourceDefinition[] = []
+  if (all || requested.has('host') || requested.has('mcp_server')) {
+    sources.push({ sourceCode: 'hosts', plural: 'hosts', namespace: config.hostsNamespace })
+  }
+  if (
+    all ||
+    requested.has('context') ||
+    requested.has('mcp_server') ||
+    requested.has('shared_filesystem')
+  ) {
+    sources.push({
+      sourceCode: 'contexts',
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+    })
+  }
+  if (all || requested.has('mcp_server')) {
+    sources.push({
       sourceCode: 'mcp_servers',
-      plural: 'mcpservers' as const,
+      plural: 'mcpservers',
       namespace: config.mcpServersNamespace,
-    },
-    {
+    })
+  }
+  if (all || requested.has('workflow_recipe') || requested.has('sandbox_app')) {
+    sources.push({
       sourceCode: 'workflow_recipes',
-      plural: 'workflowrecipes' as const,
+      plural: 'workflowrecipes',
       namespace: config.sandboxNamespace,
-    },
-    {
+    })
+  }
+  if (all || requested.has('shared_filesystem')) {
+    sources.push({
       sourceCode: 'shared_filesystems',
-      plural: 'sharedfilesystems' as const,
+      plural: 'sharedfilesystems',
       namespace: config.sharedFilesystemsNamespace,
-    },
-  ]
+    })
+  }
+  return sources
+}
+
+async function boundedOperationalList(
+  gateway: K8sGateway,
+  source: OperationalSourceDefinition
+): Promise<{ resources: K8sShape[]; capacityExceeded: boolean }> {
+  const boundedGateway = gateway as K8sGateway & {
+    listResourcePage?: (
+      plural: OperationalSourceDefinition['plural'],
+      namespace: string,
+      limit: number
+    ) => Promise<{ items: unknown[]; continueToken?: string }>
+  }
+  if (typeof boundedGateway.listResourcePage === 'function') {
+    const page = await boundedGateway.listResourcePage(
+      source.plural,
+      source.namespace,
+      ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE + 1
+    )
+    const resources = Array.isArray(page.items) ? (page.items as K8sShape[]) : []
+    return {
+      resources: resources.slice(0, ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE + 1),
+      capacityExceeded:
+        Boolean(page.continueToken) ||
+        resources.length > ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE,
+    }
+  }
+  const resources = await gateway.listResource(source.plural, source.namespace)
+  return {
+    resources: Array.isArray(resources)
+      ? (resources as K8sShape[]).slice(0, ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE + 1)
+      : [],
+    capacityExceeded:
+      Array.isArray(resources) &&
+      resources.length > ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE,
+  }
+}
+
+async function loadOperationalSources(
+  gateway: K8sGateway,
+  resourceTypes: readonly ResourceType[]
+): Promise<OperationalSourceResult[]> {
+  const now = Date.now()
+  const sources = operationalSourceDefinitions(resourceTypes)
+  if (sources.length === 0) return []
+  const cacheKey = sources.map(source => source.sourceCode).join(',')
+  let gatewayCache = operationalCatalogCache.get(gateway)
+  if (!gatewayCache) {
+    gatewayCache = new Map()
+    operationalCatalogCache.set(gateway, gatewayCache)
+  }
+  const cached = gatewayCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) return cached.value
   const value = Promise.allSettled(
-    sources.map(source => gateway.listResource(source.plural, source.namespace))
+    sources.map(source => boundedOperationalList(gateway, source))
   ).then(settled => {
     const results: OperationalSourceResult[] = settled.map((result, index) => {
       const sourceCode = sources[index]!.sourceCode
@@ -774,15 +880,16 @@ async function loadOperationalSources(gateway: K8sGateway): Promise<OperationalS
       return {
         sourceCode,
         status: 'fulfilled',
-        resources: Array.isArray(result.value) ? (result.value as K8sShape[]) : [],
+        resources: result.value.resources,
+        capacityExceeded: result.value.capacityExceeded,
       }
     })
     if (results.some(result => result.status === 'rejected')) {
-      operationalCatalogCache.delete(gateway)
+      gatewayCache!.delete(cacheKey)
     }
     return results
   })
-  operationalCatalogCache.set(gateway, {
+  gatewayCache.set(cacheKey, {
     expiresAt: now + OPERATIONAL_CATALOG_CACHE_MS,
     value,
   })
@@ -827,8 +934,14 @@ function propagatePath(
 function hydrateOperationalSeeds(
   dbSeeds: CatalogSeed[],
   results: OperationalSourceResult[],
-  environmentId: string
+  environmentId: string,
+  resourceTypes: readonly ResourceType[]
 ): CatalogSeed[] {
+  const requested = new Set(resourceTypes)
+  const deriveAll = requested.size === 0
+  const deriveMcpServers = deriveAll || requested.has('mcp_server')
+  const deriveSharedFilesystems = deriveAll || requested.has('shared_filesystem')
+  const deriveSandboxApps = deriveAll || requested.has('sandbox_app')
   const hosts = operationalMap(results, 'hosts', config.hostsNamespace)
   const contexts = operationalMap(results, 'contexts', config.contextsNamespace)
   const mcpServers = operationalMap(results, 'mcp_servers', config.mcpServersNamespace)
@@ -899,7 +1012,7 @@ function hydrateOperationalSeeds(
           providerUid: resource.metadata?.uid,
         })
         seed.resourceRevision = providerProjection(resource)
-        if (resource.spec?.ui) {
+        if (resource.spec?.ui && deriveSandboxApps) {
           const appIdentity = canonicalResourceIdentity({
             environmentId,
             type: 'sandbox_app',
@@ -934,11 +1047,12 @@ function hydrateOperationalSeeds(
       const contextName = contextSeed.resource.logicalId.split('/').pop() || ''
       const contextResource = byContextName.get(contextName)
       if (!contextResource) continue
-      const mcpNames = Array.isArray(contextResource.spec?.mcpServers)
-        ? contextResource.spec!.mcpServers!.filter(
-            (value): value is string => typeof value === 'string' && Boolean(value.trim())
-          )
-        : []
+      const mcpNames =
+        deriveMcpServers && Array.isArray(contextResource.spec?.mcpServers)
+          ? contextResource.spec!.mcpServers!.filter(
+              (value): value is string => typeof value === 'string' && Boolean(value.trim())
+            )
+          : []
       for (const name of mcpNames) {
         const logicalId = scopedLogicalId(config.mcpServersNamespace, name.trim())
         const server = mcpServers?.get(logicalId)
@@ -965,7 +1079,9 @@ function hydrateOperationalSeeds(
         })
       }
 
-      for (const reference of contextResource.spec?.sharedFileSystems ?? []) {
+      for (const reference of deriveSharedFilesystems
+        ? (contextResource.spec?.sharedFileSystems ?? [])
+        : []) {
         const name = reference.name?.trim()
         const mountPath = reference.mountPath?.trim()
         if (!name || !mountPath) continue
@@ -1004,7 +1120,7 @@ function hydrateOperationalSeeds(
     // Existing Host discovery authorizes connector names through the Host's
     // Context relationship even when the user has no independent Context grant.
     // Preserve that producer rule while keeping the Host grant as provenance.
-    for (const { contextName, host } of hostContextPaths) {
+    for (const { contextName, host } of deriveMcpServers ? hostContextPaths : []) {
       const contextResource = byContextName.get(contextName)
       if (!contextResource) continue
       const mcpNames = Array.isArray(contextResource.spec?.mcpServers)
@@ -1064,6 +1180,7 @@ function revisionFor(snapshot: AuthoritySnapshot, seeds: readonly CatalogSeed[])
         snapshot.userId,
         snapshot.sessionVersion,
         snapshot.userRevision,
+        snapshot.resourceRevisionWatermark,
         snapshot.memberships.map(membership => [
           membership.teamId,
           membership.role,
@@ -1076,9 +1193,69 @@ function revisionFor(snapshot: AuthoritySnapshot, seeds: readonly CatalogSeed[])
     .digest('base64url')
 }
 
+function authoritySnapshotCacheKey(
+  snapshot: AuthoritySnapshot,
+  filters: readonly ResourceType[]
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        snapshot.userId,
+        snapshot.sessionVersion,
+        snapshot.userRevision,
+        snapshot.resourceRevisionWatermark,
+        snapshot.memberships.map(membership => [
+          membership.teamId,
+          membership.role,
+          membership.membershipUpdatedAt,
+          membership.teamRevision,
+        ]),
+        filters,
+      ])
+    )
+    .digest('base64url')
+}
+
+function cachedSnapshot(
+  gateway: K8sGateway,
+  key: string,
+  now: number
+): CachedCatalogSnapshot | null {
+  const cache = catalogSnapshotCache.get(gateway)
+  const entry = cache?.get(key)
+  if (!entry) return null
+  if (entry.expiresAt <= now) {
+    cache!.delete(key)
+    return null
+  }
+  return entry
+}
+
+function storeCachedSnapshot(
+  gateway: K8sGateway,
+  key: string,
+  entry: Omit<CachedCatalogSnapshot, 'expiresAt'>,
+  now: number
+): void {
+  let cache = catalogSnapshotCache.get(gateway)
+  if (!cache) {
+    cache = new Map()
+    catalogSnapshotCache.set(gateway, cache)
+  }
+  cache.delete(key)
+  cache.set(key, { ...entry, expiresAt: now + ACCESS_CATALOG_SNAPSHOT_CACHE_MS })
+  while (cache.size > ACCESS_CATALOG_SNAPSHOT_CACHE_ENTRIES_PER_GATEWAY) {
+    const oldest = cache.keys().next().value as string | undefined
+    if (!oldest) break
+    cache.delete(oldest)
+  }
+}
+
 function fingerprint(label: string, value: string | null): string | undefined {
   if (!value) return undefined
-  return `fp1_${createHash('sha256').update(`${label}\u0000${value}`).digest('base64url')}`
+  return `fp1_${createHmac('sha256', config.sessionJwtPrivateKey)
+    .update(`access-catalog-descriptor\u0000${label}\u0000${value}`)
+    .digest('base64url')}`
 }
 
 function safePath(path: AccessPath, seed: CatalogPathSeed): AccessCatalogPath {
@@ -1246,13 +1423,23 @@ export async function buildAccessCatalog(
   const environmentId = canonicalEnvironmentId()
   const filters = [...new Set(query.resourceTypes ?? [])].sort()
   const authoritySourceTypes = catalogAuthoritySourceTypes(filters)
+  const cursor = query.cursor ? decodeCursor(query.cursor) : null
   let snapshot: AuthoritySnapshot | null = null
   let rows: DbSeedRow[] = []
+  let cacheKey = ''
+  let catalogSnapshot: CachedCatalogSnapshot | null = null
+  const cacheNow = Date.now()
   try {
     await withTransaction(async db => {
       await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-      snapshot = await loadAuthoritySnapshot(db, claims)
+      await db.query(`SELECT set_config('statement_timeout', $1, TRUE)`, [
+        String(ACCESS_CATALOG_STATEMENT_TIMEOUT_MS),
+      ])
+      snapshot = await loadAuthoritySnapshot(db, claims, environmentId)
       if (!snapshot) return
+      cacheKey = authoritySnapshotCacheKey(snapshot, filters)
+      catalogSnapshot = cachedSnapshot(gateway, cacheKey, cacheNow)
+      if (catalogSnapshot) return
       const grants = await db.query(accessCatalogGrantSql(), [
         claims.userId,
         environmentId,
@@ -1268,48 +1455,63 @@ export async function buildAccessCatalog(
     throw new AccessCatalogAuthorityUnavailableError(options.correlationId)
   }
   if (!snapshot) throw new AccessCatalogInvalidSessionError()
-  if (rows.some(row => row.snapshot_resource_limit_exceeded || row.snapshot_path_limit_exceeded)) {
-    throw new AccessCatalogCapacityError(options.correlationId)
-  }
-
-  const dbSeeds = mergeCatalogSeeds(
-    rows.flatMap(row => {
-      const seed = rowToSeed(row, environmentId, claims.userId)
-      return seed ? [seed] : []
-    })
-  )
-  const operational = await loadOperationalSources(gateway)
-  if (
-    operational.some(
-      source =>
-        source.status === 'fulfilled' &&
-        source.resources.length > ACCESS_CATALOG_MAX_OPERATIONAL_RESOURCES_PER_SOURCE
+  if (!catalogSnapshot) {
+    if (
+      rows.some(row => row.snapshot_resource_limit_exceeded || row.snapshot_path_limit_exceeded)
+    ) {
+      throw new AccessCatalogCapacityError(options.correlationId)
+    }
+    const dbSeeds = mergeCatalogSeeds(
+      rows.flatMap(row => {
+        const seed = rowToSeed(row, environmentId, claims.userId)
+        return seed ? [seed] : []
+      })
     )
-  ) {
-    throw new AccessCatalogCapacityError(options.correlationId)
+    const operational = await loadOperationalSources(gateway, filters)
+    if (operational.some(source => source.status === 'fulfilled' && source.capacityExceeded)) {
+      throw new AccessCatalogCapacityError(options.correlationId)
+    }
+    const partialErrors: AccessCatalogPartialError[] = operational.flatMap(source =>
+      source.status === 'rejected'
+        ? [
+            {
+              sourceCode: source.sourceCode,
+              category: 'operational_source_unavailable' as const,
+              retryable: true as const,
+            },
+          ]
+        : []
+    )
+    const hydrated = hydrateOperationalSeeds(dbSeeds, operational, environmentId, filters)
+    if (
+      hydrated.length > ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES ||
+      hydrated.reduce((count, seed) => count + seed.pathSeeds.length, 0) >
+        ACCESS_CATALOG_MAX_SNAPSHOT_PATHS
+    ) {
+      throw new AccessCatalogCapacityError(options.correlationId)
+    }
+    catalogSnapshot = {
+      expiresAt: cacheNow + ACCESS_CATALOG_SNAPSHOT_CACHE_MS,
+      authorizationRevision: revisionFor(snapshot, hydrated),
+      hydrated,
+      partialErrors,
+    }
+    storeCachedSnapshot(
+      gateway,
+      cacheKey,
+      {
+        authorizationRevision: catalogSnapshot.authorizationRevision,
+        hydrated: catalogSnapshot.hydrated,
+        partialErrors: catalogSnapshot.partialErrors,
+      },
+      cacheNow
+    )
   }
-  const partialErrors: AccessCatalogPartialError[] = operational.flatMap(source =>
-    source.status === 'rejected'
-      ? [
-          {
-            sourceCode: source.sourceCode,
-            category: 'operational_source_unavailable' as const,
-            retryable: true as const,
-            ...(options.correlationId ? { correlationId: options.correlationId } : {}),
-          },
-        ]
-      : []
-  )
-  const hydrated = hydrateOperationalSeeds(dbSeeds, operational, environmentId)
-  if (
-    hydrated.length > ACCESS_CATALOG_MAX_SNAPSHOT_RESOURCES ||
-    hydrated.reduce((count, seed) => count + seed.pathSeeds.length, 0) >
-      ACCESS_CATALOG_MAX_SNAPSHOT_PATHS
-  ) {
-    throw new AccessCatalogCapacityError(options.correlationId)
-  }
-  const authorizationRevision = revisionFor(snapshot, hydrated)
-  const cursor = query.cursor ? decodeCursor(query.cursor) : null
+  const { authorizationRevision, hydrated } = catalogSnapshot
+  const partialErrors = catalogSnapshot.partialErrors.map(error => ({
+    ...error,
+    ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+  }))
   if (
     cursor &&
     (cursor.revision !== authorizationRevision ||

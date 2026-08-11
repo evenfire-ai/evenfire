@@ -196,6 +196,31 @@ export class ResourceService {
     return res.items || []
   }
 
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    limit: number,
+    continueToken?: string
+  ): Promise<{ items: unknown[]; continueToken?: string; resourceVersion?: string }> {
+    if (namespace === '*') throw new Error('Bounded resource pages require one explicit namespace')
+    const resolvedNamespace = this.resolveNamespace(plural, namespace)
+    const res = (await this.customApi.listNamespacedCustomObject({
+      group: CLERUM_GROUP,
+      version: CLERUM_VERSION,
+      namespace: resolvedNamespace,
+      plural,
+      limit,
+      ...(continueToken ? { _continue: continueToken } : {}),
+    })) as unknown as ResourceListResponse
+    const next = res.metadata?.continue?.trim()
+    const resourceVersion = res.metadata?.resourceVersion?.trim()
+    return {
+      items: res.items || [],
+      ...(next ? { continueToken: next } : {}),
+      ...(resourceVersion ? { resourceVersion } : {}),
+    }
+  }
+
   async getResource(
     plural: ClerumResourceType,
     name: string,

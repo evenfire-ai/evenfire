@@ -222,6 +222,15 @@ export class K8sGateway {
     return this.resources.listResource(plural, namespace)
   }
 
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    limit: number,
+    continueToken?: string
+  ): Promise<{ items: unknown[]; continueToken?: string; resourceVersion?: string }> {
+    return this.resources.listResourcePage(plural, namespace, limit, continueToken)
+  }
+
   async getResource(
     plural: ClerumResourceType,
     name: string,

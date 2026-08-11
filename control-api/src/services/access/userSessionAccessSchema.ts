@@ -233,6 +233,9 @@ export async function applyLegacySessionRevocationFoundation(db: DbClient): Prom
 
 export async function applyAccessCatalogPerformanceFoundation(db: DbClient): Promise<void> {
   await db.query(`
+    CREATE INDEX IF NOT EXISTS authorization_resource_revisions_environment_updated_idx
+      ON authorization_resource_revisions (environment_id, updated_at DESC);
+
     CREATE INDEX IF NOT EXISTS workflow_runs_actor_recipe_run_idx
       ON workflow_runs (
         actor_type,

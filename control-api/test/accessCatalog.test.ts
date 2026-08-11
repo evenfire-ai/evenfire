@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
   snapshot: {
     user_id: '00000000-0000-4000-8000-000000000001',
     user_revision: 5,
+    resource_revision_watermark: '',
     session_version: 1,
     session_live: true,
     memberships: [
@@ -41,6 +42,7 @@ const state = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   failAuthority: false,
   queryCount: 0,
+  grantQueryCount: 0,
   resolverRows: [] as Record<string, unknown>[],
 }))
 
@@ -53,12 +55,15 @@ vi.mock('../src/db.js', () => ({
           if (state.failAuthority)
             throw new Error('secret-like database endpoint /var/run/postgresql')
           if (sql.startsWith('SET TRANSACTION')) return { rows: [], rowCount: 0 }
+          if (sql.includes("set_config('statement_timeout'")) return { rows: [], rowCount: 1 }
           if (sql.includes('AS session_live')) return { rows: [state.snapshot], rowCount: 1 }
           if (sql.includes('WITH requested AS') || sql.includes('WITH context_names AS')) {
             return { rows: state.resolverRows, rowCount: state.resolverRows.length }
           }
-          if (sql.includes('catalog_paths AS'))
+          if (sql.includes('catalog_paths AS')) {
+            state.grantQueryCount += 1
             return { rows: state.rows, rowCount: state.rows.length }
+          }
           throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
         },
       })
@@ -170,6 +175,7 @@ function gateway(options: { fail?: string; duplicateMounts?: boolean } = {}) {
 describe('aggregate access catalog', () => {
   beforeEach(() => {
     state.snapshot.user_revision = 5
+    state.snapshot.resource_revision_watermark = ''
     state.snapshot.memberships = [
       {
         teamId: '00000000-0000-4000-8000-000000000010',
@@ -189,6 +195,7 @@ describe('aggregate access catalog', () => {
     state.rows = []
     state.failAuthority = false
     state.queryCount = 0
+    state.grantQueryCount = 0
     state.resolverRows = []
   })
 
@@ -215,6 +222,58 @@ describe('aggregate access catalog', () => {
     invalidateAccessCatalogOperationalCache(cachedGateway as never)
     await buildAccessCatalog(claims, cachedGateway as never)
     expect(cachedGateway.listResource).toHaveBeenCalledTimes(10)
+  })
+
+  it('skips unrelated operational families for a filtered database-only catalog', async () => {
+    state.rows = [
+      row({
+        resource_type: 'notification',
+        logical_id: '00000000-0000-4000-8000-000000000900',
+        display_name: 'workflow.finished',
+        grant_id: 'notification_deliveries:00000000-0000-4000-8000-000000000900',
+        capabilities: ['notification.read'],
+      }),
+    ]
+    const filteredGateway = gateway()
+
+    const result = await buildAccessCatalog(claims, filteredGateway as never, {
+      resourceTypes: ['notification'],
+    })
+
+    expect(result.items).toHaveLength(1)
+    expect(filteredGateway.listResource).not.toHaveBeenCalled()
+  })
+
+  it('uses a bounded Kubernetes page and fails closed when a source continues', async () => {
+    state.rows = [row()]
+    const boundedGateway = {
+      listResource: vi.fn(),
+      listResourcePage: vi.fn(async () => ({ items: [], continueToken: 'more' })),
+    }
+
+    await expect(
+      buildAccessCatalog(claims, boundedGateway as never, { resourceTypes: ['host'] })
+    ).rejects.toBeInstanceOf(AccessCatalogCapacityError)
+    expect(boundedGateway.listResourcePage).toHaveBeenCalledWith('hosts', 'mcp-host', 10_001)
+    expect(boundedGateway.listResource).not.toHaveBeenCalled()
+  })
+
+  it('reuses one bounded authority snapshot across cursor pages', async () => {
+    state.rows = [row(), row({ logical_id: 'agent-b', grant_id: 'user-1:agent-b' })]
+    const cachedGateway = gateway()
+    const first = await buildAccessCatalog(claims, cachedGateway as never, { limit: 1 })
+    expect(first.nextCursor).toBeDefined()
+    expect(state.grantQueryCount).toBe(1)
+    expect(cachedGateway.listResource).toHaveBeenCalledTimes(5)
+
+    const second = await buildAccessCatalog(claims, cachedGateway as never, {
+      limit: 1,
+      cursor: first.nextCursor,
+    })
+
+    expect(second.items).toHaveLength(1)
+    expect(state.grantQueryCount).toBe(1)
+    expect(cachedGateway.listResource).toHaveBeenCalledTimes(5)
   })
 
   it('merges one immutable resource across direct and every live team path', async () => {
@@ -273,7 +332,7 @@ describe('aggregate access catalog', () => {
     )
     expect(filesystem?.capabilities).toEqual(['shared_filesystem.read'])
     expect(JSON.stringify(result)).not.toContain('secret')
-    expect(state.queryCount).toBe(3)
+    expect(state.queryCount).toBe(4)
   })
 
   it('paginates after union/deduplication and rejects a changed revision', async () => {
@@ -315,6 +374,7 @@ describe('aggregate access catalog', () => {
     expect(first.nextCursor).toMatch(/^ac2\./)
 
     state.rows = [row({ authorization_resource_revision: 8 })]
+    state.snapshot.resource_revision_watermark = '2026-08-10T13:00:00.000Z'
     await expect(
       buildAccessCatalog(claims, gateway() as never, { limit: 1, cursor: first.nextCursor })
     ).rejects.toEqual(
@@ -734,6 +794,6 @@ describe('aggregate access catalog', () => {
     )
     const result = await buildAccessCatalog(claims, gateway() as never, { limit: 100 })
     expect(result.items.find(item => item.resource.type === 'host')?.accessPaths).toHaveLength(250)
-    expect(state.queryCount).toBe(3)
+    expect(state.queryCount).toBe(4)
   })
 })

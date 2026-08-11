@@ -95,6 +95,7 @@ describe('user-session and authorization revision foundation migration', () => {
     await migration!.apply({ query })
     const sql = query.mock.calls.map(call => String(call[0])).join('\n')
 
+    expect(sql).toContain('authorization_resource_revisions_environment_updated_idx')
     expect(sql).toContain('workflow_runs_actor_recipe_run_idx')
     expect(sql).toContain('workflow_runs_team_recipe_run_idx')
     expect(sql).toContain('workflow_runs_usage_team_recipe_run_idx')

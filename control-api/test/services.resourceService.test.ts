@@ -19,6 +19,43 @@ function makeConflictError(): Error & { statusCode: number } {
   return err
 }
 
+describe('ResourceService.listResourcePage', () => {
+  it('passes a server-side limit and preserves the opaque continuation token', async () => {
+    const customApi = {
+      listNamespacedCustomObject: vi.fn(async () => ({
+        items: [{ metadata: { name: 'host-a' } }],
+        metadata: { continue: 'opaque-next', resourceVersion: '42' },
+      })),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+
+    const page = await service.listResourcePage('hosts', 'mcp-host', 101, 'opaque-current')
+
+    expect(customApi.listNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: 'mcp-host',
+        plural: 'hosts',
+        limit: 101,
+        _continue: 'opaque-current',
+      })
+    )
+    expect(page).toEqual({
+      items: [{ metadata: { name: 'host-a' } }],
+      continueToken: 'opaque-next',
+      resourceVersion: '42',
+    })
+  })
+
+  it('rejects a wildcard namespace so one page cannot hide cross-namespace fan-out', async () => {
+    const service = new ResourceService({} as never, 'control-plane', { hosts: 'mcp-host' })
+    await expect(service.listResourcePage('hosts', '*', 100)).rejects.toThrow(
+      'one explicit namespace'
+    )
+  })
+})
+
 describe('ResourceService.getResource', () => {
   it('does not fall back cluster-wide when an explicit namespace probe misses', async () => {
     const customApi = {
