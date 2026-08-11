@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { vi } from 'vitest'
+import { OPERATIONAL_SOURCE_FAMILIES } from '../src/services/access/operationalAccessProjection.js'
 import {
   CATALOG_FAMILIES,
   type ConfiguredUserAccessIntent,
@@ -6,9 +8,10 @@ import {
   UserAccessPolicyConfigurationError,
   compareSemanticVersions,
   compileUserAccessPolicy,
-  effectiveUserAccessPolicy,
   loadConfiguredUserAccessIntent,
+  reconstructionReadiness,
 } from '../src/services/access/userAccessPolicy.js'
+import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAccessRuntimePolicy.js'
 
 const allFamilies = new Set(CATALOG_FAMILIES)
 
@@ -59,7 +62,9 @@ function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentRead
 describe('central user-access rollout compiler', () => {
   it('keeps the reconstruction defaults dual-compatible and user-visible gates off', () => {
     expect(loadConfiguredUserAccessIntent({})).toEqual(intent())
-    expect(effectiveUserAccessPolicy).toMatchObject({
+    expect(
+      compileUserAccessPolicy(loadConfiguredUserAccessIntent({}), reconstructionReadiness)
+    ).toMatchObject({
       acceptV1: true,
       issueV1: true,
       acceptV2: true,
@@ -73,7 +78,7 @@ describe('central user-access rollout compiler', () => {
       desktopAllTeamMode: false,
       profileV2Mode: false,
       enforceMinimumClient: false,
-      advertisedCatalogFamilies: CATALOG_FAMILIES,
+      advertisedCatalogFamilies: [],
     })
   })
 
@@ -220,5 +225,114 @@ describe('central user-access rollout compiler', () => {
     expect(compareSemanticVersions('2.3.0', '2.3.0')).toBe(0)
     expect(compareSemanticVersions('2.2.9', '2.3.0')).toBe(-1)
     expect(compareSemanticVersions('unbounded', '2.3.0')).toBeNull()
+  })
+
+  it('advertises shadow only from a fresh complete runtime readiness snapshot', async () => {
+    const now = new Date('2026-08-11T10:00:00.000Z')
+    const query = vi.fn().mockResolvedValue({
+      rows: OPERATIONAL_SOURCE_FAMILIES.map((source_family, index) => ({
+        source_family,
+        generation: index + 1,
+        resource_version: String(index + 10),
+        status: 'current',
+        last_success_at: new Date(now.getTime() - 1_000),
+      })),
+    })
+
+    const policy = await resolveEffectiveUserAccessPolicy({
+      intent: intent({ catalogMode: 'shadow' }),
+      db: { query } as never,
+      indexerEnabled: true,
+      readinessMaxAgeMs: 5_000,
+      now,
+    })
+
+    expect(policy.computeCatalogShadow).toBe(true)
+    expect(policy.advertisedCatalogFamilies).toEqual(CATALOG_FAMILIES)
+    expect(query).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['missing', OPERATIONAL_SOURCE_FAMILIES.slice(1), 'catalog_shadow_families_incomplete'],
+    ['mixed', OPERATIONAL_SOURCE_FAMILIES, 'catalog_shadow_families_incomplete'],
+    ['expired', OPERATIONAL_SOURCE_FAMILIES, 'catalog_shadow_families_incomplete'],
+  ])(
+    'fails shadow readiness closed for a %s operational snapshot',
+    async (kind, families, code) => {
+      const now = new Date('2026-08-11T10:00:00.000Z')
+      const query = vi.fn().mockResolvedValue({
+        rows: families.map((source_family, index) => ({
+          source_family,
+          generation: index + 1,
+          resource_version: String(index + 10),
+          status: kind === 'mixed' && index === 0 ? 'relisting' : 'current',
+          last_success_at: new Date(now.getTime() - (kind === 'expired' ? 5_001 : 1_000)),
+        })),
+      })
+
+      await expect(
+        resolveEffectiveUserAccessPolicy({
+          intent: intent({ catalogMode: 'shadow' }),
+          db: { query } as never,
+          indexerEnabled: true,
+          readinessMaxAgeMs: 5_000,
+          now,
+        })
+      ).rejects.toThrowError(new UserAccessPolicyConfigurationError(code))
+    }
+  )
+
+  it('does not query operational readiness or advertise families while catalog rollout is off', async () => {
+    const query = vi.fn()
+    const policy = await resolveEffectiveUserAccessPolicy({
+      intent: intent(),
+      db: { query } as never,
+      indexerEnabled: true,
+      readinessMaxAgeMs: null,
+    })
+
+    expect(query).not.toHaveBeenCalled()
+    expect(policy.advertisedCatalogFamilies).toEqual([])
+    expect(policy.computeCatalogShadow).toBe(false)
+  })
+
+  it('fails configured shadow closed when freshness evidence or its authority is unavailable', async () => {
+    await expect(
+      resolveEffectiveUserAccessPolicy({
+        intent: intent({ catalogMode: 'shadow' }),
+        indexerEnabled: true,
+        readinessMaxAgeMs: null,
+      })
+    ).rejects.toThrowError(new UserAccessPolicyConfigurationError('readiness_snapshot_unavailable'))
+
+    await expect(
+      resolveEffectiveUserAccessPolicy({
+        intent: intent({ catalogMode: 'shadow' }),
+        db: { query: vi.fn().mockRejectedValue(new Error('authority unavailable')) } as never,
+        indexerEnabled: true,
+        readinessMaxAgeMs: 5_000,
+      })
+    ).rejects.toThrowError(new UserAccessPolicyConfigurationError('readiness_snapshot_unavailable'))
+  })
+
+  it('rejects an unparseable runtime readiness row', async () => {
+    await expect(
+      resolveEffectiveUserAccessPolicy({
+        intent: intent({ catalogMode: 'shadow' }),
+        db: {
+          query: vi.fn().mockResolvedValue({
+            rows: [{ source_family: 'host', generation: 'invalid' }],
+          }),
+        } as never,
+        indexerEnabled: true,
+        readinessMaxAgeMs: 5_000,
+      })
+    ).rejects.toThrowError(new UserAccessPolicyConfigurationError('runtime_readiness_invalid'))
+  })
+
+  it('keeps PR 1 action context unavailable even when configured', async () => {
+    await expect(
+      resolveEffectiveUserAccessPolicy({ intent: intent({ actionContextV2: true }) })
+    ).rejects.toThrowError(new UserAccessPolicyConfigurationError('action_context_unavailable'))
   })
 })

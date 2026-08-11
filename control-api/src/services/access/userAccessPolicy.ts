@@ -163,14 +163,17 @@ export function compileUserAccessPolicy(
     )
   }
 
-  const advertisedCatalogFamilies = intersection(
-    readiness.catalogRegisteredFamilies,
-    readiness.catalogHarnessFamilies,
-    readiness.catalogOperationalFamilies
-  )
-  const everyCatalogFamilyReady = hasEveryCatalogFamily(advertisedCatalogFamilies)
   const wantsShadow = intent.catalogMode === 'shadow' || intent.catalogMode === 'serve_and_shadow'
   const wantsServe = intent.catalogMode === 'serve' || intent.catalogMode === 'serve_and_shadow'
+  const advertisedCatalogFamilies =
+    wantsShadow || wantsServe
+      ? intersection(
+          readiness.catalogRegisteredFamilies,
+          readiness.catalogHarnessFamilies,
+          readiness.catalogOperationalFamilies
+        )
+      : []
+  const everyCatalogFamilyReady = hasEveryCatalogFamily(advertisedCatalogFamilies)
 
   if (wantsShadow) {
     requireCondition(acceptV2, 'catalog_shadow_requires_v2_acceptance')
@@ -337,11 +340,13 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   catalogCoordinator: 'ready',
   catalogRegisteredFamilies: new Set<CatalogFamily>(CATALOG_FAMILIES),
   catalogHarnessFamilies: new Set<CatalogFamily>(CATALOG_FAMILIES),
-  catalogOperationalFamilies: new Set<CatalogFamily>(CATALOG_FAMILIES),
+  catalogOperationalFamilies: new Set<CatalogFamily>(),
   catalogShadowComparison: 'ready',
   catalogParityAccepted: false,
   actionSafeRevisions: 'ready',
-  actionContext: 'ready',
+  // The resolver exists for foundation validation, but its public rollout is
+  // owned by the later runtime unit and remains unavailable in PR 1.
+  actionContext: 'unavailable',
   // PR 2 owns the rpc-proxy and mcp-host hops. This stays unavailable in PR 1.
   rpcDelegationAllHops: 'unavailable',
   desktop: 'unavailable',
@@ -350,10 +355,7 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   minimumClientEnforcement: 'unavailable',
 })
 
-export const effectiveUserAccessPolicy = compileUserAccessPolicy(
-  loadConfiguredUserAccessIntent(process.env),
-  reconstructionReadiness
-)
+export const configuredUserAccessIntent = loadConfiguredUserAccessIntent(process.env)
 
 export function userAccessCapabilityManifest(policy: EffectiveUserAccessPolicy): Readonly<{
   policyVersion: string

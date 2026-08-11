@@ -7,6 +7,7 @@ import {
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import {
   issueExternalUserSession,
   selectExternalSessionRepresentation,
@@ -245,13 +246,17 @@ export function createExternalInvitationsRouter(): Router {
         if (memberRegistrationErrorResponse(error)) throw error
         return res.status(400).json({ error: 'invalid_invitation' })
       }
-      const selection = selectExternalSessionRepresentation({
-        version: String(req.header('x-evenfire-client-version') || '').trim() || undefined,
-        requestedContract:
-          req.body?.sessionContract === 'v1' || req.body?.sessionContract === 'v2'
-            ? req.body.sessionContract
-            : undefined,
-      })
+      const policy = await resolveEffectiveUserAccessPolicy()
+      const selection = selectExternalSessionRepresentation(
+        {
+          version: String(req.header('x-evenfire-client-version') || '').trim() || undefined,
+          requestedContract:
+            req.body?.sessionContract === 'v1' || req.body?.sessionContract === 'v2'
+              ? req.body.sessionContract
+              : undefined,
+        },
+        policy
+      )
       if (selection.status !== 'selected') {
         return res.status(426).json({ error: 'upgrade_required' })
       }
@@ -275,7 +280,7 @@ export function createExternalInvitationsRouter(): Router {
             role: result.data.role,
             authenticationMethods: ['invitation'],
           },
-          { db }
+          { db, policy }
         )
         return { data: result.data, issued }
       })

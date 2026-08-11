@@ -1,4 +1,5 @@
 import { type DbClient, withTransaction } from '../../db.js'
+import type { EffectiveUserAccessPolicy } from '../access/userAccessPolicy.js'
 import { passwordLoginData } from '../directory/login.js'
 import {
   type ExternalSessionContract,
@@ -24,6 +25,7 @@ export async function authenticatePasswordAndIssueSession(input: {
   email: string
   password: string
   contract: ExternalSessionContract
+  policy: EffectiveUserAccessPolicy
 }) {
   const login = await passwordLoginData(input)
   if (!login || !('user' in login)) return login
@@ -50,7 +52,7 @@ export async function authenticatePasswordAndIssueSession(input: {
         role: authenticatedLogin.membership.role,
         authenticationMethods: ['pwd'],
       },
-      { db }
+      { db, policy: input.policy }
     )
     return { ...authenticatedLogin, issued }
   })

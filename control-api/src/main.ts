@@ -5,6 +5,7 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
+import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
@@ -58,6 +59,8 @@ async function main(): Promise<void> {
 
   await assertDbReady()
   console.log('[ControlAPI] Database schema ready')
+  const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
+  console.log(`[ControlAPI] User-access policy ready: ${userAccessPolicy.policyRevision}`)
 
   // Observability only (never fatal): report whether this self-hosted deployment
   // holds a registry identity. Auth is derived from credential presence, so a

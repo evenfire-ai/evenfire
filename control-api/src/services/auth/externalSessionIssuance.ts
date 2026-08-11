@@ -4,7 +4,6 @@ import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthTo
 import {
   type EffectiveUserAccessPolicy,
   compareSemanticVersions,
-  effectiveUserAccessPolicy,
 } from '../access/userAccessPolicy.js'
 import type { ExternalSessionClient } from './externalSessionAuthentication.js'
 import { createUserSession } from './userSessionService.js'
@@ -17,7 +16,7 @@ export type ExternalSessionSelection =
 
 export function selectExternalSessionRepresentation(
   client: ExternalSessionClient,
-  policy: EffectiveUserAccessPolicy = effectiveUserAccessPolicy
+  policy: EffectiveUserAccessPolicy
 ): ExternalSessionSelection {
   if (policy.enforceMinimumClient && policy.minimumClientVersion) {
     const comparison = client.version
@@ -52,10 +51,10 @@ export async function issueExternalUserSession(
   },
   options: {
     db?: Pick<DbClient, 'query'>
-    policy?: EffectiveUserAccessPolicy
-  } = {}
+    policy: EffectiveUserAccessPolicy
+  }
 ): Promise<{ token: string; contract: ExternalSessionContract }> {
-  const policy = options.policy ?? effectiveUserAccessPolicy
+  const policy = options.policy
   if (input.contract === 'v2') {
     if (!policy.issueV2 || !policy.acceptV2) {
       throw new Error('user-session v2 issuance is not effective')

@@ -171,6 +171,7 @@ type Config = {
   sharedFilesystemsNamespace: string
   operationalAccessIndexerEnabled: boolean
   operationalAccessIndexerRetryMs: number
+  operationalAccessReadinessMaxAgeMs: number | null
   // Audience claim used by browsing JWTs; must match WSF_JWT_AUDIENCE on
   // the per-SFS wfc Deployment. The signing key is reused from rpcJwtPrivateKey.
   wfcJwtAudience: string
@@ -282,6 +283,16 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${name} must be a positive integer`)
+  }
+  return value
+}
+
+function optionalPositiveIntegerFromEnv(name: string): number | null {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return null
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer when configured`)
   }
   return value
 }
@@ -815,6 +826,11 @@ export const config: Config = {
     'CONTROL_API_OPERATIONAL_ACCESS_INDEXER_RETRY_MS',
     5_000,
     100
+  ),
+  // No production freshness threshold is assumed. Catalog shadow/serve stays
+  // unavailable until an operator supplies a measured maximum source age.
+  operationalAccessReadinessMaxAgeMs: optionalPositiveIntegerFromEnv(
+    'CONTROL_API_OPERATIONAL_ACCESS_READINESS_MAX_AGE_MS'
   ),
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),

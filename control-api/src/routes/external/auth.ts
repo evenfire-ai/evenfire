@@ -5,6 +5,7 @@ import type { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
+import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { authenticateExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import { renewExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import {
@@ -67,24 +68,28 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       const idToken = String(req.body?.idToken || '').trim()
       if (!idToken) return res.status(400).json({ error: 'idToken is required' })
       const google = await verifyGoogleIdToken(idToken)
+      const policy = await resolveEffectiveUserAccessPolicy()
       const login = await googleLoginData({
         email: google.email,
         name: google.name,
         picture: google.picture,
       })
       const role = login.membership.role
-      const selection = selectExternalSessionRepresentation(externalSessionClient(req))
+      const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
       if (selection.status !== 'selected') {
         return res.status(426).json({ error: 'upgrade_required' })
       }
-      const issued = await issueExternalUserSession({
-        contract: selection.contract,
-        userId: login.user.id,
-        email: google.email,
-        teamId: login.membership.team_id || null,
-        role,
-        authenticationMethods: ['google'],
-      })
+      const issued = await issueExternalUserSession(
+        {
+          contract: selection.contract,
+          userId: login.user.id,
+          email: google.email,
+          teamId: login.membership.team_id || null,
+          role,
+          authenticationMethods: ['google'],
+        },
+        { policy }
+      )
       return res.status(200).json({
         token: issued.token,
         sessionContract: issued.contract,
@@ -114,7 +119,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(400).json({ error: 'email and password are required' })
       }
 
-      const selection = selectExternalSessionRepresentation(externalSessionClient(req))
+      const policy = await resolveEffectiveUserAccessPolicy()
+      const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
       if (selection.status !== 'selected') {
         return res.status(426).json({ error: 'upgrade_required' })
       }
@@ -122,6 +128,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         email,
         password,
         contract: selection.contract,
+        policy,
       })
       if (!login) {
         return res.status(401).json({ error: 'Unauthorized' })
@@ -260,14 +267,17 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           deprecated: true,
         })
       }
-      const issued = await issueExternalUserSession({
-        contract: 'v1',
-        userId,
-        email,
-        teamId,
-        role: liveRole,
-        authenticationMethods: [],
-      })
+      const issued = await issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId,
+          email,
+          teamId,
+          role: liveRole,
+          authenticationMethods: [],
+        },
+        { policy: authentication.policy }
+      )
       return res.status(200).json({
         token: issued.token,
         sessionContract: issued.contract,
