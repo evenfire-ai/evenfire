@@ -40,7 +40,7 @@ describe('usePluginPermissionsController', () => {
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('surfaces a failed revoke in the error banner (R1-M4)', async () => {
+  it('surfaces a failed revoke in the error banner, labeled (R1-M4)', async () => {
     installPluginSdk({
       revoke: vi.fn(async () => {
         throw new Error('revoke failed')
@@ -54,11 +54,13 @@ describe('usePluginPermissionsController', () => {
     await act(async () => {
       await result.current.revoke('ns/plugin').catch(() => undefined)
     })
-    // The security action used to fail silently; the banner must now show it.
-    await waitFor(() => expect(result.current.error).toBe('revoke failed'))
+    // The security action used to fail silently; the banner must show it, labeled.
+    await waitFor(() => expect(result.current.error).toBe('Failed to revoke access: revoke failed'))
   })
 
-  it('clears a stale clear-activity error after a later successful revoke (R2-M1)', async () => {
+  // Both masking directions: one action's success must never wipe the OTHER
+  // action's genuine failure, and the label keeps them unambiguous.
+  it('a successful revoke does not mask a prior clear-activity failure (R2-M1)', async () => {
     installPluginSdk({
       clearActivity: vi.fn(async () => {
         throw new Error('clear failed')
@@ -72,13 +74,40 @@ describe('usePluginPermissionsController', () => {
     await act(async () => {
       await result.current.clearActivity().catch(() => undefined)
     })
-    await waitFor(() => expect(result.current.error).toBe('clear failed'))
+    await waitFor(() =>
+      expect(result.current.error).toBe('Failed to clear the activity log: clear failed')
+    )
 
-    // A subsequent SUCCESSFUL revoke must not leave the stale clear-activity
-    // error in the banner (reads as "your revoke failed" when it didn't).
+    // A later SUCCESSFUL revoke must not wipe (or be misread as) the clear failure.
     await act(async () => {
       await result.current.revoke('ns/plugin')
     })
-    await waitFor(() => expect(result.current.error).toBeNull())
+    await waitFor(() =>
+      expect(result.current.error).toBe('Failed to clear the activity log: clear failed')
+    )
+    expect(result.current.error).not.toContain('revoke')
+  })
+
+  it('a successful clear-activity does not mask a prior revoke failure (R3-M1)', async () => {
+    installPluginSdk({
+      revoke: vi.fn(async () => {
+        throw new Error('revoke failed')
+      }),
+    })
+    const { result } = renderHook(() => usePluginPermissionsController(), {
+      wrapper: makeWrapper(),
+    })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.revoke('ns/plugin').catch(() => undefined)
+    })
+    await waitFor(() => expect(result.current.error).toBe('Failed to revoke access: revoke failed'))
+
+    // A later SUCCESSFUL clear-activity must not wipe the revoke failure.
+    await act(async () => {
+      await result.current.clearActivity()
+    })
+    await waitFor(() => expect(result.current.error).toBe('Failed to revoke access: revoke failed'))
   })
 })

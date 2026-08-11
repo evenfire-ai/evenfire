@@ -286,14 +286,6 @@ describe('applySandboxUiNavigationPolicies (dispatch wiring)', () => {
     expect(openExternal).not.toHaveBeenCalled()
   })
 
-  it('still supports the legacy positional oauth callback', () => {
-    const legacyOauth = vi.fn()
-    const fake = makeWebContents()
-    applySandboxUiNavigationPolicies(fake.wc, allowed, legacyOauth)
-    fake.navigate('clerum://oauth?clientId=google-gmail')
-    expect(legacyOauth).toHaveBeenCalledWith('google-gmail', false)
-  })
-
   it('dispatches window.open(gfs://…) and denies the popup', () => {
     const onGfsOpen = vi.fn()
     const fake = makeWebContents()

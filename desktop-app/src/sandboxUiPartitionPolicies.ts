@@ -156,12 +156,9 @@ export type SandboxUiNavigationHandlers = {
 export function applySandboxUiNavigationPolicies(
   webContents: WebContents,
   allowedPrefix: string,
-  handlers?: SandboxUiNavigationHandlers | ((oauthClientId: string, background: boolean) => void)
+  handlers?: SandboxUiNavigationHandlers
 ): void {
-  // Accepts the legacy positional oauth callback so existing call sites and
-  // tests keep working.
-  const resolved: SandboxUiNavigationHandlers =
-    typeof handlers === 'function' ? { onOauthAuthorize: handlers } : (handlers ?? {})
+  const resolved: SandboxUiNavigationHandlers = handlers ?? {}
 
   const dispatch = (outcome: EmbedNavigationOutcome): void => {
     if (outcome.kind === 'external') {

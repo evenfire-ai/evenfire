@@ -83,25 +83,32 @@ export function usePluginPermissionsController() {
     [activityQuery.data]
   )
 
-  // Show the error of the most-recently-submitted action, so a newer success
-  // supersedes an older failure and no stale error lingers. Derived from
-  // submittedAt rather than .reset()-ing the sibling — resetting an in-flight
-  // mutation would drop a real failure and desync isPending. submittedAt is 0
-  // for a mutation that has never run.
-  const latestAction =
-    clearActivityMutation.submittedAt > revokeMutation.submittedAt
-      ? clearActivityMutation
-      : revokeMutation
-  const actionError = latestAction.error ? toErrorMessage(latestAction.error) : null
+  // Surface EACH action's error independently and labeled by action, so one
+  // action's success (or a newer action) never masks another's genuine failure:
+  // a security-relevant revoke that failed must not be silently wiped by an
+  // unrelated clear-activity, and vice versa. React Query holds a mutation's
+  // error until that SAME mutation re-runs, so a lingering error always reflects
+  // a real, still-unaddressed failure of that specific action — and the label
+  // stops it from being misread as the other action's failure.
+  const actionErrors: string[] = []
+  if (revokeMutation.isError) {
+    actionErrors.push(`Failed to revoke access: ${toErrorMessage(revokeMutation.error)}`)
+  }
+  if (clearActivityMutation.isError) {
+    actionErrors.push(
+      `Failed to clear the activity log: ${toErrorMessage(clearActivityMutation.error)}`
+    )
+  }
+  const actionError = actionErrors.length > 0 ? actionErrors.join(' · ') : null
 
   return {
     groups,
     activity,
     loading: grantsQuery.isPending || activityQuery.isPending,
-    // Query errors take precedence; otherwise the most-recent action's error
-    // (null when it succeeded). Without surfacing mutation failures a failed
-    // revoke/clear silently left the UI unchanged, so the user believed a
-    // permission was revoked when it was not.
+    // Query errors take precedence; otherwise every action still in an error
+    // state is surfaced (labeled). Without this a failed revoke/clear silently
+    // left the UI unchanged, so the user believed a permission was revoked when
+    // it was not.
     error: grantsQuery.error
       ? toErrorMessage(grantsQuery.error)
       : activityQuery.error

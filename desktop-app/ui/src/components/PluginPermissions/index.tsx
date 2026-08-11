@@ -124,7 +124,7 @@ export function PluginPermissions() {
                     <span className="da-grid__cell da-grid__cell--right">
                       <Button
                         color="danger"
-                        disabled={controller.revoking}
+                        disabled={controller.revoking || controller.clearingActivity}
                         onClick={() => controller.revoke(group.pluginId).catch(() => undefined)}
                         size="sm"
                         variant="ghost"
@@ -150,7 +150,7 @@ export function PluginPermissions() {
                           <span className="da-grid__cell da-grid__cell--right">
                             <Button
                               color="danger"
-                              disabled={controller.revoking}
+                              disabled={controller.revoking || controller.clearingActivity}
                               onClick={() =>
                                 controller
                                   .revoke(grant.pluginId, grant.capability)
