@@ -81,6 +81,8 @@ async function selectOrdinarySubject(page: Page, ordinaryEmail: string): Promise
   const listbox = page.getByRole('listbox', { name: 'Available people, teams, and agents' })
   await expect(listbox).toBeVisible()
   await listbox.getByRole('option').filter({ hasText: ordinaryEmail }).click()
+  await picker.press('Escape')
+  await expect(listbox).toBeHidden()
 }
 
 function lifecycleDetailFields(detailRef: string | null): Record<string, string> {
