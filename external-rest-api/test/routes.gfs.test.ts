@@ -73,6 +73,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(second.headers['x-ratelimit-remaining']).toBe('0')
     expect(second.body).toEqual({
       error: 'gfs_upload_rate_limited',
+      limit: 'public_edge_requests',
       retryAfterSeconds: expect.any(Number),
     })
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(1)

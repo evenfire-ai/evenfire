@@ -91,6 +91,7 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
       res.setHeader('X-RateLimit-Remaining', '0')
       res.status(429).json({
         error: 'gfs_upload_rate_limited',
+        limit: 'public_edge_requests',
         retryAfterSeconds,
       })
     },
