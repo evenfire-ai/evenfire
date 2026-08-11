@@ -34,7 +34,6 @@ export async function catalogQuery(
 export type BoundedKeyArm = Readonly<{
   sql: string
   orderBy?: string
-  distinctCanonicalBy?: string
   hasValidUntil?: boolean
 }>
 
@@ -44,19 +43,11 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
   const sources = arms
     .map((arm, index) => {
       const definition = typeof arm === 'string' ? { sql: arm } : arm
-      if (definition.distinctCanonicalBy && definition.hasValidUntil) {
-        throw new CatalogProducerContractError('distinct_valid_until_requires_aggregation')
-      }
-      const boundedSql = definition.distinctCanonicalBy
-        ? `SELECT DISTINCT ON (${definition.distinctCanonicalBy}) distinct_arm.*
-             FROM (${definition.sql}) distinct_arm
-            ORDER BY ${definition.distinctCanonicalBy}`
-        : definition.sql
       return `${names[index]} AS MATERIALIZED (
           SELECT bounded_arm.logical_id,
                  ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
                    AS valid_until
-            FROM (${boundedSql}) bounded_arm
+            FROM (${definition.sql}) bounded_arm
           ORDER BY ${definition.orderBy ?? 'logical_id'}
           LIMIT $4
         )`
@@ -66,7 +57,9 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
     .map(name => `SELECT logical_id, valid_until FROM ${name}`)
     .join('\nUNION ALL\n')
   return `WITH ${sources}
-    SELECT logical_id, MIN(valid_until) AS valid_until
+    SELECT logical_id, MIN(valid_until) AS valid_until,
+           ${names.map(name => `(SELECT COUNT(*) FROM ${name}) >= $4`).join(' OR ')}
+             AS source_saturated
       FROM (${union}) bounded_sources
      WHERE $1::uuid IS NOT NULL AND $2::text IS NOT NULL AND $3::text IS NOT NULL
        AND $5::text IS NOT NULL AND $6::text IS NOT NULL AND $7::text IS NOT NULL
@@ -187,8 +180,13 @@ export async function listBoundedProducerKeys(input: {
     throw new CatalogProducerContractError('key_query_exceeded_take')
   }
   const candidates: CatalogIdentityCandidate[] = []
+  let sourceSaturated = false
   let prior = after
   for (const row of result.rows as Record<string, unknown>[]) {
+    if (typeof row.source_saturated !== 'boolean') {
+      throw new CatalogProducerContractError('source_saturation_invalid')
+    }
+    sourceSaturated ||= row.source_saturated
     const logicalId = typeof row.logical_id === 'string' ? row.logical_id : ''
     if (!logicalId || logicalId <= prior) {
       throw new CatalogProducerContractError('keys_not_strictly_ordered')
@@ -208,7 +206,7 @@ export async function listBoundedProducerKeys(input: {
     candidates.push(Object.freeze({ key, canonicalId: `${input.family}:${logicalId}`, validUntil }))
     prior = logicalId
   }
-  const hasMore = candidates.length > input.take
+  const hasMore = candidates.length > input.take || sourceSaturated
   return Object.freeze({
     candidates: Object.freeze(candidates),
     continuation: Object.freeze({
