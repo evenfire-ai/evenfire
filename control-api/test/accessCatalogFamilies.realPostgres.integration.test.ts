@@ -3,20 +3,20 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
-import type { K8sGateway } from '../src/k8s.js'
+import { K8sGateway } from '../src/k8s.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import type { AccessCapability } from '../src/services/access/capabilityRegistry.js'
 import { CATALOG_FAMILIES, type CatalogFamily } from '../src/services/access/catalogContracts.js'
 import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
 import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
 import {
-  OPERATIONAL_SOURCE_FAMILIES,
-  canonicalEnvironmentId,
-  projectOperationalObject,
-} from '../src/services/access/operationalAccessProjection.js'
+  OperationalAccessIndexer,
+  operationalSourceSpecs,
+} from '../src/services/access/operationalAccessIndexer.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -53,6 +53,15 @@ function transaction(pool: Pool) {
   }
 }
 
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('producer_boundary_wait_timeout')
+}
+
 type OperationalFixture = Readonly<{
   plural: 'hosts' | 'contexts' | 'mcpservers' | 'workflowrecipes' | 'sharedfilesystems'
   namespace: string
@@ -66,10 +75,19 @@ function fixture(input: {
   uid: string
   spec?: Readonly<Record<string, unknown>>
 }): OperationalFixture {
+  const kind = {
+    hosts: 'Host',
+    contexts: 'Context',
+    mcpservers: 'McpServer',
+    workflowrecipes: 'WorkflowRecipe',
+    sharedfilesystems: 'SharedFileSystem',
+  }[input.plural]
   return Object.freeze({
     plural: input.plural,
     namespace: input.namespace,
     object: Object.freeze({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind,
       metadata: Object.freeze({
         name: input.name,
         namespace: input.namespace,
@@ -157,21 +175,11 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       uid: 'catalog-files-uid',
     }),
   ]
-  const exactObjects = new Map(
-    operationalFixtures.map(value => {
-      const metadata = value.object.metadata as { name: string }
-      return [`${value.plural}:${value.namespace}/${metadata.name}`, value.object]
-    })
-  )
-  const gateway = {
-    getResourceExact: async (plural: string, name: string, namespace: string) => {
-      const value = exactObjects.get(`${plural}:${namespace}/${name}`)
-      if (!value) throw Object.assign(new Error('not found'), { httpStatus: 404 })
-      return value
-    },
-  } as unknown as Pick<K8sGateway, 'getResourceExact'>
+  const kubernetesApi = new TemporaryKubernetesApi()
   let adminPool: Pool
   let databasePool: Pool
+  let gateway: K8sGateway
+  let indexer: OperationalAccessIndexer
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -179,6 +187,18 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
     databasePool = new Pool({ connectionString })
     await initDb({ connect: () => databasePool.connect() })
+    await kubernetesApi.start()
+    for (const value of operationalFixtures) {
+      kubernetesApi.put(value.plural, value.namespace, value.object)
+    }
+    const priorKubeconfig = process.env.KUBECONFIG
+    process.env.KUBECONFIG = kubernetesApi.kubeconfig()
+    try {
+      gateway = new K8sGateway()
+    } finally {
+      if (priorKubeconfig === undefined) delete process.env.KUBECONFIG
+      else process.env.KUBECONFIG = priorKubeconfig
+    }
 
     await databasePool.query(
       `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Catalog Harness User')`,
@@ -277,53 +297,17 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     )
 
     const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
-    for (const sourceFamily of OPERATIONAL_SOURCE_FAMILIES) {
-      const fixtureForFamily = operationalFixtures.find(value => {
-        const expected = {
-          host: 'hosts',
-          context: 'contexts',
-          mcp_server: 'mcpservers',
-          workflow_recipe: 'workflowrecipes',
-          shared_filesystem: 'sharedfilesystems',
-        } as const
-        return value.plural === expected[sourceFamily]
-      })!
-      const projection = projectOperationalObject({
-        environmentId,
-        plural: fixtureForFamily.plural,
-        namespace: fixtureForFamily.namespace,
-        object: fixtureForFamily.object,
-        behaviorFingerprintKey: config.sessionJwtPrivateKey,
-        relationshipNamespaces: {
-          context: config.contextsNamespace,
-          mcpServer: config.mcpServersNamespace,
-          sharedFilesystem: config.sharedFilesystemsNamespace,
-        },
-      })
-      const budget = AccessExecutionBudget.create('catalog')
-      try {
-        const generation = await index.beginRelist({ environmentId, sourceFamily, budget })
-        await index.stageRelistPage({
-          environmentId,
-          sourceFamily,
-          stagingGeneration: generation,
-          projections: [projection],
-          budget,
-        })
-        await index.promoteRelist({
-          environmentId,
-          sourceFamily,
-          stagingGeneration: generation,
-          resourceVersion: '1',
-          budget,
-        })
-      } finally {
-        budget.close()
-      }
+    indexer = new OperationalAccessIndexer(gateway, index, {
+      environmentId,
+      behaviorFingerprintKey: config.sessionJwtPrivateKey,
+    })
+    for (const source of operationalSourceSpecs) {
+      await indexer.reconcileSource(source)
     }
   })
 
   afterAll(async () => {
+    await kubernetesApi.close()
     await databasePool?.end()
     if (adminPool) {
       await adminPool.query(
@@ -447,5 +431,139 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         item.accessPaths.map(path => JSON.stringify(path.behaviorDescriptors.filesystemScope))
       ).size
     ).toBe(2)
+  })
+
+  it('uses real Kubernetes list and exact-read wire boundaries', async () => {
+    const listRequests = kubernetesApi.requests.filter(request => !request.watch && !request.name)
+    expect(listRequests).toHaveLength(operationalSourceSpecs.length)
+    expect(listRequests.map(request => `${request.namespace}/${request.plural}`).sort()).toEqual(
+      operationalSourceSpecs.map(source => `${source.namespace}/${source.plural}`).sort()
+    )
+    expect(listRequests.every(request => request.limit !== null)).toBe(true)
+    const exactRequests = kubernetesApi.requests.filter(request => request.name)
+    expect(exactRequests.length).toBeGreaterThan(0)
+    expect(
+      new Set(exactRequests.map(request => request.namespace)).has(config.hostsNamespace)
+    ).toBe(true)
+    const sourceStates = await databasePool.query(
+      `SELECT source_family, resource_version, status
+         FROM operational_catalog_source_state
+        WHERE environment_id = $1
+        ORDER BY source_family`,
+      [environmentId]
+    )
+    expect(sourceStates.rows).toHaveLength(operationalSourceSpecs.length)
+    expect(sourceStates.rows.every(row => row.resource_version === '1')).toBe(true)
+    expect(sourceStates.rows.every(row => row.status === 'current')).toBe(true)
+  })
+
+  it('ingests deletion and recreation through the real Kubernetes watch boundary', async () => {
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const original = operationalFixtures.find(value => value.plural === 'hosts')!
+    const controller = new AbortController()
+    const watch = gateway.watchResource(
+      source.plural,
+      source.namespace,
+      '1',
+      controller.signal,
+      (phase, object) => indexer.applyWatchEvent(source, phase, object, controller.signal)
+    )
+    await waitFor(() => kubernetesApi.requests.some(request => request.watch))
+
+    const deleted = {
+      ...original.object,
+      metadata: {
+        ...(original.object.metadata as Record<string, unknown>),
+        resourceVersion: '2',
+      },
+    }
+    kubernetesApi.delete(source.plural, source.namespace, 'catalog-host')
+    kubernetesApi.emitWatch('DELETED', deleted)
+    await waitFor(async () => {
+      const result = await databasePool.query(
+        `SELECT COUNT(*)::int AS count
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      return result.rows[0]?.count === 0
+    })
+
+    const recreated = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'catalog-host',
+      uid: 'catalog-host-uid-recreated',
+      spec: {
+        contextRef: 'catalog-context',
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    }).object
+    const recreatedWithVersion = {
+      ...recreated,
+      metadata: {
+        ...(recreated.metadata as Record<string, unknown>),
+        resourceVersion: '3',
+      },
+    }
+    kubernetesApi.put(source.plural, source.namespace, recreatedWithVersion)
+    kubernetesApi.emitWatch('ADDED', recreatedWithVersion)
+    await waitFor(async () => {
+      const result = await databasePool.query(
+        `SELECT provider_uid, provider_resource_version, deleted_at
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      return (
+        result.rows[0]?.provider_uid === 'catalog-host-uid-recreated' &&
+        result.rows[0]?.provider_resource_version === '3' &&
+        result.rows[0]?.deleted_at === null
+      )
+    })
+
+    const catalog = await buildAccessCatalog(
+      { session, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(catalog.items).toHaveLength(1)
+    const item = catalog.items[0]
+    const resolved = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'host.read',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: item.accessPaths[0].accessPathId,
+      },
+      { transaction: transaction(databasePool), gateway }
+    )
+    expect(resolved.status).toBe('allowed')
+
+    controller.abort('watch_complete')
+    await expect(watch).resolves.toBeUndefined()
+    const watchRequest = kubernetesApi.requests.find(request => request.watch)
+    expect(watchRequest).toEqual(
+      expect.objectContaining({
+        namespace: config.hostsNamespace,
+        plural: 'hosts',
+        resourceVersion: '1',
+      })
+    )
+  })
+
+  it('propagates cancellation through a real Kubernetes list request', async () => {
+    const held = kubernetesApi.holdNextList()
+    const controller = new AbortController()
+    const pending = gateway.listResourcePage('hosts', config.hostsNamespace, {
+      limit: 10,
+      timeoutSeconds: 5,
+      signal: controller.signal,
+    })
+    await held.requested
+    controller.abort(new Error('test_cancelled'))
+    await expect(pending).rejects.toThrow()
+    await held.closed
   })
 })
