@@ -134,7 +134,10 @@ export const MIN_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 1
 export const MAX_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 60 * 60
 export const DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES = 128
 export const MIN_EXTERNAL_EGRESS_MAX_ENTRIES = 8
-export const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 4096
+// Audit L2: at ~150 B/entry across the state + targets annotations, the cap must
+// stay well under Kubernetes' 256KB total-annotation limit or the write fails
+// permanently with a 422. 1300 entries ~= 195KB, a safe ceiling (default is 128).
+export const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key]
@@ -327,18 +330,19 @@ export function loadConfig(): OperatorConfig {
     MIN_EXTERNAL_EGRESS_MAX_ENTRIES,
     MAX_EXTERNAL_EGRESS_MAX_ENTRIES
   )
-  // Startup invariant (plan §5): floor <= interval < overlap. A requeue that is
-  // not strictly below the overlap lets an entry expire before it is refreshed
-  // (reopening the drift window); a floor above the interval is incoherent.
-  // Fail loud rather than run with an unsafe window.
+  // Startup invariant (plan §5 + audit L2): floor <= interval <= overlap/2. The
+  // renewal-write window is only overlap/2 wide, so an interval above overlap/2
+  // lets the persisted window lapse before it is refreshed (reopening the drift
+  // window); a floor above the interval is incoherent. Fail loud rather than run
+  // with an unsafe window.
   if (
     !(
       externalEgressRefreshFloorSeconds <= externalEgressRefreshIntervalSeconds &&
-      externalEgressRefreshIntervalSeconds < externalEgressOverlapSeconds
+      externalEgressRefreshIntervalSeconds * 2 <= externalEgressOverlapSeconds
     )
   ) {
     throw new Error(
-      'Invalid external egress accumulator configuration: require floor <= interval < overlap ' +
+      'Invalid external egress accumulator configuration: require floor <= interval <= overlap/2 ' +
         `(got floor=${externalEgressRefreshFloorSeconds}s, interval=${externalEgressRefreshIntervalSeconds}s, ` +
         `overlap=${externalEgressOverlapSeconds}s). Set WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS, ` +
         'WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS, and WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS accordingly.'

@@ -56,7 +56,12 @@ import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
 import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
-import { type FqdnLookup, defaultFqdnLookup, resolveExternalEgress } from './fqdnResolver'
+import {
+  type FqdnLookup,
+  defaultFqdnLookup,
+  isBlockedExternalIPv4,
+  resolveExternalEgress,
+} from './fqdnResolver'
 import { filterByIncludeWhen } from './includeWhenFilter'
 import { resolve as resolveInputs } from './inputResolver'
 import {
@@ -630,25 +635,36 @@ export class RuntimeScopeResolutionPendingError extends Error {
 }
 
 /**
- * A representation-independent signature of a policy's egress: the sorted set of
- * (cidr | except | port/protocol) allow-tuples. Decides whether a write is needed
- * WITHOUT the key-ordering fragility of JSON.stringify (audit R2-1): the
- * apiserver/client deserializes rule objects with keys ordered differently than
- * the builder emits them, so a raw string compare is always unequal on a live
- * cluster and would defeat the no-churn gate. Mirrors HCC's `egressSignature`.
+ * Recursively canonicalize a value: sort every object's keys (order-insensitive
+ * for objects) while PRESERVING array order (egress/to/ports arrays are emitted
+ * in a deterministic order and the apiserver preserves it). Used to compare
+ * policy egress without the key-ordering fragility of a raw JSON.stringify.
  */
-function egressSignature(policy: k8s.V1NetworkPolicy): string {
-  const tuples: string[] = []
-  for (const rule of policy.spec?.egress ?? []) {
-    const ports = (rule.ports ?? []).map(p => `${p.protocol ?? 'TCP'}:${p.port ?? '*'}`).sort()
-    const portList = ports.length > 0 ? ports : ['*']
-    for (const to of rule.to ?? []) {
-      const cidr = to.ipBlock?.cidr ?? ''
-      const except = (to.ipBlock?.except ?? []).slice().sort().join('+')
-      for (const port of portList) tuples.push(`${cidr}|${except}|${port}`)
-    }
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (value && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = canonicalize(src[k])
+    return out
   }
-  return tuples.sort().join(',')
+  return value
+}
+
+/**
+ * A representation-independent signature of a policy's egress: a canonical
+ * (deep key-sorted) JSON of `spec.egress`. Decides whether a write is needed
+ * WITHOUT the key-ordering fragility of a raw JSON.stringify (audit R2-1): the
+ * apiserver/client deserializes rule objects with keys ordered differently than
+ * the builder emits them, so a raw compare is always unequal on a live cluster
+ * and would defeat the no-churn gate. Unlike the earlier tuple-only signature,
+ * this captures the FULL rule — including `namespaceSelector`/`podSelector` `to`
+ * entries for internal/cluster-local egress (audit H1): a tuple signature over
+ * ipBlock only was blind to selector changes, stranding a stale policy. Mirrors
+ * HCC's `egressSignature`.
+ */
+export function egressSignature(policy: k8s.V1NetworkPolicy): string {
+  return JSON.stringify(canonicalize(policy.spec?.egress ?? []))
 }
 
 export class WorkflowRecipeReconciler {
@@ -3973,8 +3989,22 @@ export class WorkflowRecipeReconciler {
           failures
         )
       }
+      // Audit L3: a transient failure of a newly-added FQDN (with resolving
+      // siblings) does not throw and freezes nothing — surface it so the missing
+      // egress until the next refresh is not silent.
+      if (failures.length > 0) {
+        console.warn(
+          `[WR-Reconciler] ${policyName}: ${failures.length} external egress FQDN(s) failed to resolve this round; policy written without them until the next refresh converges: ${failures
+            .map(f => `${f.fqdn} (${f.retryable ? 'transient' : 'permanent'})`)
+            .join(', ')}`
+        )
+      }
       this.warnEgressAccumulator(policyName, acc)
-      effectiveResolved = acc.resolved
+      // Defense-in-depth (audit M3): rehydrated IPs bypass the fresh CIDR gate,
+      // so re-validate the effective set against blocked ranges before rendering.
+      effectiveResolved = acc.resolved.filter(
+        r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
+      )
       stateAnnotations = acc.annotations
       egressRenewalDue = acc.renewalDue
 
@@ -4410,7 +4440,10 @@ export class WorkflowRecipeReconciler {
           )
         }
         this.warnEgressAccumulator(wlPolicyName, acc)
-        effectiveExternal = acc.resolved
+        // Defense-in-depth (audit M3): re-validate rehydrated IPs vs blocked ranges.
+        effectiveExternal = acc.resolved.filter(
+          r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
+        )
         wlStateAnnotations = acc.annotations
         wlEgressRenewalDue = acc.renewalDue
 

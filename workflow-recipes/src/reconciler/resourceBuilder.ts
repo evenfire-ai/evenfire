@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { createHash, randomBytes } from 'node:crypto'
+import { RESOLVED_AT_ANNOTATION, TARGETS_ANNOTATION } from '@clerum/network-policy-core'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   isPlatformRegistryImage,
@@ -1540,8 +1541,8 @@ function buildEgressProvenanceAnnotations(
   if (resolved.length === 0) return undefined
   const targets = resolved.map(r => `${r.source.fqdn}=${r.cidr}`).join(',')
   return {
-    'clerum.io/egress-fqdn-resolved-at': new Date().toISOString(),
-    'clerum.io/egress-fqdn-targets': targets,
+    [RESOLVED_AT_ANNOTATION]: new Date().toISOString(),
+    [TARGETS_ANNOTATION]: targets,
   }
 }
 

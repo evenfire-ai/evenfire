@@ -261,6 +261,33 @@ test('F3 rehydration hardening: legacy targets with a malformed ip are dropped',
   assert.deepEqual(back.entries.map(e => e.ip), ['140.82.112.3'])
 })
 
+// Audit M2: a hostile/misconfigured authoritative TTL must be clamped so an
+// entry cannot be pinned for years.
+test('M2 TTL clamp: an absurd TTL is bounded to 24h + overlap', () => {
+  const day = 24 * 60 * 60 * 1000
+  const out = core.reconcileEgressState(
+    core.emptyState(),
+    [{ fqdn: 'gh', port: 443, protocol: 'TCP', kind: 'ok', ips: ['1.2.3.4'], ttlMs: 2 ** 31 * 1000 }],
+    1000,
+    CFG
+  )
+  assert.equal(out.entries[0].expiresAt, 1000 + day + CFG.overlapMs, 'TTL clamped to 24h')
+})
+
+// Audit L1: F3 hardening extended to port/expiresAt — a tampered annotation with
+// an out-of-range port or non-finite expiry must be dropped, not rendered as an
+// invalid ipBlock (apiserver 422 loop).
+test('L1 rehydration hardening: entries with an out-of-range port or bad expiry are dropped', () => {
+  const raw = JSON.stringify([
+    { ip: '1.1.1.1', port: 443, protocol: 'TCP', fqdn: 'ok', expiresAt: 9e12, lastObservedAt: 1000 },
+    { ip: '2.2.2.2', port: 1000000000, protocol: 'TCP', fqdn: 'bigport', expiresAt: 9e12, lastObservedAt: 1000 },
+    { ip: '3.3.3.3', port: 0, protocol: 'TCP', fqdn: 'zeroport', expiresAt: 9e12, lastObservedAt: 1000 },
+    { ip: '4.4.4.4', port: 443, protocol: 'TCP', fqdn: 'nanexp', expiresAt: NaN, lastObservedAt: 1000 },
+  ])
+  const back = core.parseState({ [core.STATE_ANNOTATION]: raw }, 2000, CFG)
+  assert.deepEqual(back.entries.map(e => e.ip), ['1.1.1.1'], 'only the valid entry survives')
+})
+
 test('H5 rehydration: legacy egress-fqdn-targets is NOT blanked (bounded grace)', () => {
   const legacy = { [core.TARGETS_ANNOTATION]: 'gh=140.82.112.3/32,gh=140.82.112.4/32' }
   const back = core.parseState(legacy, 1000, CFG)

@@ -428,10 +428,14 @@ export function validateExternalEgressResyncInvariant(cfg: {
         `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be >= the refresh floor (${floor})`
       )
     }
-    if (interval >= overlap) {
+    // Audit L2: the renewal-write window is only overlap/2 wide, so the interval
+    // must be <= overlap/2 (not just < overlap) — otherwise the persisted window
+    // can lapse between refreshes and a rotated-away IP is pruned with grace ~=
+    // interval instead of TTL+overlap.
+    if (interval * 2 > overlap) {
       throw new Error(
-        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be below the overlap window ` +
-          `(${overlap}) so accumulated egress IPs never expire between refreshes (issue #299)`
+        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be <= half the overlap window ` +
+          `(${overlap}/2 = ${overlap / 2}) so the persisted window never lapses between refreshes (issue #299)`
       )
     }
   }

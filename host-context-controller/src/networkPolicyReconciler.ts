@@ -111,26 +111,32 @@ function isAllowedExternalEgressCidr(cidr: string): boolean {
 }
 
 /**
- * A representation-independent signature of a policy's egress: the sorted set of
- * (cidr | except | port/protocol) allow-tuples. Used to decide whether a write is
- * needed WITHOUT the key-ordering fragility of JSON.stringify (audit R2-1): the
- * apiserver/client deserializes rule objects with keys in a different order than
- * the builders emit them, so a raw string compare is always unequal on a live
- * cluster and would defeat the no-churn gate. Comparing this semantic signature
- * is order- and shape-insensitive. Mirrors WRC's `egressSignature`.
+ * Recursively canonicalize a value: sort every object's keys while preserving
+ * array order. Used to compare policy egress without JSON.stringify key-order
+ * fragility.
  */
-function egressSignature(policy: k8s.V1NetworkPolicy): string {
-  const tuples: string[] = []
-  for (const rule of policy.spec?.egress ?? []) {
-    const ports = (rule.ports ?? []).map(p => `${p.protocol ?? 'TCP'}:${p.port ?? '*'}`).sort()
-    const portList = ports.length > 0 ? ports : ['*']
-    for (const to of rule.to ?? []) {
-      const cidr = to.ipBlock?.cidr ?? ''
-      const except = (to.ipBlock?.except ?? []).slice().sort().join('+')
-      for (const port of portList) tuples.push(`${cidr}|${except}|${port}`)
-    }
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (value && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = canonicalize(src[k])
+    return out
   }
-  return tuples.sort().join(',')
+  return value
+}
+
+/**
+ * A representation-independent signature of a policy's egress: a canonical
+ * (deep key-sorted) JSON of `spec.egress`. Decides whether a write is needed
+ * WITHOUT the key-ordering fragility of a raw JSON.stringify (audit R2-1). Unlike
+ * the earlier tuple-only signature (ipBlock cidr/port), this captures the FULL
+ * rule including selector-based `to` entries (audit H1). HCC external-egress
+ * policies are ipBlock-only today, so H1 does not bite here, but this keeps the
+ * gate correct and mirrors WRC's `egressSignature`.
+ */
+export function egressSignature(policy: k8s.V1NetworkPolicy): string {
+  return JSON.stringify(canonicalize(policy.spec?.egress ?? []))
 }
 
 function isPublicDnsHostname(host: string): boolean {
@@ -1010,7 +1016,11 @@ export class NetworkPolicyReconciler {
             now,
             config: coreConfig,
           })
-          cidrs = accumulated.cidrs
+          // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own
+          // annotations) bypass the fresh-snapshot CIDR gate, so a tampered/corrupt
+          // state annotation could union a blocked/private IP. Re-validate the
+          // effective set against the blocked ranges before rendering.
+          cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
           stateAnnotations = accumulated.annotations
           egressRenewalDue = accumulated.renewalDue
           resolvedEgressIPs.push({
@@ -1042,7 +1052,11 @@ export class NetworkPolicyReconciler {
             failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
             continue
           }
-          cidrs = accumulated.cidrs
+          // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own
+          // annotations) bypass the fresh-snapshot CIDR gate, so a tampered/corrupt
+          // state annotation could union a blocked/private IP. Re-validate the
+          // effective set against the blocked ranges before rendering.
+          cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
           stateAnnotations = accumulated.annotations
           // A freeze keeps the SAME set as the live policy → changed=false → no
           // write (no churn while DNS is failing); a genuine change still writes.

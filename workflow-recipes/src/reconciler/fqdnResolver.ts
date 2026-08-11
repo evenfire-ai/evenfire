@@ -58,7 +58,7 @@ function cidrOverlaps(left: string, right: string): boolean {
   return a.start <= b.end && b.start <= a.end
 }
 
-function isBlockedExternalIPv4(ip: string): boolean {
+export function isBlockedExternalIPv4(ip: string): boolean {
   if (ipv4ToNumber(ip) === undefined) return true
   return BLOCKED_EGRESS_CIDRS.some(blocked => cidrOverlaps(`${ip}/32`, blocked))
 }

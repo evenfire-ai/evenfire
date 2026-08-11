@@ -62,6 +62,25 @@ describe('external egress sliding-window config (issue #299)', () => {
     ).rejects.toThrow(/floor/i)
   })
 
+  it('fails loud when the interval exceeds HALF the overlap (audit L2 — grace weakening)', async () => {
+    // interval 200 with overlap 300: 200 <= 300 (old rule) but 200 > 150 (overlap/2)
+    // → the persisted window can lapse between refreshes.
+    await expect(
+      loadConfig({
+        HCC_EXTERNAL_EGRESS_RESYNC_SEC: '200',
+        HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '300',
+      })
+    ).rejects.toThrow(/half the overlap/i)
+  })
+
+  it('accepts interval == overlap/2 exactly', async () => {
+    const { config } = await loadConfig({
+      HCC_EXTERNAL_EGRESS_RESYNC_SEC: '150',
+      HCC_EXTERNAL_EGRESS_OVERLAP_SEC: '300',
+    })
+    expect(config.externalEgressResyncIntervalSec).toBe(150)
+  })
+
   it('allows interval 0 (periodic resync disabled) without tripping the invariant', async () => {
     const { config } = await loadConfig({ HCC_EXTERNAL_EGRESS_RESYNC_SEC: '0' })
     expect(config.externalEgressResyncIntervalSec).toBe(0)
