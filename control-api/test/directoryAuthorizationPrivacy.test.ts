@@ -10,6 +10,8 @@ import {
   resendManagedInvitationForUser,
   revokeManagedInvitationForUser,
   searchDirectory,
+  setInvitationPasswordForEmail,
+  setInvitationPasswordForUser,
   updateManagedMemberRoleForUser,
   updateUserPassword,
 } from '../src/services/directory/membership.js'
@@ -303,8 +305,158 @@ describe('directory privacy and atomic authorization', () => {
 
     expect(result).toMatchObject({ data: { accepted: true, userId: TARGET } })
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(sql).toContain('FOR UPDATE OF i')
+    expect(sql).toContain("AND status = 'pending'")
     expect(sql).not.toContain('UPDATE users')
     expect(sql).not.toContain('UPDATE profiles')
+  })
+
+  it('serializes invitation acceptance behind a concurrent manager revocation', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Invitee',
+      email: 'invitee@example.com',
+      role: 'member',
+      token: 'invitation-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    let status = invitation.status
+    let rowOwner: symbol | null = null
+    const rowWaiters: Array<() => void> = []
+    let releaseManagerCheck!: () => void
+    const managerCheckMayFinish = new Promise<void>(resolve => {
+      releaseManagerCheck = resolve
+    })
+    let managerCheckStarted!: () => void
+    const managerCheckIsRunning = new Promise<void>(resolve => {
+      managerCheckStarted = resolve
+    })
+    let membershipWrites = 0
+
+    mocks.withTransaction.mockImplementation(async work => {
+      const transaction = Symbol('invitation-transaction')
+      const acquireRow = async () => {
+        if (rowOwner === transaction) return
+        while (rowOwner) await new Promise<void>(resolve => rowWaiters.push(resolve))
+        rowOwner = transaction
+      }
+      const releaseRow = () => {
+        if (rowOwner !== transaction) return
+        rowOwner = null
+        rowWaiters.shift()?.()
+      }
+      const query = vi.fn(async (sql: string) => {
+        if (sql.includes('FROM invitations i')) {
+          if (sql.includes('FOR UPDATE OF i')) await acquireRow()
+          if (sql.includes("i.status = 'pending'") && status !== 'pending') {
+            return { rows: [], rowCount: 0 }
+          }
+          return { rows: [{ ...invitation, status }], rowCount: 1 }
+        }
+        if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+          return {
+            rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
+          managerCheckStarted()
+          await managerCheckMayFinish
+          return { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
+        }
+        if (sql.includes("SET status = 'revoked'")) {
+          if (status !== 'pending') return { rows: [], rowCount: 0 }
+          status = 'revoked'
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes("SET status = 'accepted'")) {
+          if (status !== 'pending') return { rows: [], rowCount: 0 }
+          status = 'accepted'
+          return { rows: [{ id: invitation.id }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO team_members')) {
+          membershipWrites += 1
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+      })
+      try {
+        return await work({ query })
+      } finally {
+        releaseRow()
+      }
+    })
+
+    const revoke = revokeManagedInvitationForUser(MANAGER, invitation.id)
+    await managerCheckIsRunning
+    const accept = acceptInvitationForEmail(invitation.email, invitation.token)
+    await Promise.resolve()
+    releaseManagerCheck()
+
+    await expect(revoke).resolves.toMatchObject({ revoked: true })
+    await expect(accept).resolves.toEqual({ error: 'not_pending' })
+    expect(status).toBe('revoked')
+    expect(membershipWrites).toBe(0)
+  })
+
+  it('locks and conditionally consumes password-reset invitations before password writes', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: null,
+      invitee_name: 'Target',
+      email: 'target@example.com',
+      role: 'member',
+      token: 'password-reset-token',
+      status: 'pending',
+      purpose: 'password_reset',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: null,
+    }
+
+    for (const operation of [
+      () => setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password'),
+      () => setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password'),
+    ]) {
+      mocks.query.mockReset()
+      mocks.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM invitations i') && sql.includes('WHERE i.id::text = $1')) {
+          return { rows: [invitation], rowCount: 1 }
+        }
+        if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
+          return {
+            rows: [
+              {
+                id: TARGET,
+                email: invitation.email,
+                name: 'Target',
+                picture: null,
+                password_hash: 'old-password-hash',
+              },
+            ],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+        if (sql.includes("SET status = 'accepted'")) return { rows: [], rowCount: 0 }
+        throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+      })
+
+      await expect(operation()).resolves.toEqual({ error: 'not_pending' })
+      const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+      expect(sql).toContain('FOR UPDATE OF i')
+      expect(sql).toContain("AND status = 'pending'")
+      expect(sql).not.toContain('SET password_hash')
+    }
   })
 
   it.each(['resend', 'revoke'] as const)(

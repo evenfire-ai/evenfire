@@ -77,7 +77,8 @@ function normalizeInvitationPurpose(purpose?: InvitationPurpose): InvitationPurp
 
 async function getInvitationRecordByToken(
   db: Pick<DbClient, 'query'>,
-  token: string
+  token: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
@@ -86,7 +87,8 @@ async function getInvitationRecordByToken(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.token = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [token]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -119,7 +121,8 @@ export function stopDraftInvitationCleanup() {
 async function getInvitationRecordByTokenOrId(
   db: Pick<DbClient, 'query'>,
   token: string,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedToken = token.trim()
   const normalizedInvitationId = invitationId.trim()
@@ -136,7 +139,8 @@ async function getInvitationRecordByTokenOrId(
       WHERE ($1 <> '' AND i.token = $1)
          OR ($2 <> '' AND i.id::text = $2)
       ORDER BY i.created_at DESC
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedToken, normalizedInvitationId]
   )
 
@@ -145,7 +149,8 @@ async function getInvitationRecordByTokenOrId(
 
 async function getInvitationRecordById(
   db: Pick<DbClient, 'query'>,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedInvitationId = invitationId.trim()
   if (!normalizedInvitationId) return null
@@ -157,7 +162,8 @@ async function getInvitationRecordById(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.id::text = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedInvitationId]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -333,6 +339,28 @@ async function applyInvitationMemberships(
   )
 
   return teams
+}
+
+async function acceptPendingMembershipInvitation(
+  db: Pick<DbClient, 'query'>,
+  invitation: InvitationRow,
+  userId: string
+): Promise<boolean> {
+  const consumed = await db.query(
+    `UPDATE invitations
+        SET status = 'accepted',
+            accepted_at = NOW(),
+            accepted_user_id = $2
+      WHERE id = $1
+        AND status = 'pending'
+        AND purpose <> 'password_reset'
+        AND expires_at > NOW()
+  RETURNING id`,
+    [invitation.id, userId]
+  )
+  if ((consumed.rowCount ?? 0) === 0) return false
+  await applyInvitationMemberships(db, invitation, userId)
+  return true
 }
 
 async function insertInvitationTeams(
@@ -1080,7 +1108,7 @@ export async function setInvitationPasswordForUser(
   }
 
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId)
+    const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1109,6 +1137,22 @@ export async function setInvitationPasswordForUser(
     if (user.id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
+    if (invitation.purpose !== 'password_reset' && user.password_hash) {
+      return { error: 'password_already_set' as const }
+    }
+    if (invitation.purpose === 'password_reset') {
+      const consumed = await db.query(
+        `UPDATE invitations
+            SET status = 'accepted',
+                accepted_at = NOW(),
+                accepted_user_id = $2
+          WHERE id = $1
+            AND status = 'pending'
+      RETURNING id`,
+        [invitation.id, user.id]
+      )
+      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
+    }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
@@ -1119,20 +1163,12 @@ export async function setInvitationPasswordForUser(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
+    if (invitation.purpose !== 'password_reset' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (!invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordById(db, invitation.id)
@@ -1166,7 +1202,7 @@ export async function setInvitationPasswordForEmail(
   }
 
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId)
+    const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1192,6 +1228,22 @@ export async function setInvitationPasswordForEmail(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitation.purpose !== 'password_reset' && user.password_hash) {
+      return { error: 'password_already_set' as const }
+    }
+    if (invitation.purpose === 'password_reset') {
+      const consumed = await db.query(
+        `UPDATE invitations
+            SET status = 'accepted',
+                accepted_at = NOW(),
+                accepted_user_id = $2
+          WHERE id = $1
+            AND status = 'pending'
+      RETURNING id`,
+        [invitation.id, user.id]
+      )
+      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
+    }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
@@ -1202,20 +1254,12 @@ export async function setInvitationPasswordForEmail(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
+    if (invitation.purpose !== 'password_reset' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (!invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordById(db, invitation.id)
@@ -1240,7 +1284,9 @@ export async function acceptInvitation(
   invitationId: string
 ) {
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId)
+    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
+      lock: true,
+    })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1263,21 +1309,15 @@ export async function acceptInvitation(
     }
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
@@ -1298,7 +1338,9 @@ export async function acceptInvitation(
 
 export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId)
+    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
+      lock: true,
+    })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1315,21 +1357,15 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
@@ -1351,7 +1387,7 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
 
 export async function acceptInvitationById(email: string, invitationId: string) {
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, invitationId)
+    const invitation = await getInvitationRecordById(db, invitationId, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1368,21 +1404,15 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
