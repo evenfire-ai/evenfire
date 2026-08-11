@@ -78,7 +78,7 @@ async function selectOrdinarySubject(page: Page, ordinaryEmail: string): Promise
   const picker = page.getByRole('combobox', { name: 'Add people, teams, or agents' })
   await expect(picker).toBeVisible({ timeout: 30_000 })
   await picker.fill(ordinaryEmail)
-  const listbox = page.getByRole('listbox', { name: 'Available people and teams' })
+  const listbox = page.getByRole('listbox', { name: 'Available people, teams, and agents' })
   await expect(listbox).toBeVisible()
   await listbox.getByRole('option').filter({ hasText: ordinaryEmail }).click()
 }
