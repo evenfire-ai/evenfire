@@ -18,6 +18,7 @@ import {
   createManagedInvitationForUser,
   createTeamForUser,
   deleteManagedMemberForUser,
+  externalManagedInvitationResponse,
   findMemberRole,
   getCurrentTeam,
   getTeamAgents,
@@ -239,7 +240,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         if ('error' in result) {
           return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
         }
-        return res.status(200).json(result.invitation)
+        return res
+          .status(200)
+          .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
       } catch (error) {
         return next(error)
       }

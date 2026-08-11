@@ -7,6 +7,7 @@ import {
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
   deleteManagedUserForUser,
+  externalManagedInvitationResponse,
   listManageableTeamsForUser,
   listManagedMembersForUser,
   listManagedPendingInvitationsForUser,
@@ -112,7 +113,9 @@ export function createExternalMembersRouter(): Router {
         if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
         return res.status(400).json({ error: 'invalid_payload' })
       }
-      return res.status(201).json(result.invitation)
+      return res
+        .status(201)
+        .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
     } catch (error) {
       return next(error)
     }

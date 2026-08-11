@@ -174,6 +174,55 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.registerInvitation).not.toHaveBeenCalled()
   })
 
+  it('omits the invitation capability from managed creation results', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Invitee',
+      email: 'invitee@example.com',
+      role: 'member',
+      token: 'must-never-leave-control-api',
+      status: 'draft',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE status = 'draft'")) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
+      }
+      if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
+      if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
+      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+        return {
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes("SET status = 'pending'")) {
+        return { rows: [{ ...invitation, status: 'pending' }], rowCount: 1 }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    const result = await createManagedInvitationForUser(
+      MANAGER,
+      invitation.email,
+      [{ teamId: TEAM_A, role: 'member' }],
+      ''
+    )
+
+    expect(result).toMatchObject({ invitation: { id: invitation.id, status: 'pending' } })
+    expect(JSON.stringify(result)).not.toContain(invitation.token)
+    expect((result as { invitation: Record<string, unknown> }).invitation).not.toHaveProperty(
+      'token'
+    )
+  })
+
   it.each(['resend', 'revoke'] as const)(
     'prevents %s after the locked manager authority is gone',
     async operation => {

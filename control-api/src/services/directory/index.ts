@@ -34,6 +34,7 @@ export {
   createInvitationForTeams,
   createSilentInvitationForTeams,
   createManagedInvitationForUser,
+  externalManagedInvitationResponse,
   deleteManagedMemberForUser,
   deleteManagedUserForUser,
   findMemberRole,

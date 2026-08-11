@@ -13,6 +13,10 @@ const directoryMock = vi.hoisted(() => ({
   resendManagedInvitationForUser: vi.fn(),
   revokeManagedInvitationForUser: vi.fn(),
   updateManagedMemberRoleForUser: vi.fn(),
+  externalManagedInvitationResponse: vi.fn((value: Record<string, unknown>) => {
+    const { token: _secretCapability, ...safe } = value
+    return safe
+  }),
 }))
 
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
@@ -44,7 +48,7 @@ describe('external members routes', () => {
 
   it('passes invitee name through managed member invitations', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
-      invitation: { id: 'inv-1' },
+      invitation: { id: 'inv-1', token: 'must-never-leave-control-api' },
     })
 
     await request(makeApp())

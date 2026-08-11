@@ -674,6 +674,13 @@ function invitationForTeamsResponse(invitation: InvitationRow, teams: Invitation
   }
 }
 
+export function externalManagedInvitationResponse(
+  invitation: Record<string, unknown>
+): Record<string, unknown> {
+  const { token: _secretCapability, ...safeInvitation } = invitation
+  return safeInvitation
+}
+
 async function deliverAndActivateInvitation(
   inserted: InvitationWithTeams,
   purpose: InvitationPurpose
@@ -1841,7 +1848,9 @@ export async function createManagedInvitationForUser(
   })
   if ('error' in inserted) return inserted
   return {
-    invitation: await deliverAndActivateInvitation(inserted, 'member_invitation'),
+    invitation: externalManagedInvitationResponse(
+      await deliverAndActivateInvitation(inserted, 'member_invitation')
+    ),
   }
 }
 
