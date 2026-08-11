@@ -326,15 +326,13 @@ export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): Configur
 }
 
 export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
-  revision: 'pr1-reconstruction-auth-v1',
+  revision: 'pr1-reconstruction-auth-v2',
   snapshot: 'current',
   legacySession: 'ready',
   legacySwitchAuthorization: 'ready',
   legacyDrainAccepted: false,
   sessionV2Acceptance: 'ready',
-  // Password verification and session insertion are serialized in the next
-  // compatibility commit; issuance must fail startup until then.
-  sessionV2Issuance: 'unavailable',
+  sessionV2Issuance: 'ready',
   accessBudget: 'unavailable',
   catalogCoordinator: 'unavailable',
   catalogRegisteredFamilies: new Set<CatalogFamily>(),
