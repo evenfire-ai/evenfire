@@ -172,6 +172,11 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
         environment_id, target_type, target_id, source_type,
         source_id, relationship_instance_id
       );
+    CREATE INDEX IF NOT EXISTS operational_relationship_catalog_target_idx
+      ON operational_resource_relationships (
+        environment_id, target_type, relationship_type, target_id,
+        source_type, source_id, relationship_instance_id
+      );
     CREATE INDEX IF NOT EXISTS operational_relationship_generation_idx
       ON operational_resource_relationships (
         environment_id, source_family, source_generation, source_type, source_id
