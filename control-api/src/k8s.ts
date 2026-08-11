@@ -44,6 +44,42 @@ export const ALLOWED_READ_DIRS: readonly string[] = Object.freeze([
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 export const MAX_ARTIFACT_LISTING_BYTES = 1 * 1024 * 1024
 
+export const K8S_WATCH_QUEUE_LIMIT_CLAMPS = Object.freeze({
+  maxPendingEvents: 1_000,
+  maxPendingBytes: 8 * 1024 * 1024,
+  maxObjectBytes: 512 * 1024,
+})
+
+export type K8sWatchQueueLimits = Readonly<{
+  maxPendingEvents: number
+  maxPendingBytes: number
+  maxObjectBytes: number
+}>
+
+export class K8sWatchQueueLimitError extends Error {
+  constructor(readonly limit: keyof K8sWatchQueueLimits) {
+    super(`Kubernetes watch event budget exceeded: ${limit}`)
+    this.name = 'K8sWatchQueueLimitError'
+  }
+}
+
+function resolvedWatchQueueLimits(
+  requested: Partial<K8sWatchQueueLimits> = {}
+): K8sWatchQueueLimits {
+  const resolved: Record<keyof K8sWatchQueueLimits, number> = {
+    ...K8S_WATCH_QUEUE_LIMIT_CLAMPS,
+  }
+  for (const limit of Object.keys(resolved) as Array<keyof K8sWatchQueueLimits>) {
+    const supplied = requested[limit]
+    if (supplied === undefined) continue
+    if (!Number.isSafeInteger(supplied) || supplied < 1 || supplied > resolved[limit]) {
+      throw new Error(`Invalid Kubernetes watch queue limit: ${limit}`)
+    }
+    resolved[limit] = supplied
+  }
+  return Object.freeze(resolved)
+}
+
 export class ExecOutputLimitError extends Error {
   constructor(
     readonly maxBytes: number,
@@ -256,9 +292,11 @@ export class K8sGateway {
     namespace: string,
     resourceVersion: string,
     signal: AbortSignal,
-    onEvent: (phase: string, object: unknown) => void | Promise<void>
+    onEvent: (phase: string, object: unknown) => void | Promise<void>,
+    requestedQueueLimits: Partial<K8sWatchQueueLimits> = {}
   ): Promise<void> {
     this.resources.assertNamespaceAllowed(namespace)
+    const queueLimits = resolvedWatchQueueLimits(requestedQueueLimits)
     const watch = new k8s.Watch(this.kc)
     const path = `/apis/${CLERUM_GROUP}/${CLERUM_VERSION}/namespaces/${encodeURIComponent(
       namespace
@@ -268,6 +306,8 @@ export class K8sGateway {
       let settled = false
       let eventQueue = Promise.resolve()
       let handlerError: unknown
+      let pendingEvents = 0
+      let pendingBytes = 0
       const finish = (error?: unknown) => {
         if (settled) return
         settled = true
@@ -299,12 +339,44 @@ export class K8sGateway {
           { resourceVersion, allowWatchBookmarks: true },
           (phase, object) => {
             if (signal.aborted || handlerError) return
+            let objectBytes: number
+            try {
+              objectBytes = Buffer.byteLength(JSON.stringify(object) ?? 'null', 'utf8')
+            } catch {
+              handlerError = new K8sWatchQueueLimitError('maxObjectBytes')
+              controller?.abort()
+              finish(handlerError)
+              return
+            }
+            const exceededLimit =
+              objectBytes > queueLimits.maxObjectBytes
+                ? 'maxObjectBytes'
+                : pendingEvents + 1 > queueLimits.maxPendingEvents
+                  ? 'maxPendingEvents'
+                  : pendingBytes + objectBytes > queueLimits.maxPendingBytes
+                    ? 'maxPendingBytes'
+                    : null
+            if (exceededLimit) {
+              handlerError = new K8sWatchQueueLimitError(exceededLimit)
+              controller?.abort()
+              finish(handlerError)
+              return
+            }
+            pendingEvents += 1
+            pendingBytes += objectBytes
             eventQueue = eventQueue
-              .then(() => onEvent(phase, object))
+              .then(() => {
+                if (signal.aborted || handlerError) return
+                return onEvent(phase, object)
+              })
               .catch(error => {
                 handlerError = error
                 controller?.abort()
                 finish(error)
+              })
+              .finally(() => {
+                pendingEvents -= 1
+                pendingBytes -= objectBytes
               })
           },
           error => finish(error)
