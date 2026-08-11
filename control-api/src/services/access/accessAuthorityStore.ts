@@ -1,6 +1,7 @@
 import type { DbClient } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import {
   type AccessPathBehavior,
@@ -53,21 +54,13 @@ export type ResourceAuthorityResult = Readonly<{
   validUntil: Date | null
 }>
 
-function rowCountCharge(budget: AccessExecutionBudget, rows: readonly unknown[]): void {
-  if (rows.length > 0) budget.charge({ kind: 'dbRowsReturned', amount: rows.length })
-}
-
 async function query(
   db: Pick<DbClient, 'query'>,
   budget: AccessExecutionBudget,
   text: string,
   values: unknown[]
 ) {
-  return budget.runProducer(async () => {
-    const result = await db.query(text, values)
-    rowCountCharge(budget, result.rows)
-    return result
-  })
+  return runAccessDatabaseQuery(db, budget, text, values)
 }
 
 export function parseAuthorizationMemberships(value: unknown): AuthorizationMembershipRevision[] {
