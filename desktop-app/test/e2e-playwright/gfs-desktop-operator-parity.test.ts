@@ -75,7 +75,7 @@ async function createRootFolder(
 }
 
 async function selectOrdinarySubject(page: Page, ordinaryEmail: string): Promise<void> {
-  const picker = page.getByRole('combobox', { name: 'Add people or teams' })
+  const picker = page.getByRole('combobox', { name: 'Add people, teams, or agents' })
   await expect(picker).toBeVisible({ timeout: 30_000 })
   await picker.fill(ordinaryEmail)
   const listbox = page.getByRole('listbox', { name: 'Available people and teams' })
