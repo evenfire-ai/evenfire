@@ -7,6 +7,10 @@ const directoryMock = vi.hoisted(() => ({
   createManagedInvitationForUser: vi.fn(),
   deleteManagedMemberForUser: vi.fn(),
   deleteManagedUserForUser: vi.fn(),
+  externalManagedInvitationResponse: vi.fn((value: Record<string, unknown>) => {
+    const { token: _token, ...safe } = value
+    return safe
+  }),
   listManageableTeamsForUser: vi.fn(),
   listManagedMembersForUser: vi.fn(),
   listManagedPendingInvitationsForUser: vi.fn(),
@@ -44,7 +48,7 @@ describe('external members routes', () => {
 
   it('passes invitee name through managed member invitations', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
-      invitation: { id: 'inv-1' },
+      invitation: { id: 'inv-1', token: 'secret' },
     })
 
     await request(makeApp())

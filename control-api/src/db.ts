@@ -6,6 +6,7 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { applyUserAccessFoundationSchema } from './services/access/userAccessFoundationSchema.js'
+import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5467,6 +5468,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0091_user_access_foundation',
     apply: applyUserAccessFoundationSchema,
+  },
+  {
+    version: '0092_invitation_delivery_commands',
+    apply: applyInvitationDeliveryCommandFoundation,
   },
 ]
 

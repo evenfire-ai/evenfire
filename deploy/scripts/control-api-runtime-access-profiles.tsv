@@ -29,6 +29,7 @@ infrastructure_cost_daily	read
 infrastructure_cost_daily_components	read
 infrastructure_price_snapshots	read
 infrastructure_telemetry_events	append
+invitation_delivery_commands	legacy_dml
 invitation_teams	legacy_dml
 invitations	legacy_dml
 llm_allowed_models	legacy_dml

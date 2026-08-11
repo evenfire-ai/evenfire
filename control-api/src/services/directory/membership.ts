@@ -1,4 +1,6 @@
 import bcrypt from 'bcryptjs'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
@@ -10,7 +12,7 @@ import {
   roleCanDeleteMembers,
   roleCanInviteMembers,
 } from './types.js'
-import { adminDeleteUser } from './users.js'
+import { adminDeleteUserInTransaction } from './users.js'
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -75,7 +77,8 @@ function normalizeInvitationPurpose(purpose?: InvitationPurpose): InvitationPurp
 
 async function getInvitationRecordByToken(
   db: Pick<DbClient, 'query'>,
-  token: string
+  token: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
@@ -84,7 +87,8 @@ async function getInvitationRecordByToken(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.token = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [token]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -117,7 +121,8 @@ export function stopDraftInvitationCleanup() {
 async function getInvitationRecordByTokenOrId(
   db: Pick<DbClient, 'query'>,
   token: string,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedToken = token.trim()
   const normalizedInvitationId = invitationId.trim()
@@ -131,10 +136,12 @@ async function getInvitationRecordByTokenOrId(
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
-      WHERE ($1 <> '' AND i.token = $1)
-         OR ($2 <> '' AND i.id::text = $2)
+      WHERE ($1 <> '' AND $2 = '' AND i.token = $1)
+         OR ($1 = '' AND $2 <> '' AND i.id::text = $2)
+         OR ($1 <> '' AND $2 <> '' AND i.token = $1 AND i.id::text = $2)
       ORDER BY i.created_at DESC
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedToken, normalizedInvitationId]
   )
 
@@ -143,7 +150,8 @@ async function getInvitationRecordByTokenOrId(
 
 async function getInvitationRecordById(
   db: Pick<DbClient, 'query'>,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedInvitationId = invitationId.trim()
   if (!normalizedInvitationId) return null
@@ -155,7 +163,8 @@ async function getInvitationRecordById(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.id::text = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedInvitationId]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -178,29 +187,26 @@ async function ensureInvitationUser(
 
   let user = (existing.rows[0] as InvitationUserRow | undefined) || null
   if (!user) {
-    user = (
-      await db.query(
-        `INSERT INTO users(email, name)
+    const inserted = await db.query(
+      `INSERT INTO users(email, name)
        VALUES($1, $2)
-       ON CONFLICT (email) DO UPDATE
-           SET name = COALESCE(users.name, EXCLUDED.name),
-               updated_at = NOW()
+       ON CONFLICT (email) DO NOTHING
        RETURNING id, email, name, picture, password_hash`,
-        [normalizedEmail, normalizedInviteeName]
+      [normalizedEmail, normalizedInviteeName]
+    )
+    user = (inserted.rows[0] as InvitationUserRow | undefined) || null
+    if (!user) {
+      const racedExisting = await db.query(
+        `SELECT id, email, name, picture, password_hash
+           FROM users
+          WHERE email = $1
+          LIMIT 1`,
+        [normalizedEmail]
       )
-    ).rows[0] as InvitationUserRow
-  } else if (normalizedInviteeName && user.name !== normalizedInviteeName) {
-    user = (
-      await db.query(
-        `UPDATE users
-            SET name = $2,
-                updated_at = NOW()
-          WHERE id = $1
-       RETURNING id, email, name, picture, password_hash`,
-        [user.id, normalizedInviteeName]
-      )
-    ).rows[0] as InvitationUserRow
+      user = (racedExisting.rows[0] as InvitationUserRow | undefined) || null
+    }
   }
+  if (!user) throw new Error('Failed to resolve invitation user')
 
   await db.query(
     `INSERT INTO profiles(user_id, display_name)
@@ -208,15 +214,6 @@ async function ensureInvitationUser(
      ON CONFLICT (user_id) DO NOTHING`,
     [user.id, user.name || null]
   )
-  if (normalizedInviteeName) {
-    await db.query(
-      `UPDATE profiles
-          SET display_name = $2,
-              updated_at = NOW()
-        WHERE user_id = $1`,
-      [user.id, normalizedInviteeName]
-    )
-  }
 
   return user
 }
@@ -263,7 +260,8 @@ async function loadInvitationTeams(
 
 async function loadInvitationTeamsByInvitationIds(
   db: Pick<DbClient, 'query'>,
-  invitationIds: readonly string[]
+  invitationIds: readonly string[],
+  managerUserId?: string
 ): Promise<Map<string, InvitationTeamRow[]>> {
   const byInvitationId = new Map<string, InvitationTeamRow[]>()
   if (invitationIds.length === 0) return byInvitationId
@@ -272,9 +270,15 @@ async function loadInvitationTeamsByInvitationIds(
     `SELECT it.invitation_id, it.team_id, t.name AS team_name, it.role
        FROM invitation_teams it
        JOIN teams t ON t.id = it.team_id
+  LEFT JOIN team_members manager
+         ON manager.team_id = it.team_id
+        AND manager.user_id::text = $2
+        AND manager.status = 'active'
+        AND manager.role IN ('admin', 'inviter')
       WHERE it.invitation_id = ANY($1::uuid[])
+        AND ($2 = '' OR manager.user_id IS NOT NULL)
       ORDER BY it.invitation_id ASC, t.name ASC`,
-    [invitationIds]
+    [invitationIds, managerUserId?.trim() || '']
   )
   for (const row of result.rows as Array<InvitationTeamRow & { invitation_id: string }>) {
     const rows = byInvitationId.get(row.invitation_id) || []
@@ -288,15 +292,27 @@ async function loadInvitationTeamsByInvitationIds(
   return byInvitationId
 }
 
-async function invitationListResponse(rows: InvitationRow[]) {
+async function invitationListResponse(rows: InvitationRow[], managerUserId?: string) {
   const teamsByInvitationId = await loadInvitationTeamsByInvitationIds(
     pool,
-    rows.map(row => row.id)
+    rows.map(row => row.id),
+    managerUserId
   )
   return rows.map(row => {
     const { token: _secretCapability, ...safeInvitation } = row
+    const managerSafeInvitation = managerUserId
+      ? (() => {
+          const {
+            team_id: _hiddenPrimaryTeamId,
+            team_name: _hiddenPrimaryTeamName,
+            role: _hiddenPrimaryRole,
+            ...safeManagerFields
+          } = safeInvitation
+          return safeManagerFields
+        })()
+      : safeInvitation
     return {
-      ...safeInvitation,
+      ...managerSafeInvitation,
       teams: (teamsByInvitationId.get(row.id) || []).map(team => ({
         id: team.team_id,
         name: team.team_name,
@@ -324,6 +340,28 @@ async function applyInvitationMemberships(
   )
 
   return teams
+}
+
+async function acceptPendingMembershipInvitation(
+  db: Pick<DbClient, 'query'>,
+  invitation: InvitationRow,
+  userId: string
+): Promise<boolean> {
+  const consumed = await db.query(
+    `UPDATE invitations
+        SET status = 'accepted',
+            accepted_at = NOW(),
+            accepted_user_id = $2
+      WHERE id = $1
+        AND status = 'pending'
+        AND purpose <> 'password_reset'
+        AND expires_at > NOW()
+  RETURNING id`,
+    [invitation.id, userId]
+  )
+  if ((consumed.rowCount ?? 0) === 0) return false
+  await applyInvitationMemberships(db, invitation, userId)
+  return true
 }
 
 async function insertInvitationTeams(
@@ -653,24 +691,54 @@ function invitationForTeamsResponse(invitation: InvitationRow, teams: Invitation
   }
 }
 
-async function createInvitationForTeamsRecord(
-  input: InvitationForTeamsInput,
-  options: { sendEmail: boolean }
-) {
-  cleanupStaleDraftInvitations().catch(() => undefined)
-  const purpose = normalizeInvitationPurpose(input.purpose)
-  const inserted = await withTransaction(async db =>
-    insertInvitationForTeams(db, {
-      ...input,
-      purpose,
-      status: options.sendEmail ? 'draft' : 'pending',
-    })
+async function recordInvitationDeliveryCommand(
+  db: Pick<DbClient, 'query'>,
+  invitationId: string,
+  authorizedBy: string,
+  deliveryKind: 'create' | 'resend'
+): Promise<string> {
+  const result = await db.query(
+    `INSERT INTO invitation_delivery_commands(invitation_id, authorized_by, delivery_kind)
+     VALUES($1, $2, $3)
+     RETURNING id`,
+    [invitationId, authorizedBy.trim(), deliveryKind]
   )
+  const commandId = String((result.rows[0] as { id?: string } | undefined)?.id || '')
+  if (!commandId) throw new Error('Failed to persist invitation delivery command')
+  return commandId
+}
 
-  if (!options.sendEmail) {
-    return invitationForTeamsResponse(inserted.invitation, inserted.teams)
+async function finishInvitationDeliveryCommand(
+  db: Pick<DbClient, 'query'>,
+  commandId: string,
+  status: 'delivered' | 'failed' | 'cancelled',
+  failureCode?: string
+): Promise<void> {
+  const result = await db.query(
+    `UPDATE invitation_delivery_commands
+        SET status = $2,
+            completed_at = NOW(),
+            failure_code = $3
+      WHERE id = $1
+        AND status = 'authorized'`,
+    [commandId, status, failureCode || null]
+  )
+  if ((result.rowCount ?? 0) === 0) {
+    throw new Error('Invitation delivery command is no longer authorized')
   }
+}
 
+export function externalManagedInvitationResponse(
+  invitation: Record<string, unknown>
+): Record<string, unknown> {
+  const { token: _secretCapability, ...safeInvitation } = invitation
+  return safeInvitation
+}
+
+async function deliverAndActivateInvitation(
+  inserted: InvitationWithTeams,
+  purpose: InvitationPurpose
+) {
   await registerAndSendInvitation(
     inserted.invitation.email,
     inserted.invitation.token,
@@ -704,6 +772,103 @@ async function createInvitationForTeamsRecord(
     },
     inserted.teams
   )
+}
+
+async function deliverAndActivateManagedInvitation(
+  inserted: InvitationWithTeams,
+  commandId: string,
+  managerUserId: string
+) {
+  try {
+    await registerAndSendInvitation(
+      inserted.invitation.email,
+      inserted.invitation.token,
+      inserted.teams.length > 0
+        ? inserted.teams.map(team => team.team_name).join(', ')
+        : inserted.invitation.team_name,
+      inserted.invitation.created_at.toISOString(),
+      inserted.invitation.expires_at.toISOString(),
+      {
+        purpose: 'member_invitation',
+        teamNames: inserted.teams.map(team => team.team_name),
+      }
+    )
+  } catch (error) {
+    await withTransaction(async db => {
+      await finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
+      await db.query(
+        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
+        [inserted.invitation.id]
+      )
+    }).catch(() => undefined)
+    throw error
+  }
+
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
+              i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
+              t.name AS team_name
+         FROM invitation_delivery_commands c
+         JOIN invitations i ON i.id = c.invitation_id
+    LEFT JOIN teams t ON t.id = i.team_id
+        WHERE c.id = $1
+          AND c.invitation_id = $2
+          AND c.authorized_by = $3
+          AND c.delivery_kind = 'create'
+          AND c.status = 'authorized'
+          AND i.status = 'draft'
+        LIMIT 1
+        FOR UPDATE OF c, i`,
+      [commandId, inserted.invitation.id, managerUserId.trim()]
+    )
+    const invitation = (locked.rows[0] as InvitationRow | undefined) || null
+    if (!invitation) return { error: 'not_found' as const }
+    const teams = await loadInvitationTeams(db, invitation.id, invitation)
+    if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
+      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
+      await db.query(
+        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
+        [invitation.id]
+      )
+      return { error: 'forbidden' as const }
+    }
+
+    const activated = await db.query(
+      `UPDATE invitations
+          SET status = 'pending'
+        WHERE id = $1
+          AND status = 'draft'
+      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at,
+                expires_at, accepted_at, accepted_user_id`,
+      [invitation.id]
+    )
+    const pending = activated.rows[0] as InvitationRow | undefined
+    if (!pending) throw new Error('Failed to activate authorized invitation')
+    await finishInvitationDeliveryCommand(db, commandId, 'delivered')
+    return invitationForTeamsResponse({ ...pending, team_name: invitation.team_name }, teams)
+  })
+}
+
+async function createInvitationForTeamsRecord(
+  input: InvitationForTeamsInput,
+  options: { sendEmail: boolean }
+) {
+  cleanupStaleDraftInvitations().catch(() => undefined)
+  const purpose = normalizeInvitationPurpose(input.purpose)
+  const inserted = await withTransaction(async db =>
+    insertInvitationForTeams(db, {
+      ...input,
+      purpose,
+      status: options.sendEmail ? 'draft' : 'pending',
+    })
+  )
+
+  if (!options.sendEmail) {
+    return invitationForTeamsResponse(inserted.invitation, inserted.teams)
+  }
+
+  return deliverAndActivateInvitation(inserted, purpose)
 }
 
 export async function createInvitation(
@@ -1057,19 +1222,19 @@ export async function setInvitationPasswordForUser(
   }
 
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId)
+    const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
     }
+    if (invitation.expires_at.getTime() <= Date.now()) {
+      return { error: 'expired' as const }
+    }
     if (invitation.purpose === 'password_reset') {
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
-      }
-      if (invitation.expires_at.getTime() <= Date.now()) {
-        return { error: 'expired' as const }
       }
     } else if (
       invitation.purpose === 'member_invitation' ||
@@ -1086,6 +1251,22 @@ export async function setInvitationPasswordForUser(
     if (user.id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
+    if (invitation.purpose !== 'password_reset' && user.password_hash) {
+      return { error: 'password_already_set' as const }
+    }
+    if (invitation.purpose === 'password_reset') {
+      const consumed = await db.query(
+        `UPDATE invitations
+            SET status = 'accepted',
+                accepted_at = NOW(),
+                accepted_user_id = $2
+          WHERE id = $1
+            AND status = 'pending'
+      RETURNING id`,
+        [invitation.id, user.id]
+      )
+      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
+    }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
@@ -1096,20 +1277,12 @@ export async function setInvitationPasswordForUser(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
+    if (invitation.purpose !== 'password_reset' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (!invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordById(db, invitation.id)
@@ -1129,13 +1302,15 @@ export async function setInvitationPasswordForUser(
 
 export async function setInvitationPasswordForEmail(
   email: string,
+  invitationToken: string,
   invitationId: string,
   password: string
 ) {
   const normalizedEmail = email.trim().toLowerCase()
+  const trimmedInvitationToken = invitationToken.trim()
   const trimmedInvitationId = invitationId.trim()
   const trimmedPassword = password.trim()
-  if (!normalizedEmail || !trimmedInvitationId) {
+  if (!normalizedEmail || !trimmedInvitationToken || !trimmedInvitationId) {
     return { error: 'not_found' as const }
   }
   if (trimmedPassword.length < 8 || trimmedPassword.length > 256) {
@@ -1143,32 +1318,58 @@ export async function setInvitationPasswordForEmail(
   }
 
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId)
+    const invitation = await getInvitationRecordByToken(db, trimmedInvitationToken, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
+    if (invitation.id !== trimmedInvitationId) {
+      return { error: 'forbidden' as const }
+    }
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
+    }
+    const pendingMembershipSetup =
+      invitation.status === 'pending' &&
+      (invitation.purpose === 'member_invitation' || invitation.purpose === 'admin_desktop_access')
+    if (invitation.expires_at.getTime() <= Date.now()) {
+      return { error: 'expired' as const }
     }
     if (invitation.purpose === 'password_reset') {
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
       }
-      if (invitation.expires_at.getTime() <= Date.now()) {
-        return { error: 'expired' as const }
-      }
     } else if (
       invitation.purpose === 'member_invitation' ||
       invitation.purpose === 'admin_desktop_access'
     ) {
-      if (invitation.status !== 'accepted') {
-        return { error: 'not_accepted' as const }
+      if (!pendingMembershipSetup) {
+        return { error: 'not_pending' as const }
       }
     } else {
       return { error: 'not_found' as const }
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitation.purpose !== 'password_reset' && user.password_hash) {
+      return { error: 'password_already_set' as const }
+    }
+    if (pendingMembershipSetup) {
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.purpose === 'password_reset') {
+      const consumed = await db.query(
+        `UPDATE invitations
+            SET status = 'accepted',
+                accepted_at = NOW(),
+                accepted_user_id = $2
+          WHERE id = $1
+            AND status = 'pending'
+      RETURNING id`,
+        [invitation.id, user.id]
+      )
+      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
+    }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
@@ -1179,22 +1380,6 @@ export async function setInvitationPasswordForEmail(
       [user.id, passwordHash]
     )
     await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
-      await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
-        [invitation.id, user.id]
-      )
-    } else if (!invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
-    }
-
     const refreshed = await getInvitationRecordById(db, invitation.id)
     if (!refreshed) {
       return { error: 'not_found' as const }
@@ -1217,20 +1402,19 @@ export async function acceptInvitation(
   invitationId: string
 ) {
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId)
+    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
+      lock: true,
+    })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
     if (invitation.email.toLowerCase() !== email.toLowerCase()) {
       return { error: 'forbidden' as const }
     }
-    if (invitation.status === 'revoked') {
+    if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
       return { error: 'not_pending' as const }
     }
-    if (invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
+    if (invitation.expires_at.getTime() <= Date.now()) {
       return { error: 'expired' as const }
     }
 
@@ -1239,22 +1423,8 @@ export async function acceptInvitation(
       return { error: 'forbidden' as const }
     }
 
-    if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
-      await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
-        [invitation.id, user.id]
-      )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
+    if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+      return { error: 'not_pending' as const }
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
@@ -1273,62 +1443,59 @@ export async function acceptInvitation(
   })
 }
 
-export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId)
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-
-    if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
-      await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
-        [invitation.id, user.id]
-      )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
-    }
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        userId: user.id,
-      },
-    }
+export async function acceptInvitationForEmailInTransaction(
+  db: Pick<DbClient, 'query'>,
+  email: string,
+  token: string,
+  invitationId = ''
+) {
+  const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
+    lock: true,
   })
+  if (!invitation) {
+    return { error: 'not_found' as const }
+  }
+  if (invitation.email.toLowerCase() !== email.toLowerCase()) {
+    return { error: 'forbidden' as const }
+  }
+  if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
+    return { error: 'not_pending' as const }
+  }
+  if (invitation.expires_at.getTime() <= Date.now()) {
+    return { error: 'expired' as const }
+  }
+
+  const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+
+  if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+    return { error: 'not_pending' as const }
+  }
+
+  const refreshed = await getInvitationRecordByToken(db, invitation.token)
+  if (!refreshed) {
+    return { error: 'not_found' as const }
+  }
+  const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+  const payload = invitationResponse(refreshed, user, teams)
+
+  return {
+    data: {
+      accepted: true as const,
+      ...payload,
+      userId: user.id,
+    },
+  }
+}
+
+export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
+  return withTransaction(db =>
+    acceptInvitationForEmailInTransaction(db, email, token, invitationId)
+  )
 }
 
 export async function acceptInvitationById(email: string, invitationId: string) {
   return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, invitationId)
+    const invitation = await getInvitationRecordById(db, invitationId, { lock: true })
     if (!invitation) {
       return { error: 'not_found' as const }
     }
@@ -1345,21 +1512,15 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      await applyInvitationMemberships(db, invitation, user.id)
-
+      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
+        return { error: 'not_pending' as const }
+      }
+    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
       await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1`,
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
         [invitation.id, user.id]
       )
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
     }
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
@@ -1379,27 +1540,125 @@ export async function acceptInvitationById(email: string, invitationId: string) 
   })
 }
 
-export async function searchDirectory(teamId: string, q: string) {
+export const DIRECTORY_SEARCH_MAX_QUERY_LENGTH = 100
+export const DIRECTORY_SEARCH_PAGE_SIZE = 25
+
+export class DirectorySearchCursorError extends Error {
+  constructor() {
+    super('invalid directory search cursor')
+    this.name = 'DirectorySearchCursorError'
+  }
+}
+
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, character => `\\${character}`)
+}
+
+function directorySearchCursorSignature(value: string): string {
+  return createHmac('sha256', config.sessionJwtPrivateKey).update(value).digest('base64url')
+}
+
+function encodeDirectorySearchCursor(input: {
+  teamId: string
+  query: string
+  sortKey: string
+  userId: string
+}): string {
+  const body = Buffer.from(JSON.stringify(input)).toString('base64url')
+  return `ds1.${body}.${directorySearchCursorSignature(body)}`
+}
+
+function decodeDirectorySearchCursor(
+  value: string,
+  teamId: string,
+  query: string
+): { sortKey: string; userId: string } {
+  const [prefix, body, signature, extra] = value.split('.')
+  if (prefix !== 'ds1' || !body || !signature || extra) throw new DirectorySearchCursorError()
+  const expected = directorySearchCursorSignature(body)
+  const suppliedBytes = Buffer.from(signature)
+  const expectedBytes = Buffer.from(expected)
+  if (
+    suppliedBytes.length !== expectedBytes.length ||
+    !timingSafeEqual(suppliedBytes, expectedBytes)
+  ) {
+    throw new DirectorySearchCursorError()
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    const sortKey = typeof parsed.sortKey === 'string' ? parsed.sortKey : ''
+    const userId = typeof parsed.userId === 'string' ? parsed.userId : ''
+    if (parsed.teamId !== teamId || parsed.query !== query || !sortKey || !userId) {
+      throw new Error('cursor mismatch')
+    }
+    return { sortKey, userId }
+  } catch {
+    throw new DirectorySearchCursorError()
+  }
+}
+
+export async function searchDirectory(teamId: string, q: string, cursor?: string) {
   const query = q.trim()
-  if (!query) return []
+  if (!query) return { items: [], nextCursor: null }
+  if (query.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
+    throw new DirectorySearchCursorError()
+  }
+  const after = cursor ? decodeDirectorySearchCursor(cursor, teamId, query) : null
+  const pattern = `%${escapeLikeLiteral(query)}%`
 
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, p.display_name, p.channels
+    `SELECT u.id, u.email, u.name, p.display_name,
+            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) AS sort_key
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
         AND (
-          u.email ILIKE $2
-          OR COALESCE(u.name, '') ILIKE $2
-          OR COALESCE(p.display_name, '') ILIKE $2
+          u.email ILIKE $2 ESCAPE '\\'
+          OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
+          OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
-   ORDER BY COALESCE(p.display_name, u.name, u.email) ASC
-      LIMIT 25`,
-    [teamId, `%${query}%`]
+        AND (
+          $3::text IS NULL
+          OR (
+            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)),
+            u.id
+          ) > ($3, $4::uuid)
+        )
+   ORDER BY sort_key ASC, u.id ASC
+      LIMIT $5`,
+    [teamId, pattern, after?.sortKey ?? null, after?.userId ?? null, DIRECTORY_SEARCH_PAGE_SIZE + 1]
   )
-  return result.rows
+  const rows = result.rows as Array<{
+    id: string
+    email: string
+    name: string | null
+    display_name: string | null
+    sort_key: string
+  }>
+  const page = rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE)
+  const last = page[page.length - 1]
+  return {
+    items: page.map(row => ({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      displayName: row.display_name,
+    })),
+    nextCursor:
+      rows.length > DIRECTORY_SEARCH_PAGE_SIZE && last
+        ? encodeDirectorySearchCursor({
+            teamId,
+            query,
+            sortKey: last.sort_key,
+            userId: last.id,
+          })
+        : null,
+  }
 }
 
 export async function listManageableTeamsForUser(userId: string) {
@@ -1470,7 +1729,7 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            FROM users u
            JOIN team_members target_tm ON target_tm.user_id = u.id AND target_tm.status = 'active'
            JOIN teams t ON t.id = target_tm.team_id
-      LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
+           JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
           WHERE u.id::text = $2
             AND EXISTS (SELECT 1 FROM eligible_target)
@@ -1522,9 +1781,9 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            JOIN team_members target_tm
              ON target_tm.user_id = vu.user_id
             AND target_tm.status = 'active'
+           JOIN managed_teams mt ON mt.team_id = target_tm.team_id
            JOIN teams t ON t.id = target_tm.team_id
            JOIN users u ON u.id = target_tm.user_id
-      LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
        GROUP BY u.id, u.email, u.name, u.picture, p.display_name
        ORDER BY COALESCE(p.display_name, u.name, u.email) ASC`,
@@ -1561,16 +1820,20 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
 }
 
 async function getManagerRolesForTeams(
+  db: Pick<DbClient, 'query'>,
   managerUserId: string,
-  teamIds: readonly string[]
+  teamIds: readonly string[],
+  lock = false
 ): Promise<Map<string, TeamRole>> {
   if (teamIds.length === 0) return new Map()
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT team_id, role
        FROM team_members
       WHERE user_id = $1
         AND team_id = ANY($2::uuid[])
-        AND status = 'active'`,
+        AND status = 'active'
+      ORDER BY team_id
+      ${lock ? 'FOR UPDATE' : ''}`,
     [managerUserId.trim(), teamIds]
   )
   return new Map(
@@ -1588,13 +1851,17 @@ function canManagerInviteAssignment(
 }
 
 async function managerCanControlAllInvitationTeams(
+  db: Pick<DbClient, 'query'>,
   managerUserId: string,
-  teams: readonly InvitationTeamRow[]
+  teams: readonly InvitationTeamRow[],
+  lock = false
 ): Promise<boolean> {
   if (teams.length === 0) return false
   const managerRoles = await getManagerRolesForTeams(
+    db,
     managerUserId,
-    teams.map(team => team.team_id)
+    teams.map(team => team.team_id),
+    lock
   )
   return teams.every(team => canManagerInviteAssignment(managerRoles.get(team.team_id), team.role))
 }
@@ -1611,6 +1878,9 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
      )
      SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
+            (SELECT COUNT(*)::integer
+               FROM invitation_teams all_it
+              WHERE all_it.invitation_id = i.id) AS assignment_count,
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
@@ -1622,7 +1892,16 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
       ORDER BY i.created_at ASC`,
     [normalizedManagerUserId]
   )
-  const invitations = await invitationListResponse(result.rows as InvitationRow[])
+  const invitations = await invitationListResponse(
+    result.rows as InvitationRow[],
+    normalizedManagerUserId
+  )
+  const assignmentCounts = new Map(
+    result.rows.map(row => [
+      String((row as { id: string }).id),
+      Number((row as { assignment_count?: unknown }).assignment_count ?? 0),
+    ])
+  )
   const allTeamIds = Array.from(
     new Set(
       invitations.flatMap(invitation =>
@@ -1630,11 +1909,12 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
       )
     )
   )
-  const managerRoles = await getManagerRolesForTeams(normalizedManagerUserId, allTeamIds)
+  const managerRoles = await getManagerRolesForTeams(pool, normalizedManagerUserId, allTeamIds)
   return invitations.map(invitation => {
     const teams = invitation.teams as Array<{ id: string; name: string; role: InviteRole }>
     const canManage =
       teams.length > 0 &&
+      assignmentCounts.get(invitation.id) === teams.length &&
       teams.every(team => canManagerInviteAssignment(managerRoles.get(team.id), team.role))
     return {
       ...invitation,
@@ -1657,63 +1937,45 @@ export async function createManagedInvitationForUser(
     return { error: 'invalid_payload' as const }
   }
 
-  const rolesResult = await pool.query(
-    `SELECT tm.team_id, tm.role, t.name AS team_name
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-      WHERE tm.user_id = $1
-        AND tm.team_id = ANY($2::uuid[])
-        AND tm.status = 'active'
-        AND tm.role IN ('admin', 'inviter')`,
-    [managerUserId.trim(), assignments.map(assignment => assignment.teamId)]
-  )
-  const managerRoles = new Map(
-    (rolesResult.rows as Array<{ team_id: string; role: TeamRole; team_name: string }>).map(row => [
-      row.team_id,
-      row.role,
-    ])
-  )
-  for (const assignment of assignments) {
-    const managerRole = managerRoles.get(assignment.teamId)
-    if (!roleCanInviteMembers(managerRole)) {
-      return { error: 'forbidden' as const }
-    }
-    if (assignment.role === 'admin' && !roleCanDeleteMembers(managerRole)) {
-      return { error: 'forbidden' as const }
-    }
-  }
-
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
-  if (normalizedInviteeName) {
-    const updatedUser = await pool.query(
-      `UPDATE users
-          SET name = $2,
-              updated_at = NOW()
-        WHERE email = $1
-    RETURNING id`,
-      [normalizedEmail, normalizedInviteeName]
+  const authorized = await withTransaction(async db => {
+    const managerRoles = await getManagerRolesForTeams(
+      db,
+      managerUserId.trim(),
+      assignments.map(assignment => assignment.teamId),
+      true
     )
-    const userId = String((updatedUser.rows[0] as { id?: string } | undefined)?.id || '')
-    if (userId) {
-      await pool.query(
-        `INSERT INTO profiles(user_id, display_name)
-         VALUES($1, $2)
-         ON CONFLICT (user_id)
-         DO UPDATE SET display_name = EXCLUDED.display_name,
-                       updated_at = NOW()`,
-        [userId, normalizedInviteeName]
-      )
+    for (const assignment of assignments) {
+      if (!canManagerInviteAssignment(managerRoles.get(assignment.teamId), assignment.role)) {
+        return { error: 'forbidden' as const }
+      }
     }
-  }
 
-  return {
-    invitation: await createInvitationForTeams({
+    const inserted = await insertInvitationForTeams(db, {
       inviteeName: normalizedInviteeName || fallbackName,
       email: normalizedEmail,
       purpose: 'member_invitation',
       teamAssignments: assignments,
       fallbackRole: 'member',
-    }),
+      status: 'draft',
+    })
+    const commandId = await recordInvitationDeliveryCommand(
+      db,
+      inserted.invitation.id,
+      managerUserId,
+      'create'
+    )
+    return { inserted, commandId }
+  })
+  if ('error' in authorized && authorized.error) return { error: authorized.error }
+  const delivered = await deliverAndActivateManagedInvitation(
+    authorized.inserted,
+    authorized.commandId,
+    managerUserId
+  )
+  if ('error' in delivered) return { error: delivered.error }
+  return {
+    invitation: externalManagedInvitationResponse(delivered),
   }
 }
 
@@ -1730,17 +1992,66 @@ export async function updateManagedMemberRoleForUser(
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
   }
-  const manager = await findMemberRole(teamId, managerUserId)
-  if (!roleCanDeleteMembers(manager?.role)) {
-    return { error: 'forbidden' as const }
-  }
-  const target = await findMemberRole(teamId, targetUserId)
-  if (!target) {
-    return { error: 'not_found' as const }
-  }
-  return {
-    membership: await updateMemberRole(teamId, targetUserId, normalizedRole, managerUserId),
-  }
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT user_id::text AS user_id, role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY user_id
+        FOR UPDATE`,
+      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+    )
+    const memberships = new Map(
+      (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
+        row.user_id,
+        row.role,
+      ])
+    )
+    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+      return { error: 'forbidden' as const }
+    }
+    const previousRole = memberships.get(targetUserId.trim())
+    if (!previousRole) return { error: 'not_found' as const }
+
+    const result = await db.query(
+      `UPDATE team_members
+          SET role = $3,
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId.trim(), targetUserId.trim(), normalizedRole]
+    )
+    const membership = result.rows[0]
+    if (!membership) return { error: 'not_found' as const }
+    if (previousRole !== normalizedRole) {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: managerUserId.trim(),
+        changes: [
+          {
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${previousRole}`,
+            subject: { kind: 'user', id: targetUserId.trim() },
+            teamId: teamId.trim(),
+            status: 'role_replaced',
+          },
+          {
+            action: 'grant',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${normalizedRole}`,
+            subject: { kind: 'user', id: targetUserId.trim() },
+            teamId: teamId.trim(),
+            status: 'role_assigned',
+          },
+        ],
+      })
+    }
+    return { membership }
+  })
 }
 
 export async function deleteManagedMemberForUser(
@@ -1751,15 +2062,56 @@ export async function deleteManagedMemberForUser(
   if (managerUserId.trim() === targetUserId.trim()) {
     return { error: 'invalid_target' as const }
   }
-  const manager = await findMemberRole(teamId, managerUserId)
-  if (!roleCanDeleteMembers(manager?.role)) {
-    return { error: 'forbidden' as const }
-  }
-  const deleted = await softDeleteMember(teamId, targetUserId, managerUserId)
-  if (!deleted) {
-    return { error: 'not_found' as const }
-  }
-  return { deleted }
+  return withTransaction(async db => {
+    const locked = await db.query(
+      `SELECT user_id::text AS user_id, role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY user_id
+        FOR UPDATE`,
+      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+    )
+    const memberships = new Map(
+      (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
+        row.user_id,
+        row.role,
+      ])
+    )
+    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+      return { error: 'forbidden' as const }
+    }
+    const targetRole = memberships.get(targetUserId.trim())
+    if (!targetRole) return { error: 'not_found' as const }
+
+    const result = await db.query(
+      `UPDATE team_members
+          SET status = 'deleted',
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId.trim(), targetUserId.trim()]
+    )
+    const deleted = result.rows[0]
+    if (!deleted) return { error: 'not_found' as const }
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: managerUserId.trim(),
+      changes: [
+        {
+          action: 'revoke',
+          resourceClass: 'team_membership',
+          resourceRef: `team_membership:${teamId}:role:${targetRole}`,
+          subject: { kind: 'user', id: targetUserId.trim() },
+          teamId: teamId.trim(),
+          status: 'membership_removed',
+        },
+      ],
+    })
+    return { deleted }
+  })
 }
 
 export async function deleteManagedUserForUser(managerUserId: string, targetUserId: string) {
@@ -1772,32 +2124,54 @@ export async function deleteManagedUserForUser(managerUserId: string, targetUser
     return { error: 'invalid_target' as const }
   }
 
-  const teamsResult = await pool.query(
-    `SELECT team_id
-       FROM team_members
-      WHERE user_id = $1
-        AND status = 'active'`,
-    [normalizedTargetUserId]
-  )
-  const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
-  if (teamIds.length === 0) {
-    return { error: 'not_found' as const }
-  }
-  const managerRoles = await getManagerRolesForTeams(normalizedManagerUserId, teamIds)
-  if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
-    return { error: 'forbidden_uncontrolled_teams' as const }
-  }
+  return withTransaction(async db => {
+    const targetExists = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+      normalizedTargetUserId,
+    ])
+    if ((targetExists.rowCount ?? 0) === 0) return { error: 'not_found' as const }
 
-  const deleted = await adminDeleteUser(normalizedTargetUserId)
-  if ('error' in deleted) {
-    return { error: 'not_found' as const }
-  }
-  return { deleted }
+    const teamsResult = await db.query(
+      `SELECT team_id
+         FROM team_members
+        WHERE user_id = $1
+          AND status = 'active'
+        ORDER BY team_id
+        FOR UPDATE`,
+      [normalizedTargetUserId]
+    )
+    const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
+    if (teamIds.length === 0) return { error: 'not_found' as const }
+
+    const managerResult = await db.query(
+      `SELECT team_id, role
+         FROM team_members
+        WHERE user_id = $1
+          AND team_id = ANY($2::uuid[])
+          AND status = 'active'
+        ORDER BY team_id
+        FOR UPDATE`,
+      [normalizedManagerUserId, teamIds]
+    )
+    const managerRoles = new Map(
+      (managerResult.rows as Array<{ team_id: string; role: TeamRole }>).map(row => [
+        row.team_id,
+        row.role,
+      ])
+    )
+    if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
+      return { error: 'forbidden_uncontrolled_teams' as const }
+    }
+
+    const deleted = await adminDeleteUserInTransaction(db, normalizedTargetUserId)
+    if ('error' in deleted) return { error: 'not_found' as const }
+    return { deleted }
+  })
 }
 
 export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
-  const result = await pool.query(
-    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+  const authorized = await withTransaction(async db => {
+    const result = await db.query(
+      `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -1806,33 +2180,54 @@ export async function resendManagedInvitationForUser(managerUserId: string, invi
         AND i.status = 'pending'
         AND i.purpose = 'member_invitation'
         AND i.expires_at > NOW()
-      LIMIT 1`,
-    [invitationId.trim()]
-  )
-  const invitation = (result.rows[0] as InvitationRow | undefined) || null
-  if (!invitation) return { error: 'not_found' as const }
-  const teams = await loadInvitationTeams(pool, invitation.id, invitation)
-  if (!(await managerCanControlAllInvitationTeams(managerUserId, teams))) {
-    return { error: 'forbidden' as const }
-  }
-
-  await registerAndSendInvitation(
-    invitation.email,
-    invitation.token,
-    teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
-    new Date().toISOString(),
-    invitation.expires_at.toISOString(),
-    {
-      purpose: invitation.purpose,
-      teamNames: teams.map(team => team.team_name),
+      LIMIT 1
+      FOR UPDATE OF i`,
+      [invitationId.trim()]
+    )
+    const invitation = (result.rows[0] as InvitationRow | undefined) || null
+    if (!invitation) return { error: 'not_found' as const }
+    const teams = await loadInvitationTeams(db, invitation.id, invitation)
+    if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
+      return { error: 'forbidden' as const }
     }
-  )
+
+    const commandId = await recordInvitationDeliveryCommand(
+      db,
+      invitation.id,
+      managerUserId,
+      'resend'
+    )
+    return { invitation, teams, commandId }
+  })
+  if ('error' in authorized) return authorized
+  const { invitation, teams, commandId } = authorized
+
+  try {
+    await registerAndSendInvitation(
+      invitation.email,
+      invitation.token,
+      teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
+      new Date().toISOString(),
+      invitation.expires_at.toISOString(),
+      {
+        purpose: invitation.purpose,
+        teamNames: teams.map(team => team.team_name),
+      }
+    )
+  } catch (error) {
+    await withTransaction(db =>
+      finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
+    ).catch(() => undefined)
+    throw error
+  }
+  await withTransaction(db => finishInvitationDeliveryCommand(db, commandId, 'delivered'))
   return { resent: true as const, id: invitation.id, email: invitation.email }
 }
 
 export async function revokeManagedInvitationForUser(managerUserId: string, invitationId: string) {
-  const result = await pool.query(
-    `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
+  return withTransaction(async db => {
+    const result = await db.query(
+      `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
             t.name AS team_name
        FROM invitations i
@@ -1841,18 +2236,23 @@ export async function revokeManagedInvitationForUser(managerUserId: string, invi
         AND i.status = 'pending'
         AND i.purpose = 'member_invitation'
         AND i.expires_at > NOW()
-      LIMIT 1`,
-    [invitationId.trim()]
-  )
-  const invitation = (result.rows[0] as InvitationRow | undefined) || null
-  if (!invitation) return { error: 'not_found' as const }
-  const teams = await loadInvitationTeams(pool, invitation.id, invitation)
-  if (!(await managerCanControlAllInvitationTeams(managerUserId, teams))) {
-    return { error: 'forbidden' as const }
-  }
+      LIMIT 1
+      FOR UPDATE OF i`,
+      [invitationId.trim()]
+    )
+    const invitation = (result.rows[0] as InvitationRow | undefined) || null
+    if (!invitation) return { error: 'not_found' as const }
+    const teams = await loadInvitationTeams(db, invitation.id, invitation)
+    if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
+      return { error: 'forbidden' as const }
+    }
 
-  await pool.query(`UPDATE invitations SET status = 'revoked' WHERE id = $1`, [invitation.id])
-  return { revoked: true as const, id: invitation.id, email: invitation.email }
+    await db.query(
+      `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'pending'`,
+      [invitation.id]
+    )
+    return { revoked: true as const, id: invitation.id, email: invitation.email }
+  })
 }
 
 export async function updateUserPassword(
