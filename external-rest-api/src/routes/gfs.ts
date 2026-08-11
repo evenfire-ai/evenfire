@@ -1,4 +1,4 @@
-import { type Request, Router } from 'express'
+import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
 import { type AugmentedRequest, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { Readable } from 'node:stream'
@@ -7,26 +7,8 @@ import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
-const UPLOAD_DRIVE_WIRE_RE = /^\S(?:[\s\S]*\S)?$/
-
 type GfsRouterOptions = {
   edgeRequestLimit?: number
-}
-
-/**
- * Validate only the public wire format. Drive ownership and authorization are
- * re-established by control-api/GFSC from the authenticated subject; this
- * helper must never become an authorization decision.
- */
-function uploadDriveFromRequest(req: Request): string | null {
-  const rawDrive = req.query.drive
-  return typeof rawDrive === 'string' && UPLOAD_DRIVE_WIRE_RE.test(rawDrive) ? rawDrive : null
-}
-
-function uploadCreateBodyMatchesDrive(req: Request, path: string, drive: string): boolean {
-  if (req.method !== 'POST' || path !== '/external/gfs/uploads') return true
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return false
-  return (req.body as { drive?: unknown }).drive === drive
 }
 
 /**
@@ -434,19 +416,6 @@ async function proxyUploadStream(
   path: string
 ): Promise<void> {
   try {
-    const drive = uploadDriveFromRequest(req)
-    if (!drive) {
-      res.status(400).json({ error: 'drive_required' })
-      return
-    }
-    if (
-      method === 'POST' &&
-      path === '/external/gfs/uploads' &&
-      !uploadCreateBodyMatchesDrive(req, path, drive)
-    ) {
-      res.status(400).json({ error: 'drive_mismatch' })
-      return
-    }
     const extraHeaders: Record<string, string> = {}
     for (const name of [
       'content-type',
@@ -494,7 +463,11 @@ async function proxyUploadStream(
       // these query parameters makes every resume request fetch page one and
       // can silently truncate a session with more than 256 parts.
       query: {
-        drive,
+        // Drive syntax, body/query agreement, ownership, and authorization are
+        // validated once by control-api before admission/token minting. The
+        // relay must not make a security decision from a user-controlled drive
+        // value or maintain a second, divergent drive policy.
+        drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
         limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
         cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
       },

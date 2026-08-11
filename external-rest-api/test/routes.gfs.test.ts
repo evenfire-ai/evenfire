@@ -130,7 +130,24 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
   })
 
-  it('rejects a missing or create-body-mismatched upload drive at the public edge', async () => {
+  it('delegates missing and create-body-mismatched drive validation to control-api', async () => {
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (
+        method: string,
+        path: string,
+        options: { query?: { drive?: string }; body?: unknown }
+      ) => {
+        const drive = options.query?.drive
+        const body = typeof options.body === 'string' ? JSON.parse(options.body) : undefined
+        if (!drive) {
+          throw new ControlApiError('drive required', 400, { error: 'drive_required' })
+        }
+        if (method === 'POST' && path === '/external/gfs/uploads' && body?.drive !== drive) {
+          throw new ControlApiError('drive mismatch', 400, { error: 'drive_mismatch' })
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+    )
     const missing = await request(buildApp())
       .get('/me/gfs/capabilities')
       .set('authorization', 'Bearer sess-xyz')
@@ -142,10 +159,21 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(missing.body).toEqual({ error: 'drive_required' })
     expect(mismatched.status).toBe(400)
     expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
-    expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
   })
 
-  it('rejects malformed drive wire values without forwarding them upstream', async () => {
+  it('forwards malformed drive values unchanged for control-api to reject', async () => {
+    const forwardedDrives: unknown[] = []
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (_method: string, _path: string, options: { query?: { drive?: string } }) => {
+        const drive = options.query?.drive
+        forwardedDrives.push(drive)
+        if (!drive || drive.trim() !== drive) {
+          throw new ControlApiError('drive required', 400, { error: 'drive_required' })
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+    )
     const malformed = ['', ' archive', 'archive ', '\tarchive', 'archive\n']
     for (const drive of malformed) {
       const response = await request(buildApp())
@@ -159,7 +187,8 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       .set('authorization', 'Bearer sess-xyz')
     expect(arrayValue.status).toBe(400)
     expect(arrayValue.body).toEqual({ error: 'drive_required' })
-    expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(6)
+    expect(forwardedDrives).toEqual([...malformed, undefined])
   })
 
   it('preserves one non-main drive and the part stream through every upload lifecycle relay', async () => {
