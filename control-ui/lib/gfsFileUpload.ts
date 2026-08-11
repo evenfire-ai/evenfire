@@ -469,9 +469,7 @@ async function loadUploadStatus(
       session.uploadId !== uploadId ||
       session.expectedBytes !== current.session.expectedBytes ||
       session.expectedBytes !== expected.expectedBytes ||
-      (expected.drive !== undefined &&
-        current.session.drive !== undefined &&
-        current.session.drive !== expected.drive) ||
+      (expected.drive !== undefined && current.session.drive !== expected.drive) ||
       session.partBytes !== current.session.partBytes ||
       session.partCount !== current.session.partCount ||
       (expected.partBytes !== undefined && current.session.partBytes !== expected.partBytes) ||
@@ -1105,7 +1103,7 @@ export class GfsUploadJob {
     const session = receiptFromResponse(create)
     if (session.expectedBytes !== this.input.file.size)
       throw new Error('GFS upload session size changed before transfer')
-    if (session.drive !== undefined && session.drive !== GFS_UPLOAD_DRIVE)
+    if (session.drive !== GFS_UPLOAD_DRIVE)
       throw new Error('upload_drive_mismatch: writer changed drive')
     return { session, committed: new Set<number>(), resumable }
   }
@@ -1274,6 +1272,8 @@ export class GfsUploadJob {
           reconcile: () => this.reconcileCompletion(prepared.session),
         }
       )
+      if (completed.drive !== GFS_UPLOAD_DRIVE)
+        throw new Error('upload_drive_mismatch: writer changed drive')
       this.session = completed
       this.state = 'completed'
       this.uploadedBytes = this.input.file.size

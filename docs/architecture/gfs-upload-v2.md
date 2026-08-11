@@ -120,12 +120,15 @@ bound to `ownerId`, team/tenant id, normalized environment key, normalized API
 base URL, canonical drive, and local `authEpoch`; it stores no bearer or
 session token. Pre-v2 unscoped arrays are quarantined as `legacy_unscoped` and
 are never listed or resumed. Invalid/unsupported records are inert. A logout,
-team switch (including internal team-context hops), or runtime/API-base switch
-blocks new dispatch, advances the epoch, aborts and awaits active v2 and legacy
-fallback work, clears credentials, and persists the old records as local
-`suspended_auth`. Resume is user-explicit and succeeds only when owner, team,
-environment, base URL, and drive match exactly; the new auth epoch is bound
-only after the server session is revalidated.
+deliberate team switch, or runtime/API-base switch blocks new dispatch, advances
+the epoch, aborts and awaits active v2 and legacy fallback work, clears
+credentials, and persists the old records as local `suspended_auth`. A finite
+internal team-context hop temporarily blocks only new GFS dispatches while it
+borrows the other team's token; existing uploads keep their captured token and
+scope, and the original team scope is restored before the gate opens. Resume is
+user-explicit and succeeds only when owner, team, environment, base URL, and
+drive match exactly; the new auth epoch is bound only after the server session
+is revalidated.
 
 The legacy compatibility fallback still accepts at most 16 MiB. It opens one
 descriptor with no-follow semantics where available, validates the descriptor

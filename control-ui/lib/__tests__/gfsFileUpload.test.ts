@@ -157,6 +157,139 @@ describe('GfsUploadJob', () => {
     expect(partCalls).toBe(0)
   })
 
+  it('rejects a create receipt that omits the canonical control-ui drive', async () => {
+    const file = new File([new Uint8Array([4])], 'missing-drive.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                uploadId: '19191919-1919-4191-8191-191919191919',
+                expectedBytes: 1,
+                partBytes: 1,
+                partCount: 1,
+                state: 'initiated',
+                committedBytes: 0,
+                committedPartCount: 0,
+                activePartCount: 0,
+              },
+            }),
+            { status: 201 }
+          )
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-missing-drive' },
+      }).start()
+    ).rejects.toThrow('upload_drive_mismatch')
+  })
+
+  it('rejects a resumed status receipt that omits the canonical control-ui drive', async () => {
+    const file = new File([new Uint8Array([5])], 'missing-status-drive.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'HEAD')
+          return new Response(null, { status: 204, headers: { 'upload-length': '1' } })
+        if (method === 'GET' && url.includes('/status'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session: {
+                  uploadId: '20202020-2020-4020-8020-202020202020',
+                  expectedBytes: 1,
+                  partBytes: 1,
+                  partCount: 1,
+                  state: 'uploading',
+                  committedBytes: 0,
+                  committedPartCount: 0,
+                  activePartCount: 0,
+                },
+                parts: [],
+              },
+            }),
+            { status: 200 }
+          )
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-missing-status-drive' },
+        resumeUploadId: '20202020-2020-4020-8020-202020202020',
+      }).start()
+    ).rejects.toThrow('upload status changed during reconciliation')
+  })
+
+  it('rejects a completion receipt that omits the canonical control-ui drive', async () => {
+    const file = new File([new Uint8Array([6])], 'missing-complete-drive.bin')
+    const session = {
+      uploadId: '21212121-2121-4121-8121-212121212121',
+      drive: 'main',
+      expectedBytes: 1,
+      partBytes: 1,
+      partCount: 1,
+      state: 'initiated',
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: { ...session, drive: undefined, state: 'completed' },
+            }),
+            { status: 200 }
+          )
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-missing-complete-drive' },
+      }).start()
+    ).rejects.toThrow('upload_drive_mismatch')
+  })
+
   it('resumes only the missing part and emits visible progress before completion', async () => {
     const file = new File([new Uint8Array([1, 2, 3, 4])], 'payload.bin', { lastModified: 12 })
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([1, 2])))
@@ -165,6 +298,7 @@ describe('GfsUploadJob', () => {
     const status: GfsUploadStatus = {
       session: {
         uploadId: '11111111-1111-4111-8111-111111111111',
+        drive: 'main',
         expectedBytes: 4,
         partBytes: 2,
         partCount: 2,
@@ -286,6 +420,7 @@ describe('GfsUploadJob', () => {
     const file = new File([new Uint8Array([22])], 'part-retry-after.bin')
     const session = {
       uploadId: '13131313-1313-4131-8131-131313131314',
+      drive: 'main',
       expectedBytes: 1,
       partBytes: 1,
       partCount: 1,
@@ -337,6 +472,7 @@ describe('GfsUploadJob', () => {
     const uploadId = '15151515-1515-4151-8151-151515151515'
     const session = {
       uploadId,
+      drive: 'main',
       expectedBytes: file.size,
       partBytes: file.size,
       partCount: 1,
@@ -426,6 +562,7 @@ describe('GfsUploadJob', () => {
     })
     const session = {
       uploadId: '16161616-1616-4161-8161-161616161616',
+      drive: 'main',
       expectedBytes: file.size,
       partBytes: file.size,
       partCount: 1,
@@ -489,6 +626,7 @@ describe('GfsUploadJob', () => {
     for (const [index, activePartCount] of invalidCounts.entries()) {
       const session = {
         uploadId: `17171717-1717-4171-8171-17171717171${index}`,
+        drive: 'main',
         expectedBytes: file.size,
         partBytes: file.size,
         partCount: 1,
@@ -564,6 +702,7 @@ describe('GfsUploadJob', () => {
             data: {
               session: {
                 uploadId: '22222222-2222-4222-8222-222222222222',
+                drive: 'main',
                 expectedBytes: 2,
                 partBytes: 2,
                 partCount: 1,
@@ -621,6 +760,7 @@ describe('GfsUploadJob', () => {
               ok: true,
               data: {
                 uploadId: '33333333-3333-4333-8333-333333333333',
+                drive: 'main',
                 expectedBytes: 8,
                 partBytes: 2,
                 partCount: 4,
@@ -642,6 +782,7 @@ describe('GfsUploadJob', () => {
               data: {
                 session: {
                   uploadId: '33333333-3333-4333-8333-333333333333',
+                  drive: 'main',
                   expectedBytes: 8,
                   partBytes: 2,
                   partCount: 4,
@@ -663,6 +804,7 @@ describe('GfsUploadJob', () => {
               ok: true,
               data: {
                 uploadId: '33333333-3333-4333-8333-333333333333',
+                drive: 'main',
                 expectedBytes: 8,
                 partBytes: 2,
                 partCount: 4,
@@ -707,6 +849,7 @@ describe('GfsUploadJob', () => {
               ok: true,
               data: {
                 uploadId: '44444444-4444-4444-8444-444444444444',
+                drive: 'main',
                 expectedBytes: 2,
                 partBytes: 2,
                 partCount: 1,
