@@ -11,6 +11,7 @@ import {
   issueExternalUserSession,
   requestedExternalSessionContract,
 } from '../../services/auth/externalSessionIssuance.js'
+import { authenticatePasswordAndIssueSession } from '../../services/auth/passwordSessionAuthentication.js'
 import {
   renewUserSessionToken,
   revokeAllUserSessions,
@@ -21,7 +22,6 @@ import {
   getTeamAgents,
   getUserAgents,
   googleLoginData,
-  passwordLoginData,
   requestProfilePasswordReset,
 } from '../../services/directory/index.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
@@ -92,7 +92,11 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(400).json({ error: 'email and password are required' })
       }
 
-      const login = await passwordLoginData({ email, password })
+      const login = await authenticatePasswordAndIssueSession({
+        email,
+        password,
+        contract: requestedExternalSessionContract(req.body?.sessionContract),
+      })
       if (!login) {
         return res.status(401).json({ error: 'Unauthorized' })
       }
@@ -104,14 +108,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       }
 
       const role = login.membership.role
-      const issued = await issueExternalUserSession({
-        contract: requestedExternalSessionContract(req.body?.sessionContract),
-        userId: login.user.id,
-        email: login.user.email,
-        teamId: login.membership.team_id || null,
-        role,
-        authenticationMethods: ['pwd'],
-      })
+      const issued = login.issued
       externalUserSessionEventsTotal.inc(
         { event: 'issue', contract: issued.contract, result: 'success' },
         1

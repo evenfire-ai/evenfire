@@ -403,7 +403,7 @@ export async function validateLegacyUserSession(
     | undefined
   if (!row) return { status: 'invalid', reason: 'user_not_found' }
   if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
-  if (row.valid_after && claims.iat * 1000 < dateOf(row.valid_after).getTime()) {
+  if (row.valid_after && claims.iat * 1000 <= dateOf(row.valid_after).getTime()) {
     return { status: 'revoked', reason: 'security_event' }
   }
   return {
