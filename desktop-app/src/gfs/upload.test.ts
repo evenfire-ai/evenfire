@@ -151,6 +151,71 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
+  it('retries a lifecycle 429 using the transport Retry-After value', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-retry-after-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([1]))
+      const session = {
+        uploadId: '13131313-1313-4131-8131-131313131313',
+        drive: 'main',
+        operation: 'create' as const,
+        expectedBytes: 1,
+        partBytes: 1,
+        partCount: 1,
+        state: 'initiated',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }
+      let createCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST', url: string): Promise<T> {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities'))
+            return enabledCapabilities() as T
+          if (method === 'POST' && requestPath(url).endsWith('/uploads')) {
+            createCalls += 1
+            if (createCalls === 1)
+              throw Object.assign(new Error('quota exceeded'), { status: 429, retryAfter: '0' })
+            return { ok: true, data: session } as T
+          }
+          if (method === 'POST' && requestPath(url).endsWith('/complete'))
+            return { ok: true, data: { ...session, state: 'completed' } } as T
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart(
+          _url: string,
+          _token: string,
+          _headers: Record<string, string>,
+          body: NodeJS.ReadableStream
+        ) {
+          for await (const _chunk of body as AsyncIterable<Buffer>) {
+            /* drain */
+          }
+          return { status: 204, text: '' }
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-retry-after',
+          transport,
+        }).start()
+      ).resolves.toMatchObject({ state: 'completed' })
+      expect(createCalls).toBe(2)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('resumes from sparse status and does not replay a committed part', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-resume-'))
     try {

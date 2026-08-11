@@ -8,7 +8,11 @@ import {
 import { apiSend } from './api'
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
+const GFS_UPLOAD_DRIVE = 'main'
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
+export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
+const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
@@ -108,8 +112,7 @@ interface UploadCapabilities {
   upload?: {
     resumableV2?: {
       enabled?: boolean
-      preferredPartBytes?: number
-      maxPartBytes?: number
+      maxFileBytes?: number
       preferredChunkBytes?: number
       maxChunkBytes?: number
       maxConcurrentPartsPerSession?: number
@@ -193,7 +196,7 @@ async function requestJson<T>(
 
 async function uploadError(
   response: Response
-): Promise<Error & { status?: number; code?: string }> {
+): Promise<Error & { status?: number; code?: string; retryAfterMs?: number }> {
   const text = await response.text().catch(() => '')
   let message = text || response.statusText || 'GFS upload failed'
   let code: string | undefined
@@ -218,10 +221,34 @@ async function uploadError(
   const error = new Error(`${response.status} ${message}`) as Error & {
     status?: number
     code?: string
+    retryAfterMs?: number
   }
   error.status = response.status
   error.code = code
+  error.retryAfterMs = parseRetryAfter(response.headers.get('retry-after'))
   return error
+}
+
+/** Parse an RFC 7231 Retry-After value and cap it before it reaches a timer. */
+export function parseRetryAfter(
+  value: string | null | undefined,
+  nowMs = Date.now(),
+  capMs = GFS_UPLOAD_RETRY_AFTER_CAP_MS
+): number | undefined {
+  if (value === null || value === undefined) return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  let delayMs: number
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    delayMs = seconds * 1_000
+  } else {
+    const dateMs = Date.parse(trimmed)
+    if (!Number.isFinite(dateMs)) return undefined
+    delayMs = Math.max(0, dateMs - nowMs)
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) return undefined
+  return Math.min(capMs, delayMs)
 }
 
 function assertRetryable(error: unknown): boolean {
@@ -230,7 +257,8 @@ function assertRetryable(error: unknown): boolean {
     (error.name === 'AbortError' ||
       error.message.startsWith('source_changed:') ||
       error.message.startsWith('upload_part_mismatch:') ||
-      error.message.startsWith('upload_part_outcome_unknown:'))
+      error.message.startsWith('upload_part_outcome_unknown:') ||
+      error.message.startsWith('upload_completion_outcome_unknown:'))
   )
     return false
   const status =
@@ -254,6 +282,92 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true }
     )
   })
+}
+
+function retryAfterOf(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const value = error as {
+    retryAfterMs?: unknown
+    retryAfter?: unknown
+    headers?: { get?: (name: string) => string | null }
+    response?: { headers?: { get?: (name: string) => string | null } }
+  }
+  if (typeof value.retryAfterMs === 'number' && Number.isFinite(value.retryAfterMs))
+    return Math.min(GFS_UPLOAD_RETRY_AFTER_CAP_MS, Math.max(0, value.retryAfterMs))
+  const header =
+    typeof value.retryAfter === 'string'
+      ? value.retryAfter
+      : (value.headers?.get?.('retry-after') ?? value.response?.headers?.get?.('retry-after'))
+  return parseRetryAfter(typeof header === 'string' ? header : undefined)
+}
+
+function ambiguousLifecycleError(error: unknown): boolean {
+  const status = statusOf(error)
+  return status === undefined || status === 408 || (status !== undefined && status >= 500)
+}
+
+function terminalReconciliationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return [
+    'upload status changed during reconciliation',
+    'upload_part_mismatch:',
+    'source_changed:',
+    'upload_completion_outcome_unknown:',
+    'cannot reconcile ',
+  ].some(prefix => error.message.startsWith(prefix))
+}
+
+interface LifecycleRecovery<T> {
+  value: T
+}
+
+interface LifecycleRetryOptions<T> {
+  signal?: AbortSignal
+  attempts?: number
+  reconcileOnError?: (error: unknown) => boolean
+  reconcile?: (error: unknown) => Promise<LifecycleRecovery<T> | undefined>
+}
+
+/**
+ * Bounded lifecycle retry primitive. It centralizes status classification,
+ * capped Retry-After handling, abort propagation, and optional ambiguity
+ * reconciliation for state-changing requests.
+ */
+async function requestWithLifecycleRetries<T>(
+  operation: () => Promise<T>,
+  options: LifecycleRetryOptions<T> = {}
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? GFS_UPLOAD_RETRY_MAX_ATTEMPTS)
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (options.signal?.aborted) throw options.signal.reason ?? error
+      const shouldReconcile = options.reconcile
+        ? (options.reconcileOnError?.(error) ?? ambiguousLifecycleError(error))
+        : false
+      if (shouldReconcile) {
+        try {
+          const recovered = await options.reconcile!(error)
+          if (recovered) return recovered.value
+        } catch (reconcileError) {
+          // A transient status/HEAD failure must not suppress the bounded
+          // retry of the original request. Definitive geometry, auth, or
+          // outcome-unknown errors remain terminal and are surfaced.
+          if (terminalReconciliationError(reconcileError)) throw reconcileError
+        }
+      }
+      if (!assertRetryable(error) || attempt + 1 >= attempts) throw error
+      await delay(
+        retryAfterOf(error) ??
+          Math.min(GFS_UPLOAD_RETRY_AFTER_CAP_MS, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+        options.signal
+      )
+    }
+  }
+  throw lastError
 }
 
 function digestBase64(bytes: ArrayBuffer): string {
@@ -309,16 +423,21 @@ function indexCommittedParts(
 
 async function loadUploadStatus(
   uploadId: string,
-  expected: { expectedBytes: number; partBytes?: number; partCount?: number },
+  expected: { expectedBytes: number; drive?: string; partBytes?: number; partCount?: number },
   signal?: AbortSignal,
-  timeoutMs = 600_000
+  timeoutMs = 600_000,
+  retryAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS
 ): Promise<{ status: GfsUploadStatus; head: Response }> {
-  const head = await requestJson<undefined>(
-    'HEAD',
-    `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}`,
-    undefined,
-    signal,
-    timeoutMs
+  const head = await requestWithLifecycleRetries(
+    () =>
+      requestJson<undefined>(
+        'HEAD',
+        `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}`,
+        undefined,
+        signal,
+        timeoutMs
+      ),
+    { signal, attempts: retryAttempts }
   )
   const declaredLengthHeader = head.response.headers.get('upload-length')
   if (declaredLengthHeader !== null) {
@@ -332,12 +451,16 @@ async function loadUploadStatus(
   const parts: GfsUploadPartReceipt[] = []
   for (let page = 0; page < 8; page += 1) {
     const query = cursor ? `?limit=256&cursor=${encodeURIComponent(cursor)}` : '?limit=256'
-    const response = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
-      'GET',
-      `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}/status${query}`,
-      undefined,
-      signal,
-      timeoutMs
+    const response = await requestWithLifecycleRetries(
+      () =>
+        requestJson<{ ok: boolean; data: GfsUploadStatus }>(
+          'GET',
+          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(uploadId)}/status${query}`,
+          undefined,
+          signal,
+          timeoutMs
+        ),
+      { signal, attempts: retryAttempts }
     )
     const current = receiptFromResponse(response)
     session ??= current.session
@@ -346,6 +469,9 @@ async function loadUploadStatus(
       session.uploadId !== uploadId ||
       session.expectedBytes !== current.session.expectedBytes ||
       session.expectedBytes !== expected.expectedBytes ||
+      (expected.drive !== undefined &&
+        current.session.drive !== undefined &&
+        current.session.drive !== expected.drive) ||
       session.partBytes !== current.session.partBytes ||
       session.partCount !== current.session.partCount ||
       (expected.partBytes !== undefined && current.session.partBytes !== expected.partBytes) ||
@@ -388,11 +514,13 @@ async function reconcileAmbiguousPart(
           session.uploadId,
           {
             expectedBytes: file.size,
+            drive: GFS_UPLOAD_DRIVE,
             partBytes: session.partBytes,
             partCount: session.partCount,
           },
           signal,
-          GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS
+          GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS,
+          1
         )
       ).status
     } catch (error) {
@@ -475,8 +603,9 @@ async function putPart(
         }
         const error = new Error(
           `${xhr.status} ${xhr.responseText || 'GFS upload failed'}`
-        ) as Error & { status?: number }
+        ) as Error & { status?: number; retryAfterMs?: number }
         error.status = xhr.status
+        error.retryAfterMs = parseRetryAfter(xhr.getResponseHeader('retry-after'))
         reject(error)
       }
       xhr.onerror = () => reject(new Error('GFS upload network error'))
@@ -534,7 +663,10 @@ async function uploadPartWithRetries(
         }
       }
       if (attempt === 2) throw error
-      await delay(Math.min(1000, 150 * (attempt + 1)), signal)
+      await delay(
+        retryAfterOf(error) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+        signal
+      )
     }
   }
   throw lastError
@@ -549,6 +681,7 @@ async function runParts(
   shouldPause: () => boolean,
   onProgress?: (progress: GfsUploadProgress) => void,
   onByteProgress?: (progress: GfsUploadProgress) => void,
+  onPartFailure?: (partNumber: number) => void,
   fallbackConcurrency = GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY
 ): Promise<{ failed: typeof parts; retryableFailures: number; paused: boolean }> {
   const initialConcurrency = Math.max(1, Math.min(concurrency, parts.length || 1))
@@ -607,6 +740,7 @@ async function runParts(
           failed.delete(part.partNumber)
           retryableFailed.delete(part.partNumber)
         } catch (error) {
+          onPartFailure?.(part.partNumber)
           if (shouldPause()) {
             return
           }
@@ -648,6 +782,11 @@ function abortError(message: string): Error {
 function statusOf(error: unknown): number | undefined {
   const value = error as { status?: unknown } | null
   return value && typeof value.status === 'number' ? value.status : undefined
+}
+
+function errorCodeOf(error: unknown): string | undefined {
+  const value = error as { code?: unknown } | null
+  return value && typeof value.code === 'string' ? value.code : undefined
 }
 
 export class GfsUploadJob {
@@ -700,13 +839,19 @@ export class GfsUploadJob {
       throw new Error(`cannot pause upload in ${session.state}`)
     }
     this.pauseRequested = true
-    const response = await requestJson<{ ok: boolean; data: UploadReceipt }>(
-      'POST',
-      `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}/pause`,
-      {},
-      undefined
+    const paused = await requestWithLifecycleRetries(
+      () =>
+        requestJson<{ ok: boolean; data: UploadReceipt }>(
+          'POST',
+          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}/pause`,
+          {},
+          this.abortController.signal
+        ).then(receiptFromResponse),
+      {
+        signal: this.abortController.signal,
+        reconcile: () => this.reconcileMutation(session, 'pause'),
+      }
     )
-    const paused = receiptFromResponse(response)
     this.session = paused
     this.state = 'paused'
     this.emit()
@@ -721,13 +866,20 @@ export class GfsUploadJob {
       throw new Error(`cannot resume upload in ${session.state}`)
     }
     this.pauseRequested = false
-    const response = await requestJson<{ ok: boolean; data: UploadReceipt }>(
-      'POST',
-      `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}/resume`,
-      {},
-      this.abortController.signal
+    const resumed = await requestWithLifecycleRetries(
+      () =>
+        requestJson<{ ok: boolean; data: UploadReceipt }>(
+          'POST',
+          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}/resume`,
+          {},
+          this.abortController.signal
+        ).then(receiptFromResponse),
+      {
+        signal: this.abortController.signal,
+        reconcile: () => this.reconcileMutation(session, 'resume'),
+      }
     )
-    this.session = receiptFromResponse(response)
+    this.session = resumed
     this.state = 'uploading'
     this.emit()
     return this.start()
@@ -741,39 +893,51 @@ export class GfsUploadJob {
     this.state = 'canceling'
     this.emit()
     if (session && !['completed', 'aborted'].includes(session.state)) {
+      let reconciledCompleted: UploadReceipt | null = null
       try {
-        await requestJson(
-          'DELETE',
-          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}`,
-          undefined,
-          undefined
+        await requestWithLifecycleRetries(
+          () =>
+            requestJson(
+              'DELETE',
+              `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}`,
+              undefined,
+              undefined
+            ).then(() => undefined),
+          {
+            reconcileOnError: error =>
+              ambiguousLifecycleError(error) ||
+              statusOf(error) === 409 ||
+              errorCodeOf(error) === 'upload_finalizing',
+            reconcile: async error => {
+              const observed = await this.observeSession(
+                session,
+                GFS_UPLOAD_RETRY_MAX_ATTEMPTS,
+                undefined
+              )
+              this.session = observed
+              if (observed.state === 'completed') {
+                reconciledCompleted = observed
+                return { value: undefined }
+              }
+              if (observed.state === 'aborted') return { value: undefined }
+              if (observed.state === 'finalizing') throw error
+              if (['initiated', 'uploading', 'paused'].includes(observed.state)) return undefined
+              throw new Error(`cannot reconcile cancel upload in ${observed.state}`)
+            },
+          }
         )
       } catch (error) {
-        if (
-          statusOf(error) === 409 ||
-          (typeof error === 'object' &&
-            error !== null &&
-            (error as { code?: unknown }).code === 'upload_finalizing')
-        ) {
-          const reconciled = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
-            'GET',
-            `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(session.uploadId)}/status`,
-            undefined,
-            undefined
-          )
-          this.session = receiptFromResponse(reconciled).session
-          if (this.session.state === 'completed') {
-            this.state = 'completed'
-            this.canceled = false
-            this.emit()
-            await this.input.onClearPersisted?.(session.uploadId)
-            return
-          }
-        }
         this.canceled = false
         this.state = 'failed'
         this.emit()
         throw error
+      }
+      if (reconciledCompleted) {
+        this.state = 'completed'
+        this.canceled = false
+        this.emit()
+        await this.input.onClearPersisted?.(session.uploadId)
+        return
       }
     }
     await this.runPromise?.catch(() => undefined)
@@ -800,14 +964,76 @@ export class GfsUploadJob {
     }
   }
 
+  private async observeSession(
+    session: UploadReceipt,
+    retryAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS,
+    signal: AbortSignal | undefined = this.abortController.signal
+  ): Promise<UploadReceipt> {
+    return (
+      await loadUploadStatus(
+        session.uploadId,
+        {
+          expectedBytes: this.input.file.size,
+          drive: GFS_UPLOAD_DRIVE,
+          partBytes: session.partBytes,
+          partCount: session.partCount,
+        },
+        signal,
+        GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS,
+        retryAttempts
+      )
+    ).status.session
+  }
+
+  private async reconcileMutation(
+    session: UploadReceipt,
+    action: 'pause' | 'resume'
+  ): Promise<LifecycleRecovery<UploadReceipt> | undefined> {
+    const observed = await this.observeSession(session)
+    if (
+      (action === 'pause' && observed.state === 'paused') ||
+      (action === 'resume' && ['initiated', 'uploading', 'completed'].includes(observed.state))
+    ) {
+      return { value: observed }
+    }
+    if (
+      (action === 'pause' && ['initiated', 'uploading'].includes(observed.state)) ||
+      (action === 'resume' && observed.state === 'paused')
+    ) {
+      return undefined
+    }
+    throw new Error(`cannot reconcile ${action} upload in ${observed.state}`)
+  }
+
+  private async reconcileCompletion(
+    session: UploadReceipt
+  ): Promise<LifecycleRecovery<UploadReceipt> | undefined> {
+    for (let attempt = 0; attempt < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS; attempt += 1) {
+      const observed = await this.observeSession(session, 1)
+      if (observed.state === 'completed') return { value: observed }
+      if (['initiated', 'uploading', 'paused'].includes(observed.state)) return undefined
+      if (observed.state !== 'finalizing')
+        throw new Error(`cannot reconcile upload completion in ${observed.state}`)
+      if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS)
+        await delay(GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt, this.abortController.signal)
+    }
+    throw new Error(
+      'upload_completion_outcome_unknown: finalization is still in progress; resume the persisted session'
+    )
+  }
+
   private async loadCapabilities(): Promise<UploadCapabilities['upload']> {
     let capabilities: { data: UploadCapabilities }
     try {
-      capabilities = await requestJson<UploadCapabilities>(
-        'GET',
-        '/api/v1/gfs/proxy/v1/capabilities',
-        undefined,
-        this.abortController.signal
+      capabilities = await requestWithLifecycleRetries(
+        () =>
+          requestJson<UploadCapabilities>(
+            'GET',
+            '/api/v1/gfs/proxy/v1/capabilities',
+            undefined,
+            this.abortController.signal
+          ),
+        { signal: this.abortController.signal }
       )
     } catch (error) {
       throw new GfsUploadCapabilityError('Resumable GFS upload capabilities are unavailable.', {
@@ -827,12 +1053,20 @@ export class GfsUploadJob {
   }> {
     const upload = await this.loadCapabilities()
     const resumable = upload.resumableV2!
+    if (resumable.maxFileBytes !== undefined) {
+      if (!Number.isSafeInteger(resumable.maxFileBytes) || resumable.maxFileBytes < 0)
+        throw new GfsUploadCapabilityError(
+          'Resumable GFS upload capabilities advertised an invalid file ceiling.'
+        )
+      if (this.input.file.size > resumable.maxFileBytes)
+        throw new Error(`GFS writer limit is ${resumable.maxFileBytes} bytes for this upload.`)
+    }
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
       const { session, parts } = (
         await loadUploadStatus(
           resumeId,
-          { expectedBytes: this.input.file.size },
+          { expectedBytes: this.input.file.size, drive: GFS_UPLOAD_DRIVE },
           this.abortController.signal
         )
       ).status
@@ -858,27 +1092,21 @@ export class GfsUploadJob {
       target: this.input.target,
       name: this.input.name,
     })
-    let create: { data: { ok: boolean; data: UploadReceipt }; response: Response }
-    try {
-      create = await requestJson<{ ok: boolean; data: UploadReceipt }>(
-        'POST',
-        '/api/v1/gfs/proxy/v1/uploads',
-        createBody,
-        this.abortController.signal
-      )
-    } catch (error) {
-      // A response lost after POST is safe to replay because the key is fixed.
-      if (statusOf(error) !== undefined) throw error
-      create = await requestJson<{ ok: boolean; data: UploadReceipt }>(
-        'POST',
-        '/api/v1/gfs/proxy/v1/uploads',
-        createBody,
-        this.abortController.signal
-      )
-    }
+    const create = await requestWithLifecycleRetries(
+      () =>
+        requestJson<{ ok: boolean; data: UploadReceipt }>(
+          'POST',
+          '/api/v1/gfs/proxy/v1/uploads',
+          createBody,
+          this.abortController.signal
+        ),
+      { signal: this.abortController.signal }
+    )
     const session = receiptFromResponse(create)
     if (session.expectedBytes !== this.input.file.size)
       throw new Error('GFS upload session size changed before transfer')
+    if (session.drive !== undefined && session.drive !== GFS_UPLOAD_DRIVE)
+      throw new Error('upload_drive_mismatch: writer changed drive')
     return { session, committed: new Set<number>(), resumable }
   }
 
@@ -938,12 +1166,49 @@ export class GfsUploadJob {
       }))
       const allParts = parts
       const completedParts = new Set(prepared.committed)
-      const progress = (value: GfsUploadProgress) => {
-        completedParts.add(value.partNumber)
-        this.uploadedBytes = allParts.reduce(
+      const inFlightLoaded = new Map<number, number>()
+      const calculateUploadedBytes = (): number => {
+        const committedBytes = allParts.reduce(
           (total, part) => total + (completedParts.has(part.partNumber) ? part.lengthBytes : 0),
           0
         )
+        const inFlightBytes = [...inFlightLoaded.entries()].reduce(
+          (total, [partNumber, loaded]) => total + (completedParts.has(partNumber) ? 0 : loaded),
+          0
+        )
+        const observed = Math.min(this.input.file.size, committedBytes + inFlightBytes)
+        // Part bytes are committed before the final resource publication. Do
+        // not expose a visually complete bar until the complete receipt is
+        // durable; the caller sets the exact total only after that response.
+        return Math.min(Math.max(0, this.input.file.size - 1), observed)
+      }
+      const progress = (value: GfsUploadProgress) => {
+        completedParts.add(value.partNumber)
+        inFlightLoaded.delete(value.partNumber)
+        this.uploadedBytes = calculateUploadedBytes()
+        this.input.onProgress?.({
+          ...value,
+          uploadedBytes: this.uploadedBytes,
+          partCount: allParts.length,
+        })
+        this.emit()
+      }
+      const byteProgress = (value: GfsUploadProgress) => {
+        const part = allParts[value.partNumber]
+        if (!part) return
+        const loaded = Math.min(
+          part.lengthBytes,
+          Math.max(0, value.uploadedBytes - part.offsetBytes)
+        )
+        inFlightLoaded.set(
+          value.partNumber,
+          Math.max(inFlightLoaded.get(value.partNumber) ?? 0, loaded)
+        )
+        // A progress event is an observation of bytes sent, not a commit
+        // receipt. Deduplicate each part's in-flight contribution, and remove
+        // it when the worker reports a failed attempt so a retry cannot leave
+        // the aggregate permanently overstated.
+        this.uploadedBytes = calculateUploadedBytes()
         this.input.onProgress?.({
           ...value,
           uploadedBytes: this.uploadedBytes,
@@ -967,30 +1232,26 @@ export class GfsUploadJob {
         this.abortController.signal,
         () => this.pauseRequested || this.canceled,
         progress,
-        value => this.input.onProgress?.(value),
+        byteProgress,
+        partNumber => {
+          inFlightLoaded.delete(partNumber)
+          this.uploadedBytes = calculateUploadedBytes()
+        },
         fallbackConcurrency
       )
       if (result.paused || this.pauseRequested) {
         this.state = 'paused'
-        const paused = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
-          'GET',
-          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
-          undefined,
-          undefined
+        const paused = await requestWithLifecycleRetries(
+          () =>
+            requestJson<{ ok: boolean; data: GfsUploadStatus }>(
+              'GET',
+              `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
+              undefined,
+              this.abortController.signal
+            ).then(receiptFromResponse),
+          { signal: this.abortController.signal }
         )
-        this.session = receiptFromResponse(paused).session
-        this.emit()
-        return this.session
-      }
-      if (result.paused || this.pauseRequested) {
-        this.state = 'paused'
-        const paused = await requestJson<{ ok: boolean; data: GfsUploadStatus }>(
-          'GET',
-          `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
-          undefined,
-          undefined
-        )
-        this.session = receiptFromResponse(paused).session
+        this.session = paused.session
         this.emit()
         return this.session
       }
@@ -998,13 +1259,22 @@ export class GfsUploadJob {
         throw new Error('One or more upload parts could not be committed.')
       this.state = 'finalizing'
       this.emit()
-      const completedResponse = await requestJson<{ ok: boolean; data: UploadReceipt }>(
-        'POST',
-        `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`,
-        {},
-        this.abortController.signal
+      const completed = await requestWithLifecycleRetries(
+        () =>
+          requestJson<{ ok: boolean; data: UploadReceipt }>(
+            'POST',
+            `/api/v1/gfs/proxy/v1/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`,
+            {},
+            this.abortController.signal
+          ).then(receiptFromResponse),
+        {
+          signal: this.abortController.signal,
+          reconcileOnError: error =>
+            ambiguousLifecycleError(error) || errorCodeOf(error) === 'upload_finalizing',
+          reconcile: () => this.reconcileCompletion(prepared.session),
+        }
       )
-      this.session = receiptFromResponse(completedResponse)
+      this.session = completed
       this.state = 'completed'
       this.uploadedBytes = this.input.file.size
       this.input.onProgress?.({

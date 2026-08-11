@@ -367,9 +367,23 @@ describe('GfsBrowser', () => {
     }
     const paused = { ...completed, state: 'paused', committedBytes: 2 }
     let resolveStart: ((value: typeof completed) => void) | undefined
-    let uploadInput: { onState?: (snapshot: unknown) => void } | undefined
+    let uploadInput:
+      | {
+          onState?: (snapshot: unknown) => void
+          onProgress?: (progress: { uploadedBytes: number }) => void
+        }
+      | undefined
     const job = {
       start: vi.fn(() => {
+        uploadInput?.onState?.({
+          state: 'uploading',
+          session: { ...completed, state: 'uploading' },
+          uploadedBytes: 2,
+          totalBytes: 4,
+        })
+        // Simulate an out-of-order in-flight part reporting a later absolute
+        // offset before the accumulator commits the lower-numbered part.
+        uploadInput?.onProgress?.({ uploadedBytes: 3 })
         uploadInput?.onState?.({
           state: 'uploading',
           session: { ...completed, state: 'uploading' },
@@ -408,7 +422,10 @@ describe('GfsBrowser', () => {
       cancel: vi.fn(async () => undefined),
     }
     mockCreateGfsUploadJob.mockImplementationOnce(
-      (input: { onState?: (snapshot: unknown) => void }) => {
+      (input: {
+        onState?: (snapshot: unknown) => void
+        onProgress?: (progress: { uploadedBytes: number }) => void
+      }) => {
         uploadInput = input
         return job
       }
@@ -424,10 +441,10 @@ describe('GfsBrowser', () => {
     const progress = await within(uploadDialog).findByRole('progressbar', {
       name: /Upload progress/,
     })
-    expect(progress).toHaveAttribute('value', '2')
+    expect(progress).toHaveAttribute('value', '3')
     expect(progress).toHaveAttribute('aria-valuemin', '0')
     expect(progress).toHaveAttribute('aria-valuemax', '4')
-    expect(progress).toHaveAttribute('aria-valuenow', '2')
+    expect(progress).toHaveAttribute('aria-valuenow', '3')
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Pause' }))
     await waitFor(() => expect(job.pause).toHaveBeenCalledTimes(1))
     expect(await within(uploadDialog).findByRole('button', { name: 'Resume' })).toBeTruthy()

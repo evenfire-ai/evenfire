@@ -199,4 +199,53 @@ describe('/api/v1/gfs/proxy', () => {
     expect(res.status).toBe(413)
     expect(res.body).toEqual({ ok: false, error: { code: 'payload_too_large' } })
   })
+
+  it('preserves upload-length and Retry-After headers for lifecycle clients', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('{"error":"quota_exceeded"}', {
+          status: 429,
+          headers: {
+            'content-type': 'application/json',
+            'retry-after': '3',
+            'upload-length': '209715200',
+          },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await buildApp()
+    const res = await request(app).post('/api/v1/gfs/proxy/v1/uploads').send({})
+
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBe('3')
+    expect(res.headers['upload-length']).toBe('209715200')
+  })
+
+  it('preserves the bounded upload response headers on successful lifecycle responses', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 204,
+          headers: {
+            location: '/v1/uploads/01234567-89ab-cdef-0123-456789abcdef',
+            'upload-offset': '8388608',
+            'upload-active-parts': '1',
+            'upload-state': 'uploading',
+          },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await buildApp()
+    const res = await request(app).head(
+      '/api/v1/gfs/proxy/v1/uploads/01234567-89ab-cdef-0123-456789abcdef'
+    )
+
+    expect(res.status).toBe(204)
+    expect(res.headers.location).toContain('/v1/uploads/')
+    expect(res.headers['upload-offset']).toBe('8388608')
+    expect(res.headers['upload-active-parts']).toBe('1')
+    expect(res.headers['upload-state']).toBe('uploading')
+  })
 })

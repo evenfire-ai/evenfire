@@ -3,11 +3,13 @@ import { config } from './config.js'
 export class ApiError extends Error {
   status: number
   bodyText: string
+  retryAfter?: string
 
-  constructor(message: string, status: number, bodyText: string) {
+  constructor(message: string, status: number, bodyText: string, retryAfter?: string | null) {
     super(message)
     this.status = status
     this.bodyText = bodyText
+    if (retryAfter) this.retryAfter = retryAfter
   }
 }
 
@@ -125,7 +127,12 @@ export async function requestJson<T>(
       } catch {
         // Keep raw text as message.
       }
-      throw new ApiError(`${response.status} ${response.statusText}: ${msg}`, response.status, raw)
+      throw new ApiError(
+        `${response.status} ${response.statusText}: ${msg}`,
+        response.status,
+        raw,
+        response.headers.get('retry-after')
+      )
     }
 
     if (!raw) return {} as T

@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Pool } from 'pg'
 import type { GfsUploadConfig } from '../../gfs-controller/src/config.js'
-import { PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
+import { CommitOutcomeUnknownError, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import type {
   TransactionOptions,
   Transactor,
@@ -65,6 +65,32 @@ class HoldBeforeCommitTransactor implements Transactor {
       await this.releaseGate
     }
     return this.delegate.transaction(fn, options)
+  }
+}
+
+/**
+ * Simulates a network/process failure after PostgreSQL has committed. The
+ * upload service must reconcile the durable row instead of replaying a
+ * state-changing operation blindly.
+ */
+class ThrowAfterCommitTransactor implements Transactor {
+  private transactionCount = 0
+
+  constructor(
+    private readonly delegate: Transactor,
+    private readonly failOnTransaction: number
+  ) {}
+
+  async transaction<T>(
+    fn: (client: TxClient) => Promise<T>,
+    options?: TransactionOptions
+  ): Promise<T> {
+    this.transactionCount += 1
+    const result = await this.delegate.transaction(fn, options)
+    if (this.transactionCount === this.failOnTransaction) {
+      throw new CommitOutcomeUnknownError(new Error('synthetic post-commit response loss'))
+    }
+    return result
   }
 }
 
@@ -222,6 +248,241 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     expect(rows.rows).toEqual(expect.arrayContaining([{ state: 'committed', count: 2 }]))
   })
 
+  it('serializes concurrent indexed part reservations without losing either commit', async () => {
+    const bytes = [
+      Buffer.alloc(CONFIG.preferredPartBytes, 0x31),
+      Buffer.alloc(CONFIG.preferredPartBytes, 0x32),
+    ]
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '7'.repeat(32),
+      name: 'concurrent-parts.bin',
+      sizeBytes: bytes.length * CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    const results = await Promise.all(
+      bytes.map((value, partNumber) =>
+        uploads.putPart(
+          created.session.uploadId,
+          partGeometry(
+            { expectedBytes: value.length * bytes.length, partBytes: CONFIG.preferredPartBytes },
+            partNumber
+          ),
+          checksum(value),
+          Readable.from([value]) as never,
+          principal
+        )
+      )
+    )
+    expect(results.map(result => result.part.state)).toEqual(['committed', 'committed'])
+    const count = await pool.query(
+      `SELECT count(*)::int AS count FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed'`,
+      [created.session.uploadId]
+    )
+    expect(count.rows[0]?.count).toBe(2)
+  })
+
+  it('completes non-zero parts and replays complete idempotently', async () => {
+    const bytes0 = Buffer.alloc(CONFIG.preferredPartBytes, 0x61)
+    const bytes1 = Buffer.alloc(CONFIG.preferredPartBytes, 0x62)
+    const uploadsWithFinalizer = new GfsUploadSessionService({
+      db: pool,
+      tx: new PgTransactor(pool),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+      finalize: async session => ({
+        resourceId: session.uploadId,
+        version: 1,
+        sha256: checksum(Buffer.concat([bytes0, bytes1])),
+      }),
+    })
+    const created = await uploadsWithFinalizer.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: 'f'.repeat(32),
+      name: 'complete-non-zero.bin',
+      sizeBytes: bytes0.length + bytes1.length,
+      idempotencyKey: randomUUID(),
+    })
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    for (const [partNumber, bytes] of [bytes0, bytes1].entries()) {
+      await uploadsWithFinalizer.putPart(
+        created.session.uploadId,
+        partGeometry(
+          { expectedBytes: bytes0.length + bytes1.length, partBytes: CONFIG.preferredPartBytes },
+          partNumber
+        ),
+        checksum(bytes),
+        Readable.from([bytes]) as never,
+        principal
+      )
+    }
+
+    const completed = await uploadsWithFinalizer.complete(created.session.uploadId, principal)
+    expect(completed).toMatchObject({
+      uploadId: created.session.uploadId,
+      state: 'completed',
+      committedBytes: bytes0.length + bytes1.length,
+      resultVersion: 1,
+    })
+    await expect(
+      uploadsWithFinalizer.complete(created.session.uploadId, principal)
+    ).resolves.toEqual(completed)
+  })
+
+  it('reconciles an ambiguous committed part response without duplicating the part', async () => {
+    const base = new GfsUploadSessionService({
+      db: pool,
+      tx: new PgTransactor(pool),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+    })
+    const created = await base.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '1'.repeat(32),
+      name: 'ambiguous-part.bin',
+      sizeBytes: CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    const uploadsWithUnknownCommit = new GfsUploadSessionService({
+      db: pool,
+      // The reservation transaction commits first; the second transaction is
+      // the indexed-part commit whose response is intentionally lost.
+      tx: new ThrowAfterCommitTransactor(new PgTransactor(pool), 2),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+    })
+    const bytes = Buffer.alloc(CONFIG.preferredPartBytes, 0x73)
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    const result = await uploadsWithUnknownCommit.putPart(
+      created.session.uploadId,
+      partGeometry({ expectedBytes: bytes.length, partBytes: CONFIG.preferredPartBytes }, 0),
+      checksum(bytes),
+      Readable.from([bytes]) as never,
+      principal
+    )
+    expect(result.part.state).toBe('committed')
+    const count = await pool.query(
+      `SELECT count(*)::int AS count FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed'`,
+      [created.session.uploadId]
+    )
+    expect(count.rows[0]?.count).toBe(1)
+  })
+
+  it('reconciles an ambiguous complete response from the committed session row', async () => {
+    const bytes = Buffer.alloc(CONFIG.preferredPartBytes, 0x84)
+    const base = new GfsUploadSessionService({
+      db: pool,
+      tx: new PgTransactor(pool),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+    })
+    const created = await base.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '2'.repeat(32),
+      name: 'ambiguous-complete.bin',
+      sizeBytes: bytes.length,
+      idempotencyKey: randomUUID(),
+    })
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    await base.putPart(
+      created.session.uploadId,
+      partGeometry({ expectedBytes: bytes.length, partBytes: CONFIG.preferredPartBytes }, 0),
+      checksum(bytes),
+      Readable.from([bytes]) as never,
+      principal
+    )
+    const uploadsWithFinalizer = new GfsUploadSessionService({
+      db: pool,
+      tx: new ThrowAfterCommitTransactor(new PgTransactor(pool), 2),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+      finalize: async session => ({
+        resourceId: session.uploadId,
+        version: 2,
+        sha256: checksum(bytes),
+      }),
+    })
+    await expect(
+      uploadsWithFinalizer.complete(created.session.uploadId, principal)
+    ).resolves.toMatchObject({
+      state: 'completed',
+      resultVersion: 2,
+    })
+  })
+
+  it('fences and cleans a stale reserved lease while its row lock is held', async () => {
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '3'.repeat(32),
+      name: 'stale-reserved.bin',
+      sizeBytes: CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    const partsDir = join(tempRoot, '.uploads', created.session.uploadId, 'parts')
+    await mkdir(partsDir, { recursive: true })
+    const staleSuffix = `part.tmp-${randomUUID()}`
+    const stagingPath = join(partsDir, `0.${staleSuffix}`)
+    const finalPath = join(partsDir, '0.part')
+    await writeFile(stagingPath, Buffer.from('stale-temp'))
+    await writeFile(finalPath, Buffer.from('stale-final'))
+    await pool.query(
+      `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = 1 WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    await pool.query(
+      `INSERT INTO gfs_upload_parts
+        (upload_id, part_number, offset_bytes, length_bytes, sha256, state, staging_path, lease_epoch, lease_started_at)
+       VALUES ($1, 0, 0, $2, $3, 'reserved', $4, 1, now() - interval '1 hour')`,
+      [
+        created.session.uploadId,
+        CONFIG.preferredPartBytes,
+        checksum(Buffer.from('stale')),
+        stagingPath,
+      ]
+    )
+
+    const result = await uploads.reconcile()
+
+    expect(result.staleParts).toBeGreaterThanOrEqual(1)
+    expect(
+      await pool.query('SELECT state FROM gfs_upload_parts WHERE upload_id = $1', [
+        created.session.uploadId,
+      ])
+    ).toMatchObject({
+      rows: [{ state: 'failed' }],
+    })
+    expect(
+      (
+        await pool.query('SELECT active_part_count FROM gfs_upload_sessions WHERE upload_id = $1', [
+          created.session.uploadId,
+        ])
+      ).rows[0]?.active_part_count
+    ).toBe(0)
+    await expect(stat(stagingPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(finalPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('does not disclose a session to another owner and makes cancel terminal', async () => {
     const created = await uploads.create({
       drive,
@@ -321,6 +582,63 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       [created.session.uploadId]
     )
     expect(parts.rows[0]?.count).toBe(0)
+  })
+
+  it('reconciles expired sessions and detects a committed part whose file is missing', async () => {
+    const expired = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '9'.repeat(32),
+      name: 'expired-reconcile.bin',
+      sizeBytes: CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    await pool.query(
+      `UPDATE gfs_upload_sessions SET expires_at = now() - interval '1 second' WHERE upload_id = $1`,
+      [expired.session.uploadId]
+    )
+
+    const expiredResult = await uploads.reconcile()
+    expect(expiredResult.expiredSessions).toBeGreaterThanOrEqual(1)
+    await expect(
+      pool.query(`SELECT state FROM gfs_upload_sessions WHERE upload_id = $1`, [
+        expired.session.uploadId,
+      ])
+    ).resolves.toMatchObject({ rows: [{ state: 'expired' }] })
+
+    const bytes = Buffer.alloc(CONFIG.preferredPartBytes, 0x5a)
+    const committed = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '8'.repeat(32),
+      name: 'missing-reconcile.bin',
+      sizeBytes: bytes.length,
+      idempotencyKey: randomUUID(),
+    })
+    await uploads.putPart(
+      committed.session.uploadId,
+      partGeometry({ expectedBytes: bytes.length, partBytes: CONFIG.preferredPartBytes }, 0),
+      checksum(bytes),
+      Readable.from([bytes]) as never,
+      { drive, ownerSubject: owner, primarySubject: owner }
+    )
+    const partRow = await pool.query<{ staging_path: string }>(
+      `SELECT staging_path FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed'`,
+      [committed.session.uploadId]
+    )
+    await rm(String(partRow.rows[0]?.staging_path), { force: true })
+
+    const corruptResult = await uploads.reconcile()
+    expect(corruptResult).toMatchObject({ staleParts: 0 })
+    const corruptRow = await pool.query<{ state: string; failure_code: string }>(
+      `SELECT state, failure_code FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [committed.session.uploadId]
+    )
+    expect(corruptRow.rows[0]).toEqual({ state: 'failed', failure_code: 'corrupt_part_missing' })
   })
 
   it('rejects cancel during finalization and leaves one completed receipt', async () => {

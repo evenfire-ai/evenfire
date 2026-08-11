@@ -33,6 +33,8 @@ export function currentWindowStartMs(nowMs = Date.now()): number {
   return Math.floor(nowMs / WINDOW_MS) * WINDOW_MS
 }
 
+type RateLimitQuery = (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>
+
 /**
  * Atomically increment the (bucketKey, windowStart) counter, return the new
  * count plus whether it's still under `maxPerMinute`.
@@ -48,13 +50,35 @@ export async function checkAndIncrement(
   nowMs = Date.now(),
   cost = 1
 ): Promise<RateLimitCheck> {
+  return checkAndIncrementWithQuery(
+    (text, values) => pool.query(text, values),
+    bucketKey,
+    maxPerMinute,
+    nowMs,
+    cost
+  )
+}
+
+/**
+ * Same atomic limiter operation against an explicitly supplied query
+ * function. Production callers use the process-wide pool above; the narrow
+ * seam lets the real-Postgres integration suite exercise this exact SQL
+ * against an isolated database without changing runtime ownership.
+ */
+export async function checkAndIncrementWithQuery(
+  query: RateLimitQuery,
+  bucketKey: string,
+  maxPerMinute: number,
+  nowMs = Date.now(),
+  cost = 1
+): Promise<RateLimitCheck> {
   if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
   const windowStartMs = currentWindowStartMs(nowMs)
   const resetMs = windowStartMs + WINDOW_MS
 
   let result: { rows: unknown[] } | null | undefined
   try {
-    result = await pool.query(
+    result = await query(
       `INSERT INTO rate_limit_buckets (bucket_key, window_start_ms, count)
        VALUES ($1, $2, $3)
        ON CONFLICT (bucket_key, window_start_ms) DO UPDATE

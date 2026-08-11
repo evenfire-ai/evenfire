@@ -11,7 +11,24 @@ import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/
 import { rootLogger } from '../../observability/logger.js'
 
 const DEFAULT_DRIVE = 'main'
-const PASSTHROUGH_RESPONSE_HEADERS = ['content-type', 'content-disposition', 'content-length']
+const PASSTHROUGH_RESPONSE_HEADERS = [
+  'content-type',
+  'content-disposition',
+  'content-length',
+  'location',
+  'upload-offset',
+  'upload-length',
+  'upload-part-bytes',
+  'upload-part-count',
+  'upload-active-parts',
+  'upload-state',
+  'upload-expires',
+  'upload-part-number',
+  'upload-part-offset',
+  'upload-part-length',
+  'upload-checksum',
+  'retry-after',
+]
 const UPLOAD_PART_PATH = /^\/v1\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+(?:\?|$)/i
 const UPLOAD_PATH = /^\/v1\/(?:capabilities|uploads)(?:\/|\?|$)/i
 const STREAM_REQUEST_HEADERS = [
@@ -137,6 +154,12 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(upstreamRes.status)
         const contentType = upstreamRes.headers.get('content-type')
         if (contentType) res.setHeader('content-type', contentType)
+        const retryAfter = upstreamRes.headers.get('retry-after')
+        if (retryAfter) res.setHeader('retry-after', retryAfter)
+        for (const header of PASSTHROUGH_RESPONSE_HEADERS) {
+          const value = upstreamRes.headers.get(header)
+          if (value) res.setHeader(header, value)
+        }
         res.send(errorBody)
         return
       }

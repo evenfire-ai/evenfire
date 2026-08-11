@@ -33,6 +33,7 @@ const STREAM_HEADERS = [
   'content-length',
   'content-disposition',
   'cache-control',
+  'location',
   'upload-offset',
   'upload-length',
   'upload-part-bytes',
@@ -44,14 +45,19 @@ const STREAM_HEADERS = [
   'upload-part-offset',
   'upload-part-length',
   'upload-checksum',
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
 ]
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
     const body =
       error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    const retryAfter = error.headers?.get('retry-after')
-    if (retryAfter) res.setHeader('Retry-After', retryAfter)
+    for (const header of STREAM_HEADERS) {
+      const value = error.headers?.get(header)
+      if (value) res.setHeader(header, value)
+    }
     res.status(error.status).json(body)
     return
   }

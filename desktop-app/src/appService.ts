@@ -298,7 +298,11 @@ const gfsUploadTransport: DesktopUploadTransport = {
       signal: withTimeout(signal, timeoutMs),
     } as RequestInit & { duplex: 'half' })
     const text = await response.text()
-    return { status: response.status, text }
+    return {
+      status: response.status,
+      text,
+      retryAfter: response.headers.get('retry-after') ?? undefined,
+    }
   },
 }
 
@@ -411,6 +415,8 @@ interface DesktopGfsUploadScope {
   authEpoch: number
 }
 
+type DesktopGfsUploadIdentity = Omit<DesktopGfsUploadScope, 'drive' | 'authEpoch'>
+
 interface PersistedDesktopGfsUpload {
   version: typeof DESKTOP_GFS_UPLOAD_STATE_VERSION
   uploadId: string
@@ -471,6 +477,15 @@ function normalizeDesktopUploadBaseUrl(value: string): string {
   }
   url.hash = ''
   return url.toString().replace(/\/+$/, '')
+}
+
+function desktopGfsUploadIdentity(me: SessionMe): DesktopGfsUploadIdentity {
+  return {
+    ownerId: me.id,
+    teamId: me.teamId ? String(me.teamId).trim() : null,
+    environmentKey: getActiveEnvKey(),
+    baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+  }
 }
 
 function normalizeDesktopUploadDrive(value: string | undefined): string {
@@ -803,6 +818,10 @@ export class AppService {
   private logoutInProgress = false
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
+  // A finite RPC may temporarily borrow another team session. Keep the
+  // deliberate user-owned GFS scope stable across that hop so in-flight jobs
+  // are not invalidated by the transient `me` value.
+  private gfsScopeIdentity: DesktopGfsUploadIdentity | null = null
   private gfsUploadStateQueue: Promise<void> = Promise.resolve()
   private readonly gfsUploadJobs = new Map<
     string,
@@ -975,11 +994,12 @@ export class AppService {
   private async switchSessionToTeam(teamId: string, token = this.requireSessionToken()) {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
-    await this.suspendDesktopGfsUploadsForAuthBoundary()
     const switchGeneration = this.sessionGeneration
     if (this.sessionToken !== token || !this.me) {
       throw new Error('stale_auth_epoch: authenticated team scope changed before switch dispatch')
     }
+    const previousIdentity =
+      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
     let switchedToken: string | null = null
     try {
       const switched = await this.authClient.switchTeam(token, targetTeamId)
@@ -989,12 +1009,17 @@ export class AppService {
       }
       await this.commitSessionToken(switched.token, { refreshMe: true })
       if (!this.me) throw new Error('Team switch ended without an authenticated session')
-      this.activateGfsAuthScope()
       return switched.token
     } catch (error) {
       if (!switchedToken && this.sessionToken === token && this.me) {
-        this.activateGfsAuthScope()
+        // A failed transient hop leaves the deliberate GFS scope untouched.
       } else {
+        // Once the auth service has issued a replacement token, the previous
+        // authenticated scope is no longer safe to continue. Fence and
+        // persist its uploads before clearing the partially switched session;
+        // otherwise a failed refresh/restore could leave a job running with a
+        // token whose team ownership is unknown.
+        await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
         this.clearAuthenticatedSessionState()
         try {
           await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
@@ -1132,6 +1157,7 @@ export class AppService {
     this.sessionGeneration += 1
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
+    this.gfsScopeIdentity = null
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
@@ -1144,20 +1170,22 @@ export class AppService {
     unbindChatStore()
   }
 
-  private activateGfsAuthScope(): void {
+  private activateGfsAuthScope(identityOverride?: DesktopGfsUploadIdentity): void {
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = false
+    this.gfsScopeIdentity = identityOverride ?? (this.me ? desktopGfsUploadIdentity(this.me) : null)
   }
 
   private currentDesktopGfsUploadScope(driveValue: string | undefined): DesktopGfsUploadScope {
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
+    const identity = this.gfsScopeIdentity
+    if (!identity) {
+      throw new Error('GFS upload dispatch is unavailable before scope activation')
+    }
     return {
-      ownerId: this.me.id,
-      teamId: this.me.teamId ? String(this.me.teamId).trim() : null,
-      environmentKey: getActiveEnvKey(),
-      baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+      ...identity,
       drive: normalizeDesktopUploadDrive(driveValue),
       authEpoch: this.gfsAuthEpoch,
     }
@@ -1170,15 +1198,22 @@ export class AppService {
     }
   }
 
-  private async suspendDesktopGfsUploadsForAuthBoundary(): Promise<void> {
-    const oldIdentity = this.me
-      ? {
-          ownerId: this.me.id,
-          teamId: this.me.teamId ? String(this.me.teamId).trim() : null,
-          environmentKey: getActiveEnvKey(),
-          baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
-        }
-      : null
+  private async suspendDesktopGfsUploadsForAuthBoundary(identityOverride?: {
+    ownerId: string
+    teamId: string | null
+    environmentKey: string
+    baseUrl: string
+  }): Promise<void> {
+    const oldIdentity =
+      identityOverride ??
+      (this.me
+        ? {
+            ownerId: this.me.id,
+            teamId: this.me.teamId ? String(this.me.teamId).trim() : null,
+            environmentKey: getActiveEnvKey(),
+            baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+          }
+        : null)
     this.gfsDispatchBlocked = true
     this.gfsAuthEpoch += 1
     const jobs = new Set([
@@ -2739,6 +2774,8 @@ export class AppService {
   async switchTeam(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
+    const previousIdentity =
+      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
     // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
     // stream — the old team's progress/activity/status/notification sockets must
     // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
@@ -2751,6 +2788,11 @@ export class AppService {
     // minting a cross-team RPC token to decide an approval) must NOT.
     await this.switchSessionToTeam(targetTeamId)
     if (!this.me) throw new Error('Team switch ended without an authenticated session')
+    // A deliberate user switch is the only team-context boundary that fences
+    // in-flight uploads. Transient runWithTeamContext hops intentionally use
+    // switchSessionToTeam directly and must leave those jobs untouched.
+    await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+    this.activateGfsAuthScope()
     this.stopAllStreams()
     // Grants are keyed by userId, not by team, so they carry over — but every
     // cached org/agents/contexts answer is now about the wrong team. Drop the

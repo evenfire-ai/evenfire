@@ -247,6 +247,12 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
   }
   service.gfsAuthEpoch = 7
   service.gfsDispatchBlocked = false
+  ;(service as any).gfsScopeIdentity = {
+    ownerId: service.me.id,
+    teamId: service.me.teamId,
+    environmentKey: getActiveEnvKey(),
+    baseUrl: canonicalExternalBaseUrl(),
+  }
   service.desktopGfsUploadStatePath = async () => statePath
   service.authClient = {
     passwordLogin: vi.fn(),
@@ -430,6 +436,12 @@ describe('AppService GFS upload security scope', () => {
         role: null,
       }
       service.gfsDispatchBlocked = false
+      ;(service as any).gfsScopeIdentity = {
+        ownerId: service.me.id,
+        teamId: service.me.teamId,
+        environmentKey: getActiveEnvKey(),
+        baseUrl: canonicalExternalBaseUrl(),
+      }
       await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
       await expect(service.resumeGfsUpload(exact.uploadId, 'main')).rejects.toThrow(
         'not available in the active security scope'
@@ -447,6 +459,12 @@ describe('AppService GFS upload security scope', () => {
         role: null,
       }
       service.gfsAuthEpoch += 1
+      ;(service as any).gfsScopeIdentity = {
+        ownerId: service.me.id,
+        teamId: service.me.teamId,
+        environmentKey: getActiveEnvKey(),
+        baseUrl: canonicalExternalBaseUrl(),
+      }
       service.startDesktopGfsUpload.mockResolvedValue({ ...exact.session, state: 'uploading' })
       await service.resumeGfsUpload(exact.uploadId, 'main')
       expect(service.startDesktopGfsUpload).toHaveBeenCalledWith(

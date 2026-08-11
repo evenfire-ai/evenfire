@@ -173,6 +173,44 @@ export function GfsBrowser(): React.JSX.Element {
   // Resource IDs currently streaming a download (disables that row's button).
   const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
 
+  /**
+   * The uploader already emits the exact aggregate of committed bytes plus
+   * each part's maximum in-flight observation.  Keep a small monotonic guard
+   * only for two stale `uploading` snapshots arriving out of order; terminal
+   * or paused snapshots, and direct progress observations, must be accepted
+   * exactly so a failed retry cannot leave the bar overstated.
+   */
+  const mergeUploadSnapshot = useCallback((next: GfsUploadJobSnapshot): void => {
+    setUploadSnapshot(previous => {
+      if (!previous) return next
+      const previousUploadId = previous.session?.uploadId
+      const nextUploadId = next.session?.uploadId
+      if (
+        (previousUploadId && nextUploadId && previousUploadId !== nextUploadId) ||
+        previous.totalBytes !== next.totalBytes
+      )
+        return next
+      const uploadedBytes =
+        previous.state === 'uploading' && next.state === 'uploading'
+          ? Math.max(previous.uploadedBytes, next.uploadedBytes)
+          : next.uploadedBytes
+      return {
+        ...next,
+        uploadedBytes: Math.min(Math.max(0, uploadedBytes), next.totalBytes),
+      }
+    })
+  }, [])
+
+  const mergeUploadProgress = useCallback((uploadedBytes: number): void => {
+    setUploadSnapshot(previous => {
+      if (!previous) return previous
+      return {
+        ...previous,
+        uploadedBytes: Math.min(Math.max(0, uploadedBytes), previous.totalBytes),
+      }
+    })
+  }, [])
+
   const current = crumbs[crumbs.length - 1]
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
@@ -284,13 +322,11 @@ export function GfsBrowser(): React.JSX.Element {
     const job = createGfsUploadJob({
       ...input,
       onProgress: progress => {
-        setUploadSnapshot(previous =>
-          previous ? { ...previous, uploadedBytes: progress.uploadedBytes } : previous
-        )
+        mergeUploadProgress(progress.uploadedBytes)
         input.onProgress?.(progress)
       },
       onState: snapshot => {
-        setUploadSnapshot(snapshot)
+        mergeUploadSnapshot(snapshot)
         input.onState?.(snapshot)
       },
       onPersistPending: record => {
@@ -412,11 +448,9 @@ export function GfsBrowser(): React.JSX.Element {
           })
         },
         onProgress: progress => {
-          setUploadSnapshot(previous =>
-            previous ? { ...previous, uploadedBytes: progress.uploadedBytes } : previous
-          )
+          mergeUploadProgress(progress.uploadedBytes)
         },
-        onState: snapshot => setUploadSnapshot(snapshot),
+        onState: snapshot => mergeUploadSnapshot(snapshot),
         onPersist: record => {
           persistPendingGfsUpload({
             uploadId: record.uploadId,

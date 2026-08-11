@@ -41,6 +41,26 @@ import { GFS_DEFAULT_DRIVE, parseRequestedGfsScopes } from '../gfs/token.js'
 // rejected here, not forwarded to gfsc as an unbounded request.
 const MAX_GFS_URI_LEN = 2048
 const ACCESSIBLE_RESOURCE_DEFAULT_LIMIT = 100
+const GFS_UPLOAD_RESPONSE_HEADERS = [
+  'content-type',
+  'content-length',
+  'cache-control',
+  'location',
+  'upload-offset',
+  'upload-length',
+  'upload-part-bytes',
+  'upload-part-count',
+  'upload-active-parts',
+  'upload-state',
+  'upload-expires',
+  'upload-part-number',
+  'upload-part-offset',
+  'upload-part-length',
+  'upload-checksum',
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+] as const
 
 type ExternalGfsRequest = ExternalAuthedRequest & {
   gfsSubjectKeys?: string[]
@@ -925,31 +945,15 @@ async function proxyUploadToGfsc(
         'gfs external upload upstream error'
       )
     res.status(upstream.status)
-    const contentType = upstream.headers.get('content-type')
-    if (contentType) res.setHeader('content-type', contentType)
+    for (const name of GFS_UPLOAD_RESPONSE_HEADERS) {
+      const value = upstream.headers.get(name)
+      if (value) res.setHeader(name, value)
+    }
     res.send(body)
     return
   }
   res.status(upstream.status)
-  for (const name of [
-    'content-type',
-    'content-length',
-    'cache-control',
-    'upload-offset',
-    'upload-length',
-    'upload-part-bytes',
-    'upload-part-count',
-    'upload-active-parts',
-    'upload-state',
-    'upload-expires',
-    'upload-part-number',
-    'upload-part-offset',
-    'upload-part-length',
-    'upload-checksum',
-    'retry-after',
-    'x-ratelimit-limit',
-    'x-ratelimit-remaining',
-  ]) {
+  for (const name of GFS_UPLOAD_RESPONSE_HEADERS) {
     const value = upstream.headers.get(name)
     if (value) res.setHeader(name, value)
   }

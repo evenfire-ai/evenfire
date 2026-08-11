@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import type { Readable } from 'node:stream'
+import { type Readable, Transform } from 'node:stream'
 
 const GFS_UPLOAD_V2_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
 const GFS_UPLOAD_V2_PREFERRED_PART_BYTES = 8 * 1024 * 1024
@@ -11,6 +11,9 @@ const GFS_UPLOAD_V2_FALLBACK_CONCURRENCY = 2
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 5 * 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
+export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
+const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 
 export interface DesktopUploadSession {
   uploadId: string
@@ -71,6 +74,7 @@ interface Envelope<T> {
 interface UploadPartResponse {
   status: number
   text: string
+  retryAfter?: string
 }
 
 interface UploadCapabilities {
@@ -219,6 +223,8 @@ function retryableError(error: unknown): boolean {
   if (error instanceof Error && error.message.startsWith('stale_auth_epoch:')) return false
   if (error instanceof Error && error.message.startsWith('upload_part_outcome_unknown:'))
     return false
+  if (error instanceof Error && error.message.startsWith('upload_completion_outcome_unknown:'))
+    return false
   const status =
     error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
       ? Number((error as { status: number }).status)
@@ -228,8 +234,150 @@ function retryableError(error: unknown): boolean {
   return status === undefined || retryable(status)
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
+/** Parse an RFC 7231 Retry-After value and cap it before it reaches a timer. */
+export function parseRetryAfter(
+  value: string | null | undefined,
+  nowMs = Date.now(),
+  capMs = GFS_UPLOAD_RETRY_AFTER_CAP_MS
+): number | undefined {
+  if (value === null || value === undefined) return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  let delayMs: number
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    delayMs = seconds * 1_000
+  } else {
+    const dateMs = Date.parse(trimmed)
+    if (!Number.isFinite(dateMs)) return undefined
+    delayMs = Math.max(0, dateMs - nowMs)
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) return undefined
+  return Math.min(capMs, delayMs)
+}
+
+function retryAfterOf(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const value = error as {
+    retryAfterMs?: unknown
+    retryAfter?: unknown
+    headers?: { get?: (name: string) => string | null }
+    response?: { headers?: { get?: (name: string) => string | null } }
+    bodyText?: unknown
+  }
+  if (typeof value.retryAfterMs === 'number' && Number.isFinite(value.retryAfterMs))
+    return Math.min(GFS_UPLOAD_RETRY_AFTER_CAP_MS, Math.max(0, value.retryAfterMs))
+  const header =
+    typeof value.retryAfter === 'string'
+      ? value.retryAfter
+      : (value.headers?.get?.('retry-after') ?? value.response?.headers?.get?.('retry-after'))
+  const parsedHeader = parseRetryAfter(typeof header === 'string' ? header : undefined)
+  if (parsedHeader !== undefined) return parsedHeader
+  if (typeof value.bodyText === 'string') {
+    try {
+      const parsed = JSON.parse(value.bodyText) as { retryAfterSeconds?: unknown }
+      if (typeof parsed.retryAfterSeconds === 'number' && Number.isFinite(parsed.retryAfterSeconds))
+        return Math.min(
+          GFS_UPLOAD_RETRY_AFTER_CAP_MS,
+          Math.max(0, parsed.retryAfterSeconds * 1_000)
+        )
+    } catch {
+      // Preserve the transport's original error when its body is not JSON.
+    }
+  }
+  return undefined
+}
+
+function ambiguousLifecycleError(error: unknown): boolean {
+  const status =
+    error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
+      ? Number((error as { status: number }).status)
+      : undefined
+  return status === undefined || status === 408 || (status !== undefined && status >= 500)
+}
+
+function terminalReconciliationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return [
+    'upload status changed during reconciliation',
+    'resume_part_mismatch:',
+    'source_changed:',
+    'upload_completion_outcome_unknown:',
+    'cannot reconcile ',
+  ].some(prefix => error.message.startsWith(prefix))
+}
+
+interface LifecycleRecovery<T> {
+  value: T
+}
+
+interface LifecycleRetryOptions<T> {
+  signal?: AbortSignal
+  attempts?: number
+  reconcileOnError?: (error: unknown) => boolean
+  reconcile?: (error: unknown) => Promise<LifecycleRecovery<T> | undefined>
+}
+
+/**
+ * Bounded lifecycle retry primitive. It keeps Retry-After handling, abort
+ * propagation, and state-reconciliation hooks identical across Desktop
+ * create/pause/resume/complete/cancel/status requests.
+ */
+async function requestWithLifecycleRetries<T>(
+  input: DesktopUploadInput,
+  operation: () => Promise<T>,
+  options: LifecycleRetryOptions<T> = {}
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? GFS_UPLOAD_RETRY_MAX_ATTEMPTS)
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    assertAuthEpoch(input)
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (options.signal?.aborted) throw options.signal.reason ?? error
+      const shouldReconcile = options.reconcile
+        ? (options.reconcileOnError?.(error) ?? ambiguousLifecycleError(error))
+        : false
+      if (shouldReconcile) {
+        try {
+          const recovered = await options.reconcile!(error)
+          if (recovered) return recovered.value
+        } catch (reconcileError) {
+          // A transient status/HEAD failure must not suppress the bounded
+          // retry of the original request. Definitive geometry, auth, or
+          // outcome-unknown errors remain terminal and are surfaced.
+          if (terminalReconciliationError(reconcileError)) throw reconcileError
+        }
+      }
+      if (!retryableError(error) || attempt + 1 >= attempts) throw error
+      await sleep(
+        retryAfterOf(error) ??
+          Math.min(GFS_UPLOAD_RETRY_AFTER_CAP_MS, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+        options.signal
+      )
+    }
+  }
+  throw lastError
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer)
+        reject(signal.reason)
+      },
+      { once: true }
+    )
+  })
 }
 
 interface DesktopUploadPartChecksum {
@@ -349,16 +497,22 @@ async function loadUploadStatus(
     partCount?: number
   },
   signal?: AbortSignal,
-  timeoutMs = UPLOAD_TIMEOUT_MS
+  timeoutMs = UPLOAD_TIMEOUT_MS,
+  retryAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS
 ): Promise<DesktopUploadStatus> {
   assertAuthEpoch(input)
-  await input.transport.requestJson<Envelope<undefined>>(
-    'HEAD',
-    joinUrl(
-      input.baseUrl,
-      uploadPath(expected.drive, `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}`)
-    ),
-    { token: input.token, timeoutMs, signal }
+  await requestWithLifecycleRetries(
+    input,
+    () =>
+      input.transport.requestJson<Envelope<undefined>>(
+        'HEAD',
+        joinUrl(
+          input.baseUrl,
+          uploadPath(expected.drive, `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}`)
+        ),
+        { token: input.token, timeoutMs, signal }
+      ),
+    { signal, attempts: retryAttempts }
   )
 
   let cursor: string | undefined
@@ -369,17 +523,22 @@ async function loadUploadStatus(
     const query = new URLSearchParams({ limit: '256' })
     if (cursor) query.set('cursor', cursor)
     const status = unwrap<DesktopUploadStatus>(
-      await input.transport.requestJson<Envelope<DesktopUploadStatus>>(
-        'GET',
-        joinUrl(
-          input.baseUrl,
-          uploadPath(
-            expected.drive,
-            `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}/status`,
-            query
-          )
-        ),
-        { token: input.token, timeoutMs, signal }
+      await requestWithLifecycleRetries(
+        input,
+        () =>
+          input.transport.requestJson<Envelope<DesktopUploadStatus>>(
+            'GET',
+            joinUrl(
+              input.baseUrl,
+              uploadPath(
+                expected.drive,
+                `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}/status`,
+                query
+              )
+            ),
+            { token: input.token, timeoutMs, signal }
+          ),
+        { signal, attempts: retryAttempts }
       )
     )
     session ??= status.session
@@ -440,14 +599,18 @@ async function reconcileAmbiguousPart(
           partCount: session.partCount,
         },
         signal,
-        GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS
+        GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS,
+        1
       )
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error
       lastError = error
       if (!retryableError(error) || attempt + 1 >= GFS_UPLOAD_V2_RECONCILE_ATTEMPTS)
         throw partOutcomeUnknown(partNumber, error)
-      await sleep(250 * 2 ** attempt)
+      await sleep(
+        retryAfterOf(error) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+        signal
+      )
       continue
     }
 
@@ -485,6 +648,7 @@ async function putPart(
   start: number,
   length: number,
   signal?: AbortSignal,
+  onByteProgress?: (loadedBytes: number) => void,
   onRetryableFailure?: () => void,
   onPartSuccess?: () => void
 ): Promise<void> {
@@ -494,11 +658,21 @@ async function putPart(
     await assertSourceIdentity(input)
     const checksum = await checksumPart(input.filePath, start, start + length - 1)
     await assertSourceIdentity(input)
-    const body = createReadStream(input.filePath, {
+    const source = createReadStream(input.filePath, {
       start,
       end: start + length - 1,
       highWaterMark: 1024 * 1024,
     })
+    let loadedBytes = 0
+    const body = new Transform({
+      transform(chunk, _encoding, callback) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        loadedBytes += buffer.length
+        onByteProgress?.(Math.min(length, loadedBytes))
+        callback(null, buffer)
+      },
+    })
+    source.pipe(body)
     let response: UploadPartResponse
     try {
       assertAuthEpoch(input)
@@ -541,7 +715,10 @@ async function putPart(
         return
       }
       if (attempt >= 2) throw error
-      await sleep(250 * 2 ** attempt)
+      await sleep(
+        retryAfterOf(error) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+        signal
+      )
       attempt += 1
       continue
     }
@@ -569,7 +746,10 @@ async function putPart(
       }
     }
     if (attempt >= 2) throw uploadPartError(response.status, response.text)
-    await sleep(250 * 2 ** attempt)
+    await sleep(
+      retryAfterOf(response) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
+      signal
+    )
     attempt += 1
   }
 }
@@ -595,8 +775,10 @@ async function runParts(
   let retryableFailures = 0
   let consecutiveRetryableFailures = 0
   let downgraded = false
+  const inFlightLoaded = new Map<number, number>()
   const advertisedConcurrency = Number(input.advertisedConcurrency)
   const concurrency = Math.min(
+    GFS_UPLOAD_V2_DEFAULT_CONCURRENCY,
     Number.isSafeInteger(advertisedConcurrency) && advertisedConcurrency > 0
       ? advertisedConcurrency
       : GFS_UPLOAD_V2_DEFAULT_CONCURRENCY,
@@ -621,6 +803,21 @@ async function runParts(
   const registerPartSuccess = (): void => {
     consecutiveRetryableFailures = 0
   }
+  const calculateUploadedBytes = (): number => {
+    const committedBytes = [...completedParts].reduce(
+      (sum, number) =>
+        sum + Math.min(session.partBytes, session.expectedBytes - number * session.partBytes),
+      0
+    )
+    const inFlightBytes = [...inFlightLoaded.entries()].reduce(
+      (sum, [number, loaded]) => (completedParts.has(number) ? sum : sum + loaded),
+      0
+    )
+    const observed = Math.min(session.expectedBytes, committedBytes + inFlightBytes)
+    // Part bytes are committed before the final resource publication. Do not
+    // expose a visually complete bar until the complete receipt is durable.
+    return Math.min(Math.max(0, session.expectedBytes - 1), observed)
+  }
   const execute = async (work: typeof parts, workers: number): Promise<void> => {
     let next = 0
     const runWorker = async (workerIndex: number): Promise<void> => {
@@ -641,19 +838,24 @@ async function runParts(
             part.offsetBytes,
             part.lengthBytes,
             signal,
+            loaded => {
+              inFlightLoaded.set(
+                part.partNumber,
+                Math.max(inFlightLoaded.get(part.partNumber) ?? 0, loaded)
+              )
+              input.onProgress?.(calculateUploadedBytes(), session.expectedBytes)
+            },
             registerRetryableFailure,
             registerPartSuccess
           )
           completedParts.add(part.partNumber)
+          inFlightLoaded.delete(part.partNumber)
           failed.delete(part.partNumber)
           retryableFailed.delete(part.partNumber)
-          const completedBytes = [...completedParts].reduce(
-            (sum, number) =>
-              sum + Math.min(session.partBytes, session.expectedBytes - number * session.partBytes),
-            0
-          )
-          input.onProgress?.(completedBytes, session.expectedBytes)
+          input.onProgress?.(calculateUploadedBytes(), session.expectedBytes)
         } catch (error) {
+          inFlightLoaded.delete(part.partNumber)
+          input.onProgress?.(calculateUploadedBytes(), session.expectedBytes)
           if (shouldPause()) return
           if (
             signal?.aborted ||
@@ -682,6 +884,11 @@ function uploadPartError(status: number, text: string): Error & { status: number
   ) as Error & { status: number }
   error.status = status
   return error
+}
+
+function errorCodeOf(error: unknown): string | undefined {
+  const value = error as { code?: unknown } | null
+  return value && typeof value.code === 'string' ? value.code : undefined
 }
 
 export class DesktopGfsUploadJob {
@@ -746,23 +953,31 @@ export class DesktopGfsUploadJob {
       throw new Error(`cannot pause upload in ${session.state}`)
     this.pauseRequested = true
     this.assertAuthEpoch()
-    const paused = unwrap<DesktopUploadSession>(
-      await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
-        'POST',
-        joinUrl(
-          this.input.baseUrl,
-          uploadPath(
-            this.input.drive,
-            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/pause`
+    const paused = await requestWithLifecycleRetries(
+      this.input,
+      async () =>
+        unwrap<DesktopUploadSession>(
+          await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
+            'POST',
+            joinUrl(
+              this.input.baseUrl,
+              uploadPath(
+                this.input.drive,
+                `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/pause`
+              )
+            ),
+            {
+              token: this.input.token,
+              body: {},
+              timeoutMs: UPLOAD_TIMEOUT_MS,
+              signal: this.authBoundaryController.signal,
+            }
           )
         ),
-        {
-          token: this.input.token,
-          body: {},
-          timeoutMs: UPLOAD_TIMEOUT_MS,
-          signal: this.authBoundaryController.signal,
-        }
-      )
+      {
+        signal: this.authBoundaryController.signal,
+        reconcile: () => this.reconcileMutation(session, 'pause'),
+      }
     )
     this.session = paused
     this.state = 'paused'
@@ -781,23 +996,31 @@ export class DesktopGfsUploadJob {
     if (session.state !== 'paused') return this.start()
     this.pauseRequested = false
     this.assertAuthEpoch()
-    const resumed = unwrap<DesktopUploadSession>(
-      await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
-        'POST',
-        joinUrl(
-          this.input.baseUrl,
-          uploadPath(
-            this.input.drive,
-            `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/resume`
+    const resumed = await requestWithLifecycleRetries(
+      this.input,
+      async () =>
+        unwrap<DesktopUploadSession>(
+          await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
+            'POST',
+            joinUrl(
+              this.input.baseUrl,
+              uploadPath(
+                this.input.drive,
+                `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/resume`
+              )
+            ),
+            {
+              token: this.input.token,
+              body: {},
+              timeoutMs: UPLOAD_TIMEOUT_MS,
+              signal: this.authBoundaryController.signal,
+            }
           )
         ),
-        {
-          token: this.input.token,
-          body: {},
-          timeoutMs: UPLOAD_TIMEOUT_MS,
-          signal: this.authBoundaryController.signal,
-        }
-      )
+      {
+        signal: this.authBoundaryController.signal,
+        reconcile: () => this.reconcileMutation(session, 'resume'),
+      }
     )
     this.session = resumed
     this.state = 'uploading'
@@ -818,64 +1041,67 @@ export class DesktopGfsUploadJob {
     this.abortController.abort(new Error('GFS upload canceled'))
     const session = this.session
     if (session && !['completed', 'aborted'].includes(session.state)) {
+      let reconciledCompleted = false
       try {
-        this.assertAuthEpoch()
-        await this.input.transport.requestJson(
-          'DELETE',
-          joinUrl(
-            this.input.baseUrl,
-            uploadPath(
-              this.input.drive,
-              `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}`
-            )
-          ),
+        await requestWithLifecycleRetries(
+          this.input,
+          () =>
+            this.input.transport
+              .requestJson(
+                'DELETE',
+                joinUrl(
+                  this.input.baseUrl,
+                  uploadPath(
+                    this.input.drive,
+                    `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}`
+                  )
+                ),
+                {
+                  token: this.input.token,
+                  timeoutMs: UPLOAD_TIMEOUT_MS,
+                  signal: this.authBoundaryController.signal,
+                }
+              )
+              .then(() => undefined),
           {
-            token: this.input.token,
-            timeoutMs: UPLOAD_TIMEOUT_MS,
             signal: this.authBoundaryController.signal,
+            reconcileOnError: error =>
+              ambiguousLifecycleError(error) ||
+              Boolean(
+                error && typeof error === 'object' && (error as { status?: unknown }).status === 409
+              ) ||
+              errorCodeOf(error) === 'upload_finalizing',
+            reconcile: async error => {
+              const observed = await this.observeSession(
+                session,
+                GFS_UPLOAD_RETRY_MAX_ATTEMPTS,
+                this.authBoundaryController.signal
+              )
+              this.session = observed
+              if (observed.state === 'completed') {
+                reconciledCompleted = true
+                return { value: undefined }
+              }
+              if (observed.state === 'aborted') return { value: undefined }
+              if (observed.state === 'finalizing') throw error
+              if (['initiated', 'uploading', 'paused'].includes(observed.state)) return undefined
+              throw new Error(`cannot reconcile cancel upload in ${observed.state}`)
+            },
           }
         )
       } catch (error) {
-        const status =
-          error &&
-          typeof error === 'object' &&
-          typeof (error as { status?: unknown }).status === 'number'
-            ? Number((error as { status: number }).status)
-            : undefined
-        if (status === 409) {
-          this.assertAuthEpoch()
-          const observed = unwrap<DesktopUploadStatus>(
-            await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
-              'GET',
-              joinUrl(
-                this.input.baseUrl,
-                uploadPath(
-                  this.input.drive,
-                  `/api/v1/me/gfs/uploads/${encodeURIComponent(session.uploadId)}/status`,
-                  new URLSearchParams({ limit: '256' })
-                )
-              ),
-              {
-                token: this.input.token,
-                timeoutMs: UPLOAD_TIMEOUT_MS,
-                signal: this.authBoundaryController.signal,
-              }
-            )
-          )
-          this.session = observed.session
-          if (observed.session.state === 'completed') {
-            this.canceled = false
-            this.state = 'completed'
-            this.uploadedBytes = observed.session.expectedBytes
-            this.emit()
-            await this.input.onClearPersisted?.(session.uploadId)
-            return
-          }
-        }
         this.canceled = false
         this.state = 'failed'
         this.emit()
         throw error
+      }
+      if (reconciledCompleted) {
+        this.canceled = false
+        this.state = 'completed'
+        this.uploadedBytes = this.session?.expectedBytes ?? session.expectedBytes
+        this.emit()
+        await this.input.onClearPersisted?.(session.uploadId)
+        return
       }
     }
     await this.runPromise?.catch(() => undefined)
@@ -939,6 +1165,70 @@ export class DesktopGfsUploadJob {
     }
   }
 
+  private async observeSession(
+    session: DesktopUploadSession,
+    retryAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS,
+    signal: AbortSignal | undefined = this.authBoundaryController.signal
+  ): Promise<DesktopUploadSession> {
+    return (
+      await loadUploadStatus(
+        this.input,
+        session.uploadId,
+        {
+          drive: session.drive,
+          expectedBytes: session.expectedBytes,
+          partBytes: session.partBytes,
+          partCount: session.partCount,
+        },
+        signal,
+        GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS,
+        retryAttempts
+      )
+    ).session
+  }
+
+  private async reconcileMutation(
+    session: DesktopUploadSession,
+    action: 'pause' | 'resume'
+  ): Promise<LifecycleRecovery<DesktopUploadSession> | undefined> {
+    const observed = await this.observeSession(session)
+    if (
+      (action === 'pause' && observed.state === 'paused') ||
+      (action === 'resume' && ['initiated', 'uploading', 'completed'].includes(observed.state))
+    ) {
+      return { value: observed }
+    }
+    if (
+      (action === 'pause' && ['initiated', 'uploading'].includes(observed.state)) ||
+      (action === 'resume' && observed.state === 'paused')
+    ) {
+      return undefined
+    }
+    throw new Error(`cannot reconcile ${action} upload in ${observed.state}`)
+  }
+
+  private async reconcileCompletion(): Promise<
+    LifecycleRecovery<DesktopUploadSession> | undefined
+  > {
+    const session = this.session
+    if (!session) throw new Error('GFS upload session is unavailable during completion')
+    for (let attempt = 0; attempt < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS; attempt += 1) {
+      const observed = await this.observeSession(session, 1)
+      if (observed.state === 'completed') return { value: observed }
+      if (['initiated', 'uploading', 'paused'].includes(observed.state)) return undefined
+      if (observed.state !== 'finalizing')
+        throw new Error(`cannot reconcile upload completion in ${observed.state}`)
+      if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS)
+        await sleep(
+          GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt,
+          this.authBoundaryController.signal
+        )
+    }
+    throw new Error(
+      'upload_completion_outcome_unknown: finalization is still in progress; resume the persisted session'
+    )
+  }
+
   private async prepare(): Promise<{
     session: DesktopUploadSession
     committed: Set<number>
@@ -959,14 +1249,19 @@ export class DesktopGfsUploadJob {
       // receipts use the { ok, data, error } envelope; accepting an envelope
       // here would hide drift between Desktop and the writer's public contract.
       capabilities = parseUploadCapabilities(
-        await this.input.transport.requestJson<UploadCapabilities>(
-          'GET',
-          joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
-          {
-            token: this.input.token,
-            timeoutMs: UPLOAD_TIMEOUT_MS,
-            signal: this.abortController.signal,
-          }
+        await requestWithLifecycleRetries(
+          this.input,
+          () =>
+            this.input.transport.requestJson<UploadCapabilities>(
+              'GET',
+              joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
+              {
+                token: this.input.token,
+                timeoutMs: UPLOAD_TIMEOUT_MS,
+                signal: this.abortController.signal,
+              }
+            ),
+          { signal: this.abortController.signal }
         )
       )
     } catch (error) {
@@ -979,8 +1274,14 @@ export class DesktopGfsUploadJob {
       throw new DesktopUploadCapabilityError(
         'Resumable GFS uploads are not enabled on this writer.'
       )
-    if (typeof resumable.maxFileBytes === 'number' && file.size > resumable.maxFileBytes)
-      throw new Error(`GFS files are limited to ${resumable.maxFileBytes} bytes by the writer`)
+    if (resumable.maxFileBytes !== undefined) {
+      if (!Number.isSafeInteger(resumable.maxFileBytes) || resumable.maxFileBytes < 0)
+        throw new DesktopUploadCapabilityError(
+          'GFS resumable capabilities advertised an invalid file ceiling'
+        )
+      if (file.size > resumable.maxFileBytes)
+        throw new Error(`GFS files are limited to ${resumable.maxFileBytes} bytes by the writer`)
+    }
     this.input.advertisedConcurrency = resumable.maxConcurrentPartsPerSession
     this.input.fallbackConcurrency = resumable.fallbackConcurrency
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
@@ -1001,24 +1302,30 @@ export class DesktopGfsUploadJob {
     const target = this.input.operation === 'create' ? this.input.parentRid : this.input.resourceRid
     if (!target) throw new Error(`${this.input.operation} upload target is required`)
     this.assertAuthEpoch()
+    const createBody = {
+      operation: this.input.operation,
+      drive,
+      sizeBytes: file.size,
+      idempotencyKey: randomUUID(),
+      ...(this.input.operation === 'create'
+        ? { parentRid: target, name: this.input.name }
+        : { resourceRid: target, ifMatch: this.input.ifMatch }),
+    }
     const created = unwrap<DesktopUploadSession>(
-      await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
-        'POST',
-        joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/uploads')),
-        {
-          token: this.input.token,
-          body: {
-            operation: this.input.operation,
-            drive,
-            sizeBytes: file.size,
-            idempotencyKey: randomUUID(),
-            ...(this.input.operation === 'create'
-              ? { parentRid: target, name: this.input.name }
-              : { resourceRid: target, ifMatch: this.input.ifMatch }),
-          },
-          timeoutMs: UPLOAD_TIMEOUT_MS,
-          signal: this.abortController.signal,
-        }
+      await requestWithLifecycleRetries(
+        this.input,
+        () =>
+          this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
+            'POST',
+            joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/uploads')),
+            {
+              token: this.input.token,
+              body: createBody,
+              timeoutMs: UPLOAD_TIMEOUT_MS,
+              signal: this.abortController.signal,
+            }
+          ),
+        { signal: this.abortController.signal }
       )
     )
     if (created.drive !== drive) throw new Error('upload_drive_mismatch: writer changed drive')
@@ -1080,21 +1387,26 @@ export class DesktopGfsUploadJob {
         this.state = 'paused'
         this.assertAuthEpoch()
         const status = unwrap<DesktopUploadStatus>(
-          await this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
-            'GET',
-            joinUrl(
-              this.input.baseUrl,
-              uploadPath(
-                this.input.drive,
-                `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
-                new URLSearchParams({ limit: '256' })
-              )
-            ),
-            {
-              token: this.input.token,
-              timeoutMs: UPLOAD_TIMEOUT_MS,
-              signal: this.authBoundaryController.signal,
-            }
+          await requestWithLifecycleRetries(
+            this.input,
+            () =>
+              this.input.transport.requestJson<Envelope<DesktopUploadStatus>>(
+                'GET',
+                joinUrl(
+                  this.input.baseUrl,
+                  uploadPath(
+                    this.input.drive,
+                    `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/status`,
+                    new URLSearchParams({ limit: '256' })
+                  )
+                ),
+                {
+                  token: this.input.token,
+                  timeoutMs: UPLOAD_TIMEOUT_MS,
+                  signal: this.authBoundaryController.signal,
+                }
+              ),
+            { signal: this.authBoundaryController.signal }
           )
         )
         this.session = status.session
@@ -1108,23 +1420,33 @@ export class DesktopGfsUploadJob {
       this.assertAuthEpoch()
       this.state = 'finalizing'
       this.emit()
-      const completed = unwrap<DesktopUploadSession>(
-        await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
-          'POST',
-          joinUrl(
-            this.input.baseUrl,
-            uploadPath(
-              this.input.drive,
-              `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`
+      const completed = await requestWithLifecycleRetries<DesktopUploadSession>(
+        this.input,
+        async () =>
+          unwrap<DesktopUploadSession>(
+            await this.input.transport.requestJson<Envelope<DesktopUploadSession>>(
+              'POST',
+              joinUrl(
+                this.input.baseUrl,
+                uploadPath(
+                  this.input.drive,
+                  `/api/v1/me/gfs/uploads/${encodeURIComponent(prepared.session.uploadId)}/complete`
+                )
+              ),
+              {
+                token: this.input.token,
+                body: {},
+                timeoutMs: UPLOAD_TIMEOUT_MS,
+                signal: this.abortController.signal,
+              }
             )
           ),
-          {
-            token: this.input.token,
-            body: {},
-            timeoutMs: UPLOAD_TIMEOUT_MS,
-            signal: this.abortController.signal,
-          }
-        )
+        {
+          signal: this.abortController.signal,
+          reconcileOnError: error =>
+            ambiguousLifecycleError(error) || errorCodeOf(error) === 'upload_finalizing',
+          reconcile: () => this.reconcileCompletion(),
+        }
       )
       if (completed.drive !== canonicalDrive(this.input.drive))
         throw new Error('upload_drive_mismatch: completion changed drive')

@@ -708,6 +708,27 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect(calls).toHaveLength(0); // never reached the write service
   });
 
+  it.each([-1, 1.5, "2"])(
+    "400 path_invalid for an invalid If-Match value before authorization: %j",
+    async (ifMatch) => {
+      const res = new FakeRes();
+      const { d, calls, authzOps } = writeDeps();
+      await run(
+        d,
+        reqBody(`/v1/resources/${RID}/content`, {
+          method: "PUT",
+          auth: "Bearer t",
+          body: { content: "new", ifMatch },
+        }),
+        res
+      );
+      expect(res.statusCode).toBe(400);
+      expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
+      expect(authzOps).toEqual([]);
+      expect(calls).toHaveLength(0);
+    }
+  );
+
   it("a NON-agent (user) replace WITHOUT If-Match is allowed (agent invariant only)", async () => {
     const res = new FakeRes();
     const { d, calls } = writeDeps({ verifyToken: () => USER_WRITE_CLAIMS });

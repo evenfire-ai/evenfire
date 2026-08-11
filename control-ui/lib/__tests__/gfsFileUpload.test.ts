@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GFS_FILE_UPLOAD_MAX_BYTES, GFS_FILE_UPLOAD_MAX_MEGABYTES } from '@constants/gfsFileUpload'
-import { GfsUploadJob, type GfsUploadStatus, assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import {
+  GfsUploadJob,
+  type GfsUploadStatus,
+  assertGfsFileUploadSize,
+  parseRetryAfter,
+} from '@lib/gfsFileUpload'
 
 describe('assertGfsFileUploadSize', () => {
   it('accepts files at the upload limit', () => {
@@ -11,6 +16,14 @@ describe('assertGfsFileUploadSize', () => {
     expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES + 1)).toThrow(
       `GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`
     )
+  })
+})
+
+describe('parseRetryAfter', () => {
+  it('accepts delta-seconds and caps untrusted server delays', () => {
+    expect(parseRetryAfter('2')).toBe(2_000)
+    expect(parseRetryAfter('60')).toBe(5_000)
+    expect(parseRetryAfter('not-a-date')).toBeUndefined()
   })
 })
 
@@ -32,9 +45,13 @@ class FakeXhr {
   setRequestHeader(name: string, value: string): void {
     this.headers.set(name, value)
   }
+  getResponseHeader(name: string): string | null {
+    return this.headers.get(name) ?? null
+  }
   send(body: Blob): void {
     this.body = body
     this.status = FakeXhr.statuses.shift() ?? 204
+    if (this.status === 429) this.headers.set('retry-after', '0')
     FakeXhr.requests.push(this)
     void body.arrayBuffer().then(() => {
       this.upload.onprogress?.({
@@ -66,6 +83,78 @@ describe('GfsUploadJob', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('honors the writer-advertised maxFileBytes before creating a session', async () => {
+    const file = new File([new Uint8Array([1, 2])], 'ceiling.bin')
+    let createCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET' && String(_input).endsWith('/capabilities'))
+          return new Response(
+            JSON.stringify({ upload: { resumableV2: { enabled: true, maxFileBytes: 1 } } }),
+            { status: 200 }
+          )
+        if (method === 'POST' && String(_input).endsWith('/uploads')) createCalls += 1
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-ceiling' },
+      }).start()
+    ).rejects.toThrow('writer limit is 1 bytes')
+    expect(createCalls).toBe(0)
+  })
+
+  it('rejects a create receipt that changes the canonical control-ui drive', async () => {
+    const file = new File([new Uint8Array([3])], 'drive-drift.bin')
+    let partCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                uploadId: '18181818-1818-4181-8181-181818181818',
+                drive: 'archive',
+                expectedBytes: 1,
+                partBytes: 1,
+                partCount: 1,
+                state: 'initiated',
+                committedBytes: 0,
+                committedPartCount: 0,
+                activePartCount: 0,
+              },
+            }),
+            { status: 201 }
+          )
+        if (method === 'PUT') partCalls += 1
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-drive-drift' },
+      }).start()
+    ).rejects.toThrow('upload_drive_mismatch')
+    expect(partCalls).toBe(0)
   })
 
   it('resumes only the missing part and emits visible progress before completion', async () => {
@@ -137,6 +226,106 @@ describe('GfsUploadJob', () => {
     expect(progress.some(value => value < 4)).toBe(true)
     expect(progress.at(-1)).toBe(4)
     expect(responses).toHaveLength(0)
+  })
+
+  it('retries a lifecycle 429 using the server Retry-After header', async () => {
+    const file = new File([new Uint8Array([21])], 'retry-after.bin')
+    const session = {
+      uploadId: '12121212-1212-4121-8121-121212121212',
+      drive: 'main',
+      expectedBytes: 1,
+      partBytes: 1,
+      partCount: 1,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    let createCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads')) {
+          createCalls += 1
+          if (createCalls === 1)
+            return new Response('{"error":"quota_exceeded"}', {
+              status: 429,
+              headers: { 'retry-after': '0' },
+            })
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        }
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({ ok: true, data: { ...session, state: 'completed' } }),
+            {
+              status: 200,
+            }
+          )
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-retry-after' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+    expect(createCalls).toBe(2)
+  })
+
+  it('retries an XHR part 429 using the server Retry-After header', async () => {
+    const file = new File([new Uint8Array([22])], 'part-retry-after.bin')
+    const session = {
+      uploadId: '13131313-1313-4131-8131-131313131314',
+      expectedBytes: 1,
+      partBytes: 1,
+      partCount: 1,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    FakeXhr.statuses = [429, 204]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({ ok: true, data: { ...session, state: 'completed' } }),
+            {
+              status: 200,
+            }
+          )
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-part-retry-after' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+    expect(FakeXhr.requests).toHaveLength(2)
   })
 
   it('adopts a status-confirmed committed part after its XHR response is lost', async () => {
@@ -416,8 +605,8 @@ describe('GfsUploadJob', () => {
               upload: {
                 resumableV2: {
                   enabled: true,
-                  preferredPartBytes: 2,
-                  maxPartBytes: 2,
+                  preferredChunkBytes: 2,
+                  maxChunkBytes: 2,
                   maxConcurrentPartsPerSession: 4,
                   fallbackConcurrency: 2,
                 },
@@ -508,7 +697,7 @@ describe('GfsUploadJob', () => {
         if (init?.method === 'GET' && String(_input).endsWith('/capabilities'))
           return new Response(
             JSON.stringify({
-              upload: { resumableV2: { enabled: true, preferredPartBytes: 2, maxPartBytes: 2 } },
+              upload: { resumableV2: { enabled: true, preferredChunkBytes: 2, maxChunkBytes: 2 } },
             }),
             { status: 200 }
           )
