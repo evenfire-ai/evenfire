@@ -56,10 +56,25 @@ export async function loginControlUi(page: Page): Promise<void> {
     .poll(() => page.evaluate(() => window.localStorage.getItem('controlUiAdminToken')))
     .toBeNull()
 
-  const remindLater = page.getByRole('button', { name: 'Remind me later' })
-  if (await remindLater.isVisible({ timeout: 3_000 }).catch(() => false)) {
+  const accountAlert = page
+    .getByRole('status')
+    .filter({ hasText: /Set up your admin email|Confirm your admin email/ })
+  const remindLater = accountAlert.getByRole('button', {
+    name: 'Remind me later',
+    exact: true,
+  })
+
+  // The account reminder is allowed to arrive after the shell becomes ready.
+  // Register a user-visible dismissal handler so it cannot intercept a later
+  // GFS action, while retaining an immediate dismissal for the already-rendered
+  // case. This is test setup only; it does not mutate account state or mock the
+  // Control UI request path.
+  await page.addLocatorHandler(accountAlert, async () => {
+    if (await remindLater.isVisible().catch(() => false)) await remindLater.click()
+  })
+  if (await accountAlert.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await remindLater.click()
-    await expect(remindLater).toBeHidden({ timeout: 10_000 })
+    await expect(accountAlert).toBeHidden({ timeout: 10_000 })
   }
 }
 

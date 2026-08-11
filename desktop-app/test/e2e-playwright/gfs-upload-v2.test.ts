@@ -218,14 +218,37 @@ async function openFolder(
   page: Page,
   folderName: string
 ): Promise<{ browser: Locator; manageDialog: Locator }> {
-  const accessibleResponse = page.waitForResponse(
-    response => response.request().method() === 'GET' && response.url().includes('/external/gfs')
-  )
-  await openResourcesNavItem(page, 'nav-files')
-  await accessibleResponse.catch(() => undefined)
-  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible({
-    timeout: 30_000,
-  })
+  const filesHeading = page.getByRole('heading', { name: 'Files', exact: true })
+  const openFilesAttempt = async (timeout: number): Promise<void> => {
+    const accessibleResponse = page
+      .waitForResponse(
+        response =>
+          response.request().method() === 'GET' && response.url().includes('/external/gfs'),
+        { timeout }
+      )
+      .then(() => true)
+      .catch(() => false)
+    await openResourcesNavItem(page, 'nav-files')
+    await expect(filesHeading).toBeVisible({ timeout })
+    if (!(await accessibleResponse)) {
+      throw new Error('Desktop Files navigation did not produce the GFS accessibility response')
+    }
+  }
+
+  try {
+    await openFilesAttempt(15_000)
+  } catch (firstNavigationError) {
+    // The authenticated Desktop shell can finish its initial data refresh just
+    // after the first visible menu click and restore Chat. Retry the same user
+    // action once, bounded by the Files heading and its GFS request, instead of
+    // hiding the race behind a fixed sleep or navigating directly to a terminal
+    // route.
+    try {
+      await openFilesAttempt(30_000)
+    } catch {
+      throw firstNavigationError
+    }
+  }
   const browser = page.getByRole('region', { name: 'Global File System browser' })
   await expect(browser.getByRole('button', { name: folderName, exact: true })).toBeVisible({
     timeout: 60_000,
