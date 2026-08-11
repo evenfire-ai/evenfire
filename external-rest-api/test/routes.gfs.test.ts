@@ -132,6 +132,30 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     })
   })
 
+  it('overwrites a caller-spoofed XFF prefix with the trusted one-hop client address', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({
+      ok: true,
+      data: { items: [], nextCursor: null },
+    })
+    const app = buildApp()
+    // createApp uses this same contract: only its immediately adjacent public
+    // proxy is trusted. A caller cannot choose the leftmost XFF value.
+    app.set('trust proxy', 1)
+
+    await request(app)
+      .get('/me/gfs/resources')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+      .set('x-forwarded-for', '198.51.100.250, 203.0.113.41')
+      .expect(200)
+
+    const options = clientMock.controlApiRequest.mock.calls.at(-1)?.[2] as {
+      extraHeaders?: Record<string, string>
+    }
+    expect(options.extraHeaders?.['x-forwarded-for']).toBe('203.0.113.41')
+    expect(options.extraHeaders?.['x-forwarded-for']).not.toBe('198.51.100.250')
+  })
+
   it('does not forward a caller-supplied XFF value when the hop is untrusted', async () => {
     clientMock.controlApiRequest.mockResolvedValue({
       ok: true,
@@ -155,6 +179,26 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       ?.extraHeaders?.['x-forwarded-for']
     expect(forwarded).toBeDefined()
     expect(forwarded).not.toBe('203.0.113.99')
+  })
+
+  it('enforces the recognised ingress limit before auth or a control-api request', async () => {
+    const app = buildApp()
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await request(app)
+        .get('/me/gfs/not-classified')
+        .set('authorization', 'Bearer sess-xyz')
+        .expect(404)
+    }
+
+    const exhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+
+    expect(exhausted.status).toBe(429)
+    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(30)
+    expect(clientMock.controlApiRequest).not.toHaveBeenCalled()
+    expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
   })
 
   it('propagates a control-api no-escalation 403 verbatim', async () => {

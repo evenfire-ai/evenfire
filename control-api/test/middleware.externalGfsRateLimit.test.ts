@@ -6,6 +6,7 @@ import {
   externalGfsOperationFor,
   externalGfsPreResolutionRateLimit,
   externalGfsResolvedOperationRateLimit,
+  externalGfsSourceIp,
 } from '../src/middleware/externalGfsRateLimit.js'
 
 const checkAndIncrement = vi.hoisted(() => vi.fn())
@@ -267,6 +268,17 @@ describe('external GFS rate boundary', () => {
       `gfs-ext:pre:token:ip:${clientIpDigest}`,
       30
     )
+  })
+
+  it('uses only a valid first forwarded IP and rejects a spoofed first fragment', () => {
+    const requestWithSpoofedForwarding = {
+      header: (name: string) =>
+        name.toLowerCase() === 'x-forwarded-for' ? 'not-an-ip, 198.51.100.99' : undefined,
+      ip: '203.0.113.41',
+      socket: { remoteAddress: '10.42.0.18' },
+    } as unknown as import('express').Request
+
+    expect(externalGfsSourceIp(requestWithSpoofedForwarding)).toBe('203.0.113.41')
   })
 
   it('uses distinct session, source-IP, and effective-actor buckets for each operation class', async () => {

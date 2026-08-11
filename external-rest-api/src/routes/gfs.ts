@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
 import type { Request } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
@@ -32,6 +33,9 @@ const CONTROL_API_ERROR_HEADERS = [
   'x-request-id',
 ] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+// Approved GFS source-IP boundary; control-api adds the class-specific
+// per-session/IP/effective-actor 10/30 limits after this public edge.
+const EXTERNAL_GFS_INGRESS_LIMIT_PER_MIN = 30
 
 type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
 type GfsRequestOptions = {
@@ -97,7 +101,22 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
 export function createGfsRouter(): Router {
   const router = Router()
 
-  router.use('/me/gfs', attachGfsRequestId, requireAuth)
+  // Keep a direct, recognised edge guard at this service as well as the
+  // cross-replica control-api buckets. It runs before JWT work and prevents a
+  // client from using the proxy hop to make auth or downstream requests
+  // unbounded. Headers remain owned by control-api's durable limiter.
+  router.use(
+    '/me/gfs',
+    rateLimit({
+      windowMs: 60_000,
+      limit: EXTERNAL_GFS_INGRESS_LIMIT_PER_MIN,
+      standardHeaders: false,
+      legacyHeaders: false,
+      message: { error: 'Too Many Requests' },
+    }),
+    attachGfsRequestId,
+    requireAuth
+  )
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
     try {

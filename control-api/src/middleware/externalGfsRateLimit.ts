@@ -116,7 +116,15 @@ function authenticatedSessionDigest(req: Request): string | null {
   return token ? digest(token) : null
 }
 
-function sourceIpDigest(req: Request): string {
+/**
+ * Source address forwarded by the authenticated external-rest-api boundary.
+ *
+ * The first XFF element is accepted only when it is an IP literal. This is
+ * intentionally exported for the recognisable edge limiter as well as the
+ * durable Postgres buckets below: the two guards must meter the same trusted
+ * client identity, never a caller-selected header fragment.
+ */
+export function externalGfsSourceIp(req: Request): string {
   // The app-level /external gate accepts only the authenticated
   // external-rest-api service. That service overwrites X-Forwarded-For with
   // its proxy-attested client address; profile-control-funnel then appends its
@@ -129,7 +137,11 @@ function sourceIpDigest(req: Request): string {
     forwardedIp && isIP(forwardedIp) !== 0
       ? forwardedIp
       : req.ip || req.socket.remoteAddress || '__unknown_peer__'
-  return digest(ip)
+  return ip
+}
+
+function sourceIpDigest(req: Request): string {
+  return digest(externalGfsSourceIp(req))
 }
 
 function applyRateLimitHeaders(

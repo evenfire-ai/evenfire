@@ -462,13 +462,13 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       await expect(resourceRow(ordinary.page, grantFolder)).toBeVisible()
       await expect(resourceRow(ordinary.page, shareFolder)).toBeVisible()
 
-      dialog = await openResourceManage(page, grantFolder)
+      await openResourceManage(page, grantFolder)
       await page.getByTestId(`gfs-revoke-grant-${grant.id}`).click()
       await expectToast(page, `Access revoked for ${operatorJourney.ordinaryName}`)
       await expect.poll(() => operatorJourney.findGrant(grantFolder.resourceId)).toBeNull()
       await closeManageDialog(page)
 
-      dialog = await openResourceManage(page, shareFolder)
+      await openResourceManage(page, shareFolder)
       await page.getByTestId(`gfs-revoke-share-${share.id}`).click()
       await expectToast(page, `Shared access revoked for ${operatorJourney.ordinaryName}`)
       await expect.poll(() => operatorJourney.findShare(shareFolder.resourceId)).toBeNull()

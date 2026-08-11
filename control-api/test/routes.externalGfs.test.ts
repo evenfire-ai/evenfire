@@ -231,6 +231,48 @@ function dbReturning(
 }
 
 describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)', () => {
+  it('enforces the recognised ingress limit before session authentication or authority resolution', async () => {
+    auth()
+    const app = await buildApp()
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await request(app)
+        .post('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+      expect(response.status).toBe(404)
+    }
+
+    const exhausted = await request(app)
+      .post('/external/gfs/not-classified')
+      .set('x-user-session-token', 'sess')
+
+    expect(exhausted.status).toBe(429)
+    expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(30)
+    expect(mockResolveActiveLink).not.toHaveBeenCalled()
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('enforces the recognised 10/min token route limit per authenticated user', async () => {
+    auth()
+    const app = await buildApp()
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await request(app)
+        .post('/external/gfs/token')
+        .set('x-user-session-token', 'sess')
+        .send({})
+        .expect(200)
+    }
+
+    const exhausted = await request(app)
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'sess')
+      .send({})
+
+    expect(exhausted.status).toBe(429)
+    expect(mockSignGfsToken).toHaveBeenCalledTimes(10)
+  })
+
   it('mints a gfs token for the user with the EXISTING signGfsToken (sub=users.id)', async () => {
     auth()
     const app = await buildApp()
