@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import {
   DirectorySearchCursorError,
+  acceptInvitationForEmail,
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
   listManagedMembersForUser,
@@ -228,6 +229,82 @@ describe('directory privacy and atomic authorization', () => {
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(sql).not.toContain('UPDATE users')
     expect(sql).not.toContain('INSERT INTO profiles')
+  })
+
+  it('does not apply inviter-controlled names to an existing user during acceptance', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: TEAM_A,
+      invitee_name: 'Untrusted inviter label',
+      email: 'target@example.com',
+      role: 'member',
+      token: 'invitation-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      created_at: new Date('2026-08-10T12:00:00Z'),
+      expires_at: new Date('2026-08-11T12:00:00Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE ($1 <> '' AND i.token = $1)")) {
+        return { rows: [invitation], rowCount: 1 }
+      }
+      if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
+        return {
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'Original user name',
+              picture: null,
+              password_hash: null,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('UPDATE users') && sql.includes('SET name')) {
+        return {
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: invitation.invitee_name,
+              picture: null,
+              password_hash: null,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO profiles') || sql.includes('UPDATE profiles')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+        return {
+          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('INSERT INTO team_members')) return { rows: [], rowCount: 1 }
+      if (sql.includes("SET status = 'accepted'")) return { rows: [], rowCount: 1 }
+      if (sql.includes('WHERE i.token = $1')) {
+        return {
+          rows: [{ ...invitation, status: 'accepted', accepted_user_id: TARGET }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    const result = await acceptInvitationForEmail(invitation.email, invitation.token)
+
+    expect(result).toMatchObject({ data: { accepted: true, userId: TARGET } })
+    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(sql).not.toContain('UPDATE users')
+    expect(sql).not.toContain('UPDATE profiles')
   })
 
   it.each(['resend', 'revoke'] as const)(

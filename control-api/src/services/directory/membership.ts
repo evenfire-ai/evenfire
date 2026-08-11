@@ -180,29 +180,26 @@ async function ensureInvitationUser(
 
   let user = (existing.rows[0] as InvitationUserRow | undefined) || null
   if (!user) {
-    user = (
-      await db.query(
-        `INSERT INTO users(email, name)
+    const inserted = await db.query(
+      `INSERT INTO users(email, name)
        VALUES($1, $2)
-       ON CONFLICT (email) DO UPDATE
-           SET name = COALESCE(users.name, EXCLUDED.name),
-               updated_at = NOW()
+       ON CONFLICT (email) DO NOTHING
        RETURNING id, email, name, picture, password_hash`,
-        [normalizedEmail, normalizedInviteeName]
+      [normalizedEmail, normalizedInviteeName]
+    )
+    user = (inserted.rows[0] as InvitationUserRow | undefined) || null
+    if (!user) {
+      const racedExisting = await db.query(
+        `SELECT id, email, name, picture, password_hash
+           FROM users
+          WHERE email = $1
+          LIMIT 1`,
+        [normalizedEmail]
       )
-    ).rows[0] as InvitationUserRow
-  } else if (normalizedInviteeName && user.name !== normalizedInviteeName) {
-    user = (
-      await db.query(
-        `UPDATE users
-            SET name = $2,
-                updated_at = NOW()
-          WHERE id = $1
-       RETURNING id, email, name, picture, password_hash`,
-        [user.id, normalizedInviteeName]
-      )
-    ).rows[0] as InvitationUserRow
+      user = (racedExisting.rows[0] as InvitationUserRow | undefined) || null
+    }
   }
+  if (!user) throw new Error('Failed to resolve invitation user')
 
   await db.query(
     `INSERT INTO profiles(user_id, display_name)
@@ -210,15 +207,6 @@ async function ensureInvitationUser(
      ON CONFLICT (user_id) DO NOTHING`,
     [user.id, user.name || null]
   )
-  if (normalizedInviteeName) {
-    await db.query(
-      `UPDATE profiles
-          SET display_name = $2,
-              updated_at = NOW()
-        WHERE user_id = $1`,
-      [user.id, normalizedInviteeName]
-    )
-  }
 
   return user
 }
