@@ -9,6 +9,7 @@ import {
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -94,9 +95,16 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
-        return res
-          .status(200)
-          .json(await listTeams(req.params.userId, String(req.query.currentTeamId || '')))
+        const result = await listTeams(req.params.userId, String(req.query.currentTeamId || ''))
+        scheduleAccessCatalogShadow({
+          session: (req as ExternalAuthedRequest).externalSessionAuthority,
+          family: 'team',
+          legacyLogicalIds: Array.isArray(result.items)
+            ? result.items.map(item => String(item.id))
+            : [],
+          legacyComplete: true,
+        })
+        return res.status(200).json(result)
       } catch (error) {
         return next(error)
       }
@@ -217,6 +225,12 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const teamId = String(req.query.teamId || '')
         const data = await getMe(req.params.userId, teamId)
         if (!data) return res.status(404).json({ error: 'not_found' })
+        scheduleAccessCatalogShadow({
+          session: (req as ExternalAuthedRequest).externalSessionAuthority,
+          family: 'user',
+          legacyLogicalIds: [req.params.userId],
+          legacyComplete: true,
+        })
         return res.status(200).json(data)
       } catch (error) {
         return next(error)
@@ -239,9 +253,16 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             err
           )
         }
+        const contextIds = filterAccessValues(base.contextIds, active)
+        scheduleAccessCatalogShadow({
+          session: (req as ExternalAuthedRequest).externalSessionAuthority,
+          family: 'context',
+          legacyLogicalIds: contextIds.map(id => `${config.contextsNamespace}/${id}`),
+          legacyComplete: active !== null,
+        })
         return res.status(200).json({
           ...base,
-          contextIds: filterAccessValues(base.contextIds, active),
+          contextIds,
         })
       } catch (error) {
         return next(error)
@@ -261,6 +282,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const authorizedAgentNames = filterAccessValues(base.agentNames, null)
         let agents: Awaited<ReturnType<typeof resolveMcpServersForAgents>> = []
         let agentNames = authorizedAgentNames
+        let mcpEnrichmentComplete = true
         try {
           // Authorization model: authorizedAgentNames already reflects which agents
           // this user is allowed to use. resolveMcpServersForAgents treats agent
@@ -269,6 +291,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             mcpServersNamespace: config.mcpServersNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames: authorizedAgentNames,
+            onPartial: () => {
+              mcpEnrichmentComplete = false
+            },
           })
           // A successful lookup can safely remove genuinely missing or invalid
           // Hosts. Only the DTOs resolved from the authorized input are used.
@@ -282,7 +307,27 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             err
           )
           agents = []
+          mcpEnrichmentComplete = false
         }
+        const session = (req as ExternalAuthedRequest).externalSessionAuthority
+        scheduleAccessCatalogShadow({
+          session,
+          family: 'host',
+          legacyLogicalIds: agentNames.map(name => `${config.hostsNamespace}/${name}`),
+          legacyComplete: agents.length === agentNames.length,
+        })
+        scheduleAccessCatalogShadow({
+          session,
+          family: 'mcp_server',
+          legacyLogicalIds: [
+            ...new Set(
+              agents.flatMap(agent =>
+                agent.mcpServers.map(server => `${config.mcpServersNamespace}/${server.name}`)
+              )
+            ),
+          ],
+          legacyComplete: mcpEnrichmentComplete && agents.length === agentNames.length,
+        })
         return res.status(200).json({ ...base, agentNames, agents })
       } catch (error) {
         return next(error)
