@@ -182,6 +182,19 @@ export async function applyUserSessionAccessFoundation(db: DbClient): Promise<vo
       END IF;
     END;
     $$;
+
+    REVOKE ALL PRIVILEGES ON TABLE
+      external_user_sessions,
+      authorization_user_revisions,
+      authorization_team_revisions,
+      authorization_resource_revisions
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+      external_user_sessions,
+      authorization_user_revisions,
+      authorization_team_revisions,
+      authorization_resource_revisions
+      TO control_api_runtime;
   `)
 }
 
@@ -206,6 +219,15 @@ export async function applyLegacySessionRevocationFoundation(db: DbClient): Prom
       ON external_v1_session_revocations (user_id, expires_at);
     CREATE INDEX IF NOT EXISTS external_v1_session_revocations_expiry_idx
       ON external_v1_session_revocations (expires_at);
+
+    REVOKE ALL PRIVILEGES ON TABLE
+      external_user_session_security_epochs,
+      external_v1_session_revocations
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+      external_user_session_security_epochs,
+      external_v1_session_revocations
+      TO control_api_runtime;
   `)
 }
 

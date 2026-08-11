@@ -375,6 +375,12 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const exactControlApiRelations = [
       'administrative_events',
       'agent_run_events',
+      'authorization_resource_revisions',
+      'authorization_team_revisions',
+      'authorization_user_revisions',
+      'external_user_session_security_epochs',
+      'external_user_sessions',
+      'external_v1_session_revocations',
       'governed_event_read_v1',
       'governed_event_stream',
       'governed_approval_prompt_history',
@@ -383,6 +389,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'infrastructure_cost_daily_components',
       'infrastructure_price_snapshots',
       'infrastructure_telemetry_events',
+      'invitation_delivery_commands',
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
@@ -391,6 +398,12 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const expectedControlApiRelations: Record<string, string[]> = {
       administrative_events: ['INSERT', 'SELECT'],
       agent_run_events: ['INSERT', 'SELECT'],
+      authorization_resource_revisions: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      authorization_team_revisions: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      authorization_user_revisions: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      external_user_session_security_epochs: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      external_user_sessions: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      external_v1_session_revocations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       governed_event_read_v1: ['SELECT'],
       governed_event_stream: ['INSERT', 'SELECT'],
       governed_approval_prompt_history: ['INSERT', 'SELECT'],
@@ -399,6 +412,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       infrastructure_cost_daily_components: ['SELECT'],
       infrastructure_price_snapshots: ['SELECT'],
       infrastructure_telemetry_events: ['INSERT', 'SELECT'],
+      invitation_delivery_commands: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
@@ -1324,6 +1338,87 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [`workflow.run.completed:${workflowRunId}:Succeeded`]
     )
     expect(notification.rows[0]?.count).toBe('1')
+  }, 60_000)
+
+  it('lets only the control-api runtime exercise the new session authority tables', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+
+    const userId = randomUUID()
+    const teamId = randomUUID()
+    const invitationId = randomUUID()
+    const sessionId = randomUUID()
+    await dbPool.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [
+      userId,
+      `runtime-session-${userId}@example.test`,
+    ])
+    await dbPool.query(`INSERT INTO teams (id, name) VALUES ($1, 'Runtime session authority')`, [
+      teamId,
+    ])
+    await dbPool.query(
+      `INSERT INTO invitations (id, team_id, email, role, status)
+       VALUES ($1, $2, $3, 'member', 'draft')`,
+      [invitationId, teamId, `runtime-invitation-${invitationId}@example.test`]
+    )
+
+    const runtimeClient = await dbPool.connect()
+    try {
+      await runtimeClient.query('BEGIN')
+      await runtimeClient.query('SET LOCAL ROLE control_api_runtime')
+      await runtimeClient.query(
+        `INSERT INTO external_user_sessions (
+           sid, user_id, current_jti, current_issued_at, idle_expires_at,
+           absolute_expires_at, authenticated_at
+         ) VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour',
+                   NOW() + INTERVAL '1 day', NOW())`,
+        [sessionId, userId, randomUUID()]
+      )
+      await runtimeClient.query(
+        `UPDATE external_user_sessions SET last_used_at = NOW() WHERE sid = $1`,
+        [sessionId]
+      )
+      await runtimeClient.query(
+        `INSERT INTO external_user_session_security_epochs (user_id, valid_after, reason)
+         VALUES ($1, NOW(), 'integration_test')`,
+        [userId]
+      )
+      await runtimeClient.query(
+        `INSERT INTO external_v1_session_revocations (
+           token_hash, user_id, expires_at, reason
+         ) VALUES ($1, $2, NOW() + INTERVAL '1 hour', 'integration_test')`,
+        ['runtime-contract-token-hash', userId]
+      )
+      await runtimeClient.query(
+        `INSERT INTO team_members (team_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+        [teamId, userId]
+      )
+      await runtimeClient.query(
+        `INSERT INTO authorization_resource_revisions (
+           environment_id, resource_type, resource_id
+         ) VALUES ('runtime-contract', 'Host', 'host-1')`
+      )
+      await runtimeClient.query(
+        `INSERT INTO invitation_delivery_commands (
+           invitation_id, authorized_by, delivery_kind
+         ) VALUES ($1, $2, 'create')`,
+        [invitationId, userId]
+      )
+
+      const revisionRows = await runtimeClient.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+           FROM authorization_user_revisions
+          WHERE user_id = $1`,
+        [userId]
+      )
+      expect(revisionRows.rows).toEqual([{ count: '1' }])
+      await runtimeClient.query('ROLLBACK')
+    } catch (error) {
+      await runtimeClient.query('ROLLBACK')
+      throw error
+    } finally {
+      runtimeClient.release()
+    }
   }, 60_000)
 
   it('authorizes and binds the canonical Host route with signed JWTs and persisted grants', async () => {

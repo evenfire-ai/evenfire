@@ -24,13 +24,9 @@ export async function applyInvitationDeliveryCommandFoundation(db: DbClient): Pr
     CREATE INDEX IF NOT EXISTS invitation_delivery_commands_invitation_idx
       ON invitation_delivery_commands (invitation_id, authorized_at DESC);
 
-    DO $invitation_delivery_runtime_grant$
-    BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_api_runtime') THEN
-        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE invitation_delivery_commands
-          TO control_api_runtime;
-      END IF;
-    END
-    $invitation_delivery_runtime_grant$;
+    REVOKE ALL PRIVILEGES ON TABLE invitation_delivery_commands
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE invitation_delivery_commands
+      TO control_api_runtime;
   `)
 }
