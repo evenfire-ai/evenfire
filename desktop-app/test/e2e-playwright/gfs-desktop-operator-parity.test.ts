@@ -265,9 +265,9 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     const renamedFolder = operatorJourney.readResource(rootId, operatorJourney.names.renamedFolder)!
     operatorJourney.resources.set('renamedFolder', renamedFolder)
 
-    await resourceRow(page, renamedFolder)
-      .getByRole('button', { name: renamedFolder.name, exact: true })
-      .click()
+    // openResourceManage() resolves a non-current resource through the
+    // controller before opening the dialog, so the visible page is already
+    // inside the renamed folder when the dialog closes.
     await expect(page.getByRole('navigation', { name: 'File location' })).toContainText(
       renamedFolder.name
     )
