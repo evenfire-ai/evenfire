@@ -57,7 +57,11 @@ export async function requireExternalWorkflowCaller(
       return null
     }
     if (authentication.status !== 'authenticated') return unauthorized(res)
-    return { kind: 'user-session', claims: authentication.claims }
+    return {
+      kind: 'user-session',
+      claims: authentication.claims,
+      session: authentication.authorityContext,
+    }
   } catch {
     res.status(503).json({ error: 'authority_unavailable' })
     return null

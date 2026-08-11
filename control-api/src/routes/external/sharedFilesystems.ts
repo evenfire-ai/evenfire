@@ -6,6 +6,7 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import {
   listActiveContextIds,
@@ -295,6 +296,19 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
           // reach this end-user-facing API. See curatedSfsMessage().
           message: curatedSfsMessage(phase),
         }
+      })
+
+      scheduleAccessCatalogShadow({
+        session: req.externalSessionAuthority,
+        family: 'shared_filesystem',
+        legacyLogicalIds: items.map(item => `${sfsNs}/${item.name}`),
+        legacyComplete: true,
+        scope: {
+          kind: 'behavior-json',
+          dimension: 'filesystemScope',
+          field: 'contextId',
+          equals: `${ctxNs}/${contextId}`,
+        },
       })
 
       res.status(200).json({ items })
