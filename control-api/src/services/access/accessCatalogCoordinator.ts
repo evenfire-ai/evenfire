@@ -11,6 +11,11 @@ import {
   decodeAccessCatalogCursor,
   encodeAccessCatalogCursor,
 } from './accessCatalogCursor.js'
+import {
+  AccessCatalogMergeError,
+  mergeCatalogCandidateStreams,
+  mergeHydratedCatalogResources,
+} from './accessCatalogMerge.js'
 import { AccessExecutionBudget, type AccessExecutionLimits } from './accessExecutionBudget.js'
 import { buildAccessPath, canonicalAccessPathTuple } from './accessPath.js'
 import { authorizationRevision, revisionOfValues } from './authorizationRevision.js'
@@ -31,8 +36,6 @@ import {
   type HydratedCatalogResource,
   type ProducerContinuation,
   type SafeCatalogPartialError,
-  catalogKeyEquals,
-  compareCatalogKey,
 } from './catalogContracts.js'
 import { CatalogProducerContractError } from './catalogProducerSupport.js'
 import { requireCatalogProducer } from './catalogProducers.js'
@@ -81,16 +84,8 @@ type CatalogTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
 type ProducerRuntime = {
   family: CatalogFamily
-  inputContinuation: ProducerContinuation
   page: CatalogProducerPage
-  cursorIndex: number
-  emittedCount: number
 }
-
-type HeapEntry = Readonly<{
-  runtime: ProducerRuntime
-  candidate: CatalogIdentityCandidate
-}>
 
 function normalizeFamilies(value: readonly CatalogFamily[] | undefined): CatalogFamily[] {
   if (value === undefined) return [...CATALOG_FAMILIES]
@@ -111,75 +106,6 @@ function emptyContinuations(): Record<CatalogFamily, ProducerContinuation> {
   return Object.fromEntries(
     CATALOG_FAMILIES.map(family => [family, Object.freeze({ afterKey: null, exhausted: false })])
   ) as Record<CatalogFamily, ProducerContinuation>
-}
-
-function entryCompare(left: HeapEntry, right: HeapEntry): number {
-  const keyOrder = compareCatalogKey(left.candidate.key, right.candidate.key)
-  return keyOrder || left.runtime.family.localeCompare(right.runtime.family)
-}
-
-function heapPush(heap: HeapEntry[], entry: HeapEntry): void {
-  heap.push(entry)
-  let index = heap.length - 1
-  while (index > 0) {
-    const parent = Math.floor((index - 1) / 2)
-    if (entryCompare(heap[parent], heap[index]) <= 0) break
-    ;[heap[parent], heap[index]] = [heap[index], heap[parent]]
-    index = parent
-  }
-}
-
-function heapPop(heap: HeapEntry[]): HeapEntry | undefined {
-  const first = heap[0]
-  const last = heap.pop()
-  if (!first || !last || heap.length === 0) return first
-  heap[0] = last
-  let index = 0
-  for (;;) {
-    const left = index * 2 + 1
-    const right = left + 1
-    let smallest = index
-    if (left < heap.length && entryCompare(heap[left], heap[smallest]) < 0) smallest = left
-    if (right < heap.length && entryCompare(heap[right], heap[smallest]) < 0) smallest = right
-    if (smallest === index) break
-    ;[heap[index], heap[smallest]] = [heap[smallest], heap[index]]
-    index = smallest
-  }
-  return first
-}
-
-function advanceRuntime(heap: HeapEntry[], runtime: ProducerRuntime): void {
-  runtime.cursorIndex += 1
-  const candidate = runtime.page.candidates[runtime.cursorIndex]
-  if (candidate) heapPush(heap, { runtime, candidate })
-}
-
-function mergeCandidatePages(
-  runtimes: readonly ProducerRuntime[],
-  limit: number
-): CatalogIdentityCandidate[] {
-  const heap: HeapEntry[] = []
-  for (const runtime of runtimes) {
-    const candidate = runtime.page.candidates[0]
-    if (candidate) heapPush(heap, { runtime, candidate })
-  }
-  const values: CatalogIdentityCandidate[] = []
-  while (heap.length > 0 && values.length < limit + 1) {
-    const first = heapPop(heap)!
-    const equal = [first]
-    while (heap[0] && catalogKeyEquals(heap[0].candidate.key, first.candidate.key)) {
-      equal.push(heapPop(heap)!)
-    }
-    let validUntil: string | null = null
-    for (const entry of equal) {
-      if (entry.candidate.validUntil && (!validUntil || entry.candidate.validUntil < validUntil)) {
-        validUntil = entry.candidate.validUntil
-      }
-      advanceRuntime(heap, entry.runtime)
-    }
-    values.push(Object.freeze({ ...first.candidate, validUntil }))
-  }
-  return values
 }
 
 function safePartialErrors(runtimes: readonly ProducerRuntime[]): SafeCatalogPartialError[] {
@@ -204,17 +130,14 @@ async function hydrateSelected(
     values.push(candidate.key)
     byFamily.set(candidate.key[1], values)
   }
-  const hydrated = new Map<string, HydratedCatalogResource>()
+  const hydratedValues: HydratedCatalogResource[] = []
   for (const family of CATALOG_FAMILIES) {
     const keys = byFamily.get(family)
     if (!keys?.length) continue
     const values = await requireCatalogProducer(family).hydrateCanonicalKeys(context, keys)
-    for (const value of values) {
-      const key = JSON.stringify(value.key)
-      if (hydrated.has(key)) throw new AccessCatalogRequestError('catalog_invariant_failed')
-      hydrated.set(key, value)
-    }
+    hydratedValues.push(...values)
   }
+  const hydrated = mergeHydratedCatalogResources(hydratedValues)
   for (const candidate of selected) {
     if (!hydrated.has(JSON.stringify(candidate.key))) {
       throw new AccessCatalogRequestError('authority_unavailable')
@@ -295,7 +218,6 @@ function finalContinuations(input: {
     }
     const runtime = input.runtimes.find(value => value.family === family)!
     const emitted = input.selected.filter(candidate => candidate.key[1] === family)
-    runtime.emittedCount = emitted.length
     const afterKey = emitted.at(-1)?.key ?? input.initial[family].afterKey
     const hasUnconsumed = runtime.page.candidates.length > emitted.length
     output[family] = Object.freeze({
@@ -363,13 +285,13 @@ async function buildInTransaction(input: {
     )
     runtimes.push({
       family,
-      inputContinuation: initial[family],
       page,
-      cursorIndex: 0,
-      emittedCount: 0,
     })
   }
-  const merged = mergeCandidatePages(runtimes, input.limit)
+  const merged = mergeCatalogCandidateStreams(
+    runtimes.map(runtime => ({ streamId: runtime.family, candidates: runtime.page.candidates })),
+    input.limit + 1
+  )
   const selected = merged.slice(0, input.limit)
   const hydrated = await hydrateSelected(context, selected)
   const items = selected.map(candidate =>
@@ -469,6 +391,9 @@ export async function buildAccessCatalog(
     }
     if (error instanceof CatalogProducerContractError) {
       throw new AccessCatalogRequestError('authority_unavailable')
+    }
+    if (error instanceof AccessCatalogMergeError) {
+      throw new AccessCatalogRequestError('catalog_invariant_failed')
     }
     throw error
   } finally {
