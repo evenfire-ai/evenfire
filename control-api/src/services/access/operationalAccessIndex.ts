@@ -206,7 +206,9 @@ export class OperationalAccessIndex {
                   (value->>'observed_generation')::bigint,
                   (value->>'content_bytes')::bigint, NOW()
              FROM resource_rows
-           ON CONFLICT (environment_id, resource_type, logical_id) DO UPDATE
+           ON CONFLICT (
+             environment_id, source_family, source_generation, resource_type, logical_id
+           ) DO UPDATE
              SET source_family = EXCLUDED.source_family,
                  source_generation = EXCLUDED.source_generation,
                  provider_uid = EXCLUDED.provider_uid,
@@ -238,7 +240,8 @@ export class OperationalAccessIndex {
                   (value->>'content_bytes')::bigint, NOW()
              FROM relationship_rows
            ON CONFLICT (
-             environment_id, source_type, source_id, relationship_type,
+             environment_id, source_family, source_generation,
+             source_type, source_id, relationship_type,
              target_type, target_id, relationship_instance_id
            ) DO UPDATE
              SET behavior_attributes = EXCLUDED.behavior_attributes,

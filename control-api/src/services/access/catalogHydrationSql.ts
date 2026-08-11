@@ -127,7 +127,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
     ORDER BY logical_id, kind, team_id NULLS FIRST, grant_id
     LIMIT $7
   ), relationships AS MATERIALIZED (
-    SELECT DISTINCT relationship.source_id AS logical_id,
+    SELECT DISTINCT relationship.source_id AS logical_id, relationship.source_id,
            relationship.relationship_type, relationship.target_type,
            relationship.target_id, relationship.relationship_instance_id,
            relationship.behavior_attributes, relationship.source_type,
