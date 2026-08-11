@@ -46,16 +46,15 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   preflight:
-    name: Source preflight
+    name: Exact-CI release preflight
     needs: resolve-release-ref
     permissions:
       actions: read
       contents: read
-    uses: ./.github/workflows/prettier-source-preflight.yml
+    uses: ./.github/workflows/exact-ci-provenance.yml
     with:
       allowed_branches: main
       head_sha: ${{ needs.resolve-release-ref.outputs.sha }}
-      mode: exact-ci
 
   promote:
     name: Promote images

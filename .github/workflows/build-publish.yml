@@ -55,18 +55,61 @@ jobs:
   # the publishing workflow is an independent enforcement boundary. Manual
   # dispatches have no bounded push range, so they require a successful CI push
   # run for the exact selected commit instead.
-  preflight:
-    name: Source preflight
-    if: github.repository == 'evenfire-ai/evenfire'
+  incoming-diff-preflight:
+    name: Incoming-diff Prettier preflight
+    if: github.repository == 'evenfire-ai/evenfire' && github.event_name == 'push'
     permissions:
-      actions: read
       contents: read
     uses: ./.github/workflows/prettier-source-preflight.yml
     with:
-      allowed_branches: dev
-      base_sha: ${{ github.event.before || '' }}
+      base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
-      mode: ${{ github.event_name == 'workflow_dispatch' && 'exact-ci' || 'direct' }}
+      mode: direct
+
+  exact-ci-preflight:
+    name: Manual exact-CI preflight
+    if: >-
+      github.repository == 'evenfire-ai/evenfire' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/dev' &&
+      github.workflow_sha == github.sha
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/exact-ci-provenance.yml
+    with:
+      allowed_branches: dev
+      head_sha: ${{ github.sha }}
+
+  preflight:
+    name: Publication preflight result
+    if: always() && github.repository == 'evenfire-ai/evenfire'
+    needs: [incoming-diff-preflight, exact-ci-preflight]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require the event-specific source gate
+        env:
+          DIFF_RESULT: ${{ needs.incoming-diff-preflight.result }}
+          EVENT: ${{ github.event_name }}
+          PROVENANCE_RESULT: ${{ needs.exact-ci-preflight.result }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            push)
+              [ "$DIFF_RESULT" = success ] && [ "$PROVENANCE_RESULT" = skipped ]
+              ;;
+            workflow_dispatch)
+              [ "$RUN_REF" = refs/heads/dev ] && [ "$WORKFLOW_SHA" = "$RUN_SHA" ]
+              [ "$DIFF_RESULT" = skipped ] && [ "$PROVENANCE_RESULT" = success ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
 
   detect:
     name: Detect changed images

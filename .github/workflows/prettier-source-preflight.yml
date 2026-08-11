@@ -9,18 +9,13 @@ on:
         type: string
         default: ''
       head_sha:
-        description: 'Exact source commit to check or verify'
+        description: 'Exact source commit to check'
         required: true
         type: string
       mode:
-        description: 'merge-base, direct, or exact-ci'
+        description: 'merge-base or direct'
         required: true
         type: string
-      allowed_branches:
-        description: 'Comma-separated push branches accepted by exact-ci mode'
-        required: false
-        type: string
-        default: ''
 
 jobs:
   validate-inputs:
@@ -33,7 +28,6 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           MODE: ${{ inputs.mode }}
-          ALLOWED_BRANCHES: ${{ inputs.allowed_branches }}
         run: |
           set -euo pipefail
           zero=0000000000000000000000000000000000000000
@@ -41,12 +35,6 @@ jobs:
             direct|merge-base)
               if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$BASE_SHA" = "$zero" ]; then
                 echo "::error::A non-zero full base SHA is required for a bounded incoming diff."
-                exit 1
-              fi
-              ;;
-            exact-ci)
-              if [ -z "$ALLOWED_BRANCHES" ]; then
-                echo "::error::exact-ci mode requires an explicit allowed_branches value."
                 exit 1
               fi
               ;;
@@ -62,7 +50,6 @@ jobs:
 
   prettier:
     name: Prettier (incoming files)
-    if: inputs.mode == 'direct' || inputs.mode == 'merge-base'
     needs: validate-inputs
     runs-on: ubuntu-latest
     permissions:
@@ -96,55 +83,17 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: npm run format:diff -- --base "$BASE_SHA" --head "$HEAD_SHA" --mode "$MODE"
 
-  ci-provenance:
-    name: CI provenance (exact SHA)
-    if: inputs.mode == 'exact-ci'
-    needs: validate-inputs
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ inputs.head_sha }}
-
-      - name: Require successful CI push run for exact SHA
-        env:
-          ALLOWED_BRANCHES: ${{ inputs.allowed_branches }}
-          GITHUB_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ inputs.head_sha }}
-        run: >-
-          node scripts/ci/require-successful-ci-run.mjs
-          --sha "$SOURCE_SHA"
-          --branches "$ALLOWED_BRANCHES"
-
   conclude:
     name: Source preflight result
     if: always()
-    needs: [validate-inputs, prettier, ci-provenance]
+    needs: [validate-inputs, prettier]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - name: Require the selected gate to pass
+      - name: Require the incoming-diff gate to pass
         env:
-          MODE: ${{ inputs.mode }}
           VALIDATE_RESULT: ${{ needs.validate-inputs.result }}
           PRETTIER_RESULT: ${{ needs.prettier.result }}
-          PROVENANCE_RESULT: ${{ needs.ci-provenance.result }}
         run: |
           set -euo pipefail
-          [ "$VALIDATE_RESULT" = success ] || exit 1
-          case "$MODE" in
-            direct|merge-base)
-              [ "$PRETTIER_RESULT" = success ] && [ "$PROVENANCE_RESULT" = skipped ]
-              ;;
-            exact-ci)
-              [ "$PRETTIER_RESULT" = skipped ] && [ "$PROVENANCE_RESULT" = success ]
-              ;;
-            *)
-              exit 1
-              ;;
-          esac
+          [ "$VALIDATE_RESULT" = success ] && [ "$PRETTIER_RESULT" = success ]
