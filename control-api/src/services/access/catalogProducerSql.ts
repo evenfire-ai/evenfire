@@ -16,6 +16,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT $5::text || '/' || ua.agent_name AS logical_id, ua.agent_name AS source_key
               FROM user_agents ua
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'host'
+               AND resource.logical_id = $5::text || '/' || ua.agent_name
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE ua.user_id = $1 AND ua.agent_name > $7`,
       orderBy: 'source_key',
     },
@@ -23,6 +27,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       sql: `SELECT $5::text || '/' || ta.agent_name AS logical_id, ta.agent_name AS source_key
               FROM team_agents ta
               JOIN team_members tm ON tm.team_id = ta.team_id
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'host'
+               AND resource.logical_id = $5::text || '/' || ta.agent_name
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
       orderBy: 'source_key',
     },
@@ -31,6 +39,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT $6::text || '/' || uc.context_id AS logical_id, uc.context_id AS source_key
               FROM user_contexts uc
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'context'
+               AND resource.logical_id = $6::text || '/' || uc.context_id
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE uc.user_id = $1 AND uc.context_id > $7`,
       orderBy: 'source_key',
     },
@@ -38,6 +50,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       sql: `SELECT $6::text || '/' || tc.context_id AS logical_id, tc.context_id AS source_key
               FROM team_contexts tc
               JOIN team_members tm ON tm.team_id = tc.team_id
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'context'
+               AND resource.logical_id = $6::text || '/' || tc.context_id
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
       orderBy: 'source_key',
     },
@@ -49,8 +65,16 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON edge.environment_id = $3
         AND edge.source_type = 'context'
         AND edge.source_id = $6::text || '/' || uc.context_id
-        AND edge.relationship_type = 'includes_mcp_server'
+       AND edge.relationship_type = 'includes_mcp_server'
         AND edge.target_type = 'mcp_server'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
     `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
@@ -61,6 +85,14 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_id = $6::text || '/' || tc.context_id
         AND edge.relationship_type = 'includes_mcp_server'
         AND edge.target_type = 'mcp_server'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
     `SELECT mcp_edge.target_id AS logical_id
        FROM user_agents ua
@@ -76,6 +108,18 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND mcp_edge.source_id = host_edge.target_id
         AND mcp_edge.relationship_type = 'includes_mcp_server'
         AND mcp_edge.target_type = 'mcp_server'
+       JOIN operational_resource_index host_resource
+         ON host_resource.environment_id = $3 AND host_resource.resource_type = 'host'
+        AND host_resource.logical_id = host_edge.source_id
+        AND host_resource.enabled = TRUE AND host_resource.deleted_at IS NULL
+       JOIN operational_resource_index context_resource
+         ON context_resource.environment_id = $3 AND context_resource.resource_type = 'context'
+        AND context_resource.logical_id = host_edge.target_id
+        AND context_resource.enabled = TRUE AND context_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
+        AND target_resource.logical_id = mcp_edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE ua.user_id = $1 AND mcp_edge.target_id > $2`,
     `SELECT mcp_edge.target_id AS logical_id
        FROM team_agents ta
@@ -92,12 +136,28 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND mcp_edge.source_id = host_edge.target_id
         AND mcp_edge.relationship_type = 'includes_mcp_server'
         AND mcp_edge.target_type = 'mcp_server'
+       JOIN operational_resource_index host_resource
+         ON host_resource.environment_id = $3 AND host_resource.resource_type = 'host'
+        AND host_resource.logical_id = host_edge.source_id
+        AND host_resource.enabled = TRUE AND host_resource.deleted_at IS NULL
+       JOIN operational_resource_index context_resource
+         ON context_resource.environment_id = $3 AND context_resource.resource_type = 'context'
+        AND context_resource.logical_id = host_edge.target_id
+        AND context_resource.enabled = TRUE AND context_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
+        AND target_resource.logical_id = mcp_edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND mcp_edge.target_id > $2`,
   ]),
   workflow_recipe: boundedKeyUnionSql([
     {
       sql: `SELECT uwt.recipe_namespace || '/' || uwt.recipe_name AS logical_id
               FROM user_workflow_triggers uwt
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'workflow_recipe'
+               AND resource.logical_id = uwt.recipe_namespace || '/' || uwt.recipe_name
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE uwt.user_id = $1
                AND (uwt.recipe_namespace || '/' || uwt.recipe_name) > $2`,
       orderBy: 'logical_id',
@@ -106,6 +166,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       sql: `SELECT twt.recipe_namespace || '/' || twt.recipe_name AS logical_id
               FROM team_workflow_triggers twt
               JOIN team_members tm ON tm.team_id = twt.team_id
+              JOIN operational_resource_index resource
+                ON resource.environment_id = $3 AND resource.resource_type = 'workflow_recipe'
+               AND resource.logical_id = twt.recipe_namespace || '/' || twt.recipe_name
+               AND resource.enabled = TRUE AND resource.deleted_at IS NULL
              WHERE tm.user_id = $1 AND tm.status = 'active'
                AND (twt.recipe_namespace || '/' || twt.recipe_name) > $2`,
       orderBy: 'logical_id',
@@ -142,7 +206,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       WHERE wr.usage_team_id IS NOT NULL AND wr.run_id::text > $2`,
   ]),
   workflow_approval: boundedKeyUnionSql([
-    `SELECT war.id::text AS logical_id
+    {
+      sql: `SELECT war.id::text AS logical_id, war.expires_at AS valid_until
        FROM workflow_approval_requests war
        JOIN user_workflow_triggers uwt
          ON uwt.user_id = $1
@@ -150,7 +215,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND uwt.recipe_name = war.recipe_name
       WHERE war.target_user_id = $1 AND war.status = 'pending'
         AND war.expires_at > NOW() AND war.id::text > $2`,
-    `SELECT war.id::text AS logical_id
+      hasValidUntil: true,
+    },
+    {
+      sql: `SELECT war.id::text AS logical_id, war.expires_at AS valid_until
        FROM workflow_approval_requests war
        JOIN team_members tm
          ON tm.team_id = war.target_team_id AND tm.user_id = $1 AND tm.status = 'active'
@@ -159,19 +227,27 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND twt.recipe_namespace = war.recipe_namespace
         AND twt.recipe_name = war.recipe_name
       WHERE war.status = 'pending' AND war.expires_at > NOW() AND war.id::text > $2`,
+      hasValidUntil: true,
+    },
   ]),
   notification: boundedKeyUnionSql([
-    `SELECT nd.id::text AS logical_id
+    {
+      sql: `SELECT nd.id::text AS logical_id, nd.expires_at AS valid_until
        FROM notification_deliveries nd
       WHERE nd.audience->>'userId' = $1::text
         AND (nd.expires_at IS NULL OR nd.expires_at > NOW())
         AND nd.id::text > $2`,
-    `SELECT nd.id::text AS logical_id
+      hasValidUntil: true,
+    },
+    {
+      sql: `SELECT nd.id::text AS logical_id, nd.expires_at AS valid_until
        FROM notification_deliveries nd
        JOIN team_members tm
          ON tm.team_id::text = nd.audience->>'teamId'
         AND tm.user_id = $1::uuid AND tm.status = 'active'
       WHERE (nd.expires_at IS NULL OR nd.expires_at > NOW()) AND nd.id::text > $2`,
+      hasValidUntil: true,
+    },
   ]),
   gfs_resource: boundedKeyUnionSql([
     `SELECT g.resource_id::text AS logical_id
@@ -212,6 +288,15 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_id = $6::text || '/' || uc.context_id
         AND edge.relationship_type = 'mounts_shared_filesystem'
         AND edge.target_type = 'shared_filesystem'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3
+        AND target_resource.resource_type = 'shared_filesystem'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
     `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
@@ -222,6 +307,15 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_id = $6::text || '/' || tc.context_id
         AND edge.relationship_type = 'mounts_shared_filesystem'
         AND edge.target_type = 'shared_filesystem'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3
+        AND target_resource.resource_type = 'shared_filesystem'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
   ]),
   sandbox_app: boundedKeyUnionSql([
@@ -233,6 +327,15 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_id = uwt.recipe_namespace || '/' || uwt.recipe_name
         AND edge.relationship_type = 'exposes_sandbox_app'
         AND edge.target_type = 'sandbox_app'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3
+        AND source_resource.resource_type = 'workflow_recipe'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'sandbox_app'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uwt.user_id = $1 AND edge.target_id > $2`,
     `SELECT edge.target_id AS logical_id
        FROM team_workflow_triggers twt
@@ -243,6 +346,15 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_id = twt.recipe_namespace || '/' || twt.recipe_name
         AND edge.relationship_type = 'exposes_sandbox_app'
         AND edge.target_type = 'sandbox_app'
+       JOIN operational_resource_index source_resource
+         ON source_resource.environment_id = $3
+        AND source_resource.resource_type = 'workflow_recipe'
+        AND source_resource.logical_id = edge.source_id
+        AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
+       JOIN operational_resource_index target_resource
+         ON target_resource.environment_id = $3 AND target_resource.resource_type = 'sandbox_app'
+        AND target_resource.logical_id = edge.target_id
+        AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
   ]),
 })

@@ -70,7 +70,7 @@ async function query(
   })
 }
 
-function memberships(value: unknown): AuthorizationMembershipRevision[] {
+export function parseAuthorizationMemberships(value: unknown): AuthorizationMembershipRevision[] {
   if (!Array.isArray(value)) return []
   return value.flatMap(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
@@ -200,7 +200,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
     sessionRevision: String(row.session_revision),
     userRevision: String(row.user_revision ?? '1'),
     resourceRevision: String(row.resource_revision ?? '1'),
-    memberships: Object.freeze(memberships(row.memberships)),
+    memberships: Object.freeze(parseAuthorizationMemberships(row.memberships)),
   })
 }
 
@@ -671,7 +671,14 @@ async function loadDatabaseCandidates(input: {
             }),
           ]
         : [],
-      relationships: [],
+      relationships: membership
+        ? [
+            Object.freeze({
+              type: 'membership',
+              targetResourceId: `user:${snapshot.userId}`,
+            }),
+          ]
+        : [],
       validUntil: null,
     }
   }
