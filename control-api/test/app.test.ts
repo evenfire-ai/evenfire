@@ -4,6 +4,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
@@ -170,6 +171,7 @@ describe('app router wiring', () => {
       email: 'user@example.com',
       teamId: 'team-1',
     }
+    const currentToken = signExternalSessionToken(payload)
 
     await request(app)
       .post('/api/v1/external/auth/session-token')
@@ -178,12 +180,18 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query').mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
+    vi.spyOn(pool, 'query')
+      .mockResolvedValueOnce({
+        rows: [{ id: payload.userId, valid_after: null, token_revoked: false }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ role: payload.role }], rowCount: 1 })
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')
       .set('authorization', 'Bearer dev-external-rest-api-token')
       .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', currentToken)
       .send(payload)
       .expect(200)
     expect(res.body.token).toBeTruthy()
