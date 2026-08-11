@@ -159,7 +159,7 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
     expect(link.rows).toEqual([
       {
         state: 'revoked',
-        row_version: 2,
+        row_version: '2',
         revoked_by_type: 'control_admin',
         revoked_by_control_admin_id: actorId,
         revocation_reason: 'operator access revoked with account retirement',
