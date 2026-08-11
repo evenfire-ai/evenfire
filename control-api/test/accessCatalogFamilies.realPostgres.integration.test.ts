@@ -553,17 +553,81 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     )
   })
 
-  it('propagates cancellation through a real Kubernetes list request', async () => {
+  it('cancels a real indexer relist without staging or promoting late results', async () => {
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const before = await databasePool.query(
+      `SELECT generation, staging_generation, resource_version, status
+         FROM operational_catalog_source_state
+        WHERE environment_id = $1 AND source_family = $2`,
+      [environmentId, source.family]
+    )
+    expect(before.rows[0]).toEqual(
+      expect.objectContaining({
+        staging_generation: null,
+        resource_version: '3',
+        status: 'current',
+      })
+    )
     const held = kubernetesApi.holdNextList()
     const controller = new AbortController()
-    const pending = gateway.listResourcePage('hosts', config.hostsNamespace, {
-      limit: 10,
-      timeoutSeconds: 5,
-      signal: controller.signal,
-    })
-    await held.requested
-    controller.abort(new Error('test_cancelled'))
-    await expect(pending).rejects.toThrow()
-    await held.closed
+    const pending = indexer.reconcileSource(source, controller.signal)
+    try {
+      await held.requested
+      controller.abort(new Error('test_cancelled'))
+      await expect(pending).rejects.toThrow()
+      await held.closed
+
+      const afterAbort = await databasePool.query(
+        `SELECT generation, staging_generation, resource_version, status
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1 AND source_family = $2`,
+        [environmentId, source.family]
+      )
+      expect(afterAbort.rows[0]).toEqual(
+        expect.objectContaining({
+          generation: String(Number(before.rows[0].generation) + 1),
+          resource_version: '3',
+          status: 'relisting',
+        })
+      )
+      expect(afterAbort.rows[0].staging_generation).not.toBeNull()
+      const staged = await databasePool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM operational_resource_index_staging
+             WHERE environment_id = $1 AND source_family = $2) AS resources,
+           (SELECT COUNT(*)::int FROM operational_relationships_staging
+             WHERE environment_id = $1 AND source_family = $2) AS relationships`,
+        [environmentId, source.family]
+      )
+      expect(staged.rows[0]).toEqual({ resources: 0, relationships: 0 })
+      const live = await databasePool.query(
+        `SELECT provider_uid, provider_resource_version
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      expect(live.rows).toEqual([
+        {
+          provider_uid: 'catalog-host-uid-recreated',
+          provider_resource_version: '3',
+        },
+      ])
+
+      await expect(indexer.reconcileSource(source)).resolves.toBe('3')
+      const recovered = await databasePool.query(
+        `SELECT staging_generation, resource_version, status
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1 AND source_family = $2`,
+        [environmentId, source.family]
+      )
+      expect(recovered.rows[0]).toEqual({
+        staging_generation: null,
+        resource_version: '3',
+        status: 'current',
+      })
+    } finally {
+      held.release()
+    }
   })
 })
