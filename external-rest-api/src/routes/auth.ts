@@ -65,6 +65,9 @@ async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
   if (!payload?.email) {
     throw new Error('Google token has no email')
   }
+  if (payload.email_verified !== true) {
+    throw new Error('Google token email is not verified')
+  }
   return {
     email: payload.email.toLowerCase(),
     name: payload.name,
