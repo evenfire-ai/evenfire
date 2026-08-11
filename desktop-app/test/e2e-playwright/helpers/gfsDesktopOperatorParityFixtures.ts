@@ -270,8 +270,10 @@ export class GfsDesktopOperatorJourney {
   operatorContext: BrowserContext | null = null
   operatorUserDataDir: string | null = null
   operatorVideoDir: string | null = null
+  operatorDownloadsDir: string | null = null
   private operatorSessionSequence = 0
   private readonly operatorUserDataDirs = new Set<string>()
+  private readonly operatorDownloadsDirs = new Set<string>()
   operatorLink: OperatorLinkRow | null = null
   ordinaryUserId: string | null = null
   ordinaryTeamId: string | null = null
@@ -362,6 +364,18 @@ export class GfsDesktopOperatorJourney {
         const allowedRoot = path.resolve(this.workerInfo.project.outputDir)
         if (!resolved.startsWith(`${allowedRoot}${path.sep}`)) {
           throw new Error(`refusing to remove user data outside ${allowedRoot}`)
+        }
+        if (fs.existsSync(resolved)) fs.rmSync(resolved, { recursive: true })
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    for (const downloadsDir of this.operatorDownloadsDirs) {
+      try {
+        const resolved = path.resolve(downloadsDir)
+        const allowedRoot = path.resolve(this.workerInfo.project.outputDir)
+        if (!resolved.startsWith(`${allowedRoot}${path.sep}`)) {
+          throw new Error(`refusing to remove downloads outside ${allowedRoot}`)
         }
         if (fs.existsSync(resolved)) fs.rmSync(resolved, { recursive: true })
       } catch (error) {
@@ -783,9 +797,12 @@ export class GfsDesktopOperatorJourney {
     const sessionTag = `${this.runTag}-${this.operatorSessionSequence}`
     this.operatorUserDataDir = path.join(outputRoot, `gfs-operator-user-data-${sessionTag}`)
     this.operatorVideoDir = path.join(outputRoot, `gfs-operator-video-${sessionTag}`)
+    this.operatorDownloadsDir = path.join(outputRoot, `gfs-operator-downloads-${sessionTag}`)
     this.operatorUserDataDirs.add(this.operatorUserDataDir)
+    this.operatorDownloadsDirs.add(this.operatorDownloadsDir)
     fs.mkdirSync(this.operatorUserDataDir, { recursive: true })
     fs.mkdirSync(this.operatorVideoDir, { recursive: true })
+    fs.mkdirSync(this.operatorDownloadsDir, { recursive: true })
     this.operatorApp = await electron.launch({
       args: [`--user-data-dir=${this.operatorUserDataDir}`, MAIN_ENTRY],
       env: {
@@ -798,12 +815,50 @@ export class GfsDesktopOperatorJourney {
       },
       recordVideo: { dir: this.operatorVideoDir, size: { width: 1280, height: 720 } },
     })
+    const configuredDownloadsDir = await this.operatorApp.evaluate(
+      ({ app: electronApp }, downloadsDir) => {
+        electronApp.setPath('downloads', downloadsDir)
+        return electronApp.getPath('downloads')
+      },
+      this.operatorDownloadsDir
+    )
+    if (path.resolve(configuredDownloadsDir) !== path.resolve(this.operatorDownloadsDir)) {
+      throw new Error(
+        `[GFS-OPERATOR-E2E] Electron did not honor the isolated downloads directory: expected ${this.operatorDownloadsDir}, got ${configuredDownloadsDir}`
+      )
+    }
     this.operatorContext = this.operatorApp.context()
     this.operatorPage = await this.operatorApp.firstWindow()
     this.liveDesktopPages.add(this.operatorPage)
     await this.operatorPage.waitForLoadState('domcontentloaded')
     await this.loginDesktop(this.operatorPage, this.operatorEmail, this.operatorPassword)
     return this.operatorPage
+  }
+
+  readDownloadedArtifact(
+    expectedName: string,
+    expectedBytes: Buffer
+  ): {
+    filename: string
+    size: number
+    sha256: string
+    relativePath: string
+  } | null {
+    if (!this.operatorDownloadsDir) {
+      throw new Error('[GFS-OPERATOR-E2E] operator downloads directory is not initialized')
+    }
+    const entries = fs.readdirSync(this.operatorDownloadsDir, { withFileTypes: true })
+    const files = entries.filter(entry => entry.isFile()).map(entry => entry.name)
+    if (files.length !== 1 || files[0] !== expectedName) return null
+    const filePath = path.join(this.operatorDownloadsDir, expectedName)
+    const bytes = fs.readFileSync(filePath)
+    if (!bytes.equals(expectedBytes)) return null
+    return {
+      filename: expectedName,
+      size: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      relativePath: path.relative(this.workerInfo.project.outputDir, filePath),
+    }
   }
 
   async closeOperatorDesktop(): Promise<void> {

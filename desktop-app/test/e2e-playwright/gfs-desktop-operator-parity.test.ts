@@ -1,4 +1,5 @@
 import type { Locator, Page } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { UUID_RE } from '../../../tests/e2e/gfsFixtureCore'
 import { GFS_OPERATOR_SETUP_PATH } from './gfsDesktopOperatorParityContract'
 import {
@@ -348,12 +349,35 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await dialog
       .getByRole('button', { name: `Options for ${operatorJourney.names.renamedFile}` })
       .click()
-    const downloadPromise = page.waitForEvent('download')
     await page.getByRole('menuitem', { name: 'Download', exact: true }).click()
-    const download = await downloadPromise
-    expect(download.suggestedFilename()).toBe(operatorJourney.names.renamedFile)
-    await download.saveAs(testInfo.outputPath(operatorJourney.names.renamedFile))
     await expectToast(page, `Downloaded ${operatorJourney.names.renamedFile}`)
+    const expectedDownloadBytes = Buffer.from('# nested version two\n', 'utf8')
+    const expectedDownloadHash = createHash('sha256').update(expectedDownloadBytes).digest('hex')
+    await expect
+      .poll(
+        () =>
+          operatorJourney.readDownloadedArtifact(
+            operatorJourney.names.renamedFile,
+            expectedDownloadBytes
+          ),
+        { timeout: 30_000, intervals: [250, 500, 1_000] }
+      )
+      .toMatchObject({
+        filename: operatorJourney.names.renamedFile,
+        size: expectedDownloadBytes.byteLength,
+        sha256: expectedDownloadHash,
+      })
+    const downloadEvidence = operatorJourney.readDownloadedArtifact(
+      operatorJourney.names.renamedFile,
+      expectedDownloadBytes
+    )
+    if (!downloadEvidence) {
+      throw new Error('[GFS-OPERATOR-E2E] downloaded artifact disappeared after verification')
+    }
+    await testInfo.attach('gfs-download-evidence', {
+      body: JSON.stringify(downloadEvidence, null, 2),
+      contentType: 'application/json',
+    })
 
     await dialog
       .getByRole('button', { name: `Options for ${operatorJourney.names.renamedFile}` })
