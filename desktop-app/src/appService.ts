@@ -2842,7 +2842,26 @@ export class AppService {
       // A deliberate user switch is the only team-context boundary that fences
       // in-flight uploads. Transient runWithTeamContext hops intentionally use
       // switchSessionToTeam directly and must leave those jobs untouched.
-      await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+      try {
+        await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+      } catch (error) {
+        // The replacement session is already installed at this point. If the
+        // auth-boundary state write fails, do not leave that token/me paired
+        // with a blocked or stale GFS scope. Cleanup remains inside the outer
+        // transient-hop gate, and the original persistence error is preserved.
+        this.clearAuthenticatedSessionState()
+        try {
+          await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+            legacyEnvKeys: getActiveLegacyEnvKeys(),
+          })
+        } catch (clearError) {
+          console.warn(
+            '[AppService] Failed to clear a partially switched team session:',
+            clearError
+          )
+        }
+        throw error
+      }
       this.activateGfsAuthScope()
       this.stopAllStreams()
       // Grants are keyed by userId, not by team, so they carry over — but every

@@ -391,6 +391,61 @@ describe('AppService.invokeHostMessage', () => {
     ).toBeGreaterThan(service.authClient.switchTeam.mock.invocationCallOrder[0])
   })
 
+  it('clears the replacement team session when explicit GFS fence persistence fails', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsDispatchBlocked = false
+    service.authClient = {
+      switchTeam: vi.fn().mockResolvedValue({
+        token: 'team-b-token',
+        team: { id: 'team-b', name: 'Team B', role: 'member' },
+      }),
+      getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
+    }
+    service.tokenStore = {
+      setSessionToken: vi.fn(),
+      clearSessionToken: vi.fn(),
+    }
+    service.rpcTokenManager = { clear: vi.fn() }
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi
+      .fn()
+      .mockRejectedValue(new Error('state file is read-only'))
+    const clearAuthenticatedSessionState = service.clearAuthenticatedSessionState.bind(service)
+    let depthDuringCleanup = 0
+    service.clearAuthenticatedSessionState = vi.fn(() => {
+      depthDuringCleanup = service.gfsTransientTeamHopDepth
+      clearAuthenticatedSessionState()
+    })
+
+    await expect(service.switchTeam('team-b')).rejects.toThrow('state file is read-only')
+
+    expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
+    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(expect.any(String), {
+      legacyEnvKeys: expect.any(Array),
+    })
+    expect(depthDuringCleanup).toBeGreaterThan(0)
+    expect(service.sessionToken).toBeNull()
+    expect(service.me).toBeNull()
+    expect(service.gfsScopeIdentity).toBeNull()
+    expect(service.gfsDispatchBlocked).toBe(true)
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
   it('does not fence GFS uploads when an explicit switchTeam is rejected', async () => {
     const service = new AppService() as any
     service.sessionToken = 'team-a-token'
