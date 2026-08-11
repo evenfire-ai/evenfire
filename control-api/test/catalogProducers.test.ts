@@ -33,6 +33,8 @@ function context(
       sessionContract: 'v2',
       sessionRevision: 'session-1',
       userRevision: 'user-1',
+      catalogRevision: 'catalog-1',
+      authorizationRevision: 'catalog-authorization-1',
       memberships: [],
     },
     environmentId,
@@ -166,6 +168,8 @@ describe('catalog producer protocol', () => {
       expect.objectContaining({
         key: [environmentId, 'user', userId],
         authorizationResourceRevision: '4',
+        authorizationSourceRevision: 'database-resource',
+        authorizationRelationshipsRevision: '[]',
         accessPaths: [expect.objectContaining({ kind: 'direct', grantId: `users:${userId}` })],
       }),
     ])

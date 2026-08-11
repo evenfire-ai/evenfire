@@ -131,7 +131,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
            relationship.relationship_type, relationship.target_type,
            relationship.target_id, relationship.relationship_instance_id,
            relationship.behavior_attributes, relationship.source_type,
-           relationship.source_provider_uid
+           relationship.source_provider_uid, relationship.source_resource_version
       FROM operational_resource_relationships relationship
       JOIN resources resource
         ON relationship.environment_id = $3
