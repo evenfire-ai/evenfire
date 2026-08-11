@@ -9,6 +9,7 @@ import {
   within,
 } from '@testing-library/react'
 import { apiSend, getMcpServers, getRecipeSecrets, getRecipes } from '../../lib/api'
+import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
 
@@ -77,7 +78,7 @@ describe('SecretsTable — LLM secret update payload', () => {
       <ToastProvider>
         <SecretsTable
           activeScope="llm"
-          items={[{ name: SECRET, keys }]}
+          items={[buildSecretSummary({ name: SECRET, keys })]}
           onChanged={async () => {}}
           onCreateLlmSecret={() => {}}
           onCreateMcpSecret={() => {}}

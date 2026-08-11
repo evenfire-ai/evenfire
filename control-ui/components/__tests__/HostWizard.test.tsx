@@ -2,6 +2,8 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import { buildContextList, buildContextResource } from '../../test/fixtures/contextResource'
+import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { HostWizard } from '../HostWizard'
 import { ToastProvider } from '../Toast'
 
@@ -91,7 +93,7 @@ async function renderWizard(props?: {
     <ToastProvider>
       <HostWizard
         mcpServers={props?.mcpServers ?? [{ metadata: { name: 'mcp-a' } }]}
-        existingSecrets={props?.existingSecrets ?? [{ name: 'secret-a' }]}
+        existingSecrets={props?.existingSecrets ?? [buildSecretSummary({ name: 'secret-a' })]}
         onCreated={onCreated}
         onClose={onClose}
       />
@@ -156,10 +158,10 @@ describe('HostWizard — credential draft is projected onto the active provider 
   it('shows every provider with complete credentials for an existing Secret', async () => {
     await renderWizard({
       existingSecrets: [
-        {
+        buildSecretSummary({
           name: 'shared-llm-keys',
           keys: ['openai-api-key', 'aws-access-key-id', 'aws-secret-access-key'],
-        },
+        }),
       ],
     })
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
@@ -178,8 +180,11 @@ describe('HostWizard — credential draft is projected onto the active provider 
   it('matches the primary provider to the selected credential', async () => {
     await renderWizard({
       existingSecrets: [
-        { name: 'zai-only', keys: ['zai-api-key'] },
-        { name: 'anthropic-and-zai', keys: ['claude-api-key', 'zai-api-key'] },
+        buildSecretSummary({ name: 'zai-only', keys: ['zai-api-key'] }),
+        buildSecretSummary({
+          name: 'anthropic-and-zai',
+          keys: ['claude-api-key', 'zai-api-key'],
+        }),
       ],
     })
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
@@ -294,14 +299,14 @@ describe('HostWizard — credential draft is projected onto the active provider 
 describe('HostWizard — Context creation', () => {
   it('titles the existing context selector and shows attached MCP servers as chips', async () => {
     vi.mocked(api.apiGet)
-      .mockResolvedValueOnce({
-        items: [
-          {
+      .mockResolvedValueOnce(
+        buildContextList([
+          buildContextResource({
             metadata: { name: 'business', namespace: 'mcp-host' },
-            spec: { contextId: 'business', mcpServers: ['mcp-a', 'mcp-b'] },
-          },
-        ],
-      })
+            spec: { mcpServers: ['mcp-a', 'mcp-b'] },
+          }),
+        ])
+      )
       .mockResolvedValueOnce({ items: [] })
     await renderWizard()
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { buildContextResource } from '../../test/fixtures/contextResource'
 import { McpServerTable } from '../McpServerTable'
 
 afterEach(() => {
@@ -55,6 +56,22 @@ function makeItem(overrides: {
     item.status = { conditions: overrides.conditions }
   }
   return item
+}
+
+function makeContextBinding(options: {
+  name: string
+  description?: string
+  mcpServers?: string[]
+}) {
+  const context = buildContextResource({
+    metadata: { name: options.name },
+    spec: { description: options.description ?? '', mcpServers: options.mcpServers ?? [] },
+  })
+  return {
+    name: context.metadata.name,
+    description: context.spec.description,
+    mcpServers: context.spec.mcpServers,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -365,8 +382,8 @@ describe('McpServerTable — context membership', () => {
       <McpServerTable
         items={[makeItem({ name: 'airtable-server', contextRef: 'removed-context' })]}
         contexts={[
-          { name: 'removed-context', mcpServers: [] },
-          { name: 'active-context', mcpServers: ['another-server'] },
+          makeContextBinding({ name: 'removed-context' }),
+          makeContextBinding({ name: 'active-context', mcpServers: ['another-server'] }),
         ]}
         accessByConnectorKey={{}}
       />
@@ -388,8 +405,12 @@ describe('McpServerTable — context membership', () => {
       <McpServerTable
         items={items}
         contexts={[
-          { name: 'research', description: 'Research tools', mcpServers: ['airtable-server'] },
-          { name: 'sales', mcpServers: [] },
+          makeContextBinding({
+            name: 'research',
+            description: 'Research tools',
+            mcpServers: ['airtable-server'],
+          }),
+          makeContextBinding({ name: 'sales' }),
         ]}
         onAddToContexts={vi.fn().mockResolvedValue(undefined)}
         onRemoveFromContext={onRemoveFromContext}
@@ -420,8 +441,8 @@ describe('McpServerTable — context membership', () => {
       <McpServerTable
         items={items}
         contexts={[
-          { name: 'research', mcpServers: ['airtable-server'] },
-          { name: 'sales', description: 'Sales tools', mcpServers: [] },
+          makeContextBinding({ name: 'research', mcpServers: ['airtable-server'] }),
+          makeContextBinding({ name: 'sales', description: 'Sales tools' }),
         ]}
         onAddToContexts={onAddToContexts}
         onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}

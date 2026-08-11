@@ -8,6 +8,7 @@ import {
 } from '@components/UpdateConnectorCredentials'
 import { getMcpServer, getMcpServers, getRegistryCredentialSchema, updateMcpSecret } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
+import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
@@ -30,6 +31,14 @@ const ENV_SECRET: EnvSecret = {
     { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
     { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
   ],
+}
+
+function secretRotationResponse(keys: string[], affectedConnectors = [SERVER_NAME]) {
+  return {
+    ...buildSecretSummary({ name: ENV_SECRET.name, keys }),
+    namespace: 'mcp-server',
+    affectedConnectors,
+  }
 }
 
 function serverWithCondition(condition?: {
@@ -177,12 +186,7 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
   })
 
   it('never renders a stored credential value — inputs stay empty through a full rotation cycle', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -204,12 +208,7 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
 
 describe('UpdateConnectorCredentials — partial payload', () => {
   it('sends only the filled keys, never the untouched ones', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key', 'workspace-id'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key', 'workspace-id']))
     mockGetMcpServer.mockResolvedValue(serverWithCondition(undefined))
 
     await renderPanel(ENV_SECRET)
@@ -260,12 +259,7 @@ describe('UpdateConnectorCredentials — PUT rejection', () => {
 // ─── Polling / DeploymentReady correlation — the CRD contract (Fase 3 §6) ───
 describe('UpdateConnectorCredentials — rollout polling', () => {
   it('reports success once a FRESH DeploymentReady=True is observed after the PUT', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     // First poll: a False condition that predates the PUT (stale) — must NOT
     // be read as an outcome of this rotation.
     mockGetMcpServer.mockResolvedValueOnce(
@@ -309,12 +303,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // reason WaitingForReplicas (fresh, post-PUT) for the whole rollout window,
     // then True once the new pod is Ready. The UI must NOT read the transitory
     // False as failure — doing so would abort almost every successful rotation.
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     // First two polls: transitory False, timestamped AFTER the PUT.
     mockGetMcpServer
       .mockResolvedValueOnce(
@@ -370,12 +359,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // failure on the first sighting; it reports failure only when its OWN
     // POLL_TIMEOUT_MS expires with the diagnostic still uncorrected — and then
     // with the HCC's rollout numbers, never a bare "timed out".
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
@@ -414,12 +398,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // still observing". The UI must keep polling and report SUCCESS on the later
     // True, not latch 'failed' on the first RolloutIncomplete. This is the
     // false-negative a slow/loaded cluster reproduces (convergence 120s..180s).
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer
       .mockResolvedValueOnce(
         serverWithCondition({
@@ -460,12 +439,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('keeps waiting when DeploymentReady=True predates the PUT (stale success must not count)', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -486,12 +460,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('reports failure with the condition message when RolloutIncomplete persists after the PUT', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
@@ -529,12 +498,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // this condition is judged stale, the rotation wedges until timeout, and
     // this assertion goes red — which the pre-existing success test (whose
     // timestamp sits AFTER system time) could not detect.
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -555,12 +519,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('reports a bounded timeout — never success — when the condition never transitions', async () => {
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
     // Always stale: predates the PUT on every single poll.
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
@@ -590,12 +549,7 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // them (a false-positive: SERVER_NAME could converge while the other pod
     // CrashLoopBackOffs, yet the old banner said both "restarted and is serving").
     const OTHER = 'other-connector-b'
-    mockUpdateMcpSecret.mockResolvedValue({
-      name: ENV_SECRET.name,
-      namespace: 'mcp-server',
-      keys: ['api-key'],
-      affectedConnectors: [SERVER_NAME, OTHER],
-    })
+    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key'], [SERVER_NAME, OTHER]))
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',

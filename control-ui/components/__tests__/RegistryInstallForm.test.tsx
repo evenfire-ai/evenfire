@@ -6,15 +6,17 @@ import { RegistryInstallForm } from '../RegistryInstallForm'
 import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', async () => {
+  const { buildContextList, buildContextResource } =
+    await import('../../test/fixtures/contextResource')
   const mod: Record<string, unknown> = {}
   mod.getRegistryCredentialSchema = vi.fn().mockResolvedValue({
     required: false,
     authType: 'none',
     keys: [],
   })
-  mod.getContexts = vi.fn().mockResolvedValue({
-    items: [{ metadata: { name: 'context1' } }],
-  })
+  mod.getContexts = vi
+    .fn()
+    .mockResolvedValue(buildContextList([buildContextResource({ metadata: { name: 'context1' } })]))
   mod.getContextUsers = vi.fn().mockResolvedValue({ items: [] })
   mod.getContextTeams = vi.fn().mockResolvedValue({ items: [] })
   mod.getHosts = vi.fn().mockResolvedValue({ items: [] })

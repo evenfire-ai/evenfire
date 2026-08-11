@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import EditMcpServerPage from '../../app/mcp-servers/[name]/edit/page'
 import * as api from '../../lib/api'
+import { buildContextList, buildContextResource } from '../../test/fixtures/contextResource'
 
 const replace = vi.fn()
 const push = vi.fn()
@@ -58,14 +59,14 @@ describe('connector edit Context access', () => {
       metadata: { name: 'search' },
       spec: { contextRef: 'removed-context', image: 'example/search:latest' },
     })
-    vi.mocked(api.getContexts).mockResolvedValue({
-      items: [
-        {
+    vi.mocked(api.getContexts).mockResolvedValue(
+      buildContextList([
+        buildContextResource({
           metadata: { name: 'removed-context', resourceVersion: 'rv-2' },
-          spec: { contextId: 'removed-context', mcpServers: [] },
-        },
-      ],
-    })
+          spec: { mcpServers: [] },
+        }),
+      ])
+    )
 
     render(<EditMcpServerPage />)
 

@@ -1,17 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
-import type { ContextResource } from '../../lib/api'
+import { buildContextResource } from '../../test/fixtures/contextResource'
 import { ContextTable } from '../ContextTable'
 
-const contexts: ContextResource[] = [
-  {
+const contexts = [
+  buildContextResource({
     metadata: { name: 'business' },
-    spec: {
-      contextId: 'business',
-      description: 'Business context',
-      mcpServers: ['server-a', 'server-b'],
-    },
-  },
+    spec: { description: 'Business context', mcpServers: ['server-a', 'server-b'] },
+  }),
 ]
 
 describe('ContextTable', () => {

@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import {
   areRequiredCredentialRowsComplete,
   reconcileCredentialRows,
 } from '../registryCredentialDraft'
+import type { CredentialDraftRow, RegistryCredentialKey } from '../registryCredentialDraft.types'
+
+const token = fc.stringMatching(/^[A-Z][A-Z0-9_]{0,11}$/)
+const shortString = fc.string({ maxLength: 20 })
+const schemaKeysArbitrary: fc.Arbitrary<RegistryCredentialKey[]> = fc.uniqueArray(
+  fc.record({ name: token, label: shortString }),
+  { maxLength: 12, selector: key => key.name }
+)
+const rowArbitrary: fc.Arbitrary<CredentialDraftRow> = fc.record({
+  id: shortString,
+  secretKey: fc.oneof(token, shortString),
+  value: shortString,
+  label: fc.option(shortString, { nil: undefined }),
+})
 
 describe('registry credential drafts', () => {
   const schemaKeys = [
@@ -90,5 +105,96 @@ describe('registry credential drafts', () => {
     ]
     expect(areRequiredCredentialRowsComplete([...complete].reverse(), schemaKeys)).toBe(true)
     expect(areRequiredCredentialRowsComplete([...complete, complete[0]], schemaKeys)).toBe(true)
+  })
+
+  it('places every arbitrary schema key exactly once at the front and is idempotent', () => {
+    fc.assert(
+      fc.property(
+        fc.array(rowArbitrary, { maxLength: 30 }),
+        schemaKeysArbitrary,
+        (currentRows, generatedSchemaKeys) => {
+          const reconciled = reconcileCredentialRows(currentRows, generatedSchemaKeys)
+          const schemaNames = generatedSchemaKeys.map(key => key.name)
+          const boundRows = reconciled.slice(0, schemaNames.length)
+
+          expect(boundRows.map(row => row.secretKey)).toEqual(schemaNames)
+          expect(new Set(boundRows.map(row => row.secretKey)).size).toBe(schemaNames.length)
+          expect(reconcileCredentialRows(reconciled, generatedSchemaKeys)).toEqual(reconciled)
+        }
+      )
+    )
+  })
+
+  it('preserves arbitrary uniquely-bound values and is stable under their permutation', () => {
+    fc.assert(
+      fc.property(
+        schemaKeysArbitrary.chain(generatedSchemaKeys =>
+          fc.tuple(...generatedSchemaKeys.map(() => shortString)).chain(values => {
+            const rows = generatedSchemaKeys.map((key, index) => ({
+              id: `row-${index}`,
+              secretKey: key.name,
+              value: values[index] ?? '',
+            }))
+            return fc
+              .shuffledSubarray(rows, { minLength: rows.length, maxLength: rows.length })
+              .map(shuffled => ({ generatedSchemaKeys, rows, shuffled }))
+          })
+        ),
+        ({ generatedSchemaKeys, rows, shuffled }) => {
+          const expected = reconcileCredentialRows(rows, generatedSchemaKeys)
+          expect(reconcileCredentialRows(shuffled, generatedSchemaKeys)).toEqual(expected)
+          for (const row of rows) {
+            expect(expected.find(item => item.secretKey === row.secretKey)?.value).toBe(row.value)
+          }
+        }
+      )
+    )
+  })
+
+  it('adopts at most one arbitrary unbound filled row', () => {
+    fc.assert(
+      fc.property(
+        schemaKeysArbitrary,
+        fc.uniqueArray(
+          fc.record({
+            id: shortString,
+            value: shortString.filter(value => value.trim().length > 0),
+          }),
+          { maxLength: 10, selector: row => row.id }
+        ),
+        (generatedSchemaKeys, unboundRows) => {
+          const currentRows = unboundRows.map(row => ({ ...row, secretKey: '' }))
+          const reconciled = reconcileCredentialRows(currentRows, generatedSchemaKeys)
+          const adoptedIds = new Set(currentRows.map(row => row.id))
+          const adoptedSchemaRows = reconciled
+            .slice(0, generatedSchemaKeys.length)
+            .filter(row => adoptedIds.has(row.id))
+          expect(adoptedSchemaRows.length).toBeLessThanOrEqual(1)
+        }
+      )
+    )
+  })
+
+  it('agrees with reconciled values and remains complete under arbitrary duplicate reordering', () => {
+    fc.assert(
+      fc.property(
+        fc.array(rowArbitrary, { maxLength: 30 }),
+        schemaKeysArbitrary,
+        (rows, generatedSchemaKeys) => {
+          const reconciled = reconcileCredentialRows(rows, generatedSchemaKeys)
+          const expectedComplete = reconciled
+            .slice(0, generatedSchemaKeys.length)
+            .every(row => row.value.trim().length > 0)
+          expect(areRequiredCredentialRowsComplete(reconciled, generatedSchemaKeys)).toBe(
+            expectedComplete
+          )
+
+          const duplicatedAndReordered = [...rows, ...rows].reverse()
+          expect(
+            areRequiredCredentialRowsComplete(duplicatedAndReordered, generatedSchemaKeys)
+          ).toBe(areRequiredCredentialRowsComplete(rows, generatedSchemaKeys))
+        }
+      )
+    )
   })
 })

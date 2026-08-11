@@ -6,32 +6,32 @@ import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports; factory runs lazily so references to `api` are safe.
-vi.mock('../../lib/api', () => ({
-  createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
-  createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
-  deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
-  getContexts: vi.fn().mockResolvedValue({
-    items: [
-      {
-        metadata: { name: 'context1', resourceVersion: 'rv-context1' },
-        spec: { contextId: 'context1', mcpServers: [] },
-      },
-      {
-        metadata: { name: 'research', resourceVersion: 'rv-research' },
-        spec: { contextId: 'research', mcpServers: [] },
-      },
-    ],
-  }),
-  getContext: vi.fn().mockResolvedValue({
+vi.mock('../../lib/api', async () => {
+  const { buildContextList, buildContextResource } =
+    await import('../../test/fixtures/contextResource')
+  const context1 = buildContextResource({
     metadata: { name: 'context1', resourceVersion: 'rv-context1' },
-    spec: { contextId: 'context1', mcpServers: [] },
-  }),
-  getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
-  getContextUsers: vi.fn().mockResolvedValue({ items: [] }),
-  listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
-  getHosts: vi.fn().mockResolvedValue({ items: [] }),
-  updateContext: vi.fn().mockResolvedValue({}),
-}))
+  })
+  return {
+    createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
+    createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    getContexts: vi.fn().mockResolvedValue(
+      buildContextList([
+        context1,
+        buildContextResource({
+          metadata: { name: 'research', resourceVersion: 'rv-research' },
+        }),
+      ])
+    ),
+    getContext: vi.fn().mockResolvedValue(context1),
+    getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
+    getContextUsers: vi.fn().mockResolvedValue({ items: [] }),
+    listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
+    getHosts: vi.fn().mockResolvedValue({ items: [] }),
+    updateContext: vi.fn().mockResolvedValue({}),
+  }
+})
 
 afterEach(() => {
   cleanup()
