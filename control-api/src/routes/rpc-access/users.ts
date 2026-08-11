@@ -1,6 +1,7 @@
 import express, { Router } from 'express'
 import type { Request } from 'express'
 import { config } from '../../config.js'
+import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import {
   requireRpcTokenUserMatch,
@@ -117,10 +118,16 @@ export function createRpcAccessUsersRouter(
     async (req, res, next) => {
       try {
         const userContexts = await getUserContexts(req.params.userId)
+        // `req.params.userId` is authoritative here — `requireRpcTokenUserMatch()`
+        // has already bound it to the RPC token subject. The DB client follows the
+        // pool-wrapper idiom used by the other oauth routes (mcpOauth.ts,
+        // internal/oauth.ts): `{ query: (t, v) => pool.query(t, v) }`.
         const servers = await resolveInvocableMcpServersForContexts(
           gateway,
           config.mcpServersNamespace,
-          userContexts.contextIds
+          userContexts.contextIds,
+          req.params.userId,
+          { query: (text, values) => pool.query(text, values) }
         )
         res.status(200).json({
           userId: req.params.userId,

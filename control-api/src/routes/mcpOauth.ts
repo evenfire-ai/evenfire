@@ -12,6 +12,7 @@ import {
 } from '../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
+import { type McpServerOAuthDecl, resolveServerOAuth } from '../oauth/mcpServerOAuthSpec.js'
 import type { OAuthGrantKey } from '../oauth/store.js'
 import { getAccessToken } from '../oauth/tokenHelper.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
@@ -51,16 +52,6 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Both branches ship in v1; the `context` branch is governed/exercised by U6.
  */
 
-interface McpServerOAuthDecl {
-  id?: unknown
-  provider?: unknown
-  clientIdRef?: { name?: unknown; key?: unknown }
-  clientSecretRef?: { name?: unknown; key?: unknown }
-  scopes?: unknown
-  backgroundAccess?: unknown
-  grantScope?: unknown
-}
-
 interface McpServerResource {
   metadata?: { name?: string; namespace?: string }
   spec?: {
@@ -71,15 +62,6 @@ interface McpServerResource {
     // context-identity server — the shared grant coordinate — never the body.
     contextRef?: unknown
   }
-}
-
-type GrantScope = 'user' | 'context'
-
-interface ResolvedServerOAuth {
-  oauthClientId: string
-  grantScope: GrantScope
-  /** Authoritative Context of the server (spec.contextRef); undefined if absent. */
-  contextRef?: string
 }
 
 /**
@@ -120,17 +102,6 @@ function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuth
       ],
     },
   }
-}
-
-function resolveServerOAuth(server: McpServerResource): ResolvedServerOAuth | null {
-  const oauth = server.spec?.oauth
-  if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
-  const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const contextRef =
-    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
-      ? server.spec.contextRef
-      : undefined
-  return { oauthClientId: oauth.id, grantScope, contextRef }
 }
 
 // DNS-1123 subdomain, the shape a k8s resource name takes. Reject anything else

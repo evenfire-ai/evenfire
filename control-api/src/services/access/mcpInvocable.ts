@@ -11,13 +11,23 @@
  *     the scoped context-ids lists it in `spec.mcpServers`.
  *   - A server is **invocable** if it's allowed AND:
  *       - `spec.enabled !== false`
- *       - `spec.auth.type` is absent or equals `"none"`
+ *       - `spec.auth.type` is on the allowlist — absent/`"none"`/`"oauth"`
+ *         (`bearer`/`basic`/`apiKey` are excluded). U3, mini-spec 04.
  *       - `spec.transport.url` is a non-empty string
+ *   - **rpc-proxy rail only** (`resolveInvocableMcpServersForContexts`): an
+ *     `oauth` server additionally requires a valid grant for the caller,
+ *     computed by flavor (`grantScope`) and passed into the pure filter as data
+ *     (`grantPresence`). The catalog rail (`resolveMcpServersForAgents`) skips
+ *     this gate — its isolation is the JIT token resolution (U4), not this
+ *     filter.
  *   - Session catalog preserves names-only compatibility while enriching each
  *     authorized agent with its canonical directory identity; RPC catalog
  *     additionally returns the transport URL.
  */
+import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
+import { resolveServerOAuth } from '../../oauth/mcpServerOAuthSpec.js'
+import { oauthGrantExists } from '../../oauth/store.js'
 import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
@@ -43,6 +53,14 @@ interface McpServerCR {
     enabled?: boolean
     auth?: { type?: string }
     transport?: { type?: string; url?: string }
+    // OAuth coordinates (U1). Read only for the rpc-proxy grant-presence gate;
+    // the catalog rail never inspects them. Structurally compatible with
+    // `resolveServerOAuth`'s input.
+    oauth?: {
+      id?: unknown
+      grantScope?: unknown
+    }
+    contextRef?: unknown
   }
 }
 
@@ -131,11 +149,24 @@ function resolveServerUrl(s: McpServerCR, mcpServersNamespace: string): string |
 /**
  * Intersect a name set with the "invocable" filter on McpServer CRs.
  * Returns a new Set of just the invocable names.
+ *
+ * PURE + total — the only I/O is done by the caller, which passes its result in
+ * as `grantPresence` (the "identity as data" pattern, mini-spec 04 §2).
+ *
+ * Auth-type allowlist: admits `none` (or absent) and `oauth`; still EXCLUDES
+ * `bearer`/`basic`/`apiKey`. This runs on BOTH rails.
+ *
+ * Grant-presence gate (rpc-proxy rail ONLY): when `grantPresence` is provided,
+ * an `oauth` server is invocable IFF its name is in the set. When `grantPresence`
+ * is ABSENT (catalog rail, `resolveMcpServersForAgents`), the gate is skipped and
+ * oauth servers pass on the auth-type allowlist alone — that rail's isolation is
+ * the JIT token resolution (U4), not this filter.
  */
-function filterInvocable(
+export function filterInvocable(
   names: ReadonlySet<string>,
   servers: McpServerCR[],
-  mcpServersNamespace: string
+  mcpServersNamespace: string,
+  grantPresence?: ReadonlySet<string>
 ): Set<string> {
   const byName = new Map<string, McpServerCR>()
   for (const s of servers) {
@@ -148,7 +179,11 @@ function filterInvocable(
     if (!s) continue
     if (s.spec?.enabled === false) continue
     const authType = s.spec?.auth?.type
-    if (authType && authType !== 'none') continue
+    // Allowlist: absent/`none`/`oauth` admitted; `bearer`/`basic`/`apiKey` excluded.
+    if (authType && authType !== 'none' && authType !== 'oauth') continue
+    // rpc-proxy grant-presence gate: an oauth server needs a valid grant, passed
+    // as data by the resolver. Fail-closed — not in the set means not invocable.
+    if (grantPresence && authType === 'oauth' && !grantPresence.has(name)) continue
     if (!resolveServerUrl(s, mcpServersNamespace)) continue
     out.add(name)
   }
@@ -156,13 +191,91 @@ function filterInvocable(
 }
 
 /**
+ * Compute the set of candidate server names that have a valid OAuth grant for
+ * this caller, by flavor (mini-spec 04 §2 step 3). Non-oauth servers are never
+ * added here (the auth-type allowlist governs them). FAIL-CLOSED throughout: a
+ * missing oauth id / contextRef, an unknown grantScope, or a DB error EXCLUDES
+ * the server (it is simply not added to the set), so the rpc-proxy gate treats
+ * it as un-serviceable rather than propagating a 500 for the whole request.
+ *
+ * The `user` branch is fully exercised in v1. The `context` (shared-grant)
+ * branch is implemented + covered by the pure property test here; its
+ * cross-service, end-to-end activation is exercised by U6(api).
+ */
+async function computeGrantPresence(
+  db: DbClient,
+  mcpServersNamespace: string,
+  callerUserId: string,
+  servers: McpServerCR[],
+  candidateNames: ReadonlySet<string>
+): Promise<Set<string>> {
+  const byName = new Map<string, McpServerCR>()
+  for (const s of servers) {
+    const n = s.metadata?.name
+    if (n) byName.set(n, s)
+  }
+
+  const present = new Set<string>()
+  for (const name of candidateNames) {
+    const s = byName.get(name)
+    if (!s) continue
+    // Only oauth servers are grant-gated; `none` servers pass on the allowlist.
+    if (s.spec?.auth?.type !== 'oauth') continue
+    const resolved = resolveServerOAuth(s)
+    if (!resolved) continue // fail-closed: no usable oauth id
+
+    try {
+      let exists = false
+      if (resolved.grantScope === 'user') {
+        exists = await oauthGrantExists(db, {
+          grantKind: 'user',
+          ownerKind: 'mcpserver',
+          recipeNamespace: mcpServersNamespace,
+          recipeName: name,
+          userId: callerUserId,
+          oauthClientId: resolved.oauthClientId,
+        })
+      } else if (resolved.grantScope === 'context') {
+        // Shared identity is keyed by the server's AUTHORITATIVE Context
+        // (`spec.contextRef`), DECOUPLED from the caller's userId (mini-spec 04
+        // §2 3b). Exercised end-to-end by U6(api).
+        if (!resolved.contextRef) continue // fail-closed: context server without contextRef
+        exists = await oauthGrantExists(db, {
+          grantKind: 'shared',
+          ownerKind: 'mcpserver',
+          recipeNamespace: mcpServersNamespace,
+          recipeName: name,
+          contextId: resolved.contextRef,
+          oauthClientId: resolved.oauthClientId,
+        })
+      }
+      // Any other grantScope is unknown → fail-closed (exists stays false).
+      if (exists) present.add(name)
+    } catch (err) {
+      // A grant-check DB error excludes THIS server (fail-closed) rather than
+      // failing the whole request — loudly, matching the sibling resolver's
+      // observable-degradation posture (`resolveMcpServersForAgents`).
+      console.error(
+        '[mcpInvocable] grant-presence check failed; server excluded from rpc-proxy rail:',
+        name,
+        err instanceof Error ? err.message : String(err)
+      )
+    }
+  }
+  return present
+}
+
+/**
  * Flat list of invocable `{name, url}` for the given scoped context ids.
- * Used by `/rpc/access/users/:id/mcp-servers`.
+ * Used by `/rpc/access/users/:id/mcp-servers` — the rpc-proxy rail, so it
+ * additionally applies the OAuth grant-presence gate (mini-spec 04).
  */
 export async function resolveInvocableMcpServersForContexts(
   gateway: K8sGateway,
   mcpServersNamespace: string,
-  scopedContextIds: readonly string[]
+  scopedContextIds: readonly string[],
+  callerUserId: string,
+  db: DbClient
 ): Promise<InvocableMcpServer[]> {
   const scoped = new Set(scopedContextIds)
   if (scoped.size === 0) return []
@@ -177,7 +290,14 @@ export async function resolveInvocableMcpServersForContexts(
   for (const names of allowedByContext.values()) {
     for (const name of names) union.add(name)
   }
-  const invocable = filterInvocable(union, serverList, mcpServersNamespace)
+  const grantPresence = await computeGrantPresence(
+    db,
+    mcpServersNamespace,
+    callerUserId,
+    serverList,
+    union
+  )
+  const invocable = filterInvocable(union, serverList, mcpServersNamespace, grantPresence)
 
   const byName = new Map<string, McpServerCR>()
   for (const s of serverList) {
