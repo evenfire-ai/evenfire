@@ -1,4 +1,5 @@
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import type {
   OperationalObjectProjection,
@@ -104,15 +105,7 @@ export class OperationalAccessIndex {
     text: string,
     values: unknown[] = []
   ) {
-    return budget.runProducer(async () => {
-      budget.assertActive()
-      const result = await db.query(text, values)
-      budget.assertActive()
-      if (result.rows.length > 0) {
-        budget.charge({ kind: 'dbRowsReturned', amount: result.rows.length })
-      }
-      return result
-    })
+    return runAccessDatabaseQuery(db, budget, text, values)
   }
 
   private async configureTransaction(db: DbClient, budget: AccessExecutionBudget): Promise<void> {
