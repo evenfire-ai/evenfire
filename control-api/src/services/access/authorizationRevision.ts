@@ -10,6 +10,12 @@ export type AuthorizationMembershipRevision = Readonly<{
   teamRevision: string
 }>
 
+export type AuthorizationRelationship = Readonly<{
+  type: string
+  targetResourceId: string
+  instanceId?: string
+}>
+
 export type AuthorizationRevisionInput = Readonly<{
   principalUserId: string
   sessionContract: 'v1' | 'v2'
@@ -23,20 +29,32 @@ export type AuthorizationRevisionInput = Readonly<{
   candidates: readonly AccessPathSeed[]
 }>
 
-function canonicalCandidates(candidates: readonly AccessPathSeed[]) {
-  return [...candidates]
-    .map(candidate => ({
-      kind: candidate.kind,
-      grantId: candidate.grantId,
-      teamId: candidate.teamId ?? null,
-      currentRole: candidate.currentRole ?? null,
-      behavior: candidate.behavior,
-    }))
-    .sort((left, right) =>
-      JSON.stringify([left.kind, left.teamId, left.grantId]).localeCompare(
-        JSON.stringify([right.kind, right.teamId, right.grantId])
-      )
+export function canonicalAccessPathSeeds<T extends AccessPathSeed>(candidates: readonly T[]): T[] {
+  const values = new Map<string, T>()
+  for (const candidate of candidates) {
+    values.set(
+      JSON.stringify([
+        candidate.kind,
+        candidate.teamId ?? null,
+        candidate.grantId,
+        candidate.behavior,
+      ]),
+      candidate
     )
+  }
+  return [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, value]) => value)
+}
+
+function canonicalCandidates(candidates: readonly AccessPathSeed[]) {
+  return canonicalAccessPathSeeds(candidates).map(candidate => ({
+    kind: candidate.kind,
+    grantId: candidate.grantId,
+    teamId: candidate.teamId ?? null,
+    currentRole: candidate.currentRole ?? null,
+    behavior: candidate.behavior,
+  }))
 }
 
 export function authorizationRevision(input: AuthorizationRevisionInput): string {
@@ -59,6 +77,31 @@ export function authorizationRevision(input: AuthorizationRevisionInput): string
       })
     )
     .digest('base64url')}`
+}
+
+export function canonicalAuthorizationRelationships(
+  relationships: readonly AuthorizationRelationship[]
+): AuthorizationRelationship[] {
+  const values = new Map<string, AuthorizationRelationship>()
+  for (const relationship of relationships) {
+    values.set(
+      JSON.stringify([
+        relationship.type,
+        relationship.targetResourceId,
+        relationship.instanceId ?? null,
+      ]),
+      Object.freeze({ ...relationship })
+    )
+  }
+  return [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, value]) => value)
+}
+
+export function databaseRelationshipsRevision(
+  relationships: readonly AuthorizationRelationship[]
+): string {
+  return JSON.stringify(canonicalAuthorizationRelationships(relationships))
 }
 
 function canonicalValue(value: unknown): string {

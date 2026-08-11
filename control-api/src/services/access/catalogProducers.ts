@@ -1,6 +1,11 @@
 import { config } from '../../config.js'
 import type { TeamRole } from '../../profileTypes.js'
 import { type AuthorityCandidate, authorityCandidate } from './accessAuthorityStore.js'
+import {
+  canonicalAccessPathSeeds,
+  databaseRelationshipsRevision,
+  revisionOfValues,
+} from './authorizationRevision.js'
 import type { AccessCapability } from './capabilityRegistry.js'
 import { gfsPermissionsToCapabilities } from './capabilityRegistry.js'
 import {
@@ -139,6 +144,22 @@ function canonicalRelationships(rows: readonly JsonRecord[]): CatalogRelationshi
     .map(([, value]) => value)
 }
 
+function operationalRelationshipsRevision(rows: readonly JsonRecord[]): string {
+  return revisionOfValues(
+    rows.map(row => [
+      row.source_type,
+      row.source_id,
+      row.relationship_type,
+      row.target_type,
+      row.target_id,
+      row.relationship_instance_id,
+      row.behavior_attributes,
+      row.source_provider_uid,
+      row.source_resource_version,
+    ])
+  )
+}
+
 function commonCandidate(input: {
   context: CatalogRequestContext
   row: JsonRecord
@@ -224,6 +245,7 @@ function simpleOperationalCandidates(input: {
     if (input.family === 'sandbox_app') {
       return row.target_type === 'sandbox_app' && row.target_id === input.logicalId
     }
+    if (input.family === 'workflow_recipe') return true
     return sourceType === input.family && sourceId === input.logicalId
   })
   const runtimeRef = JSON.stringify(
@@ -375,6 +397,7 @@ function decodedHydrationBytes(rows: readonly unknown[]): number {
 function hydrateRows(input: {
   context: CatalogRequestContext
   family: CatalogFamily
+  sourceRevision: string
   rows: readonly JsonRecord[]
 }): HydratedCatalogResource[] {
   input.context.budget.charge({
@@ -424,21 +447,7 @@ function hydrateRows(input: {
               logicalId,
               pathRows,
             })
-    const dedupedPaths = new Map<string, AuthorityCandidate>()
-    for (const accessPath of accessPaths) {
-      dedupedPaths.set(
-        JSON.stringify([
-          accessPath.kind,
-          accessPath.teamId ?? null,
-          accessPath.grantId,
-          accessPath.behavior,
-        ]),
-        accessPath
-      )
-    }
-    const paths = [...dedupedPaths.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([, value]) => value)
+    const paths = canonicalAccessPathSeeds(accessPaths)
     const relationships = canonicalRelationships(relationshipRows)
     representedPaths += paths.length
     representedRelationships += relationships.length
@@ -460,6 +469,16 @@ function hydrateRows(input: {
           'resource_revision',
           128
         ),
+        authorizationSourceRevision: input.sourceRevision,
+        authorizationRelationshipsRevision:
+          input.family === 'host' ||
+          input.family === 'context' ||
+          input.family === 'mcp_server' ||
+          input.family === 'workflow_recipe' ||
+          input.family === 'shared_filesystem' ||
+          input.family === 'sandbox_app'
+            ? operationalRelationshipsRevision(relationshipRows)
+            : databaseRelationshipsRevision(relationships),
         validUntil,
       })
     )
@@ -545,6 +564,10 @@ class SqlCatalogProducer implements CatalogProducer {
       hydrateRows({
         context,
         family: this.family,
+        sourceRevision:
+          this.requiredOperationalSources.length === 0
+            ? 'database-resource'
+            : readiness.sourceRevision,
         rows: result.rows as JsonRecord[],
       })
     )

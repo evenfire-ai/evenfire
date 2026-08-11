@@ -36,6 +36,7 @@ export type ProducerContinuation = Readonly<{
 export type CatalogIdentityCandidate = Readonly<{
   key: CatalogKey
   canonicalId: string
+  validUntil: string | null
 }>
 
 export type SafeCatalogPartialError = Readonly<{
@@ -65,6 +66,8 @@ export type HydratedCatalogResource = Readonly<{
   accessPaths: readonly AccessPathSeed[]
   relationships: readonly CatalogRelationship[]
   authorizationResourceRevision: string
+  authorizationSourceRevision: string
+  authorizationRelationshipsRevision: string
   validUntil: string | null
 }>
 
@@ -73,6 +76,8 @@ export type CatalogPrincipalSnapshot = Readonly<{
   sessionContract: 'v1' | 'v2'
   sessionRevision: string
   userRevision: string
+  catalogRevision: string
+  authorizationRevision: string
   memberships: readonly Readonly<{
     teamId: string
     role: TeamRole

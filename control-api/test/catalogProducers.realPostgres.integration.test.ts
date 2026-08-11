@@ -87,6 +87,8 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
         sessionContract: 'v2',
         sessionRevision: '1',
         userRevision: '1',
+        catalogRevision: '1',
+        authorizationRevision: 'catalog-authorization-1',
         memberships: [],
       },
       environmentId,

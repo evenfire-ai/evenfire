@@ -38,7 +38,11 @@ export async function catalogQuery(
   })
 }
 
-export type BoundedKeyArm = Readonly<{ sql: string; orderBy?: string }>
+export type BoundedKeyArm = Readonly<{
+  sql: string
+  orderBy?: string
+  hasValidUntil?: boolean
+}>
 
 export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): string {
   if (arms.length === 0) throw new CatalogProducerContractError('key_arms_missing')
@@ -47,15 +51,20 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
     .map((arm, index) => {
       const definition = typeof arm === 'string' ? { sql: arm } : arm
       return `${names[index]} AS MATERIALIZED (
-          ${definition.sql}
+          SELECT bounded_arm.logical_id,
+                 ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
+                   AS valid_until
+            FROM (${definition.sql}) bounded_arm
           ORDER BY ${definition.orderBy ?? 'logical_id'}
           LIMIT $4
         )`
     })
     .join(',\n')
-  const union = names.map(name => `SELECT logical_id FROM ${name}`).join('\nUNION ALL\n')
+  const union = names
+    .map(name => `SELECT logical_id, valid_until FROM ${name}`)
+    .join('\nUNION ALL\n')
   return `WITH ${sources}
-    SELECT logical_id
+    SELECT logical_id, MIN(valid_until) AS valid_until
       FROM (${union}) bounded_sources
      WHERE $1::uuid IS NOT NULL AND $2::text IS NOT NULL AND $3::text IS NOT NULL
        AND $5::text IS NOT NULL AND $6::text IS NOT NULL AND $7::text IS NOT NULL
@@ -186,7 +195,15 @@ export async function listBoundedProducerKeys(input: {
     if (candidates.length > 0 && compareCatalogKey(candidates.at(-1)!.key, key) >= 0) {
       throw new CatalogProducerContractError('keys_not_strictly_ordered')
     }
-    candidates.push(Object.freeze({ key, canonicalId: `${input.family}:${logicalId}` }))
+    let validUntil: string | null = null
+    if (row.valid_until !== null && row.valid_until !== undefined) {
+      const timestamp = new Date(String(row.valid_until))
+      if (Number.isNaN(timestamp.getTime())) {
+        throw new CatalogProducerContractError('candidate_valid_until_invalid')
+      }
+      validUntil = timestamp.toISOString()
+    }
+    candidates.push(Object.freeze({ key, canonicalId: `${input.family}:${logicalId}`, validUntil }))
     prior = logicalId
   }
   const hasMore = candidates.length > input.take

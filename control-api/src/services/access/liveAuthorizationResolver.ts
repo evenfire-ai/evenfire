@@ -9,6 +9,7 @@ import {
   loadResourceAuthority,
   operationTargetIsCurrentlyValid,
 } from './accessAuthorityStore.js'
+import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
 import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
@@ -20,7 +21,11 @@ import {
   buildAccessPath,
   selectEquivalentAccessPath,
 } from './accessPath.js'
-import { authorizationRevision } from './authorizationRevision.js'
+import {
+  authorizationRevision,
+  canonicalAccessPathSeeds,
+  databaseRelationshipsRevision,
+} from './authorizationRevision.js'
 import {
   type AccessCapability,
   isAccessCapability,
@@ -107,18 +112,6 @@ function dependencyForError(
   return 'authorization_store'
 }
 
-async function configureAuthorityTransaction(
-  db: Pick<DbClient, 'query'>,
-  budget: AccessExecutionBudget
-): Promise<void> {
-  await budget.runProducer(async () => {
-    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    await db.query(`SELECT set_config('statement_timeout', $1, true)`, [
-      `${budget.statementTimeoutMs()}ms`,
-    ])
-  })
-}
-
 function candidateForPath(
   path: AccessPath,
   candidates: readonly AuthorityCandidate[]
@@ -167,7 +160,7 @@ async function resolveInTransaction(input: {
   gateway?: Pick<K8sGateway, 'getResourceExact'>
   budget: AccessExecutionBudget
 }): Promise<LiveAuthorizationResult> {
-  await configureAuthorityTransaction(input.db, input.budget)
+  await configureAccessAuthorityTransaction(input.db, input.budget)
   const snapshot = await loadPrincipalAuthoritySnapshot({
     db: input.db,
     budget: input.budget,
@@ -235,8 +228,8 @@ async function resolveInTransaction(input: {
     capability: input.capability,
     operationTarget: input.operationTarget,
   })
-  const capable = targeted.filter(candidate =>
-    candidate.behavior.capabilities.includes(input.capability)
+  const capable = canonicalAccessPathSeeds(
+    targeted.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
   )
   if (capable.length === 0) return { status: 'denied', code: 'forbidden' }
   input.budget.charge({ kind: 'accessPaths', amount: capable.length })
@@ -254,7 +247,7 @@ async function resolveInTransaction(input: {
     relationshipsRevision:
       graph?.status === 'current'
         ? graph.relationshipsRevision
-        : JSON.stringify(authority.relationships),
+        : databaseRelationshipsRevision(authority.relationships),
     candidates: capable,
   })
   const paths = Object.freeze(
