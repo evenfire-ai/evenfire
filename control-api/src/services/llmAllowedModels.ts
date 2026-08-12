@@ -402,6 +402,53 @@ export async function listEnabledModelNamesForProvider(
 }
 
 /**
+ * Full allowlist state for one `(provider, model)`: `{ enabled, stale }`, or
+ * `null` when no row exists. Fase 6 (soft quarantine of `stale` models) reads
+ * this on the operator write path so the gate can WARN — never block — when an
+ * `enabled` but `stale` model (vanished from the external catalog, Fase 4) is
+ * assigned to something NEW. `isModelAllowed` stays the boolean fail-closed gate
+ * (unchanged callers, unchanged semantics); this is strictly additive.
+ */
+export async function getModelAllowlistState(
+  provider: string,
+  model: string,
+  db: DbClient = pool
+): Promise<{ enabled: boolean; stale: boolean } | null> {
+  const result = await db.query(
+    `SELECT enabled, stale FROM llm_allowed_models
+      WHERE provider = $1 AND model = $2
+      LIMIT 1`,
+    [provider, model]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  return { enabled: Boolean(row.enabled), stale: Boolean(row.stale) }
+}
+
+/**
+ * Enabled model names for one provider WITH their `stale` flag (Fase 6 grant
+ * gate). Same `enabled`-only filter as `listEnabledModelNamesForProvider`; adds
+ * `stale` so the grant write gate can warn on a NEW assignment of an enabled-but-
+ * stale model without a second round-trip. A `stale` model is still `enabled`, so
+ * it still appears here — quarantine is a warning, not a de-listing (R3.7).
+ */
+export async function listEnabledModelsWithStaleForProvider(
+  provider: string,
+  db: DbClient = pool
+): Promise<Array<{ model: string; stale: boolean }>> {
+  const result = await db.query(
+    `SELECT model, stale FROM llm_allowed_models
+      WHERE provider = $1 AND enabled
+      ORDER BY model ASC`,
+    [provider]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => ({
+    model: String(row.model),
+    stale: Boolean(row.stale),
+  }))
+}
+
+/**
  * Enabled rows grouped by provider, shaped for the ConfigMap materializer.
  * Only providers with at least one enabled row appear. Deterministic ordering
  * (provider then model) keeps the materialized content hash stable.

@@ -808,4 +808,87 @@ describe('routes/admin/pluginWorkloadSdk — quota & audit', () => {
       expect.objectContaining({ method: undefined, status: undefined })
     )
   })
+
+  // Fase 6 — soft quarantine of `stale` models on the grant write path. An ENABLED
+  // but `stale` model assigned to a NEW target answers 200 with an additive
+  // `warnings` array — NEVER a 400 — and a live reference already in the stored
+  // grant is not revalidated. Assert the HTTP body (T4).
+  describe('stale soft-quarantine warnings (Fase 6)', () => {
+    // Stored grant derived through the real row producer (`mapGrantRow`) so the
+    // fixture cannot drift from what the DB layer emits (T1).
+    const makeStoredGrant = (
+      over: { promptTargets?: unknown; allowedModels?: string[] } = {}
+    ): sdkDb.PluginWorkloadSdkGrant =>
+      sdkDb.mapGrantRow({
+        id: 'g-stored',
+        recipe_namespace: validGrantBody.recipeNamespace,
+        recipe_name: validGrantBody.recipeName,
+        capability_family: 'promptBridge',
+        provider: 'zai',
+        allowed_models: over.allowedModels ?? validGrantBody.allowedModels,
+        prompt_targets: over.promptTargets ?? validGrantBody.promptTargets,
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      })
+
+    it('NEW target assigning an enabled+stale model → 200 + warnings, never 400', async () => {
+      // glm-4.7 is enabled AND stale; there is no stored grant → the assignment is
+      // new.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: true }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toEqual([
+        {
+          code: 'stale_model_assigned',
+          provider: 'zai',
+          model: 'glm-4.7',
+          field: 'promptTargets[0].model',
+        },
+      ])
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('EXISTING stale target (already in the stored grant) → 200 + NO warnings (not revalidated)', async () => {
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: true }],
+        rowCount: 1,
+      } as never)
+      // The stored grant already references glm-4.7 as its target.
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([makeStoredGrant()] as never)
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toBeUndefined()
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('enabled non-stale target → 200 + NO warnings', async () => {
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: false }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toBeUndefined()
+    })
+  })
 })

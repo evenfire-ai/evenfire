@@ -23,6 +23,7 @@ import {
   type HostSpecIncoherenceToleratedEvent,
   emitHostSpecIncoherenceTolerated,
 } from './hostWriteGateAudit.js'
+import type { StaleModelWarning } from './staleModelWarning.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -385,6 +386,10 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
         credentials?: Record<string, string>
       }
+      // Fase 6 soft-quarantine warnings granted during Host validation, returned
+      // in the 201 body only after the CR persists (below). Empty for every
+      // non-host create.
+      const hostWarnings: StaleModelWarning[] = []
 
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
@@ -490,6 +495,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         // apply — a fresh Host may not introduce a disabled model.
         const issue = await validateHostSpec(body.spec, undefined, {
           hostRef: { namespace: ns, name: body.metadata.name },
+          // Fase 6: a fresh Host has no stored CR, so EVERY assignment is new — a
+          // stale enabled model warns (never blocks). Emitted after the CR lands.
+          warnings: hostWarnings,
         })
         if (issue) {
           res.status(422).json(issue)
@@ -529,7 +537,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           return
         }
       }
-      res.status(201).json(created)
+      // Host CR persisted: attach any Fase 6 warnings additively (older clients
+      // ignore the field). Absent when there is nothing to warn about.
+      res
+        .status(201)
+        .json(
+          hostWarnings.length > 0
+            ? { ...(created as Record<string, unknown>), warnings: hostWarnings }
+            : created
+        )
     })
   )
 
@@ -557,6 +573,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // Pieza D tolerations granted during Host validation, emitted only after
       // the CR persists (below). Empty for every non-host / non-tolerated write.
       const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
+      // Fase 6 soft-quarantine warnings, returned in the 200 body only after the
+      // CR persists (below). Empty for every non-host / non-stale write.
+      const hostWarnings: StaleModelWarning[] = []
 
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
@@ -600,6 +619,10 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           // the CR persists (mini-spec 01), so a secretRef 422 or a K8s conflict
           // leaves no audit record.
           tolerations: hostTolerations,
+          // Fase 6 warnings: a NEW assignment of an enabled-but-stale model warns
+          // (never blocks). A live reference already in the stored CR is not
+          // revalidated. Returned in the body only after the CR persists.
+          warnings: hostWarnings,
         })
         if (issue) {
           res.status(422).json(issue)
@@ -676,7 +699,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             return
           }
         }
-        res.status(200).json(updated)
+        res
+          .status(200)
+          .json(
+            hostWarnings.length > 0
+              ? { ...(updated as Record<string, unknown>), warnings: hostWarnings }
+              : updated
+          )
       } catch (err) {
         // AP-6: the caller sent the resourceVersion it read and the resource
         // changed underneath it. Machine-readable so the UI can tell the

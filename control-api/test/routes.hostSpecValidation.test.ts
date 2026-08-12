@@ -721,4 +721,120 @@ describe('validateHostSpec', () => {
       expect(tolerations).toEqual([])
     })
   })
+
+  // Fase 6 — soft quarantine of `stale` models on the operator path. An ENABLED
+  // but `stale` model assigned to something NEW passes the gate (never 422) and
+  // yields a NON-BLOCKING warning; a live reference (already in the stored CR) is
+  // never revalidated. Orthogonal to Fase 2 (`enabled=false`).
+  describe('stale soft-quarantine warnings (Fase 6)', () => {
+    // Everything enabled; `stale` keyed on `${provider}:${model}`.
+    const enabledAll = () => vi.fn(() => Promise.resolve(true))
+    const stateFn = (...staleKeys: string[]) => {
+      const stale = new Set(staleKeys)
+      return vi.fn((p: string, m: string) =>
+        Promise.resolve({ enabled: true, stale: stale.has(`${p}:${m}`) })
+      )
+    }
+
+    it('NEW assignment of an enabled+stale primary → null (no error) + warning, never 422', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings } // no stored → create → assignment is new
+      )
+      // Never a rejection for stale alone.
+      expect(res).toBeNull()
+      expect(warnings).toEqual([
+        { code: 'stale_model_assigned', provider: 'claude', model: 'M', field: 'spec.model.name' },
+      ])
+    })
+
+    it('EXISTING reference to a stale model (already in stored) → no warning (not revalidated)', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const warnings: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } }
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { stored, tolerations: [], warnings }
+      )
+      expect(res).toBeNull()
+      expect(warnings).toEqual([])
+      // A live reference is never revalidated — the state lookup is skipped.
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+
+    it('NEW assignment of an enabled but NON-stale model → no warning', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn() // nothing stale
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).toBeNull()
+      expect(warnings).toEqual([])
+    })
+
+    it('warns for a NEW stale fallback and a NEW stale subset entry (all 3 gates)', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:P', 'claude:F', 'claude:S')
+      const warnings: Array<{ field: string; model: string }> = []
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'P' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'F' }] },
+          allowedModels: [
+            { provider: 'claude', model: 'P' },
+            { provider: 'claude', model: 'F' },
+            { provider: 'claude', model: 'S' },
+          ],
+        },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).toBeNull()
+      // One warning per distinct pair (deduped), across primary/fallback/subset.
+      const byModel = Object.fromEntries(warnings.map(w => [w.model, w.field]))
+      expect(byModel).toEqual({
+        P: 'spec.model.name',
+        F: 'spec.llmPolicy.fallbacks[0].model',
+        S: 'spec.allowedModels[2].model',
+      })
+    })
+
+    it('a DISABLED model (Fase 2) is not turned into a Fase 6 warning — it rejects', async () => {
+      // enabled=false → the R3 gate 422s (create, no tolerance). Fase 6 never runs
+      // for a rejected pair, and the state lookup is not even consulted.
+      const isModelAllowed = vi.fn(() => Promise.resolve(false))
+      const getModelAllowlistState = stateFn('claude:M') // would-be stale, but disabled
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].message).toContain('model_not_allowed')
+      expect(warnings).toEqual([])
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+
+    it('does not consult the state lookup at all when no warnings sink is provided', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState }
+        // no context.warnings → opt-out, zero extra queries
+      )
+      expect(res).toBeNull()
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+  })
 })

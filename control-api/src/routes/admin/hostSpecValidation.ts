@@ -4,7 +4,10 @@ import {
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
-import { isModelAllowed as isModelAllowedDefault } from '../../services/llmAllowedModels.js'
+import {
+  getModelAllowlistState as getModelAllowlistStateDefault,
+  isModelAllowed as isModelAllowedDefault,
+} from '../../services/llmAllowedModels.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import {
   type HostSpecIncoherenceToleratedEvent,
@@ -15,6 +18,7 @@ import {
   isNonWorseningToleration,
   offeredKey,
 } from './modelAllowlistTolerance.js'
+import { STALE_MODEL_ASSIGNED, type StaleModelWarning } from './staleModelWarning.js'
 
 // A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
 // A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
@@ -53,6 +57,16 @@ const HostApprovalSchema = z
 
 export interface HostSpecValidationDeps {
   isModelAllowed: (provider: string, model: string) => Promise<boolean>
+  /**
+   * Full `{ enabled, stale }` allowlist state for a pair (Fase 6). OPTIONAL and
+   * defaulted so existing callers that inject only `isModelAllowed` keep working;
+   * it is consulted ONLY when `context.warnings` is supplied (the stale-warning
+   * sink), so a caller not requesting warnings never triggers this lookup.
+   */
+  getModelAllowlistState?: (
+    provider: string,
+    model: string
+  ) => Promise<{ enabled: boolean; stale: boolean } | null>
 }
 
 /**
@@ -73,6 +87,16 @@ export interface HostSpecValidationContext {
    * step (secretRef check, K8s conflict) rejects leaves no audit record.
    */
   tolerations?: HostSpecIncoherenceToleratedEvent[]
+  /**
+   * OUTPUT sink for Fase 6 soft-quarantine warnings. When present, the validator
+   * appends a warning for every NEW assignment of an `enabled` but `stale` model
+   * (a live reference in `stored` is never revalidated). Same emit-after-persist
+   * discipline as `tolerations`: the validator only fills the sink on ACCEPT; the
+   * caller returns it in the success body only after the write persists — a write
+   * rejected by a later gate carries no warning. Independent of `stored`: warnings
+   * apply on both create (all assignments new) and update.
+   */
+  warnings?: StaleModelWarning[]
 }
 
 // spec.lifecycle follows the facade's contract for optional spec objects,
@@ -123,7 +147,10 @@ const HostLifecycleSchema = z
  */
 export async function validateHostSpec(
   spec: Record<string, unknown>,
-  deps: HostSpecValidationDeps = { isModelAllowed: isModelAllowedDefault },
+  deps: HostSpecValidationDeps = {
+    isModelAllowed: isModelAllowedDefault,
+    getModelAllowlistState: getModelAllowlistStateDefault,
+  },
   context: HostSpecValidationContext = {}
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   // Contract guard (mini-spec 01): passing `stored` enables tolerance, so the
@@ -171,10 +198,13 @@ export async function validateHostSpec(
   // introduce a disabled model.
   const tol: HostToleranceBundle = {
     context,
+    deps,
     storedRoles: storedRoleSets(context.stored),
     incomingCov: hostCoverage(spec),
     storedCov: hostCoverage(context.stored),
     pending: [],
+    warnings: [],
+    warnedKeys: new Set(),
   }
 
   // R3 model allowlist. Enforcement is keyed on the PRESENCE of `spec.model.name`
@@ -216,6 +246,9 @@ export async function validateHostSpec(
         ],
       }
     }
+    // Fase 6: an ENABLED pair that passed the gate may still be `stale`. Warn (no
+    // block) if this is a NEW assignment.
+    if (allowed) await maybeWarnStale(provider, name, 'spec.model.name', tol)
   }
 
   // R5 provider-fallback policy. Opt-in and additive: a spec with no `llmPolicy`
@@ -238,6 +271,11 @@ export async function validateHostSpec(
   // here, so a later rejection (secretRef check, K8s conflict) leaves no audit
   // record (mini-spec 01, persist-ordering fix).
   if (context.tolerations) context.tolerations.push(...tol.pending)
+
+  // Fase 6: hand the queued soft-quarantine warnings to the caller via the sink,
+  // on ACCEPT only — same persist-ordering as tolerations, so a write a later gate
+  // rejects (secretRef check, K8s conflict) surfaces no warning.
+  if (context.warnings) context.warnings.push(...tol.warnings)
 
   return null
 }
@@ -333,6 +371,7 @@ function hostCoverage(spec: Record<string, unknown> | undefined): CoverageSet {
 /** The precomputed no-worsening tolerance inputs, shared by the 3 Host gates. */
 interface HostToleranceBundle {
   context: HostSpecValidationContext
+  deps: HostSpecValidationDeps
   storedRoles: StoredRoleSets
   incomingCov: CoverageSet
   storedCov: CoverageSet
@@ -344,6 +383,40 @@ interface HostToleranceBundle {
    * leaves no audit record. One event per tolerated gate decision.
    */
   pending: HostSpecIncoherenceToleratedEvent[]
+  /**
+   * Fase 6 soft-quarantine warnings, ACCUMULATED here and copied into
+   * `context.warnings` only on ACCEPT (same persist-ordering as `pending`).
+   */
+  warnings: StaleModelWarning[]
+  /** Pair keys already warned, so a model in two roles warns at most once. */
+  warnedKeys: Set<string>
+}
+
+/**
+ * Fase 6 soft quarantine. Queue a NON-BLOCKING warning when an `enabled` but
+ * `stale` model is assigned to something NEW. NO-OP unless `context.warnings` is
+ * provided (opt-in sink), so callers that do not request warnings pay no lookup.
+ * A pair already referenced by the STORED record is a live reference and is never
+ * revalidated (spec §3.3) → no warning. Called ONLY on the `enabled` path (after
+ * the gate accepted the pair), so a disabled/tolerated pair (Fase 2) never routes
+ * here.
+ */
+async function maybeWarnStale(
+  provider: string,
+  model: string,
+  field: string,
+  tol: HostToleranceBundle
+): Promise<void> {
+  if (!tol.context.warnings) return
+  const key = offeredKey(provider, model)
+  if (tol.storedRoles.any.has(key)) return
+  if (tol.warnedKeys.has(key)) return
+  const getState = tol.deps.getModelAllowlistState ?? getModelAllowlistStateDefault
+  const state = await getState(provider, model)
+  if (state?.enabled && state.stale) {
+    tol.warnedKeys.add(key)
+    tol.warnings.push({ code: STALE_MODEL_ASSIGNED, provider, model, field })
+  }
 }
 
 /**
@@ -454,6 +527,8 @@ async function validateAllowedModels(
         ],
       }
     }
+    // Fase 6 soft quarantine on the per-host offered subset.
+    if (allowed) await maybeWarnStale(provider, model, `${base}.model`, tol)
 
     offered.add(offeredKey(provider, model))
   }
@@ -610,6 +685,8 @@ async function validateLlmPolicy(
         ],
       }
     }
+    // Fase 6 soft quarantine on a fallback assignment.
+    if (allowed) await maybeWarnStale(provider, model, `${base}.model`, tol)
   }
 
   return null

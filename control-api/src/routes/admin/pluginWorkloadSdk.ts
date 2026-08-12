@@ -7,7 +7,7 @@ import {
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
-import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModels.js'
+import { listEnabledModelsWithStaleForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
   MAX_ALLOWLIST_ITEMS,
@@ -38,6 +38,7 @@ import {
   isNonWorseningToleration,
   offeredKey,
 } from './modelAllowlistTolerance.js'
+import { STALE_MODEL_ASSIGNED, type StaleModelWarning } from './staleModelWarning.js'
 
 // ─── Plugin Workload SDK — admin routes (plan §2.6) ──────────────────────
 // Admin auth is enforced upstream by the control-ui auth gate in app.ts
@@ -398,6 +399,11 @@ export function createAdminPluginWorkloadSdkRouter(
       // ACCEPTED (right before upsert). A grant rejected by a later 400 leaves no
       // audit record.
       const pendingGrantTolerations: HostSpecIncoherenceToleratedEvent[] = []
+      // Fase 6 soft-quarantine warnings for NEW assignments of enabled-but-stale
+      // models. Returned in the 200 body only after the upsert lands (below); a
+      // grant rejected by a later 400 returns before the response and carries none.
+      const grantWarnings: StaleModelWarning[] = []
+      const grantWarnedKeys = new Set<string>()
       if (capabilityFamily === 'promptBridge') {
         const rawProvider = typeof body.provider === 'string' ? body.provider.trim() : ''
         if (!rawProvider) {
@@ -461,7 +467,33 @@ export function createAdminPluginWorkloadSdkRouter(
           storedCoverage = new Set(storedGrant?.allowedModels ?? [])
         }
         for (const [targetProvider, targetModels] of modelsByProvider) {
-          const enabled = new Set(await listEnabledModelNamesForProvider(targetProvider))
+          const enabledRows = await listEnabledModelsWithStaleForProvider(targetProvider)
+          const enabled = new Set(enabledRows.map(row => row.model))
+          const staleEnabled = new Set(enabledRows.filter(row => row.stale).map(row => row.model))
+
+          // Fase 6 soft quarantine: warn (never block) when a NEW target assigns an
+          // ENABLED but `stale` model. A live reference already in the stored grant
+          // is not revalidated (spec §3.3). The stored grant is loaded lazily — only
+          // when a stale-enabled candidate is actually present — so the all-fresh /
+          // no-stale happy path keeps its single-query cost.
+          for (const model of targetModels) {
+            if (!enabled.has(model) || !staleEnabled.has(model)) continue
+            const pairKey = offeredKey(targetProvider, model)
+            if (grantWarnedKeys.has(pairKey)) continue
+            grantWarnedKeys.add(pairKey)
+            await loadStoredGrant()
+            if (storedAnyTarget.has(pairKey)) continue
+            const i = promptTargets.findIndex(
+              target => target.provider === targetProvider && target.model === model
+            )
+            grantWarnings.push({
+              code: STALE_MODEL_ASSIGNED,
+              provider: targetProvider,
+              model,
+              field: i >= 0 ? `promptTargets[${i}].model` : 'promptTargets',
+            })
+          }
+
           const rawOffenders = targetModels.filter(model => !enabled.has(model))
           if (rawOffenders.length === 0) continue
           await loadStoredGrant()
@@ -545,7 +577,11 @@ export function createAdminPluginWorkloadSdkRouter(
       // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
       // lands, so a failed upsert leaves no audit record — mini-spec 01).
       for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
-      res.status(200).json({ grant })
+      // Fase 6: attach any soft-quarantine warnings additively (older clients
+      // ignore the field). Absent when there is nothing to warn about.
+      res
+        .status(200)
+        .json(grantWarnings.length > 0 ? { grant, warnings: grantWarnings } : { grant })
     })
   )
 
