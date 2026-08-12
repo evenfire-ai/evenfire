@@ -53,6 +53,49 @@ export class ClaudeProvider implements SingleTurnProvider {
   }
 
   classifyError(err: unknown): ClassifiedError {
+    // Anthropic surfaces a modeled `error.type` that is more precise than the
+    // HTTP status (a live model can still 404 with `not_found_error`). Classify
+    // by type FIRST; the set is open by contract, so unmatched types fall
+    // through to the status-based classifier below. (spec 02 §3.1)
+    //
+    // Nesting note: on `Anthropic.APIError`, `.error` is the FULL response
+    // envelope `{ type:'error', error:{ type, message } }`, so the modeled type
+    // lives at `.error.error.type` (`.error.type` is the constant 'error'). Read
+    // the inner level first, with the outer level as a defensive fallback for
+    // any non-enveloped shape.
+    const anthropicErr = err as {
+      status?: unknown
+      message?: string
+      error?: { type?: string; message?: string; error?: { type?: string; message?: string } }
+    }
+    const bodyType = anthropicErr?.error?.error?.type ?? anthropicErr?.error?.type
+    const httpStatus = typeof anthropicErr?.status === 'number' ? anthropicErr.status : undefined
+    const rawMsg =
+      anthropicErr?.error?.error?.message ??
+      anthropicErr?.error?.message ??
+      anthropicErr?.message ??
+      'Unknown Claude error'
+    if (bodyType) {
+      const byType = ((): ClassifiedError | null => {
+        switch (bodyType) {
+          case 'not_found_error':
+            // Retired or inaccessible model — ambiguous by design; non-retryable
+            // and NOT a failover trigger.
+            return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message: rawMsg }
+          case 'overloaded_error':
+            return { code: LlmErrorCode.ModelOverloaded, retryable: true, message: rawMsg }
+          case 'billing_error':
+          case 'permission_error':
+            // Account access / billing, not a rotatable credential (kept off
+            // AuthenticationFailed — see the 403 split in errorClassification).
+            return { code: LlmErrorCode.InsufficientQuota, retryable: false, message: rawMsg }
+          default:
+            return null
+        }
+      })()
+      if (byType) return { ...byType, httpStatus, providerCode: bodyType }
+    }
+
     const httpClassification = classifyByHttpStatus(err)
     if (httpClassification) {
       // Anthropic quirk: insufficient credit is reported as HTTP 400
@@ -65,6 +108,9 @@ export class ClaudeProvider implements SingleTurnProvider {
           ...httpClassification,
           code: LlmErrorCode.InsufficientQuota,
           retryable: false,
+          // Prefer the inner-level message: on a real Anthropic envelope the
+          // shared classifier only sees the outer `${status} {json}` string.
+          message: rawMsg,
         }
       }
       return httpClassification
