@@ -65,29 +65,28 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
     .join(',\n')
   const union = names
     .map(
-      (name, index) => `SELECT source_arm, logical_id, valid_until,
+      (name, index) => `SELECT '${name}'::text AS source_arm,
+                       COALESCE((
+                         SELECT jsonb_agg(jsonb_build_object(
+                           'logical_id', logical_id,
+                           'valid_until', valid_until
+                         ) ORDER BY logical_id)
+                           FROM ${name}
+                       ), '[]'::jsonb) AS source_rows,
                        ${
                          (typeof arms[index] === 'string' ? false : arms[index].duplicateCapable)
                            ? `(SELECT COUNT(*) FROM ${name}) >= $4`
                            : 'FALSE'
-                       } AS source_saturated,
-                       FALSE AS source_marker FROM ${name}
-                UNION ALL
-                SELECT '${name}'::text, NULL::text, NULL::timestamptz,
-                       ${
-                         (typeof arms[index] === 'string' ? false : arms[index].duplicateCapable)
-                           ? `(SELECT COUNT(*) FROM ${name}) >= $4`
-                           : 'FALSE'
-                       }, TRUE
+                       } AS source_saturated
                  WHERE $9::jsonb IS NULL OR $9::jsonb ? '${name}'`
     )
     .join('\nUNION ALL\n')
   return `WITH ${sources}
-    SELECT source_arm, logical_id, valid_until, source_saturated, source_marker
+    SELECT source_arm, source_rows, source_saturated
       FROM (${union}) bounded_sources
      WHERE $1::uuid IS NOT NULL AND $2::text IS NOT NULL AND $3::text IS NOT NULL
        AND $5::text IS NOT NULL AND $6::text IS NOT NULL AND $7::text IS NOT NULL
-     ORDER BY source_arm, source_marker, logical_id`
+     ORDER BY source_arm`
 }
 
 function validateContinuation(
@@ -227,28 +226,36 @@ export async function listBoundedProducerKeys(input: {
         throw new CatalogProducerContractError('source_saturation_invalid')
       }
       saturation.set(armName, row.source_saturated)
-      if (row.source_marker === true) continue
-      const logicalId = typeof row.logical_id === 'string' ? row.logical_id : ''
+      if (!Array.isArray(row.source_rows)) {
+        throw new CatalogProducerContractError('source_rows_invalid')
+      }
       const state = arms.get(armName) ?? { after, exhausted: false, candidates: [] }
-      if (!logicalId || logicalId <= state.after) {
-        throw new CatalogProducerContractError('keys_not_strictly_ordered')
-      }
-      let validUntil: string | null = null
-      if (row.valid_until !== null && row.valid_until !== undefined) {
-        const timestamp = new Date(String(row.valid_until))
-        if (Number.isNaN(timestamp.getTime())) {
-          throw new CatalogProducerContractError('candidate_valid_until_invalid')
+      const values: ArmCandidate[] = []
+      for (const sourceRow of row.source_rows) {
+        if (!sourceRow || typeof sourceRow !== 'object' || Array.isArray(sourceRow)) {
+          throw new CatalogProducerContractError('source_rows_invalid')
         }
-        validUntil = timestamp.toISOString()
-      }
-      const values = rawByArm.get(armName) ?? []
-      const previous = values.at(-1)
-      if (!previous || previous.logicalId !== logicalId) values.push({ logicalId, validUntil })
-      else if (
-        previous.validUntil === null ||
-        (validUntil !== null && validUntil < previous.validUntil)
-      ) {
-        values[values.length - 1] = { logicalId, validUntil }
+        const sourceValue = sourceRow as Record<string, unknown>
+        const logicalId = typeof sourceValue.logical_id === 'string' ? sourceValue.logical_id : ''
+        if (!logicalId || logicalId <= state.after) {
+          throw new CatalogProducerContractError('keys_not_strictly_ordered')
+        }
+        let validUntil: string | null = null
+        if (sourceValue.valid_until !== null && sourceValue.valid_until !== undefined) {
+          const timestamp = new Date(String(sourceValue.valid_until))
+          if (Number.isNaN(timestamp.getTime())) {
+            throw new CatalogProducerContractError('candidate_valid_until_invalid')
+          }
+          validUntil = timestamp.toISOString()
+        }
+        const previous = values.at(-1)
+        if (!previous || previous.logicalId !== logicalId) values.push({ logicalId, validUntil })
+        else if (
+          previous.validUntil === null ||
+          (validUntil !== null && validUntil < previous.validUntil)
+        ) {
+          values[values.length - 1] = { logicalId, validUntil }
+        }
       }
       rawByArm.set(armName, values)
     }
