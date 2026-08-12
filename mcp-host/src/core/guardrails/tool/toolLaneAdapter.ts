@@ -18,7 +18,7 @@ import { createGuardrailBoundary } from '../boundary'
 import type { GuardrailsConfig } from '../config'
 import type { GuardrailBoundary } from '../types'
 import type { ToolIdentity } from './provenance'
-import { compileRules } from './rules'
+import { compileRules, evaluateRules } from './rules'
 
 /** The tool-lane input the boundary aggregates over. */
 export type ToolLaneInput = Record<string, unknown>
@@ -32,24 +32,27 @@ export type ToolLaneBoundary = GuardrailBoundary<ToolLaneInput, ToolLaneResult, 
  * `undefined` when no rules are configured — the caller then behaves exactly as
  * today (no-config compatibility, spec §5).
  *
- * TODO(phase1): assemble rules → contributors, add doom-loop, and implement the
- * boundary body (see `boundary.ts`).
+ * Compilation throws on a malformed rule set (spec §3/§5); the caller must
+ * reject the config rather than run a partially-valid set.
+ *
+ * TODO(phase1): add the doom-loop guard (§6.4) as a `pre` contributor once the
+ * gate is wired with per-task state.
  */
 export function buildToolLaneBoundary(
   config: GuardrailsConfig | undefined
 ): ToolLaneBoundary | undefined {
-  const compiled = compileRules(config?.rules)
+  const compiled = compileRules(config?.rules, config?.limits?.maxRules)
   if (!compiled.hasRules) return undefined
 
   return createGuardrailBoundary<ToolLaneInput, ToolLaneResult, ToolIdentity>({
     lane: 'tool',
     hasRules: compiled.hasRules,
     contributors: {
-      // TODO(phase1): back `pre` with `evaluateRules(compiled, identity, input)`.
-      async pre() {
-        throw new Error('tool-lane contributors not yet implemented (Phase 1 scaffold)')
+      async pre(input, identity) {
+        return evaluateRules(compiled, identity, input)
       },
       async post() {
+        // Phase 1: no post transforms on the tool lane (PostToolUse = Phase 3).
         return []
       },
     },
