@@ -445,7 +445,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
-        const token = sessionTokenFromRequest(req)
         const authentication = req.externalSessionAuthentication!
         const revoked = await revokeUserSession(
           authentication.claims.userId,
