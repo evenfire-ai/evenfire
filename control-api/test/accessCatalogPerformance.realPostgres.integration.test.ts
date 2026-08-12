@@ -17,6 +17,7 @@ import {
   teamGfsTopKSql,
 } from '../src/services/access/teamGfsTopK.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { CatalogQueryObservation } from './accessCatalogQueryObservation.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -849,14 +850,12 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
   }, 30_000)
 
   it('bounds coordinator query count and composes keyset pages', async () => {
-    let queryCount = 0
+    const observation = new CatalogQueryObservation()
     const measuredTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
       const client = (await databasePool.connect()) as PoolClient
       const measured: DbClient = {
         query: async (text, values) => {
-          if (!/^SET TRANSACTION|set_config\('statement_timeout'/i.test(text.trim())) {
-            queryCount += 1
-          }
+          observation.observe(text)
           return client.query(text, values)
         },
       }
@@ -882,18 +881,39 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     )
     expect(first.items).toHaveLength(100)
     expect(first.nextCursor).not.toBeNull()
-    expect(queryCount).toBeLessThanOrEqual(40)
+    expect(observation.workCount).toBeLessThanOrEqual(40)
+    expect(observation.unexpected).toEqual([])
 
-    queryCount = 0
+    const nextObservation = new CatalogQueryObservation()
     const second = await buildAccessCatalog(
       { session, families: CATALOG_FAMILIES, limit: 100, cursor: first.nextCursor },
       {
-        transaction: measuredTransaction,
+        transaction: async work => {
+          const client = (await databasePool.connect()) as PoolClient
+          const measured: DbClient = {
+            query: async (text, values) => {
+              nextObservation.observe(text)
+              return client.query(text, values)
+            },
+          }
+          try {
+            await client.query('BEGIN')
+            const value = await work(measured)
+            await client.query('COMMIT')
+            return value
+          } catch (error) {
+            await client.query('ROLLBACK')
+            throw error
+          } finally {
+            client.release()
+          }
+        },
         teamGfsMembershipAdmissionLimit: HIGH_TEAMS,
       }
     )
     expect(second.items).toHaveLength(100)
-    expect(queryCount).toBeLessThanOrEqual(40)
+    expect(nextObservation.workCount).toBeLessThanOrEqual(40)
+    expect(nextObservation.unexpected).toEqual([])
     const firstIds = new Set(first.items.map(item => item.resource.canonicalId))
     expect(second.items.every(item => !firstIds.has(item.resource.canonicalId))).toBe(true)
 
