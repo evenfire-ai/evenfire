@@ -41,8 +41,22 @@ describe('buildLlmBuiltinChain', () => {
     expect(r.temperature).toBeUndefined()
   })
 
-  it('skips unknown built-in types', () => {
+  it('token-trim on an empty message list is a no-op', () => {
     const r = req()
-    expect(buildLlmBuiltinChain([{ type: 'token-trim' }])(r)).toEqual(r) // not yet implemented → no-op
+    expect(buildLlmBuiltinChain([{ type: 'token-trim' }])(r)).toBe(r) // nothing to prune
+  })
+
+  it('skips genuinely unknown built-in types', () => {
+    const r = req()
+    // Cast: an admin-invalid type is rejected at admission in prod; here it's skipped.
+    expect(buildLlmBuiltinChain([{ type: 'nonsense' } as never])(r)).toEqual(r)
+  })
+
+  it('composes prompt-shaping + token-trim', () => {
+    const shape = buildLlmBuiltinChain([
+      { type: 'token-trim', config: { maxInputTokens: 1_000_000 } },
+      { type: 'prompt-shaping', config: { temperature: 0.3 } },
+    ])
+    expect(shape(req()).temperature).toBe(0.3)
   })
 })

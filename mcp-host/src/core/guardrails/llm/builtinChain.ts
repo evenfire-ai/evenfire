@@ -8,6 +8,7 @@
  */
 import type { ToolCompletionRequest } from '../../types'
 import { type PromptShapingConfig, applyPromptShaping } from './builtins/promptShaping'
+import { type TokenTrimConfig, applyTokenTrim } from './builtins/tokenTrim'
 
 /** One entry of `guardrails.builtins[]` (spec §7.2). */
 export interface BuiltinItem {
@@ -45,8 +46,10 @@ export function buildLlmBuiltinChain(builtins: unknown[] | undefined): RequestSh
     if (item.type === 'prompt-shaping') {
       const cfg = (item.config ?? {}) as PromptShapingConfig
       shapers.push(req => applyPromptShaping(req, cfg))
+    } else if (item.type === 'token-trim') {
+      const cfg = (item.config ?? {}) as TokenTrimConfig
+      shapers.push(req => applyTokenTrim(req, cfg))
     }
-    // TODO(phase2): item.type === 'token-trim' → reuse prePrune (§7.2).
   }
 
   if (shapers.length === 0) return IDENTITY
