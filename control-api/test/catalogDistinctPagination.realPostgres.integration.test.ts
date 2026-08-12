@@ -4,7 +4,10 @@ import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
+import {
+  AccessBudgetExceededError,
+  AccessExecutionBudget,
+} from '../src/services/access/accessExecutionBudget.js'
 import type {
   CatalogOperationalSourceState,
   CatalogRequestContext,
@@ -180,7 +183,10 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
             limit: 2,
             ...(cursor ? { cursor } : {}),
           },
-          { transaction: transaction(databasePool) }
+          {
+            transaction: transaction(databasePool),
+            teamGfsMembershipAdmissionLimit: 8,
+          }
         )
         expect(page.complete).toBe(true)
         firstItem ??= page.items[0]
@@ -663,4 +669,42 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       minimumPathsForFirst: 4,
     })
   }, 30_000)
+
+  it('fails closed above the configured local team GFS membership admission bound', async () => {
+    const actor = await principal('gfs-admission', 3)
+    const resourceId = 'e0000000-0000-4000-8000-000000000001'
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, 'gfs-admission', '/', 'directory')`,
+      [resourceId]
+    )
+    for (const teamId of actor.teamIds) {
+      await databasePool.query(
+        `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+         VALUES ('gfs-admission', $1, 'team', $2, ARRAY['read']::text[])`,
+        [resourceId, teamId]
+      )
+    }
+    const session: ExternalSessionAuthorityContext = {
+      contract: 'v1',
+      userId: actor.userId,
+      tokenHash: randomBytes(32).toString('hex'),
+      issuedAt: Math.floor(Date.now() / 1_000),
+    }
+    const build = (admission: number) =>
+      buildAccessCatalog(
+        { session, families: ['gfs_resource'], limit: 2 },
+        {
+          transaction: transaction(databasePool),
+          teamGfsMembershipAdmissionLimit: admission,
+        }
+      )
+
+    await expect(build(4)).resolves.toMatchObject({ complete: true })
+    await expect(build(3)).resolves.toMatchObject({ complete: true })
+    await expect(build(2)).rejects.toMatchObject({
+      limit: 'teamGfsMembershipAdmission',
+      authorityRequired: true,
+    } satisfies Partial<AccessBudgetExceededError>)
+  })
 })

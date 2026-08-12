@@ -62,7 +62,7 @@ describe('catalog producer registry', () => {
       workflow_run: 3,
       workflow_approval: 2,
       notification: 2,
-      gfs_resource: 4,
+      gfs_resource: 2,
       shared_filesystem: 2,
       sandbox_app: 2,
     }
@@ -70,10 +70,7 @@ describe('catalog producer registry', () => {
       const sql = CATALOG_KEY_SQL[family]
       expect(sql).not.toMatch(/\bOFFSET\b/i)
       expect(sql.match(/AS MATERIALIZED/g)).toHaveLength(expectedArmCounts[family])
-      const perMembershipBounds = family === 'gfs_resource' ? 2 : 0
-      expect(sql.match(/LIMIT \$4/g)).toHaveLength(
-        expectedArmCounts[family] + perMembershipBounds + 1
-      )
+      expect(sql.match(/LIMIT \$4/g)).toHaveLength(expectedArmCounts[family] + 1)
     }
   })
 })

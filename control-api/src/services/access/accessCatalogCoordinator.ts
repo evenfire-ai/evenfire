@@ -354,6 +354,7 @@ export async function buildAccessCatalog(
     transaction?: CatalogTransaction
     budget?: AccessExecutionBudget
     limits?: Partial<AccessExecutionLimits>
+    teamGfsMembershipAdmissionLimit?: number
     now?: Date
   } = {}
 ): Promise<AccessCatalogResponse> {
@@ -364,7 +365,11 @@ export async function buildAccessCatalog(
   const families = normalizeFamilies(input.families)
   const limit = input.limit ?? 50
   const budget =
-    options.budget ?? AccessExecutionBudget.create('catalog', { limits: options.limits })
+    options.budget ??
+    AccessExecutionBudget.create('catalog', {
+      limits: options.limits,
+      teamGfsMembershipAdmissionLimit: options.teamGfsMembershipAdmissionLimit,
+    })
   const ownedBudget = options.budget ? null : budget
   try {
     budget.assertPageSize(limit)
