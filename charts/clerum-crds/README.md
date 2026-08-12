@@ -10,6 +10,7 @@ code name; public product name is **evenfire**).
 | Host                 | `hosts.clerum.io`                  |
 | Context              | `contexts.clerum.io`               |
 | McpServer            | `mcpservers.clerum.io`             |
+| LlmHook              | `llmhooks.clerum.io`               |
 | CommunicationChannel | `communicationchannels.clerum.io`  |
 | WorkflowRecipe       | `workflowrecipes.clerum.io`        |
 | WorkflowRecipePolicy | `workflowrecipepolicies.clerum.io` |
