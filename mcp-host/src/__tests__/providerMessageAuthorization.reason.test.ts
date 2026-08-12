@@ -33,4 +33,22 @@ describe('classifyAuthorizationFailure', () => {
     const err = new WorkflowBrokerRequestError(404, 'something_else', 'nope')
     expect(classifyAuthorizationFailure(err)).toBe('error')
   })
+
+  // The status check carries its own weight: a whitelisted code can ride along on
+  // a non-404/403 body (a control-api 5xx error wrapper, a gateway 502 echoing
+  // upstream). Without the status guard those classify 'unresolved' and tell
+  // linked users they are unlinked for the length of an outage.
+  it('maps a 500 carrying a whitelisted code to error', () => {
+    const err = new WorkflowBrokerRequestError(500, 'medium_account_not_found', 'boom')
+    expect(classifyAuthorizationFailure(err)).toBe('error')
+  })
+
+  it('maps a 502 carrying a whitelisted code to error', () => {
+    const err = new WorkflowBrokerRequestError(
+      502,
+      'communication_channel_access_denied',
+      'gateway'
+    )
+    expect(classifyAuthorizationFailure(err)).toBe('error')
+  })
 })

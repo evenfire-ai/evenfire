@@ -45,4 +45,28 @@ describe('handleProviderMessageAuthorization', () => {
       reason: 'error',
     })
   })
+
+  // A null context is not a thrown broker failure, so classifyAuthorizationFailure
+  // never sees it and its reason is hardcoded. 'error' keeps channel-reader silent:
+  // we have no 404/403 substantiating "this account is unlinked", so we must not
+  // claim it.
+  it('reports a null caller context as authorized:false, reason:error', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce(null)
+
+    await expect(handleProviderMessageAuthorization({ providerIdentity })).resolves.toEqual({
+      authorized: false,
+      reason: 'error',
+    })
+  })
+
+  it('reports a context with no targetUserId as authorized:false, reason:error', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+      targetUserId: '',
+    } as never)
+
+    await expect(handleProviderMessageAuthorization({ providerIdentity })).resolves.toEqual({
+      authorized: false,
+      reason: 'error',
+    })
+  })
 })

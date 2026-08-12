@@ -39,10 +39,18 @@ describe('authorizeProviderMessage response shape', () => {
     })
   })
 
+  // The body is deliberately a WELL-FORMED unresolved payload. An unparseable
+  // body would exercise the catch path instead, which returns the same shape, so
+  // the assertion would hold with the `!response.ok` guard deleted. Only a
+  // parseable `reason: 'unresolved'` on a non-2xx proves the status is what
+  // suppresses the reason.
   it('returns no reason when the response is not ok, so callers stay silent', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('nope', { status: 503 }))
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ authorized: false, reason: 'unresolved' }), { status: 503 })
+      )
     )
     const client = new RPCClient('http://mcp-host.test')
     expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
