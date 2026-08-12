@@ -3,6 +3,25 @@ import { canGenerateSlackAppManifest, slackAppManifest } from '../slackAppManife
 
 const URL = 'https://webhook.example.com/webhooks/slack/slack%3AeyJ4IjoxfQ'
 
+/**
+ * The emitted `      - <value>` items under a list header. Matching values against the whole
+ * document instead lets one entry stand in for another: `app_mentions:read` (a scope) satisfies
+ * a search for `app_mention` (the event), and `mpim:read` satisfies `im:read`. Three of the
+ * seventeen required values were unpinned that way.
+ */
+function listItemsUnder(yaml: string, header: string): string[] {
+  const lines = yaml.split('\n')
+  const start = lines.findIndex(line => line.trim() === header)
+  expect(start).toBeGreaterThanOrEqual(0)
+  const items: string[] = []
+  for (const line of lines.slice(start + 1)) {
+    const item = /^\s+- (.+)$/.exec(line)
+    if (!item) break
+    items.push(item[1])
+  }
+  return items
+}
+
 describe('slackAppManifest', () => {
   const yaml = slackAppManifest('Evenfire', URL)
 
@@ -19,6 +38,7 @@ describe('slackAppManifest', () => {
   })
 
   it('subscribes to every bot event the reader handles', () => {
+    const events = listItemsUnder(yaml, 'bot_events:')
     for (const event of [
       'app_mention',
       'message.channels',
@@ -26,11 +46,13 @@ describe('slackAppManifest', () => {
       'message.im',
       'message.mpim',
     ]) {
-      expect(yaml).toContain(event)
+      expect(events).toContain(event)
     }
+    expect(events).toHaveLength(5)
   })
 
   it('requests every scope the platform calls', () => {
+    const scopes = listItemsUnder(yaml, 'bot:')
     for (const scope of [
       'app_mentions:read',
       'channels:history',
@@ -45,8 +67,9 @@ describe('slackAppManifest', () => {
       'files:write',
       'users:read',
     ]) {
-      expect(yaml).toContain(scope)
+      expect(scopes).toContain(scope)
     }
+    expect(scopes).toHaveLength(12)
   })
 
   it('disables socket mode, which this platform does not use', () => {
