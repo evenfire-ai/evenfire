@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { CHAT_NEAR_BOTTOM_THRESHOLD_PX } from '@constants/agents'
 import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
 
 /**
@@ -6,8 +7,6 @@ import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
  * treat the user as "following" the conversation and auto-scroll on new content.
  * Beyond it, the user is reading history and we must NOT yank them down (B4-a).
  */
-const NEAR_BOTTOM_THRESHOLD_PX = 120
-
 interface UseChatScrollParams {
   selectedAgent: string | null
   chatMessages: AgentChatMessage[]
@@ -125,7 +124,7 @@ export function useChatScroll({
     while (node) {
       const { scrollHeight, scrollTop, clientHeight } = node
       if (scrollHeight > clientHeight) {
-        return scrollHeight - scrollTop - clientHeight <= NEAR_BOTTOM_THRESHOLD_PX
+        return scrollHeight - scrollTop - clientHeight <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
       }
       node = node.parentElement
     }

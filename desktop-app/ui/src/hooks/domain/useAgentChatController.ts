@@ -2928,6 +2928,7 @@ export function useAgentChatController({
     agentError,
     failedAgentSend,
     chatEndRef,
+    scrollChatToBottom,
     activityByMessageId,
     progressByMessageId,
     groupedMessages,

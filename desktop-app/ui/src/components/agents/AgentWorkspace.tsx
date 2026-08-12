@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -76,8 +77,10 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const { sessionStateByChatId, activeChatId } = useChatListContext()
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
+  const { scrollChatToBottom } = useAgentChatActionsContext()
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
   const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
@@ -497,7 +500,28 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               <ComposerPanel inline />
             </>
           )}
-          {isChatMode && <ChatThread />}
+          {isChatMode && (
+            <div className="chat-thread-container">
+              <ChatThread onScrollPositionChange={setShowScrollToBottom} />
+              {activeChatId && showScrollToBottom && (
+                <div className="chat-scroll-to-bottom">
+                  <IconButton
+                    className="chat-scroll-to-bottom-button"
+                    color="neutral"
+                    label="Scroll to latest messages"
+                    onClick={scrollChatToBottom}
+                    size="sm"
+                    variant="solid"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M12 4v14" />
+                      <path d="m6 12 6 6 6-6" />
+                    </svg>
+                  </IconButton>
+                </div>
+              )}
+            </div>
+          )}
           {isChatMode && activeChatId && (
             <div className="agent-chat-composer-dock">
               {activeSessionState?.offlineMode || activeSessionState?.syncing ? (
