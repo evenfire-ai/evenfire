@@ -749,7 +749,17 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     for (const family of CATALOG_FAMILIES) {
       const result = await databasePool.query(
         `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${CATALOG_KEY_SQL[family]}`,
-        [userId, '', environmentId, 101, config.hostsNamespace, config.contextsNamespace, '']
+        [
+          userId,
+          '',
+          environmentId,
+          101,
+          config.hostsNamespace,
+          config.contextsNamespace,
+          '',
+          '{}',
+          null,
+        ]
       )
       const explained = queryPlan(result.rows[0])
       const nodes = planNodes(explained.Plan)
