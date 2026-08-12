@@ -1,0 +1,204 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import { ApiException } from '@kubernetes/client-node'
+import request from 'supertest'
+import type { K8sGateway } from '../src/k8s.js'
+import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
+
+// Same hand-crafted gateway double as routes.adminCommunicationChannelCredentials.test.ts:
+// only the K8sGateway methods the CC write paths touch.
+const gatewayMock = {
+  createResource: vi.fn(),
+  deleteResource: vi.fn(),
+  getResource: vi.fn(),
+  updateResource: vi.fn(),
+  createSecret: vi.fn(),
+  mergeSecret: vi.fn(),
+  removeSecretKey: vi.fn(),
+  deleteSecret: vi.fn(),
+  getSecret: vi.fn(),
+}
+
+function makeApp(): express.Express {
+  const app = express()
+  app.use(express.json())
+  app.use(createAdminResourcesRouter(gatewayMock as unknown as K8sGateway))
+  return app
+}
+
+/** The jose-tg channel as the cluster holds it: Telegram only, with a credentials Secret. */
+const TELEGRAM_SPEC = {
+  hostRef: 'h1',
+  telegram: [{ channelId: '-1001', chatType: 'group', userIds: ['123'] }],
+  telegramSettings: { botHandle: '@jose_tg_bot' },
+}
+
+const SECRET_REF = { credentialsSecretRef: { name: 'cc-jose-tg-credentials' } }
+
+function persistedChannel(spec: Record<string, unknown>): Record<string, unknown> {
+  return {
+    metadata: { name: 'jose-tg', namespace: 'channels', resourceVersion: 'rv-1' },
+    spec,
+  }
+}
+
+describe('admin communicationchannels — provider transition validation (#312)', () => {
+  beforeEach(() => {
+    Object.values(gatewayMock).forEach(fn => fn.mockReset())
+    // Echo the written spec back, the way the API server does when the CRD is
+    // current. Anything less trips the pruned-provider-setting 409 instead.
+    gatewayMock.updateResource.mockImplementation(
+      async (_plural: string, name: string, body: { spec: Record<string, unknown> }) => ({
+        metadata: { name, namespace: 'channels', resourceVersion: 'rv-2' },
+        spec: body.spec,
+      })
+    )
+    gatewayMock.createResource.mockImplementation(
+      async (
+        _plural: string,
+        body: { metadata: { name: string }; spec: Record<string, unknown> }
+      ) => ({
+        metadata: { name: body.metadata.name, namespace: 'channels' },
+        spec: body.spec,
+      })
+    )
+    gatewayMock.createSecret.mockResolvedValue({})
+  })
+
+  // ── BLOCKING ─────────────────────────────────────────────────────────────
+
+  it('PUT enabling Slack on a Telegram channel whose Secret holds only telegram-bot-token → 400', async () => {
+    // The #312 regression: an operator typed a Slack App Name into an existing
+    // Telegram channel. The channel already had a credentialsSecretRef, so the
+    // pre-existing "no envelope and no ref" guard never fired, and the channel
+    // went on to answer every Slack request with slack_signing_secret_missing.
+    gatewayMock.getResource.mockResolvedValue(persistedChannel({ ...TELEGRAM_SPEC, ...SECRET_REF }))
+    gatewayMock.getSecret.mockResolvedValue({ data: { 'telegram-bot-token': 'dGc=' } })
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/jose-tg')
+      .send({ spec: { ...TELEGRAM_SPEC, slackSettings: { botHandle: 'Jose Bot' } } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/slack-bot-token|slack-signing-secret/)
+    expect(gatewayMock.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('POST declaring Slack with a credentialsSecretRef whose Secret lacks the Slack keys → 400', async () => {
+    // A ref proves a Secret is named, not that it holds Slack credentials.
+    gatewayMock.getSecret.mockResolvedValue({ data: { 'telegram-bot-token': 'dGc=' } })
+
+    const res = await request(makeApp())
+      .post('/admin/communicationchannels')
+      .send({
+        metadata: { name: 'jose-slack' },
+        spec: {
+          hostRef: 'h1',
+          slackSettings: { botHandle: 'Jose Bot' },
+          credentialsSecretRef: { name: 'shared-secret' },
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/slack-bot-token|slack-signing-secret/)
+    expect(gatewayMock.createResource).not.toHaveBeenCalled()
+  })
+
+  // ── ALLOWING ─────────────────────────────────────────────────────────────
+  // Without these, a validator that reads nothing at all still passes every
+  // blocking case above.
+
+  it('PUT enabling Slack where the referenced Secret ALREADY holds both Slack keys → 200', async () => {
+    gatewayMock.getResource.mockResolvedValue(persistedChannel({ ...TELEGRAM_SPEC, ...SECRET_REF }))
+    gatewayMock.getSecret.mockResolvedValue({
+      data: {
+        'telegram-bot-token': 'dGc=',
+        'slack-bot-token': 'eG94Yi0x',
+        'slack-signing-secret': 'c2ln',
+      },
+    })
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/jose-tg')
+      .send({ spec: { ...TELEGRAM_SPEC, slackSettings: { botHandle: 'Jose Bot' } } })
+
+    expect(res.status).toBe(200)
+    // The request body carries no credentialsSecretRef (the UI never sends one),
+    // so the keys can only have come from the preserved ref being read.
+    expect(gatewayMock.getSecret).toHaveBeenCalledWith('cc-jose-tg-credentials', 'channels')
+    expect(gatewayMock.updateResource).toHaveBeenCalled()
+  })
+
+  it('POST declaring Slack with both keys in the credentials envelope → 201', async () => {
+    const res = await request(makeApp())
+      .post('/admin/communicationchannels')
+      .send({
+        metadata: { name: 'jose-slack' },
+        spec: { hostRef: 'h1', slackSettings: { botHandle: 'Jose Bot' } },
+        credentials: { 'slack-bot-token': 'xoxb-1', 'slack-signing-secret': 'sig-1' },
+      })
+
+    expect(res.status).toBe(201)
+    expect(gatewayMock.createResource).toHaveBeenCalled()
+    // Envelope-supplied keys need no Secret read at all.
+    expect(gatewayMock.getSecret).not.toHaveBeenCalled()
+  })
+
+  it('PUT editing a channel whose Secret LACKS the provider keys, with no NEW provider → 200', async () => {
+    // present -> present. Validation is scoped to the transition, so a channel
+    // already missing credentials in the cluster stays editable.
+    const slackSpec = { hostRef: 'h1', slackSettings: { botHandle: 'Jose Bot' } }
+    gatewayMock.getResource.mockResolvedValue(persistedChannel({ ...slackSpec, ...SECRET_REF }))
+    gatewayMock.getSecret.mockResolvedValue({ data: {} })
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/jose-tg')
+      .send({ spec: { ...slackSpec, access: { users: ['user-1'], teams: [] } } })
+
+    expect(res.status).toBe(200)
+    expect(gatewayMock.updateResource).toHaveBeenCalled()
+  })
+
+  it('PUT REMOVING a provider from a channel with an empty Secret → 200', async () => {
+    gatewayMock.getResource.mockResolvedValue(
+      persistedChannel({
+        ...TELEGRAM_SPEC,
+        slackSettings: { botHandle: 'Jose Bot' },
+        ...SECRET_REF,
+      })
+    )
+    gatewayMock.getSecret.mockResolvedValue({ data: {} })
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/jose-tg')
+      .send({ spec: { ...TELEGRAM_SPEC } })
+
+    expect(res.status).toBe(200)
+    expect(gatewayMock.updateResource).toHaveBeenCalled()
+  })
+
+  // ── FAIL CLOSED ──────────────────────────────────────────────────────────
+
+  it('PUT enabling Slack when the Secret read fails with 403 → 400, never a silent 200', async () => {
+    // A real @kubernetes/client-node ApiException: it sets `.code`, not
+    // `.statusCode`. A hand-rolled error shape would not exercise the
+    // status extraction that decides rethrow-vs-"no keys".
+    gatewayMock.getResource.mockResolvedValue(persistedChannel({ ...TELEGRAM_SPEC, ...SECRET_REF }))
+    gatewayMock.getSecret.mockRejectedValue(
+      new ApiException(
+        403,
+        'Forbidden',
+        { message: 'secrets "cc-jose-tg-credentials" is forbidden' },
+        {}
+      )
+    )
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/jose-tg')
+      .send({ spec: { ...TELEGRAM_SPEC, slackSettings: { botHandle: 'Jose Bot' } } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/Cannot read the credentials Secret/)
+    expect(gatewayMock.updateResource).not.toHaveBeenCalled()
+  })
+})
