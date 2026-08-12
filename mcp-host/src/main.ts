@@ -47,6 +47,7 @@ import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
 import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
+import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js'
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
@@ -1787,9 +1788,30 @@ async function handleProviderWorkflowApprovalDecision(
   return submitProviderWorkflowApprovalDecision(decision, runtimeAuth)
 }
 
+const UNRESOLVED_BROKER_CODES = new Set([
+  'medium_account_not_found',
+  'communication_channel_access_denied',
+])
+
+/**
+ * An unlinked or access-denied identity reaches us as a THROWN 404/403 from the
+ * broker, not as a null context. Only these map to 'unresolved'; everything else
+ * (5xx, timeouts, network failures, unrecognized codes) is 'error', which keeps
+ * channel-reader silent so a control-api outage never tells linked users they are
+ * unlinked.
+ */
+export function classifyAuthorizationFailure(error: unknown): 'unresolved' | 'error' {
+  if (error instanceof WorkflowBrokerRequestError) {
+    if ((error.status === 404 || error.status === 403) && error.code) {
+      return UNRESOLVED_BROKER_CODES.has(error.code) ? 'unresolved' : 'error'
+    }
+  }
+  return 'error'
+}
+
 async function handleProviderMessageAuthorization(
   input: ProviderMessageAuthorization
-): Promise<{ authorized: boolean }> {
+): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
   const identity = input.providerIdentity
   try {
     const context = await resolveProviderWorkflowCallerContext(
@@ -1805,14 +1827,22 @@ async function handleProviderMessageAuthorization(
       },
       key => process.env[key]
     )
-    return { authorized: Boolean(context?.targetUserId) }
+    if (context?.targetUserId) {
+      return { authorized: true }
+    }
+    // A null context is unreachable for validated Slack traffic: channel-reader's
+    // handoff validation already rejects malformed provider identities before this
+    // runs. Treat it as 'error' (fail closed, stay silent) rather than invent a
+    // reason we cannot substantiate.
+    return { authorized: false, reason: 'error' }
   } catch (error) {
+    const reason = classifyAuthorizationFailure(error)
     console.warn(
-      `[Main] Provider message authorization failed closed: ${
+      `[Main] Provider message authorization failed closed (${reason}): ${
         error instanceof Error ? error.message : String(error)
       }`
     )
-    return { authorized: false }
+    return { authorized: false, reason }
   }
 }
 
