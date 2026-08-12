@@ -151,17 +151,33 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     telegramSettings: { botHandle: '@ops_bot' },
   }
 
+  /** The panel's own copy for a stored-key read that failed, written out rather
+   *  than imported: this copy is the fix, so a reworded panel must fail here. */
+  const STORED_KEYS_ERROR =
+    'Could not check which credentials are stored. You can still rotate a value; deleting one needs a successful read.'
+
+  function credentialReadCount(name: string): number {
+    return vi
+      .mocked(api.apiGet)
+      .mock.calls.filter(
+        ([path]) => path === `/api/v1/admin/communication-channels/${name}/credentials`
+      ).length
+  }
+
   /** Like mockChannel, but also answers the per-channel credentials read.
-   *  Pass an Error to make that read fail. */
+   *  Pass an Error to make that read fail, or an array to answer successive
+   *  reads in order (the last entry answers every read after it). */
   function mockChannelCredentials(name: string, spec: ChannelSpec, credentials: unknown) {
     navigation.params = { name }
+    const answers = Array.isArray(credentials) ? [...credentials] : [credentials]
     vi.mocked(api.apiGet).mockImplementation(async path => {
       if (path === '/api/v1/admin/hosts') {
         return { items: [{ metadata: { name: 'agent-a' } }] }
       }
       if (path === `/api/v1/admin/communication-channels/${name}/credentials`) {
-        if (credentials instanceof Error) throw credentials
-        return credentials
+        const answer = answers.length > 1 ? answers.shift() : answers[0]
+        if (answer instanceof Error) throw answer
+        return answer
       }
       if (path === `/api/v1/admin/communication-channels/${name}`) {
         return {
@@ -218,9 +234,13 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     expect(telegramToken.placeholder).toBe('123456789:ABCDEF…')
   })
 
-  it('leaves the fields unknown, not empty, when the credentials read fails', async () => {
-    // A denied or failed read says nothing about what is stored. Rendering the
-    // empty state here would report "no credentials" on a channel that has them.
+  it('says the credentials read failed instead of reporting them as empty or pending', async () => {
+    // A denied or failed read says nothing about what is stored, so the empty
+    // state would report "no credentials" on a channel that has them. The
+    // pending state is just as wrong once the request is over: the panel
+    // disables every control while it believes a read is in flight, so
+    // swallowing the error left the whole panel dead, silently, until a reload
+    // — which repeats the failure whenever the cause is not transient.
     mockChannelCredentials(
       TELEGRAM_ONLY_CHANNEL,
       TELEGRAM_ONLY_SPEC,
@@ -229,21 +249,79 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     await renderLoadedPage()
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
+      expect(screen.getByText(STORED_KEYS_ERROR)).toBeInTheDocument()
     })
+    // The cause reaches the operator rather than being discarded with the
+    // rejected promise.
+    expect(screen.getByText('secrets is forbidden')).toBeInTheDocument()
+
     const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
-    expect(telegramToken.getAttribute('aria-busy')).toBe('true')
+    expect(telegramToken.getAttribute('aria-busy')).toBe(null)
     expect(telegramToken.value).toBe('')
-    expect(telegramToken.placeholder).toBe('Checking stored credentials…')
+    expect(telegramToken.placeholder).toBe('Stored value unknown')
+    // Rotation still works: a PUT overwrites whatever is there and needs to
+    // know nothing about it. Deleting an invisible key does not.
+    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
+    expect(screen.getByLabelText('Delete Telegram Bot Token')).toBeDisabled()
     // The page itself still loaded: the read failure is scoped to the panel.
     expect(screen.getByLabelText(/Telegram bot handle/)).toHaveValue('@ops_bot')
+  })
+
+  it('retries the credentials read from the panel and recovers', async () => {
+    // The failure is reachable from a control-ui newer than control-api (404 on
+    // this route, a window on every rolling update) or any transient apiserver
+    // failure, so the way out has to be cheaper than a page reload.
+    mockChannelCredentials(TELEGRAM_ONLY_CHANNEL, TELEGRAM_ONLY_SPEC, [
+      new Error('secrets is forbidden'),
+      {
+        name: TELEGRAM_ONLY_CHANNEL,
+        secretName: 'cc-jose-tg-credentials',
+        namespace: 'channels',
+        keys: ['telegram-bot-token'],
+      },
+    ])
+    await renderLoadedPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    })
+    expect(credentialReadCount(TELEGRAM_ONLY_CHANNEL)).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+    })
+    expect(credentialReadCount(TELEGRAM_ONLY_CHANNEL)).toBe(2)
+    expect(screen.queryByText(STORED_KEYS_ERROR)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('treats an unusable credentials response as a failed read, not as no credentials', async () => {
+    // 200 with a body that carries no key list is exactly as uninformative as a
+    // rejection, and parked the panel in the same permanent pending state.
+    mockChannelCredentials(TELEGRAM_ONLY_CHANNEL, TELEGRAM_ONLY_SPEC, {
+      name: TELEGRAM_ONLY_CHANNEL,
+      namespace: 'channels',
+    })
+    await renderLoadedPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(STORED_KEYS_ERROR)).toBeInTheDocument()
+    })
+    expect(
+      screen.getByText('The credentials response did not list the stored keys.')
+    ).toBeInTheDocument()
+    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    expect(telegramToken.placeholder).toBe('Stored value unknown')
+    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
   })
 })
 
 /** Both strings are written out rather than imported: this copy IS the feature,
  *  so a reworded page must fail here instead of quietly passing. */
 const EMPTY_CONVERSATIONS_COPY =
-  'No conversations confirmed yet. Each user links their own by sending the verify command from their profile page in the conversation they want to link.'
+  'No conversations confirmed yet. Each user links their own by copying the verify command from their profile page and sending it in the conversation they want to link.'
 const THREAD_MENTION_COPY =
   'Replies inside a thread still require a mention: even in a thread the app started, a follow-up that does not mention the app is ignored.'
 

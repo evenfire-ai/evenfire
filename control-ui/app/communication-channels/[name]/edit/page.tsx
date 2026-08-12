@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
@@ -70,10 +70,16 @@ function extractChannel(response: unknown, name: string): CommunicationChannelIt
   return list.items?.find(item => item.metadata?.name === name) ?? null
 }
 
+/** Detail shown under the panel's read-failed banner when the request itself
+ *  succeeded but the body did not carry a usable key list. */
+const CREDENTIALS_SHAPE_ERROR = 'The credentials response did not list the stored keys.'
+/** Same, when the request threw something that is not an Error. */
+const CREDENTIALS_REQUEST_ERROR = 'The credentials request failed.'
+
 /**
  * Key names from `GET .../credentials`, or `undefined` when the answer is not
- * usable. Undefined keeps the credentials panel in its pending state: a read
- * that failed or came back malformed is "unknown", never "nothing stored".
+ * usable. Undefined is never "nothing stored": callers turn it into the panel's
+ * read-failed state, which says so and offers a retry.
  */
 function extractCredentialKeys(response: unknown): string[] | undefined {
   if (!response || typeof response !== 'object') return undefined
@@ -108,6 +114,13 @@ export default function EditCommunicationChannelPage() {
   // Which credential keys the channel's Secret actually holds. Undefined until
   // the read lands, so the panel renders pending instead of "nothing stored".
   const [storedCredentialKeys, setStoredCredentialKeys] = useState<string[] | undefined>(undefined)
+  // Why that read failed, when it did. Undefined keys ALONE cannot say whether
+  // the read is still running or is over and broken, and the panel disables
+  // itself while it believes a read is in flight — so swallowing the error left
+  // every credential control dead until a page reload, with no way to tell.
+  const [credentialKeysError, setCredentialKeysError] = useState('')
+  // Drops a stale credentials response when the read is retried or `name` changes.
+  const credentialsRequestId = useRef(0)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -117,13 +130,40 @@ export default function EditCommunicationChannelPage() {
     router.push(CONTROL_ROUTES.externalChannels.root)
   }
 
+  // Key names only — the API never returns values. A failure here must not take
+  // the whole page down, must not be read as "no credentials", and must not be
+  // read as "still loading" either: it is its own state, with a retry.
+  const loadCredentialKeys = useCallback(async (channelName: string) => {
+    if (!channelName) return
+    const id = ++credentialsRequestId.current
+    setStoredCredentialKeys(undefined)
+    setCredentialKeysError('')
+    try {
+      const response = await apiGet(
+        `/api/v1/admin/communication-channels/${encodeURIComponent(channelName)}/credentials`
+      )
+      if (id !== credentialsRequestId.current) return
+      const keys = extractCredentialKeys(response)
+      if (!keys) {
+        setCredentialKeysError(CREDENTIALS_SHAPE_ERROR)
+        return
+      }
+      setStoredCredentialKeys(keys)
+    } catch (error) {
+      // A silent error is an expired session: the app is already redirecting,
+      // so a banner about credentials would just be noise on the way out.
+      if (id !== credentialsRequestId.current || isSilentApiError(error)) return
+      setCredentialKeysError(error instanceof Error ? error.message : CREDENTIALS_REQUEST_ERROR)
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     async function load() {
       setLoading(true)
       setLoadError('')
       try {
-        const [channelResponse, hostsResponse, credentialsResponse] = await Promise.all([
+        const [channelResponse, hostsResponse] = await Promise.all([
           apiGet(`/api/v1/admin/communication-channels/${encodeURIComponent(name)}`).catch(
             async error => {
               if (isSilentApiError(error)) return null
@@ -131,12 +171,9 @@ export default function EditCommunicationChannelPage() {
             }
           ),
           apiGet('/api/v1/admin/hosts') as Promise<HostsResponse | HostItem[]>,
-          // Key names only — the API never returns values. A failure here must
-          // not take the whole page down, and must not be read as "no
-          // credentials": null leaves the panel's stored state unknown.
-          apiGet(
-            `/api/v1/admin/communication-channels/${encodeURIComponent(name)}/credentials`
-          ).catch(() => null),
+          // Runs alongside the other two, but owns its own state: a credentials
+          // failure is reported in the panel, not by failing the page load.
+          loadCredentialKeys(name),
         ])
         if (cancelled || channelResponse === null) return
         const nextItem = extractChannel(channelResponse, name)
@@ -151,7 +188,6 @@ export default function EditCommunicationChannelPage() {
         setDraft(createCommunicationChannelDraft(nextItem))
         setActiveTab(communicationChannelInitialTab(nextItem))
         setHosts(nextHosts)
-        setStoredCredentialKeys(extractCredentialKeys(credentialsResponse))
       } catch (error) {
         if (isSilentApiError(error)) return
         if (!cancelled) {
@@ -167,7 +203,7 @@ export default function EditCommunicationChannelPage() {
     return () => {
       cancelled = true
     }
-  }, [name])
+  }, [name, loadCredentialKeys])
 
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeTab], [activeTab])
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
@@ -660,6 +696,8 @@ export default function EditCommunicationChannelPage() {
                   ccName={item.metadata?.name || name}
                   visibleChannelTypes={visibleChannelTypes}
                   storedKeys={storedCredentialKeys}
+                  storedKeysError={credentialKeysError}
+                  onRetryStoredKeys={() => void loadCredentialKeys(name)}
                 />
               </section>
 

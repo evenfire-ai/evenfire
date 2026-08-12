@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { IconCheck, IconPencil, IconTrash } from '@components/icons'
 import { cn } from '@lib/cn'
 import { apiSend } from '../../lib/api'
+import { RetryBanner } from '../PublisherView/RetryBanner'
 import { useToast } from '../Toast'
 import { CHANNEL_CREDENTIAL_FIELDS } from './constants'
 import type { ChannelCredentialsPanelProps, CredentialDraft } from './types'
@@ -19,6 +20,15 @@ const MASKED_VALUE = '**********'
 /** Shown while `storedKeys` is unknown. Distinct from the per-field placeholder
  *  so a page load cannot flash "nothing stored" before the answer arrives. */
 const PENDING_PLACEHOLDER = 'Checking stored credentials…'
+/** Shown per field once the stored-key read has FAILED. The panel knows nothing
+ *  about this key, and a blank field with its normal placeholder would read as
+ *  "nothing stored", which is the lie this panel exists to stop. */
+const UNKNOWN_PLACEHOLDER = 'Stored value unknown'
+/** Banner copy for a failed stored-key read. Rotation is a blind PUT that does
+ *  not need to know the current state, so it stays available; deleting a key
+ *  the panel cannot see does not. */
+const STORED_KEYS_ERROR =
+  'Could not check which credentials are stored. You can still rotate a value; deleting one needs a successful read.'
 /**
  * Slack offers four secrets and this platform uses two of them. The "app is
  * ready" dialog puts the App-Level Token next to the bot token, and the Signing
@@ -45,12 +55,21 @@ const SLACK_CREDENTIAL_NOTE =
  * masked only when the Secret holds that field's own key. The panel used to
  * take one boolean for the whole channel, so a Telegram-only Secret made every
  * Slack field look populated.
+ *
+ * That state has three cases, not two: the read is in flight (`storedKeys`
+ * undefined, controls closed because the answer landing would discard whatever
+ * was typed), the read answered (`storedKeys` set), or the read FAILED
+ * (`storedKeysError`). The failed case says so and keeps rotation open —
+ * a PUT overwrites whatever is there and needs no knowledge of it — while
+ * Delete stays closed, because a key the panel cannot see is not safe to drop.
  */
 export function ChannelCredentialsPanel({
   ccName,
   pending,
   onPendingChange,
   storedKeys,
+  storedKeysError,
+  onRetryStoredKeys,
   presentation = 'panel',
   readOnly = false,
   visibleChannelTypes,
@@ -97,9 +116,14 @@ export function ChannelCredentialsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [storedSignature]
   )
-  // Nothing is known about the Secret yet. Create flows have no Secret to read,
-  // so they are never pending.
-  const keysPending = !pending && storedSignature === null
+  // The read is over and its answer is unusable. Create flows have no Secret to
+  // read, so they never reach this state either.
+  const storedKeysReadFailed = !pending && Boolean(storedKeysError)
+  // Nothing is known about the Secret YET, i.e. the read is still in flight.
+  // Create flows have no Secret to read, so they are never pending. A failed
+  // read is not pending: leaving it here disabled the whole panel forever,
+  // under a placeholder describing a request that had already finished.
+  const keysPending = !pending && storedSignature === null && !storedKeysReadFailed
 
   // Reset local state when the target CC changes so values typed for CC A
   // are not saved against CC B if the parent swaps `ccName` without unmounting.
@@ -268,6 +292,17 @@ export function ChannelCredentialsPanel({
 
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
 
+      {storedKeysReadFailed ? (
+        <div role="alert">
+          {onRetryStoredKeys ? (
+            <RetryBanner message={STORED_KEYS_ERROR} onRetry={onRetryStoredKeys} />
+          ) : (
+            <p className="cu-banner cu-banner--warn">{STORED_KEYS_ERROR}</p>
+          )}
+          <p className="cu-field__hint cu-channel-credentials__note">{storedKeysError}</p>
+        </div>
+      ) : null}
+
       {!pending && !ccName ? (
         <div className="cu-empty">
           Save the channel first, then return here to set its credentials.
@@ -295,7 +330,13 @@ export function ChannelCredentialsPanel({
                         }
                         onChange={e => updateField(field.key, e.target.value)}
                         placeholder={
-                          keysPending ? PENDING_PLACEHOLDER : stored ? undefined : field.placeholder
+                          keysPending
+                            ? PENDING_PLACEHOLDER
+                            : stored
+                              ? undefined
+                              : storedKeysReadFailed
+                                ? UNKNOWN_PLACEHOLDER
+                                : field.placeholder
                         }
                         aria-busy={keysPending || undefined}
                         disabled={

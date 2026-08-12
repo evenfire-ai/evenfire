@@ -54,7 +54,7 @@ function conversationKey(conversation: CommunicationChannelConversation, index: 
  * page. Saying only "none confirmed" made a working channel read as broken.
  */
 const EMPTY_CONVERSATIONS_LABEL =
-  'No conversations confirmed yet. Each user links their own by sending the verify command from their profile page in the conversation they want to link.'
+  'No conversations confirmed yet. Each user links their own by copying the verify command from their profile page and sending it in the conversation they want to link.'
 
 export function CommunicationChannelConversationsTable({
   conversations,

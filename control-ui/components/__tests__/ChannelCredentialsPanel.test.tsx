@@ -19,6 +19,12 @@ afterEach(() => {
 const MASKED = '**********'
 /** Placeholder shown while the stored-key list is unknown (GET in flight). */
 const PENDING_PLACEHOLDER = 'Checking stored credentials…'
+/** Placeholder shown per field once that GET has failed. */
+const UNKNOWN_PLACEHOLDER = 'Stored value unknown'
+/** Banner copy for a failed stored-key read. Written out, not imported: this
+ *  copy is the whole fix, so a reworded panel has to fail here. */
+const STORED_KEYS_ERROR =
+  'Could not check which credentials are stored. You can still rotate a value; deleting one needs a successful read.'
 
 function credentialInput(label: string): HTMLInputElement {
   return screen.getByLabelText(label) as HTMLInputElement
@@ -277,6 +283,28 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     expect(screen.queryByLabelText('Delete Slack Bot User OAuth Token')).not.toBeInTheDocument()
   })
 
+  it('keeps the create wizard editable when no stored-key list is passed', () => {
+    // What the create page actually renders: pending, and no storedKeys at all
+    // (there is no Secret to read yet). Without the `!pending` guard on
+    // keysPending, every credential input on the create page is disabled under
+    // a "checking" placeholder for a request nobody made — and no suite
+    // notices, because the test that looks like it covers pending mode passes
+    // storedKeys, which makes the guard irrelevant to its assertions.
+    renderPanel({ ccName: 'cc-new', pending: true, visibleChannelTypes: ['slack'] })
+
+    const signingSecret = credentialInput('Slack Signing Secret')
+    // Asserted on the property, not by typing: fireEvent.change dispatches
+    // straight at the node and lands on a disabled input just the same.
+    expect(signingSecret.disabled).toBe(false)
+    expect(signingSecret.placeholder).toBe('signing secret')
+    expect(signingSecret.getAttribute('aria-busy')).toBe(null)
+
+    const botToken = credentialInput('Slack Bot User OAuth Token')
+    expect(botToken.disabled).toBe(false)
+    expect(botToken.placeholder).toBe('xoxb-…')
+    expect(botToken.getAttribute('aria-busy')).toBe(null)
+  })
+
   it('ignores storedKeys in pending (create) mode', () => {
     // A CC that does not exist yet has no Secret to report on; the panel must
     // stay a plain editable form even if a caller passes a list.
@@ -291,6 +319,112 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     expect(signingSecret.value).toBe('')
     expect(signingSecret.placeholder).toBe('signing secret')
     expect(signingSecret).not.toBeDisabled()
+  })
+})
+
+describe('ChannelCredentialsPanel — failed stored-key read', () => {
+  const TELEGRAM_AND_SLACK: Parameters<typeof ChannelCredentialsPanel>[0] = {
+    ccName: 'jose-tg',
+    visibleChannelTypes: ['telegram', 'slack'],
+  }
+
+  it('says the read failed, keeps rotation open, and keeps delete closed', () => {
+    // A failed read is NOT the pending state. Rendering it as pending disabled
+    // every input, Edit and Delete permanently, under a placeholder describing
+    // a request that had already finished, with nothing on screen saying so and
+    // no way out but a page reload.
+    const onRetryStoredKeys = vi.fn()
+    renderPanel({
+      ...TELEGRAM_AND_SLACK,
+      storedKeys: undefined,
+      storedKeysError: 'secrets is forbidden',
+      onRetryStoredKeys,
+    })
+
+    expect(screen.getByText(STORED_KEYS_ERROR)).toBeInTheDocument()
+    // The cause, not just "something went wrong".
+    expect(screen.getByText('secrets is forbidden')).toBeInTheDocument()
+
+    for (const label of [
+      'Telegram Bot Token',
+      'Slack Signing Secret',
+      'Slack Bot User OAuth Token',
+    ]) {
+      const input = credentialInput(label)
+      expect(input.getAttribute('aria-busy')).toBe(null)
+      expect(input.placeholder).toBe(UNKNOWN_PLACEHOLDER)
+      expect(input.value).toBe('')
+      // Rotation is a blind PUT: it overwrites whatever is there and needs to
+      // know nothing about it, so a failed read must not block it.
+      expect(screen.getByLabelText(`Edit ${label}`)).not.toBeDisabled()
+      // Deleting a key the panel cannot see is a different matter.
+      expect(screen.getByLabelText(`Delete ${label}`)).toBeDisabled()
+    }
+  })
+
+  it('offers a retry that re-runs the read the panel does not own', () => {
+    const onRetryStoredKeys = vi.fn()
+    renderPanel({
+      ...TELEGRAM_AND_SLACK,
+      storedKeysError: 'secrets is forbidden',
+      onRetryStoredKeys,
+    })
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    })
+    expect(onRetryStoredKeys).toHaveBeenCalledTimes(1)
+  })
+
+  it('still reports the failure when the caller offers no retry', () => {
+    renderPanel({ ...TELEGRAM_AND_SLACK, storedKeysError: 'secrets is forbidden' })
+
+    expect(screen.getByText(STORED_KEYS_ERROR)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('lets the panel mask a key it saved while the read was failing', () => {
+    // The read said nothing, but this panel just wrote this key, so it knows
+    // that one exists — and only that one.
+    renderPanel({
+      ...TELEGRAM_AND_SLACK,
+      storedKeysError: 'secrets is forbidden',
+      onRetryStoredKeys: vi.fn(),
+    })
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText('Edit Slack Signing Secret'))
+    })
+    act(() => {
+      fireEvent.change(credentialInput('Slack Signing Secret'), {
+        target: { value: 'signing-secret-value' },
+      })
+    })
+    act(() => {
+      fireEvent.click(screen.getByLabelText('Save Slack Signing Secret'))
+    })
+
+    return waitFor(() => {
+      expect(credentialInput('Slack Signing Secret').value).toBe(MASKED)
+      expect(credentialInput('Slack Bot User OAuth Token').placeholder).toBe(UNKNOWN_PLACEHOLDER)
+    })
+  })
+
+  it('never shows the read-failed banner in pending (create) mode', () => {
+    // A CC that does not exist has no Secret to read, so nothing can have
+    // failed to read it.
+    renderPanel({
+      ccName: 'cc-new',
+      pending: true,
+      visibleChannelTypes: ['slack'],
+      storedKeysError: 'secrets is forbidden',
+      onRetryStoredKeys: vi.fn(),
+    })
+
+    expect(screen.queryByText(STORED_KEYS_ERROR)).not.toBeInTheDocument()
+    const signingSecret = credentialInput('Slack Signing Secret')
+    expect(signingSecret.disabled).toBe(false)
+    expect(signingSecret.placeholder).toBe('signing secret')
   })
 })
 

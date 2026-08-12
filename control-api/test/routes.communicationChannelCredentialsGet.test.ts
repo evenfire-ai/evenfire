@@ -64,6 +64,38 @@ describe('GET /admin/communication-channels/:name/credentials — names only', (
     })
   })
 
+  it('reads the Secret the channel points at, not the conventional name', async () => {
+    // Every other fixture sets credentialsSecretRef to `cc-<name>-credentials`,
+    // which is byte-identical to the fallback — so the ref lookup, the whole
+    // reason this route reads the CC at all, was never exercised. A channel
+    // pointing at an operator-supplied Secret would report the keys of a
+    // `cc-foo-credentials` that does not exist, which is the same lie about
+    // what is configured that this endpoint was added to kill.
+    gatewayMock.getResource.mockResolvedValue({
+      metadata: { name: 'foo', namespace: 'channels' },
+      spec: { hostRef: 'h1', credentialsSecretRef: { name: 'ops-shared-slack' } },
+    })
+    gatewayMock.getSecret.mockResolvedValue({
+      metadata: { name: 'ops-shared-slack', namespace: 'channels' },
+      data: { 'slack-bot-token': Buffer.from('xoxb-shared').toString('base64') },
+    })
+
+    const res = await request(makeApp()).get('/admin/communication-channels/foo/credentials')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'ops-shared-slack',
+      namespace: 'channels',
+      keys: ['slack-bot-token'],
+    })
+    // The call ARGUMENTS are the point. Asserting only the body leaves a route
+    // that never reads the CC, or reads the right Secret out of the wrong
+    // namespace, passing: both can still produce a plausible-looking answer.
+    expect(gatewayMock.getResource).toHaveBeenCalledWith('communicationchannels', 'foo', 'channels')
+    expect(gatewayMock.getSecret).toHaveBeenCalledWith('ops-shared-slack', 'channels')
+  })
+
   it('returns 200 with keys: [] when the channel has no Secret yet', async () => {
     gatewayMock.getResource.mockResolvedValue({
       metadata: { name: 'foo', namespace: 'channels' },
