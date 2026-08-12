@@ -128,13 +128,22 @@ export interface PersistedSessionSummary {
   session: SessionRow
   last_activity_at: number
   turn_count: number
-  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  // U5 — carry the connect_required discriminator on the lightweight summary
+  // projection too, so the REST rejoin snapshot never degrades a reactive-consent
+  // suspension into a generic approval.
+  pending_approval: Pick<
+    PendingApprovalRow,
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+  > | null
 }
 
 export interface PersistedSessionMessagePage {
   session: SessionRow
   messages: MessageRow[]
-  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  pending_approval: Pick<
+    PendingApprovalRow,
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+  > | null
   total_turns: number
   first_turn_number: number | null
   last_turn_number: number | null

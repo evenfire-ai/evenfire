@@ -271,6 +271,9 @@ export function prepareStatements(db: Database): PreparedStatements {
         SELECT pa.session_id,
                pa.request_id,
                pa.tool_name,
+               pa.reason,
+               pa.mcp_server_name,
+               pa.provider,
                ROW_NUMBER() OVER (
                  PARTITION BY pa.session_id
                  ORDER BY pa.registered_at ASC, pa.request_id ASC
@@ -282,7 +285,10 @@ export function prepareStatements(db: Database): PreparedStatements {
              COALESCE(s.last_activity_at, s.started_at) AS summary_last_activity_at,
              COALESCE(s.turn_count, 0) AS summary_turn_count,
              pa.request_id AS pending_request_id,
-             pa.tool_name AS pending_tool_name
+             pa.tool_name AS pending_tool_name,
+             pa.reason AS pending_reason,
+             pa.mcp_server_name AS pending_mcp_server_name,
+             pa.provider AS pending_provider
         FROM scoped_sessions s
         LEFT JOIN ranked_approvals pa
           ON pa.session_id = s.id

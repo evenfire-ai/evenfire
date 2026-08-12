@@ -645,6 +645,72 @@ describe('dbWorker dispatcher', () => {
     expect(rows[0].session_key).toBe('u-3:rpc:agent:default')
   })
 
+  it('projects the connect_required discriminator on the cold DB paths (page + summary)', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-connect', 'conv-connect:rpc:agent:chat-1'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-connect',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_pending_approval',
+        payload: {
+          request_id: 'req-connect',
+          session_id: 'conv-connect',
+          task_id: 'task-connect',
+          tool_name: 'monday__list_boards',
+          tool_call_id: 'tc-1',
+          parameters: '{}',
+          description: 'Connect monday to continue',
+          context_snapshot: '[]',
+          completed_results: null,
+          intent_summary: null,
+          source_message: null,
+          registered_at: Date.now() / 1000,
+          expires_at: Date.now() / 1000 + 3600,
+          trace_context: null,
+          reason: 'connect_required',
+          mcp_server_name: 'monday',
+          provider: 'monday',
+        },
+      },
+      deps
+    )
+
+    // Cold path A — the specific-conversation rejoin (load_session_message_page).
+    const page = (await dispatch(
+      { kind: 'load_session_message_page', sessionKey: session.session_key },
+      deps
+    )) as { pending_approval: Record<string, unknown> | null }
+    expect(page.pending_approval).toMatchObject({
+      request_id: 'req-connect',
+      tool_name: 'monday__list_boards',
+      reason: 'connect_required',
+      mcp_server_name: 'monday',
+      provider: 'monday',
+    })
+
+    // Cold path B — the session-list summary projection (narrow SELECT).
+    const summaries = (await dispatch(
+      {
+        kind: 'list_session_summaries_by_prefix',
+        sessionKeyPrefix: 'conv-connect:rpc:',
+        userId: 'conv-connect',
+      },
+      deps
+    )) as Array<{ pending_approval: Record<string, unknown> | null }>
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].pending_approval).toMatchObject({
+      request_id: 'req-connect',
+      tool_name: 'monday__list_boards',
+      reason: 'connect_required',
+      mcp_server_name: 'monday',
+      provider: 'monday',
+    })
+  })
+
   it('selects the earliest pending approval consistently for one session', async () => {
     const deps = createDispatcher(db)
     const session = {

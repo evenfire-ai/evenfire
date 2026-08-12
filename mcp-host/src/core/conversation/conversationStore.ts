@@ -86,7 +86,13 @@ export interface ConversationSessionSummary {
   chatId: string
   state: ConversationState
   activeTaskId?: string
-  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name'>
+  // U5 — includes the connect_required discriminator (reason/mcpServerName/provider)
+  // so the REST rejoin snapshot lets the desktop rebuild a "Connect <server>"
+  // suspension, not a generic approval. Absent reason ⇒ generic approval.
+  pendingApproval?: Pick<
+    PendingApproval,
+    'request_id' | 'tool_name' | 'reason' | 'mcpServerName' | 'provider'
+  >
   turnCount: number
   messageCount: number
   lastActivityAt: Date
@@ -167,6 +173,9 @@ function sessionMessagesFromConversation(
       ? {
           request_id: conversation.pending_approval.request_id,
           tool_name: conversation.pending_approval.tool_name,
+          reason: conversation.pending_approval.reason,
+          mcpServerName: conversation.pending_approval.mcpServerName,
+          provider: conversation.pending_approval.provider,
         }
       : undefined,
     turns,
@@ -401,6 +410,9 @@ export class InMemoryConversationStore implements ConversationStore {
           ? {
               request_id: conversation.pending_approval.request_id,
               tool_name: conversation.pending_approval.tool_name,
+              reason: conversation.pending_approval.reason,
+              mcpServerName: conversation.pending_approval.mcpServerName,
+              provider: conversation.pending_approval.provider,
             }
           : undefined,
         turnCount: conversation.turns.length,
