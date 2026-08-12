@@ -18,6 +18,17 @@ export function isValidK8sName(name: string): boolean {
  * e.g. `@test-oss-jose/helloo` → `test-oss-jose-helloo`. May return `""` when
  * the input has no usable characters (the caller then leaves the field empty).
  */
+export function getAgentNameError(name: string): string {
+  if (!name.trim()) return 'Agent name is required.'
+  if (!/^[a-z0-9-]+$/.test(name))
+    return 'Agent name may only use lowercase letters, numbers, and hyphens.'
+  if (!/^[a-z]/.test(name)) return 'Agent name must start with a letter.'
+  if (!/[a-z0-9]$/.test(name)) return 'Agent name must end with a letter or number.'
+  if (name.length > 63) return 'Agent name must be 63 characters or fewer.'
+  if (name.length < 3) return 'Agent name must be at least 3 characters long.'
+  return ''
+}
+
 export function toK8sName(raw: string): string {
   return raw
     .toLowerCase()

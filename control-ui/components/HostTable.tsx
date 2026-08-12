@@ -218,17 +218,7 @@ export function HostTable({
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
-                      <button
-                        type="button"
-                        className="cu-link"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openAgent()
-                        }}
-                        onKeyDown={e => e.stopPropagation()}
-                      >
-                        {name}
-                      </button>
+                      <span className="cu-expandable-row__name">{name}</span>
                     </td>
                     <td>
                       <HostLifecycleBadge lifecycle={lifecycle} />
