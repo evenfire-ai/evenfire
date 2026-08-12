@@ -582,9 +582,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(
       controlPage.getByText('Desktop GFS operator access revoked.', { exact: true })
     ).toBeVisible({ timeout: 30_000 })
-    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
-      'Revoked'
-    )
+    await expect(
+      controlPage
+        .getByTestId(`gfs-operator-link-${link.controlAdminId}`)
+        .getByText('Revoked', { exact: true })
+    ).toBeVisible()
     await expect
       .poll(() => operatorJourney.countActiveLinks(), {
         timeout: 30_000,
@@ -681,9 +683,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(
       controlPage.getByText('Desktop GFS operator access reactivated.', { exact: true })
     ).toBeVisible({ timeout: 30_000 })
-    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
-      'Active'
-    )
+    await expect(
+      controlPage
+        .getByTestId(`gfs-operator-link-${link.controlAdminId}`)
+        .getByText('Active', { exact: true })
+    ).toBeVisible()
     await expect
       .poll(() => operatorJourney.countActiveLinks(), {
         timeout: 30_000,
@@ -762,9 +766,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(
       controlPage.getByText('Desktop GFS operator access revoked.', { exact: true })
     ).toBeVisible({ timeout: 30_000 })
-    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
-      'Revoked'
-    )
+    await expect(
+      controlPage
+        .getByTestId(`gfs-operator-link-${link.controlAdminId}`)
+        .getByText('Revoked', { exact: true })
+    ).toBeVisible()
     await expect
       .poll(() => operatorJourney.countActiveLinks(), {
         timeout: 30_000,
@@ -829,9 +835,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     const controlPage = await operatorJourney.loginControlUi()
     await operatorJourney.openControlAdmins()
     await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
-    await expect(controlPage.getByTestId(`gfs-operator-link-${link.controlAdminId}`)).toHaveText(
-      'Revoked'
-    )
+    await expect(
+      controlPage
+        .getByTestId(`gfs-operator-link-${link.controlAdminId}`)
+        .getByText('Revoked', { exact: true })
+    ).toBeVisible()
 
     await expect
       .poll(
