@@ -71,6 +71,12 @@ export function slackWebhookTargetIdForChannel(item: CommunicationChannelItem): 
   const namespace = item.metadata?.namespace?.trim() || 'channels'
   const name = item.metadata?.name?.trim()
   if (!name) return null
+  const spec = item.spec
+  const slackConfigured =
+    (spec?.slack?.length ?? 0) > 0 ||
+    !!spec?.slackSettings?.workspaceId?.trim() ||
+    !!spec?.slackSettings?.botHandle?.trim()
+  if (!slackConfigured) return null
   return `slack:${base64UrlEncode(JSON.stringify({ namespace, name }))}`
 }
 
