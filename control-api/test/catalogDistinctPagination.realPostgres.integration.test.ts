@@ -297,11 +297,17 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
 
   it('does not let duplicate team paths hide later canonical host IDs', async () => {
     const budget = AccessExecutionBudget.create('catalog')
+    let hostKeyStatements = 0
     const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
       family => ({ family, generation: '1', resourceVersion: '1', status: 'current' })
     )
     const context: CatalogRequestContext = {
-      db: databasePool,
+      db: {
+        query: (text, values) => {
+          if (text === CATALOG_KEY_SQL.host) hostKeyStatements += 1
+          return databasePool.query(text, values)
+        },
+      },
       budget,
       principal: {
         userId,
@@ -328,6 +334,7 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       ])
       expect(page.hasMore).toBe(true)
       expect(page.continuation.exhausted).toBe(false)
+      expect(hostKeyStatements).toBe(1)
     } finally {
       budget.close()
     }
