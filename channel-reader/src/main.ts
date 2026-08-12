@@ -1569,7 +1569,9 @@ export class ChannelReader {
 
     const adapter = this.adapterForMessage(msg)
     if (!adapter?.sendEphemeral) return
-    await adapter.sendEphemeral(channelId, userId, UNRESOLVED_NOTICE_COPY)
+    const profileUrl = config.profileUiUrl?.trim()
+    const content = profileUrl ? `${UNRESOLVED_NOTICE_COPY} ${profileUrl}` : UNRESOLVED_NOTICE_COPY
+    await adapter.sendEphemeral(channelId, userId, content)
   }
 
   private pendingApprovalChannelScope(msg: Message): string {

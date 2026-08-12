@@ -10,6 +10,7 @@ const mockCfg = vi.hoisted(() => ({
   namespace: '',
   pollIntervalSeconds: 1,
   devChannelConfig: undefined,
+  profileUiUrl: undefined as string | undefined,
 }))
 
 vi.mock('../src/config', () => ({
@@ -87,6 +88,7 @@ interface BuildReaderOptions {
   reason?: 'unresolved' | 'error'
   medium?: 'slack' | 'telegram'
   ephemeralThrows?: boolean
+  profileUiUrl?: string
 }
 
 /**
@@ -103,6 +105,9 @@ function buildReader(options: BuildReaderOptions = {}) {
   // would silently turn the absent-reason case into the unresolved case.
   const reason: 'unresolved' | 'error' | undefined =
     'reason' in options ? options.reason : 'unresolved'
+  // Reset on every call (not just when passed) so state never leaks between
+  // tests that share this hoisted mock config.
+  mockCfg.profileUiUrl = options.profileUiUrl
 
   const sendEphemeral = vi.fn(async (_channelId: string, _userId: string, _content: string) => {
     if (ephemeralThrows) throw new Error('user_not_in_channel')
@@ -265,5 +270,24 @@ describe('unresolved sender notice', () => {
     const { deliver, sendEphemeral } = buildReader({ medium: 'telegram' })
     await deliver('C1', 'U1')
     expect(sendEphemeral).not.toHaveBeenCalled()
+  })
+})
+
+describe('unresolved notice link', () => {
+  it('appends the profile URL when configured', async () => {
+    const { deliver, sendEphemeral } = buildReader({ profileUiUrl: 'https://profile.example.com' })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral.mock.calls[0][2]).toContain('https://profile.example.com')
+  })
+
+  it('sends the copy unchanged when no profile URL is configured', async () => {
+    const { deliver, sendEphemeral } = buildReader({ profileUiUrl: undefined })
+    await deliver('C1', 'U1')
+    const text = sendEphemeral.mock.calls[0][2]
+    expect(text).toBe(
+      "I can't accept messages from this Slack account. If you haven't linked it yet, " +
+        'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+    )
+    expect(text).not.toContain('undefined')
   })
 })
