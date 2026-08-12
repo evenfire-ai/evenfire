@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { type NextFunction, type Request, type Response, Router } from 'express'
 import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
@@ -66,6 +66,19 @@ function sessionTokenFromRequest(req: {
 }): string {
   const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
   return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+}
+
+function requireLegacySessionTokenPayload(req: Request, res: Response, next: NextFunction): void {
+  const body = (req.body ?? {}) as { userId?: unknown; email?: unknown; teamId?: unknown }
+  const userId = String(body.userId || '').trim()
+  const email = String(body.email || '').trim()
+  const teamId = String(body.teamId || '').trim()
+  const token = sessionTokenFromRequest(req)
+  if (!userId || !email || !teamId || !token || token.length > 4096) {
+    res.status(400).json({ error: 'invalid payload' })
+    return
+  }
+  next()
 }
 
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
@@ -228,6 +241,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/session-token',
     preAuthExternalUserRateLimit('session_lifecycle'),
+    requireLegacySessionTokenPayload,
     requireExternalSessionRateLimitContext({ purpose: 'switch', client: externalSessionClient }),
     ...authenticatedExternalUserRateLimit('session_lifecycle'),
     async (req: ExternalAuthedRequest, res, next) => {
