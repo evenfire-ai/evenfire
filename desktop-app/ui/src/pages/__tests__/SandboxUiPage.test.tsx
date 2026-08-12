@@ -276,7 +276,7 @@ describe('SandboxUiPage', () => {
     })
   })
 
-  it('keeps a long conversation return label accessible after its visible text is bounded', async () => {
+  it('keeps a long conversation return label available to assistive technology and hover text', async () => {
     const title =
       'A deliberately long conversation title that must remain available to assistive technology'
     sandboxUi.listApps.mockResolvedValueOnce({
