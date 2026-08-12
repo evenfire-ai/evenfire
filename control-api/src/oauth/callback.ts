@@ -166,6 +166,14 @@ export type CallbackResult =
        * deep-link (U5).
        */
       source?: 'mcp'
+      /**
+       * The consented mcp-server's name — present only on the `source:'mcp'`
+       * path. Comes from the signed state (authoritative), never a body param.
+       * The route forwards it into the deep-link (`&mcpServerName=…`) so the
+       * desktop can correlate which suspended task to resume under concurrent
+       * suspensions.
+       */
+      mcpServerName?: string
     }
   | { kind: 'invalid_state'; reason: string }
   | { kind: 'unknown_oauth_client' }
@@ -393,6 +401,9 @@ async function handleMcpOAuthCallback(
     backgroundRequested: false,
     backgroundEnabled: false,
     source: 'mcp',
+    // Authoritative — from the signed state, never a body param. Lets the
+    // desktop correlate which suspended task to resume.
+    mcpServerName: claims.mcpServerName,
   }
 }
 

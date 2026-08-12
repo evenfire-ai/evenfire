@@ -138,6 +138,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
                 backgroundRequested: result.backgroundRequested,
                 backgroundEnabled: result.backgroundEnabled,
                 source: result.source,
+                mcpServerName: result.mcpServerName,
               })
             )
         case 'invalid_state':
@@ -196,7 +197,12 @@ export function buildPublicCallbackUrl(
 export function renderSuccessHtml(
   provider: string,
   oauthClientId: string,
-  opts?: { backgroundRequested?: boolean; backgroundEnabled?: boolean; source?: 'mcp' }
+  opts?: {
+    backgroundRequested?: boolean
+    backgroundEnabled?: boolean
+    source?: 'mcp'
+    mcpServerName?: string
+  }
 ): string {
   // The user's browser hits this page on the platform's origin, not inside
   // the embed. Spec §9.9 — bounce to `clerum://oauth-completed?…` so the
@@ -211,6 +217,11 @@ export function renderSuccessHtml(
   deepLink.searchParams.set('provider', safeProvider)
   if (opts?.source === 'mcp') {
     deepLink.searchParams.set('source', 'mcp')
+    // Correlation key for the desktop resume (authoritative — from the signed
+    // state). Robust against concurrent suspensions of different mcp-servers.
+    if (opts.mcpServerName) {
+      deepLink.searchParams.set('mcpServerName', opts.mcpServerName)
+    }
   }
   const deepLinkHref = htmlAttrEscape(deepLink.toString())
   // JSON.stringify gives valid JS string literal; `<` → `<` blocks

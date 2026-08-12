@@ -149,6 +149,7 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
       backgroundRequested: false,
       backgroundEnabled: false,
       source: 'mcp',
+      mcpServerName: 'gdrive',
     })
 
     expect(db.query).toHaveBeenCalledTimes(1)
