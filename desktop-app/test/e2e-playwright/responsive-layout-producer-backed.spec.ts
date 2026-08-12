@@ -157,7 +157,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await resizeDesktop(app!, 1100)
       const tray = page.getByRole('dialog', { name: 'Notifications and approvals' })
       const search = page.getByRole('textbox', { name: 'Search' })
-      await expect(search).toHaveAttribute('placeholder', /Search teams, contexts…/)
+      await expect(search).toHaveAttribute('placeholder', 'Search workspace...')
       await expect(search).toHaveAttribute(
         'title',
         'Search teams, contexts, members, agents or connectors...'
