@@ -18,6 +18,7 @@ import {
   OPERATIONAL_SOURCE_FAMILIES,
   canonicalEnvironmentId,
 } from '../src/services/access/operationalAccessProjection.js'
+import { teamGfsTopKSql } from '../src/services/access/teamGfsTopK.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -652,6 +653,43 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       expect(Number(node['Temp Read Blocks'] ?? 0)).toBe(0)
       expect(Number(node['Temp Written Blocks'] ?? 0)).toBe(0)
     }
+
+    const teamExplained = await databasePool.query(
+      `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${teamGfsTopKSql.streamHead}`,
+      [
+        JSON.stringify([
+          {
+            kind: 'grant',
+            subject_id: actor.teamIds[0],
+            after_id: '00000000-0000-0000-0000-000000000000',
+            take: 3,
+          },
+          {
+            kind: 'share',
+            subject_id: actor.teamIds[0],
+            after_id: '00000000-0000-0000-0000-000000000000',
+            take: 3,
+          },
+        ]),
+      ]
+    )
+    const teamEnvelope = (teamExplained.rows[0] as Record<string, unknown>)['QUERY PLAN'] as Array<{
+      Plan: ExplainNode
+    }>
+    const teamNodes = explainNodes(teamEnvelope[0].Plan)
+    const teamIndexes = new Set(
+      teamNodes.flatMap(node =>
+        typeof node['Index Name'] === 'string' ? [node['Index Name']] : []
+      )
+    )
+    expect(teamIndexes).toContain('gfs_grants_subject_resource_catalog_idx')
+    expect(teamIndexes).toContain('gfs_shares_subject_resource_catalog_idx')
+    expect(
+      teamNodes
+        .filter(node => node['Relation Name'] === 'gfs_resources')
+        .reduce((total, node) => total + actualWork(node), 0)
+    ).toBeLessThanOrEqual(8)
+    expect(teamNodes.every(node => Number(node['Temp Written Blocks'] ?? 0) === 0)).toBe(true)
 
     await consumeFamily({
       family: 'gfs_resource',
