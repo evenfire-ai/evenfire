@@ -641,6 +641,44 @@ export async function listGrants(filter?: {
 }
 
 /**
+ * Grants whose `allowed_models` list names `model` — the 4th source of the
+ * LLM-model impact enumeration (Fase 3, `llmModelImpact.ts`).
+ *
+ * MATCH BY MODEL NAME ONLY, deliberately NOT by `(provider, model)`. The
+ * `allowed_models` column is a provider-LESS flat model-name list and is NOT
+ * enforced to hold only models of the grant's `provider` column: the write-gate
+ * (`routes/admin/pluginWorkloadSdk.ts`) validates `prompt_targets` per-provider,
+ * but `allowed_models` is parsed from the request body free-form and passed
+ * straight through — and since `prompt_targets` can span multiple providers, the
+ * mirrored `allowed_models` set can too. Filtering by `provider` would therefore
+ * UNDER-report references, the unsafe direction for a safety gate that gates a
+ * destructive disable/delete. Matching by model name may over-report a same-named
+ * model under a different provider (extra operator friction, never silent
+ * breakage) — the fail-safe trade-off. This is exercised by the realPostgres
+ * integration test `db.listGrantsReferencingModel.realPostgres.integration`.
+ *
+ * No `policy_state` and no `provider IS NOT NULL` filter: a grant is surfaced
+ * whenever it names the model, including legacy NULL-provider and
+ * `revoking`/`disabled` rows (fail-loud — never hide a dangling reference).
+ *
+ * `allowed_models @> to_jsonb($1::text)` is jsonb array-contains-scalar: for a
+ * text `model`, `to_jsonb('m'::text)` is the JSON string `"m"`, and a jsonb
+ * array `@>` a scalar is true when the array contains that element.
+ */
+export async function listGrantsReferencingModel(
+  model: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkGrant[]> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_grants
+      WHERE allowed_models @> to_jsonb($1::text)
+      ORDER BY recipe_namespace, recipe_name, capability_family`,
+    [model]
+  )
+  return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
  * Read-only migration gate for promptBridge rows written before the ordered
  * target policy existed. Legacy rows are intentionally never inferred or
  * rewritten here; operators get only non-secret identifiers, shape flags, and
