@@ -13,9 +13,15 @@ import {
   listBoundedProducerKeys,
 } from './catalogProducerSupport.js'
 
-type StreamKind = 'grant' | 'share'
-type StreamHead = Readonly<{
-  kind: StreamKind
+export type TeamGfsStreamKind = 'grant' | 'share'
+export type TeamGfsStreamRequest = Readonly<{
+  kind: TeamGfsStreamKind
+  subjectId: string
+  afterId: string
+  take: number
+}>
+export type TeamGfsStreamHead = Readonly<{
+  kind: TeamGfsStreamKind
   subjectId: string
   logicalId: string
   batchLast: boolean
@@ -62,7 +68,7 @@ SELECT kind, subject_id, resource_id::text AS logical_id
   FROM heads
  ORDER BY logical_id, kind, subject_id`
 
-function compareHead(left: StreamHead, right: StreamHead): number {
+function compareHead(left: TeamGfsStreamHead, right: TeamGfsStreamHead): number {
   return (
     left.logicalId.localeCompare(right.logicalId) ||
     left.kind.localeCompare(right.kind) ||
@@ -71,17 +77,17 @@ function compareHead(left: StreamHead, right: StreamHead): number {
 }
 
 class HeadHeap {
-  private readonly values: StreamHead[] = []
+  private readonly values: TeamGfsStreamHead[] = []
 
   get size(): number {
     return this.values.length
   }
 
-  peek(): StreamHead | undefined {
+  peek(): TeamGfsStreamHead | undefined {
     return this.values[0]
   }
 
-  push(value: StreamHead): void {
+  push(value: TeamGfsStreamHead): void {
     this.values.push(value)
     let index = this.values.length - 1
     while (index > 0) {
@@ -93,7 +99,7 @@ class HeadHeap {
     this.values[index] = value
   }
 
-  pop(): StreamHead | undefined {
+  pop(): TeamGfsStreamHead | undefined {
     const first = this.values[0]
     const last = this.values.pop()
     if (!first || !last || this.values.length === 0) return first
@@ -115,7 +121,7 @@ class HeadHeap {
   }
 }
 
-function parseHeads(rows: readonly Record<string, unknown>[]): StreamHead[] {
+function parseHeads(rows: readonly Record<string, unknown>[]): TeamGfsStreamHead[] {
   const parsed = rows.map(row => {
     const kind = row.kind
     const subjectId = row.subject_id
@@ -129,7 +135,7 @@ function parseHeads(rows: readonly Record<string, unknown>[]): StreamHead[] {
     ) {
       throw new CatalogProducerContractError('team_gfs_stream_head_invalid')
     }
-    return { kind, subjectId, logicalId }
+    return { kind: kind as TeamGfsStreamKind, subjectId, logicalId }
   })
   const lastByStream = new Map<string, string>()
   for (const head of parsed) lastByStream.set(`${head.kind}:${head.subjectId}`, head.logicalId)
@@ -143,13 +149,8 @@ function parseHeads(rows: readonly Record<string, unknown>[]): StreamHead[] {
 
 async function readHeads(
   context: CatalogRequestContext,
-  streams: readonly Readonly<{
-    kind: StreamKind
-    subjectId: string
-    afterId: string
-    take: number
-  }>[]
-): Promise<StreamHead[]> {
+  streams: readonly TeamGfsStreamRequest[]
+): Promise<TeamGfsStreamHead[]> {
   if (streams.length === 0) return []
   const result = await catalogQuery(
     context.db,
@@ -170,47 +171,28 @@ async function readHeads(
   return parseHeads(result.rows as Record<string, unknown>[])
 }
 
-async function teamCandidates(input: {
-  context: CatalogRequestContext
-  after: string
+export async function collectTeamGfsTopK(input: {
+  streams: readonly Omit<TeamGfsStreamRequest, 'take'>[]
   take: number
-}): Promise<Readonly<{ candidates: readonly CatalogIdentityCandidate[]; hasMore: boolean }>> {
-  const memberships = input.context.principal.memberships
-  if (memberships.length === 0) return { candidates: Object.freeze([]), hasMore: false }
-  const admission = input.context.budget.teamGfsMembershipAdmissionLimit
-  if (admission === null || memberships.length > admission) {
-    throw new AccessBudgetExceededError('teamGfsMembershipAdmission', true)
-  }
-  const streamCount = memberships.length * 2
+  read: (streams: readonly TeamGfsStreamRequest[]) => Promise<readonly TeamGfsStreamHead[]>
+}): Promise<Readonly<{ logicalIds: readonly string[]; hasMore: boolean }>> {
+  if (input.streams.length === 0) return { logicalIds: Object.freeze([]), hasMore: false }
+  const streamCount = input.streams.length
   const initialTake = Math.max(
     1,
     Math.min(TEAM_GFS_ADVANCE_CHUNK, Math.ceil((input.take + 1) / streamCount) + 1)
   )
-  const initialStreams = memberships.flatMap(membership =>
-    (['grant', 'share'] as const).map(kind => ({
-      kind,
-      subjectId: membership.teamId,
-      afterId: input.after || '00000000-0000-0000-0000-000000000000',
-      take: initialTake,
-    }))
-  )
+  const initialStreams = input.streams.map(stream => ({ ...stream, take: initialTake }))
   const heap = new HeadHeap()
-  for (const head of await readHeads(input.context, initialStreams)) heap.push(head)
-  const candidates: CatalogIdentityCandidate[] = []
-  while (heap.size > 0 && candidates.length < input.take + 1) {
+  for (const head of await input.read(initialStreams)) heap.push(head)
+  const logicalIds: string[] = []
+  while (heap.size > 0 && logicalIds.length < input.take + 1) {
     const logicalId = heap.peek()!.logicalId
-    const consumed: StreamHead[] = []
+    const consumed: TeamGfsStreamHead[] = []
     while (heap.peek()?.logicalId === logicalId) consumed.push(heap.pop()!)
-    candidates.push(
-      Object.freeze({
-        key: catalogKey(input.context.environmentId, 'gfs_resource', logicalId),
-        canonicalId: `gfs_resource:${logicalId}`,
-        validUntil: null,
-      })
-    )
-    if (candidates.length < input.take + 1) {
-      const advanced = await readHeads(
-        input.context,
+    logicalIds.push(logicalId)
+    if (logicalIds.length < input.take + 1) {
+      const advanced = await input.read(
         consumed
           .filter(head => head.batchLast)
           .map(head => ({
@@ -223,7 +205,40 @@ async function teamCandidates(input: {
       for (const head of advanced) heap.push(head)
     }
   }
-  return Object.freeze({ candidates: Object.freeze(candidates), hasMore: heap.size > 0 })
+  return Object.freeze({ logicalIds: Object.freeze(logicalIds), hasMore: heap.size > 0 })
+}
+
+async function teamCandidates(input: {
+  context: CatalogRequestContext
+  after: string
+  take: number
+}): Promise<Readonly<{ candidates: readonly CatalogIdentityCandidate[]; hasMore: boolean }>> {
+  const memberships = input.context.principal.memberships
+  if (memberships.length === 0) return { candidates: Object.freeze([]), hasMore: false }
+  const admission = input.context.budget.teamGfsMembershipAdmissionLimit
+  if (admission === null || memberships.length > admission) {
+    throw new AccessBudgetExceededError('teamGfsMembershipAdmission', true)
+  }
+  const streams = memberships.flatMap(membership =>
+    (['grant', 'share'] as const).map(kind => ({
+      kind,
+      subjectId: membership.teamId,
+      afterId: input.after || '00000000-0000-0000-0000-000000000000',
+    }))
+  )
+  const merged = await collectTeamGfsTopK({
+    streams,
+    take: input.take,
+    read: requested => readHeads(input.context, requested),
+  })
+  const candidates = merged.logicalIds.map(logicalId =>
+    Object.freeze({
+      key: catalogKey(input.context.environmentId, 'gfs_resource', logicalId),
+      canonicalId: `gfs_resource:${logicalId}`,
+      validUntil: null,
+    })
+  )
+  return Object.freeze({ candidates: Object.freeze(candidates), hasMore: merged.hasMore })
 }
 
 function mergeCandidates(
