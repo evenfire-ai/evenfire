@@ -146,7 +146,7 @@ function buildReader(options: BuildReaderOptions = {}) {
   })
 
   let eventSeq = 0
-  const deliver = async (channelId: string, userId: string): Promise<void> => {
+  const deliver = async (channelId: string, userId: string, workspaceId = 'T1'): Promise<void> => {
     eventSeq += 1
     const message: Message = {
       channelType: medium,
@@ -158,7 +158,7 @@ function buildReader(options: BuildReaderOptions = {}) {
       providerIdentity: {
         medium,
         providerUserId: userId,
-        providerWorkspaceId: 'T1',
+        providerWorkspaceId: workspaceId,
         providerChannelId: channelId,
         // Unique per delivery on purpose. A repeated providerEventId is dropped by
         // the provider-event dedupe *before* authorization runs, which would make
@@ -192,6 +192,16 @@ describe('unresolved sender notice', () => {
     expect(sendEphemeral).toHaveBeenCalledTimes(1)
   })
 
+  it('posts into the conversation the message came from, addressed to its sender', async () => {
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C1', 'U1')
+    // Argument order is load-bearing: sendEphemeral(channelId, userId, content).
+    // Swapped, Slack rejects the post, SlackAdapter swallows the error, and the
+    // limiter key is already recorded — the sender gets 24h of silence, which is
+    // the exact failure this feature exists to remove.
+    expect(sendEphemeral).toHaveBeenCalledWith('C1', 'U1', expect.any(String))
+  })
+
   it('sends again after the TTL expires and the sweep runs', async () => {
     vi.useFakeTimers()
     const { deliver, sendEphemeral, runSweep } = buildReader()
@@ -220,6 +230,14 @@ describe('unresolved sender notice', () => {
     const { deliver, sendEphemeral } = buildReader()
     await deliver('C1', 'U1')
     await deliver('C1', 'U2')
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats the same user and channel in a second workspace as its own conversation', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C1', 'U1')
+    await deliver('C1', 'U1', 'T2')
     expect(sendEphemeral).toHaveBeenCalledTimes(2)
   })
 
