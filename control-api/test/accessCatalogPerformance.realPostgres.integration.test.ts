@@ -11,6 +11,11 @@ import {
   OPERATIONAL_SOURCE_FAMILIES,
   canonicalEnvironmentId,
 } from '../src/services/access/operationalAccessProjection.js'
+import {
+  type TeamGfsStreamRequest,
+  collectTeamGfsTopK,
+  teamGfsTopKSql,
+} from '../src/services/access/teamGfsTopK.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -37,7 +42,7 @@ const armCounts: Readonly<Record<CatalogFamily, number>> = Object.freeze({
   workflow_run: 3,
   workflow_approval: 2,
   notification: 2,
-  gfs_resource: 4,
+  gfs_resource: 2,
   shared_filesystem: 2,
   sandbox_app: 2,
 })
@@ -529,6 +534,214 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     )
   }
 
+  async function seedDuplicateTeamGfs(teamIds: readonly string[]): Promise<void> {
+    if (teamIds.length === 0) return
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES
+         ('00000000-0000-4000-8000-000000000001', 'team-plan-duplicate-1', '/', 'directory'),
+         ('00000000-0000-4000-8000-000000000002', 'team-plan-duplicate-2', '/', 'directory')
+       ON CONFLICT (resource_id) DO NOTHING`
+    )
+    await databasePool.query(
+      `WITH requested AS (SELECT UNNEST($1::uuid[])::text AS subject_id),
+            resources AS (
+              SELECT resource_id, drive
+                FROM gfs_resources
+               WHERE resource_id IN (
+                 '00000000-0000-4000-8000-000000000001',
+                 '00000000-0000-4000-8000-000000000002'
+               )
+            )
+       INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       SELECT resource.drive, resource.resource_id, 'team', requested.subject_id,
+              ARRAY['read']::text[]
+         FROM requested CROSS JOIN resources resource
+       ON CONFLICT (drive, resource_id, subject_type, subject_id) DO NOTHING`,
+      [teamIds]
+    )
+    await databasePool.query(
+      `WITH requested AS (SELECT UNNEST($1::uuid[])::text AS subject_id),
+            resources AS (
+              SELECT resource_id, drive
+                FROM gfs_resources
+               WHERE resource_id IN (
+                 '00000000-0000-4000-8000-000000000001',
+                 '00000000-0000-4000-8000-000000000002'
+               )
+            )
+       INSERT INTO gfs_shares(drive, resource_id, subject_type, subject_id, permissions)
+       SELECT resource.drive, resource.resource_id, 'team', requested.subject_id,
+              ARRAY['read']::text[]
+         FROM requested CROSS JOIN resources resource
+       ON CONFLICT (drive, resource_id, subject_type, subject_id) DO NOTHING`,
+      [teamIds]
+    )
+  }
+
+  function teamGfsRequests(teamIds: readonly string[], take: number): TeamGfsStreamRequest[] {
+    return teamIds.flatMap(subjectId =>
+      (['grant', 'share'] as const).map(kind => ({
+        kind,
+        subjectId,
+        afterId: '00000000-0000-0000-0000-000000000000',
+        take,
+      }))
+    )
+  }
+
+  async function explainTeamGfs(
+    profile: string,
+    requests: readonly TeamGfsStreamRequest[]
+  ): Promise<void> {
+    const result = await databasePool.query(
+      `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${teamGfsTopKSql.streamHead}`,
+      [
+        JSON.stringify(
+          requests.map(request => ({
+            kind: request.kind,
+            subject_id: request.subjectId,
+            after_id: request.afterId,
+            take: request.take,
+          }))
+        ),
+      ]
+    )
+    const explained = queryPlan(result.rows[0])
+    const nodes = planNodes(explained.Plan)
+    const indexNames = new Set(
+      nodes.flatMap(node => (typeof node['Index Name'] === 'string' ? [node['Index Name']] : []))
+    )
+    if (profile.startsWith('high-')) {
+      expect(indexNames, `${profile}:grant-index`).toContain(
+        'gfs_grants_subject_resource_catalog_idx'
+      )
+      expect(indexNames, `${profile}:share-index`).toContain(
+        'gfs_shares_subject_resource_catalog_idx'
+      )
+    }
+    const perStreamTake = Math.max(...requests.map(request => request.take), 0)
+    const rowEnvelope = requests.length * perStreamTake
+    const relationWork = (relation: string) =>
+      nodes
+        .filter(node => node['Relation Name'] === relation)
+        .reduce(
+          (total, node) =>
+            total +
+            numberField(node, 'Actual Loops') *
+              (numberField(node, 'Actual Rows') + numberField(node, 'Rows Removed by Filter')),
+          0
+        )
+    expect(relationWork('gfs_grants'), `${profile}:grant-work`).toBeLessThanOrEqual(rowEnvelope)
+    expect(relationWork('gfs_shares'), `${profile}:share-work`).toBeLessThanOrEqual(rowEnvelope)
+    if (profile.startsWith('high-')) {
+      expect(relationWork('gfs_resources'), `${profile}:resource-work`).toBeLessThanOrEqual(
+        rowEnvelope
+      )
+    }
+    const sharedBlocks =
+      numberField(explained.Plan, 'Shared Hit Blocks') +
+      numberField(explained.Plan, 'Shared Read Blocks')
+    expect(sharedBlocks, `${profile}:shared-blocks`).toBeLessThanOrEqual(rowEnvelope * 8 + 256)
+    for (const node of nodes) {
+      expect(String(node['Sort Method'] ?? ''), `${profile}:sort`).not.toContain('external')
+      expect(numberField(node, 'Temp Read Blocks'), `${profile}:temp-read`).toBe(0)
+      expect(numberField(node, 'Temp Written Blocks'), `${profile}:temp-write`).toBe(0)
+    }
+    console.info(
+      `[access-catalog-team-gfs-plan:${profile}] ${JSON.stringify({
+        streams: requests.length,
+        perStreamTake,
+        rows: numberField(explained.Plan, 'Actual Rows'),
+        grantWork: relationWork('gfs_grants'),
+        shareWork: relationWork('gfs_shares'),
+        resourceWork: relationWork('gfs_resources'),
+        sharedBlocks,
+        tempReadBlocks: nodes.reduce(
+          (total, node) => total + numberField(node, 'Temp Read Blocks'),
+          0
+        ),
+        tempWrittenBlocks: nodes.reduce(
+          (total, node) => total + numberField(node, 'Temp Written Blocks'),
+          0
+        ),
+        planningMs: Number(explained['Planning Time'] ?? 0),
+        executionMs: Number(explained['Execution Time'] ?? 0),
+        indexes: [...indexNames].sort(),
+      })}`
+    )
+  }
+
+  async function measureTeamGfsTopK(
+    profile: string,
+    teamIds: readonly string[],
+    take: number
+  ): Promise<void> {
+    let statementCount = 0
+    const merged = await collectTeamGfsTopK({
+      streams: teamGfsRequests(teamIds, 1).map(({ kind, subjectId, afterId }) => ({
+        kind,
+        subjectId,
+        afterId,
+      })),
+      take,
+      read: async requests => {
+        statementCount += 1
+        const result = await databasePool.query(teamGfsTopKSql.streamHead, [
+          JSON.stringify(
+            requests.map(request => ({
+              kind: request.kind,
+              subject_id: request.subjectId,
+              after_id: request.afterId,
+              take: request.take,
+            }))
+          ),
+        ])
+        const lastByStream = new Map<string, string>()
+        for (const row of result.rows as Array<Record<string, string>>) {
+          lastByStream.set(`${row.kind}:${row.subject_id}`, row.logical_id)
+        }
+        return (result.rows as Array<Record<string, string>>).map(row => ({
+          kind: row.kind as 'grant' | 'share',
+          subjectId: row.subject_id,
+          logicalId: row.logical_id,
+          batchLast: lastByStream.get(`${row.kind}:${row.subject_id}`) === row.logical_id,
+        }))
+      },
+    })
+    const expected = await databasePool.query<{ logical_id: string }>(
+      `SELECT resource_id::text AS logical_id
+         FROM (
+           SELECT grant_row.resource_id
+             FROM gfs_grants grant_row
+            WHERE grant_row.subject_type = 'team'
+              AND grant_row.subject_id = ANY($1::text[])
+           UNION
+           SELECT share.resource_id
+             FROM gfs_shares share
+            WHERE share.subject_type = 'team'
+              AND share.subject_id = ANY($1::text[])
+         ) authorized
+         JOIN gfs_resources resource USING (resource_id)
+        WHERE resource.deleted_at IS NULL
+        ORDER BY resource_id
+        LIMIT $2`,
+      [teamIds, take + 1]
+    )
+    expect(merged.logicalIds, `${profile}:composition`).toEqual(
+      expected.rows.map(row => row.logical_id)
+    )
+    expect(statementCount, `${profile}:statement-envelope`).toBeLessThanOrEqual(take + 2)
+    console.info(
+      `[access-catalog-team-gfs-merge:${profile}] ${JSON.stringify({
+        memberships: teamIds.length,
+        take,
+        statements: statementCount,
+        candidates: merged.logicalIds.length,
+      })}`
+    )
+  }
+
   async function analyzeAndExplain(profile: string): Promise<void> {
     await databasePool.query(`ANALYZE`)
     const metrics: Array<Record<string, unknown>> = []
@@ -600,11 +813,29 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     await analyzeAndExplain('direct-only')
 
     await seedTeams(allTeamIds.slice(0, TYPICAL_TEAMS), TYPICAL_RESOURCES_PER_TEAM)
+    await seedDuplicateTeamGfs(allTeamIds.slice(0, TYPICAL_TEAMS))
     await analyzeAndExplain('typical-multi-team')
+    await explainTeamGfs(
+      'typical-multi-team',
+      teamGfsRequests(allTeamIds.slice(0, TYPICAL_TEAMS), 8)
+    )
+    await measureTeamGfsTopK('typical-multi-team', allTeamIds.slice(0, TYPICAL_TEAMS), 2)
 
     await seedDirect(DIRECT_ONLY_RESOURCES + 1, HIGH_DIRECT_RESOURCES)
     await seedTeams(allTeamIds.slice(TYPICAL_TEAMS), HIGH_RESOURCES_PER_TEAM)
+    await seedDuplicateTeamGfs(allTeamIds)
     await analyzeAndExplain('high-cardinality')
+    await explainTeamGfs('high-dense-and-duplicate', teamGfsRequests(allTeamIds, 8))
+    await explainTeamGfs('high-duplicate-saturated', teamGfsRequests(allTeamIds, 2))
+    await explainTeamGfs(
+      'high-sparse',
+      teamGfsRequests(
+        [allTeamIds[0]!, ...Array.from({ length: HIGH_TEAMS - 1 }, () => randomUUID())],
+        2
+      )
+    )
+    await measureTeamGfsTopK('high-duplicate-saturated', allTeamIds, 2)
+    await measureTeamGfsTopK('high-maximum-page', allTeamIds, 100)
   }, 30_000)
 
   it('bounds coordinator query count and composes keyset pages', async () => {
