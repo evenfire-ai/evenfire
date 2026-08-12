@@ -38,6 +38,7 @@ export function signExternalSessionToken(
 
 export function verifyExternalSessionToken(token: string): AuthClaims | null {
   try {
+    if (token.length > 4096) return null
     const payload = jwt.verify(token, sessionJwtPublicKey, {
       algorithms: ['RS256'],
       issuer: config.jwtIssuer,

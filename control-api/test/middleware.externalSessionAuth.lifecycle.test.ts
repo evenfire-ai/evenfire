@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { rateLimit } from 'express-rate-limit'
 import request from 'supertest'
 
 const poolQuery = vi.hoisted(() => vi.fn())
@@ -25,6 +26,7 @@ function app() {
   const server = express()
   server.get(
     '/protected',
+    rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
     async (req, res, next) => {
       const { requireValidExternalSessionToken } =
         await import('../src/middleware/externalSessionAuth.js')

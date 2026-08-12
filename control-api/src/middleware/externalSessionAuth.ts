@@ -60,7 +60,7 @@ async function requireValidExternalSessionTokenAsync(
 ): Promise<void> {
   try {
     const token = extractUserSessionToken(req)
-    if (!token || token.length > 4096) {
+    if (!token) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
