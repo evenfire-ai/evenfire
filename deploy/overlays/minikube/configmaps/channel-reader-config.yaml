@@ -14,3 +14,10 @@ data:
   CLERUM_ENABLE_RESPONSE_ATTACHMENTS: "true"
   CLERUM_ATTACHMENT_MAX_COUNT: "3"
   CLERUM_ATTACHMENT_MAX_BYTES: "52428800"
+  # Linked from the notice sent to an unverified Slack sender. Same local
+  # profile-ui address control-api already uses for its own links in this
+  # overlay (CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL in
+  # configmaps/control-api-config.yaml) -- minikube is reached through host
+  # port-forwards, so 127.0.0.1 is the address a developer can actually open.
+  # Optional everywhere: drop the key and the notice sends without a link.
+  CLERUM_PROFILE_UI_URL: "http://127.0.0.1:3001"
