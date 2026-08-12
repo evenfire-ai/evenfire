@@ -159,6 +159,16 @@ else
   fail "pre-gate sync can run the GFS authentication probe while control-api is fenced"
 fi
 
+cluster_sync_line="$(grep -nF 'if [[ "${cluster_changed}" == "true" ]]; then' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+pre_migration_reconcile_line="$(awk -v start="$cluster_sync_line" -v end="$control_api_migration_line" \
+  'NR >= start && NR < end && /reconcile-gfs-deploy-credentials\.sh/ { print NR; exit }' "$SCRIPT")"
+if [[ -z "$pre_migration_reconcile_line" && -n "$gfs_provision_line" && \
+      -n "$control_api_migration_line" && "$control_api_migration_line" -lt "$gfs_provision_line" ]]; then
+  pass "pre-gate defers GFS credential reconciliation until after schema migration"
+else
+  fail "pre-gate can reconcile GFS roles before the migration that grants their projection"
+fi
+
 if contains 'fence_control_api()' &&
    contains 'restore_control_api()' &&
    contains 'fence_workflow_reconciler' &&
