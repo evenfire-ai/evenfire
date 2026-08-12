@@ -1,0 +1,163 @@
+/**
+ * RemoteLlmHook (spec §8) — calls an installed hook over the `/v1` protocol and
+ * maps its response to an LLM-lane `Contributor`, enforcing the security
+ * invariants on the RESPONSE (the hook is an untrusted out-of-process container):
+ *
+ *  - Response-capability enforcement (F4, §8.1): a `reject` from a hook without
+ *    `may_deny` downgrades to `no_decision`; a `patch` without `may_rewrite` is
+ *    dropped; a `recover` without `may_substitute_result` is dropped.
+ *  - System prompt is immutable to installed hooks (N4, §8.1): a `pre_call`
+ *    patch may edit only NON-system messages + params — system-role messages in
+ *    the patch are dropped.
+ *  - Actions come only from the model (N5, §8.1): an `on_error recover` is
+ *    TEXT-ONLY (no tool_calls); a `post_call` transform may drop tool_calls but
+ *    never introduce them.
+ *  - Fail-posture (§8.6): an unavailable hook degrades per its `failMode`
+ *    (closed → deny `hook_unavailable`; open → no contribution).
+ *
+ * Phase 3 increment 1: pre_call / moderate / on_error mapping + invariants,
+ * fetcher-injected. Content projection (§8.4) and the concrete fetcher land next.
+ */
+import { FinishReason } from '../../types'
+import type { ChatMessage, ToolCompletionRequest, ToolCompletionResponse } from '../../types'
+import type { Capability, Contributor } from '../types'
+import type { HookDescriptor, HookFetcher, LifecyclePoint } from './types'
+
+type LlmContributor = Contributor<ToolCompletionRequest, ToolCompletionResponse>
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object'
+}
+
+/** Strip system-role messages from a hook's messages patch (N4 — system prompt is first-party). */
+function stripSystemRole(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter(m => m.role !== 'system')
+}
+
+export class RemoteLlmHook {
+  constructor(
+    private readonly descriptor: HookDescriptor,
+    private readonly fetch: HookFetcher
+  ) {}
+
+  private has(cap: Capability): boolean {
+    return this.descriptor.capabilities.includes(cap)
+  }
+
+  private handles(point: LifecyclePoint): boolean {
+    return this.descriptor.lifecyclePoints.includes(point)
+  }
+
+  /** Fail-posture (§8.6): closed → deny `hook_unavailable`; open → no contribution. */
+  private onUnavailable(): LlmContributor | null {
+    if (this.descriptor.failMode === 'closed' && this.has('may_deny')) {
+      return this.contribution('deny', 'hook_unavailable')
+    }
+    // Fail-open, or a non-deny-authoritative hook: no contribution (advisory).
+    return null
+  }
+
+  private contribution(
+    decision: LlmContributor['decision'],
+    reasonCode: string,
+    extra: Partial<LlmContributor> = {}
+  ): LlmContributor {
+    return {
+      phase: extra.phase ?? 'pre',
+      source: 'hook',
+      sourceId: this.descriptor.id,
+      decision,
+      reasonCode,
+      ...extra,
+    }
+  }
+
+  /** `pre_call` (spec §8.1): reject → deny (gated), continue+patch → rewrite (gated), else allow. */
+  async preCall(request: ToolCompletionRequest): Promise<LlmContributor | null> {
+    if (!this.handles('pre_call')) return null
+    const res = await this.fetch({ point: 'pre_call', descriptor: this.descriptor, body: request })
+    if (res.unavailable) return this.onUnavailable()
+
+    const body = isRecord(res.body) ? res.body : {}
+    if (body.action === 'reject') {
+      // F4: only honored with may_deny; otherwise downgrade to no_decision.
+      const decision = this.has('may_deny') ? 'deny' : 'no_decision'
+      return this.contribution(decision, String(body.code ?? 'content_filtered'), {
+        audit: { modelReason: typeof body.message === 'string' ? body.message : undefined },
+      })
+    }
+    // action === 'continue'
+    const patch = isRecord(body.patch) ? body.patch : undefined
+    if (patch && this.has('may_rewrite')) {
+      const rewrite = this.applyPatch(request, patch)
+      return this.contribution('allow', 'shaped', { rewrite })
+    }
+    // Continue with no honored patch → no contribution (allow).
+    return null
+  }
+
+  /** Apply a `pre_call` patch: NON-system messages + params only (N4). */
+  private applyPatch(
+    request: ToolCompletionRequest,
+    patch: Record<string, unknown>
+  ): ToolCompletionRequest {
+    const next: ToolCompletionRequest = { ...request }
+    if (Array.isArray(patch.messages)) {
+      next.messages = stripSystemRole(patch.messages as ChatMessage[])
+    }
+    const params = isRecord(patch.params) ? patch.params : undefined
+    if (params) {
+      if (typeof params.temperature === 'number') next.temperature = params.temperature
+      if (typeof params.max_tokens === 'number') next.max_tokens = params.max_tokens
+      if (
+        params.tool_choice === 'auto' ||
+        params.tool_choice === 'none' ||
+        params.tool_choice === 'required'
+      ) {
+        next.tool_choice = params.tool_choice
+      }
+    }
+    return next
+  }
+
+  /** `moderate` (spec §8.1): 2xx = pass (no contribution); 4xx = deny (gated). */
+  async moderate(request: ToolCompletionRequest): Promise<LlmContributor | null> {
+    if (!this.handles('moderate')) return null
+    const res = await this.fetch({ point: 'moderate', descriptor: this.descriptor, body: request })
+    if (res.unavailable) return this.onUnavailable()
+    if (res.status >= 200 && res.status < 300) return null // pass
+
+    const body = isRecord(res.body) ? res.body : {}
+    const decision = this.has('may_deny') ? 'deny' : 'no_decision'
+    return this.contribution(decision, String(body.code ?? 'moderation_blocked'), {
+      audit: { modelReason: typeof body.message === 'string' ? body.message : undefined },
+    })
+  }
+
+  /**
+   * `on_error` (spec §8.1): `recover` → a TEXT-ONLY substitute (N5 — no tool_calls),
+   * gated by may_substitute_result; otherwise no recovery (the error surfaces).
+   */
+  async onError(request: ToolCompletionRequest, error: unknown): Promise<LlmContributor | null> {
+    if (!this.handles('on_error')) return null
+    const res = await this.fetch({
+      point: 'on_error',
+      descriptor: this.descriptor,
+      body: { request, error },
+    })
+    if (res.unavailable) return null // can't recover a failed call if the recovery hook is also down.
+
+    const body = isRecord(res.body) ? res.body : {}
+    if (body.action !== 'recover' || !this.has('may_substitute_result')) return null
+
+    const resp = isRecord(body.response) ? body.response : {}
+    // N5: recovery is text-only — a substitute never introduces tool_calls.
+    const substitute: ToolCompletionResponse = {
+      content: typeof resp.content === 'string' ? resp.content : '',
+      tool_calls: null,
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      finish_reason: FinishReason.Stop,
+    }
+    return this.contribution('allow', 'recovered', { phase: 'post', substitute })
+  }
+}
