@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -82,29 +82,39 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const { scrollChatToBottom } = useAgentChatActionsContext()
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
-  const [showDelayedScrollToBottom, setShowDelayedScrollToBottom] = useState(false)
+  const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
+  const [delayedScrollToBottomChatId, setDelayedScrollToBottomChatId] = useState<string | null>(
+    null
+  )
   const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
   const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
   const mcpHealthNow = undefined
 
-  useEffect(() => {
-    setShowScrollToBottom(false)
-  }, [activeChatId])
+  const handleScrollPositionChange = useCallback(
+    (isScrolledAwayFromBottom: boolean) => {
+      setScrollToBottomChatId(isScrolledAwayFromBottom ? activeChatId : null)
+    },
+    [activeChatId]
+  )
+
+  const showScrollToBottom = Boolean(activeChatId) && scrollToBottomChatId === activeChatId
+  const showDelayedScrollToBottom =
+    Boolean(activeChatId) && delayedScrollToBottomChatId === activeChatId
 
   useEffect(() => {
     if (!showScrollToBottom) {
-      setShowDelayedScrollToBottom(false)
+      setDelayedScrollToBottomChatId(null)
       return
     }
 
+    const chatId = activeChatId
     const timeoutId = window.setTimeout(
-      () => setShowDelayedScrollToBottom(true),
+      () => setDelayedScrollToBottomChatId(chatId),
       CHAT_SCROLL_TO_BOTTOM_SHOW_DELAY_MS
     )
     return () => window.clearTimeout(timeoutId)
-  }, [showScrollToBottom])
+  }, [activeChatId, showScrollToBottom])
 
   useClickOutside(chatAgentRouteMenuRef, chatAgentRouteMenuOpen, () =>
     setChatAgentRouteMenuOpen(false)
@@ -522,7 +532,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           )}
           {isChatMode && (
             <div className="chat-thread-container">
-              <ChatThread onScrollPositionChange={setShowScrollToBottom} />
+              <ChatThread onScrollPositionChange={handleScrollPositionChange} />
               {activeChatId && showDelayedScrollToBottom && (
                 <div className="chat-scroll-to-bottom">
                   <IconButton
