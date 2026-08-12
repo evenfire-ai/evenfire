@@ -410,6 +410,95 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
   })
 })
 
+describe('ProgressStepper — connect_required suspension (U5, T5 invariant c)', () => {
+  const connectProgress = () =>
+    makeProgress({
+      status: 'suspended',
+      suspendedInfo: {
+        requestId: 'req-1',
+        displayName: 'monday tool',
+        reason: 'connect_required',
+        mcpServerName: 'monday',
+      },
+    })
+
+  it('renders a "Connect <server>" prompt, NOT the generic approval prompt', () => {
+    render(<ProgressStepper progress={connectProgress()} onConnect={vi.fn()} />)
+    expect(screen.getByText('Connect monday to continue')).toBeDefined()
+    // The generic approval label / buttons must NOT appear for a connect suspension.
+    expect(screen.queryByText(/requires approval/)).toBeNull()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+  })
+
+  it('renders a Connect button that fires onConnect and shows "Connecting..." on click', () => {
+    const onConnect = vi.fn()
+    render(<ProgressStepper progress={connectProgress()} onConnect={onConnect} />)
+    const btn = screen.getByTestId('connect-mcp-btn')
+    expect(btn.textContent).toBe('Connect monday')
+    fireEvent.click(btn)
+    expect(onConnect).toHaveBeenCalledOnce()
+    expect(btn.textContent).toBe('Connecting...')
+  })
+
+  it('does NOT render Approve/Deny even when those callbacks are supplied (connect wins)', () => {
+    render(
+      <ProgressStepper
+        progress={connectProgress()}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onConnect={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('connect-mcp-btn')).toBeDefined()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+  })
+
+  it('a generic approval suspension still renders Approve/Deny (connect branch is scoped)', () => {
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: { requestId: 'req-1', displayName: 'Tool X' },
+        })}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onConnect={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('approval-approve-btn')).toBeDefined()
+    expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
+  })
+
+  it('FIX2: connect_required WITHOUT an actionable onConnect falls back to Approve/Deny (no dead-end)', () => {
+    // Defensive: if mcpServerName were ever empty the caller leaves onConnect
+    // undefined — the block must still be actionable, never a suspended dead-end.
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: {
+            requestId: 'req-1',
+            displayName: 'monday tool',
+            reason: 'connect_required',
+            mcpServerName: '',
+          },
+        })}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        // onConnect intentionally omitted
+      />
+    )
+    // No Connect button (nothing to connect to), but Approve/Deny are present.
+    expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
+    expect(screen.getByTestId('approval-approve-btn')).toBeDefined()
+    expect(screen.getByTestId('approval-deny-btn')).toBeDefined()
+    // Falls back to the generic label, not a half-rendered connect prompt.
+    expect(screen.queryByText(/to continue$/)).toBeNull()
+  })
+})
+
 describe('ProgressStepper — iteration dividers', () => {
   it("shows 'Thinking further...' divider between different iterations after expanding", () => {
     const steps = [

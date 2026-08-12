@@ -1,10 +1,12 @@
 import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import path from 'node:path'
 import { AppService } from './appService.js'
+import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
+import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -32,6 +34,15 @@ const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
 const MAX_PENDING_EVENFIRE_URLS = 20
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+// U5: deliver mcp-oauth completions to the renderer, or queue them when the
+// renderer is not yet ready (cold start), draining after `app:rendererReady`.
+const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindowRendererReady) {
+    mainWindow.webContents.send('rpc:mcpOauthCompleted', completion)
+    return true
+  }
+  return false
+})
 let mainWindowLifecycleReady = false
 let mainWindowRendererReady = false
 let appWindowVisibilityWired = false
@@ -145,6 +156,11 @@ ipcMain.handle('app:rendererReady', event => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return
   mainWindowRendererReady = true
   drainPendingEvenfireUrls()
+  // U5: flush mcp-oauth completions that arrived before the renderer installed
+  // its listener (cold start). The onMcpOauthCompleted listener is registered by
+  // useAppController's effect, which runs before App's rendererReady effect, so
+  // it is guaranteed installed by the time this handshake fires.
+  mcpOauthCompletionQueue.drain()
 })
 
 ipcMain.handle('sandboxUi:listPendingDeepLinks', event => {
@@ -295,22 +311,33 @@ function drainPendingEvenfireUrls(): void {
  * the OS-protocol-handler level.
  */
 function handleClerumUrl(rawUrl: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(rawUrl)
-  } catch {
+  // U5 (mcp-oauth reactive consent): the routing decision — which producer this
+  // deep link came from — lives in the pure, unit-tested `routeClerumOauthCompleted`.
+  // The sandbox-ui path (source absent / !== 'mcp') is byte-identical to before.
+  const route = routeClerumOauthCompleted(rawUrl, CLERUM_PROTOCOL)
+  if (route.kind === 'ignore') return
+
+  if (route.kind === 'mcp') {
+    // An mcp-server OAuth completion resumes the suspended conversation: forward
+    // `mcpServerName` (the correlation key, self-describing on the deep-link) to
+    // the renderer, which matches it against its suspended entries and re-fires
+    // the approval/resume RPC. It does NOT dispatch to the sandbox-ui embed.
+    // Queued when the renderer is not yet ready (cold start) so it is never
+    // swallowed before `onMcpOauthCompleted` is installed.
+    mcpOauthCompletionQueue.submit({
+      mcpServerName: route.mcpServerName,
+      provider: route.provider,
+    })
+    focusMainWindow()
     return
   }
-  if (parsed.protocol !== `${CLERUM_PROTOCOL}:`) return
-  if (parsed.hostname.toLowerCase() !== 'oauth-completed') return
-
-  const oauthClientId = parsed.searchParams.get('clientId') || ''
-  const provider = parsed.searchParams.get('provider') || ''
-  if (!oauthClientId) return
 
   void (async () => {
     const driver = await import('./sandboxUiDriver.js')
-    driver.dispatchSandboxUiOauthCompleted({ oauthClientId, provider })
+    driver.dispatchSandboxUiOauthCompleted({
+      oauthClientId: route.oauthClientId,
+      provider: route.provider,
+    })
   })()
 
   focusMainWindow()

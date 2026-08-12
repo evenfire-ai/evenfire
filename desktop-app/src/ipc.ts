@@ -966,6 +966,19 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
+  // U5 (mcp-oauth reactive consent): the renderer's "Connect <server>" button.
+  // Fetches a fresh provider authorize-URL (host-bound to the suspended
+  // conversation's hostRef) and opens it in the OS browser. The deep-link return
+  // (`clerum://oauth-completed?…&source=mcp`) is routed by main.ts back to the
+  // renderer to resume the suspended task.
+  ipcMain.handle('rpc:connectMcpServer', async (event, { mcpServerName, hostRef, contextId }) => {
+    assertTrustedSender(event)
+    const server = sanitizeString(mcpServerName)
+    const targetHostRef = sanitizeString(hostRef)
+    const ctx = sanitizeString(contextId) || undefined
+    return service.requestMcpOauthAuthorize(server, targetHostRef, ctx)
+  })
+
   ipcMain.handle('rpc:listServers', async (event, { hostRefs }) => {
     assertTrustedSender(event)
     return service.listAccessibleMcpServers(hostRefs)
