@@ -50,7 +50,7 @@ describe('catalog producer registry', () => {
     expect([...catalogProducers.keys()]).toEqual(CATALOG_FAMILIES)
   })
 
-  it('keyset-bounds every source arm before its final union and never uses offsets', () => {
+  it('keyset-bounds every raw source arm before its final union and never uses offsets', () => {
     const expectedArmCounts: Record<(typeof CATALOG_FAMILIES)[number], number> = {
       user: 1,
       team: 1,
@@ -65,26 +65,12 @@ describe('catalog producer registry', () => {
       shared_filesystem: 2,
       sandbox_app: 2,
     }
-    const expectedDistinctArmCounts: Record<(typeof CATALOG_FAMILIES)[number], number> = {
-      user: 0,
-      team: 0,
-      host: 1,
-      context: 1,
-      mcp_server: 4,
-      workflow_recipe: 1,
-      workflow_run: 0,
-      workflow_approval: 0,
-      notification: 0,
-      gfs_resource: 0,
-      shared_filesystem: 2,
-      sandbox_app: 0,
-    }
     for (const family of CATALOG_FAMILIES) {
       const sql = CATALOG_KEY_SQL[family]
       expect(sql).not.toMatch(/\bOFFSET\b/i)
       expect(sql.match(/AS MATERIALIZED/g)).toHaveLength(expectedArmCounts[family])
       expect(sql.match(/LIMIT \$4/g)).toHaveLength(expectedArmCounts[family] + 1)
-      expect(sql.match(/SELECT DISTINCT ON/g) ?? []).toHaveLength(expectedDistinctArmCounts[family])
+      expect(sql).not.toMatch(/SELECT DISTINCT ON/i)
     }
   })
 })
