@@ -40,6 +40,62 @@ export function getMcpServerPrefix(toolName: string): string | null {
   return idx >= 0 ? toolName.substring(0, idx) : null
 }
 
+// ─── U5 · Reactive OAuth-consent suspension ──────────────────────────────────
+
+/** Typed `connect_required` marker carried on a tool result's metadata. */
+export interface ConnectRequiredMarker {
+  mcpServerName: string
+  provider?: string
+}
+
+/**
+ * Read the typed `connect_required` marker off a tool result's `metadata`
+ * (set by `toolRegistryAdapter` when `manager.callTool` surfaced a 401 on an
+ * oauth mcp-server). Returns null for any other result — a plain error, a 403
+ * (terminal, never marked), or a non-oauth tool. Defensive against a malformed
+ * marker (missing mcpServerName → null) so a suspension is never raised without
+ * a server to connect.
+ */
+export function extractConnectRequiredMarker(
+  metadata: Record<string, unknown> | undefined
+): ConnectRequiredMarker | null {
+  const raw = metadata?.connect_required
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const marker = raw as Record<string, unknown>
+  const mcpServerName = typeof marker.mcpServerName === 'string' ? marker.mcpServerName : undefined
+  if (!mcpServerName) return null
+  const provider = typeof marker.provider === 'string' ? marker.provider : undefined
+  return { mcpServerName, provider }
+}
+
+/**
+ * Build a durable `connect_required` suspension for a tool call whose live
+ * execution surfaced a 401 on an oauth mcp-server (spec §U5). Reuses the SAME
+ * `PendingApproval` machinery as the HITL gate; `reason='connect_required'` +
+ * `mcpServerName`/`provider` steer the desktop connect UI and are persisted so a
+ * cold restart never degrades this into a generic approval. The caller fills in
+ * `context_snapshot`/`completed_results`/`intent_summary` so the resume path
+ * re-executes the SAME tool once the user connects.
+ */
+export function buildConnectRequiredApproval(
+  call: { id: string; name: string; arguments: Record<string, unknown> },
+  marker: ConnectRequiredMarker
+): PendingApproval {
+  return {
+    request_id: randomUUID(),
+    tool_name: call.name,
+    tool_kind: 'mcp_server_tool',
+    tool_source_ref: getMcpServerPrefix(call.name),
+    parameters: call.arguments,
+    description: `Connect ${marker.mcpServerName} to continue`,
+    tool_call_id: call.id,
+    context_snapshot: [],
+    reason: 'connect_required',
+    mcpServerName: marker.mcpServerName,
+    provider: marker.provider,
+  }
+}
+
 /**
  * Cron×stateless approval prompt (product decision): creating or enabling a
  * schedule on a stateless host keeps the pod running indefinitely (an active

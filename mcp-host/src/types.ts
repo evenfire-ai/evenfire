@@ -212,4 +212,19 @@ export interface ToolCallResult {
   toolName: string
   result: unknown
   isError: boolean
+  /**
+   * U5 reactive-consent marker. Present iff `manager.callTool` caught an
+   * `McpAuthError` with `status===401` on a server whose `auth.type==='oauth'`
+   * (both per-user and shared grantScope='context'): a live tool call surfaced a
+   * real 401 after the client's single forced-refresh retry, so the user must
+   * (re)connect. NEVER set for 403 (insufficient scope — terminal) nor for
+   * static/non-oauth servers. `toolRegistryAdapter` maps it to
+   * `metadata.connect_required`, which the tool-use loop turns into a durable
+   * `connect_required` suspension (spec §U5). Kept as a typed field so the marker
+   * is NOT flattened into an opaque error.
+   */
+  connectRequired?: {
+    mcpServerName: string
+    provider?: string
+  }
 }

@@ -385,11 +385,13 @@ export function prepareStatements(db: Database): PreparedStatements {
       INSERT INTO pending_approvals (
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
-        intent_summary, source_message, registered_at, expires_at, trace_context
+        intent_summary, source_message, registered_at, expires_at, trace_context,
+        reason, mcp_server_name, provider
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
-        @intent_summary, @source_message, @registered_at, @expires_at, @trace_context
+        @intent_summary, @source_message, @registered_at, @expires_at, @trace_context,
+        @reason, @mcp_server_name, @provider
       )
       ON CONFLICT(request_id) DO UPDATE SET
         task_id = excluded.task_id,

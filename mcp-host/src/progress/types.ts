@@ -101,7 +101,13 @@ export interface SuspendedEvent {
   // endpoint still exposes raw tool_name in `pendingApprovals[]` — separate
   // channel, tracked as a follow-up.
   displayName: string
-  reason: 'approval_required'
+  // U5 — 'connect_required' is a reactive OAuth-consent suspension; the default
+  // HITL gate stays 'approval_required'.
+  reason: 'approval_required' | 'connect_required'
+  /** Set iff reason==='connect_required' — the oauth mcp-server to connect. */
+  mcpServerName?: string
+  /** Set iff reason==='connect_required' — the OAuth provider for the connect UI. */
+  provider?: string
 }
 
 /**

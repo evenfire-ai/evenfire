@@ -127,6 +127,18 @@ class McpToolAdapter implements Tool {
         duration_ms: Date.now() - startTime,
         is_error: result.isError,
         attachments: attachments.length > 0 ? attachments : undefined,
+        // U5 — map the typed reactive-consent marker to `metadata.connect_required`
+        // on the SUCCESS path (the manager never lets the McpAuthError throw reach
+        // the catch below — that route would be dead code). The tool-use loop and
+        // resume path read this to raise a durable `connect_required` suspension.
+        metadata: result.connectRequired
+          ? {
+              connect_required: {
+                mcpServerName: result.connectRequired.mcpServerName,
+                provider: result.connectRequired.provider,
+              },
+            }
+          : undefined,
       }
     } catch (err) {
       return {

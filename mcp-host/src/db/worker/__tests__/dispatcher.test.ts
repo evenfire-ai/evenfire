@@ -631,6 +631,9 @@ describe('dbWorker dispatcher', () => {
       registered_at: Date.now() / 1000,
       expires_at: Date.now() / 1000 + 3600,
       trace_context: null,
+      reason: null,
+      mcp_server_name: null,
+      provider: null,
     }
     await dispatch({ kind: 'insert_pending_approval', payload: approvalRow }, deps)
     const rows = (await dispatch({ kind: 'load_all_pending_approvals' }, deps)) as Array<{
@@ -673,6 +676,9 @@ describe('dbWorker dispatcher', () => {
             registered_at: registeredAt,
             expires_at: 100,
             trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+            provider: null,
           },
         },
         deps
@@ -725,6 +731,9 @@ describe('dbWorker dispatcher', () => {
             registered_at: now / 1000,
             expires_at: now / 1000 + 3600,
             trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+            provider: null,
           },
         },
         deps

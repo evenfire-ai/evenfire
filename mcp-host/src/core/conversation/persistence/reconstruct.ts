@@ -131,6 +131,12 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     completed_results: deserializeCompletedResults(row.completed_results),
     intent_summary: row.intent_summary ?? undefined,
     traceContext: parseTraceContext(row.trace_context),
+    // U5 — rehydrate the connect_required discriminator so a cold restart does
+    // NOT degrade a reactive-consent suspension into a generic approval. Only the
+    // two known reasons survive; any other/legacy value reads as the default gate.
+    reason: row.reason === 'connect_required' ? 'connect_required' : undefined,
+    mcpServerName: row.mcp_server_name ?? undefined,
+    provider: row.provider ?? undefined,
   }
 }
 
