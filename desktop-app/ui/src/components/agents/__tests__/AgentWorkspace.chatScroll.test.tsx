@@ -289,4 +289,71 @@ describe('AgentWorkspace chat scroll control', () => {
 
     expect(screen.queryByRole('button', { name: 'Scroll to latest messages' })).toBeNull()
   })
+
+  it('cancels before the delay when returning to latest and scrolls the rendered thread on click', async () => {
+    vi.useFakeTimers()
+    const view = render(<WorkspaceHarness activeChatId="chat-a" />)
+    const { thread, getScrollTop, setScrollTop } = setScrollableThread()
+
+    fireEvent.scroll(thread)
+    setScrollTop(600)
+    fireEvent.scroll(thread)
+    await advance(300)
+    expect(screen.queryByRole('button', { name: 'Scroll to latest messages' })).toBeNull()
+
+    setScrollTop(0)
+    fireEvent.scroll(thread)
+    await advance(250)
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll to latest messages' }))
+    await advance(100)
+
+    expect(getScrollTop()).toBe(800)
+    view.unmount()
+  })
+
+  it('opens both cached and hydrated provider transcripts at their latest rendered message', async () => {
+    vi.useFakeTimers()
+    const cachedView = render(<WorkspaceHarness activeChatId="cached-chat" />)
+    const cachedThread = setScrollableThread()
+    await advance(100)
+    expect(cachedThread.getScrollTop()).toBe(800)
+    cachedView.unmount()
+
+    const remoteView = render(
+      <WorkspaceHarness activeChatId="remote-chat" messages={[]} chatMessagesLoading />
+    )
+    const remoteThread = setScrollableThread()
+    remoteThread.setScrollTop(0)
+    remoteView.rerender(
+      <WorkspaceHarness
+        activeChatId="remote-chat"
+        messages={baseMessages}
+        chatMessagesLoading={false}
+      />
+    )
+    await advance(100)
+
+    expect(remoteThread.getScrollTop()).toBe(800)
+  })
+
+  it('keeps a reader at older history when provider messages append', async () => {
+    vi.useFakeTimers()
+    const view = render(<WorkspaceHarness activeChatId="chat-a" />)
+    const thread = setScrollableThread()
+    await advance(200)
+    thread.setScrollTop(0)
+
+    view.rerender(
+      <WorkspaceHarness
+        activeChatId="chat-a"
+        messages={[
+          ...baseMessages,
+          { id: 'new-assistant', role: 'assistant', content: 'New reply', timestamp: 3 },
+        ]}
+      />
+    )
+    await advance(100)
+
+    expect(thread.getScrollTop()).toBe(0)
+  })
 })
