@@ -363,7 +363,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     },
   ]),
   sandbox_app: boundedKeyUnionSql([
-    `SELECT edge.target_id AS logical_id
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM operational_resource_relationships edge
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3
@@ -385,7 +386,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
            WHERE uwt.user_id = $1
              AND uwt.recipe_namespace || '/' || uwt.recipe_name = edge.source_id
         )`,
-    `SELECT edge.target_id AS logical_id
+      duplicateCapable: true,
+    },
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM operational_resource_relationships edge
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3
@@ -408,5 +412,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
            WHERE tm.user_id = $1 AND tm.status = 'active'
              AND twt.recipe_namespace || '/' || twt.recipe_name = edge.source_id
         )`,
+      duplicateCapable: true,
+    },
   ]),
 })
