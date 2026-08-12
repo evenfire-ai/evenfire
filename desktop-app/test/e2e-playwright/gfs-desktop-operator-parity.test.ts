@@ -878,31 +878,35 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       )
       .toBe(true)
 
+    // Freeze the denied window before reactivation. The same journey later
+    // performs a valid create after reactivation; querying the whole suffix
+    // would incorrectly classify that allowed mutation as part of the denied
+    // request window.
+    let deniedRows: ReturnType<typeof operatorJourney.auditRowsAfter> = []
     await expect
       .poll(
-        () =>
-          operatorJourney
-            .auditRowsAfter(operatorJourney.deniedAuditFloor, link.desktopUserId)
-            .some(
-              row =>
-                row.subject === link.desktopUserId &&
-                row.actorOnBehalfOf === null &&
-                row.desktopUserId === link.desktopUserId &&
-                row.authoritySource === 'user-session' &&
-                row.op === 'read' &&
-                row.outcome === 'deny' &&
-                row.recordType === 'authorization_decision' &&
-                row.mutationOutcome === null &&
-                UUID_RE.test(row.requestId ?? '')
-            ),
+        () => {
+          deniedRows = operatorJourney.auditRowsAfter(
+            operatorJourney.deniedAuditFloor,
+            link.desktopUserId
+          )
+          return deniedRows.some(
+            row =>
+              row.subject === link.desktopUserId &&
+              row.actorOnBehalfOf === null &&
+              row.desktopUserId === link.desktopUserId &&
+              row.authoritySource === 'user-session' &&
+              row.op === 'read' &&
+              row.outcome === 'deny' &&
+              row.recordType === 'authorization_decision' &&
+              row.mutationOutcome === null &&
+              UUID_RE.test(row.requestId ?? '')
+          )
+        },
         { timeout: 30_000, intervals: [250, 500, 1_000] }
       )
       .toBe(true)
 
-    const deniedRows = operatorJourney.auditRowsAfter(
-      operatorJourney.deniedAuditFloor,
-      link.desktopUserId
-    )
     expect(
       deniedRows.filter(row => row.requestId && row.op === 'create' && row.mutationOutcome)
     ).toHaveLength(0)
