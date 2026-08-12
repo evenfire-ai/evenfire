@@ -293,48 +293,12 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       orderBy: 'cursor_id',
     },
     {
-      sql: `SELECT candidate.resource_id::text AS logical_id,
-                  candidate.resource_id AS cursor_id
-       FROM team_members tm
-       CROSS JOIN LATERAL (
-         SELECT g.resource_id, g.drive
-           FROM gfs_grants g
-          WHERE g.subject_type = 'team' AND g.subject_id = tm.team_id::text
-            AND g.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
-          ORDER BY g.resource_id
-          LIMIT $4
-       ) candidate
-       JOIN gfs_resources resource
-         ON resource.resource_id = candidate.resource_id
-        AND resource.drive = candidate.drive AND resource.deleted_at IS NULL
-      WHERE tm.user_id = $1::uuid AND tm.status = 'active'`,
-      orderBy: 'cursor_id',
-    },
-    {
       sql: `SELECT share.resource_id::text AS logical_id, share.resource_id AS cursor_id
        FROM gfs_shares share
        JOIN gfs_resources resource
          ON resource.resource_id = share.resource_id AND resource.deleted_at IS NULL
       WHERE share.subject_type = 'user' AND share.subject_id = $1::text
         AND share.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
-      orderBy: 'cursor_id',
-    },
-    {
-      sql: `SELECT candidate.resource_id::text AS logical_id,
-                  candidate.resource_id AS cursor_id
-       FROM team_members tm
-       CROSS JOIN LATERAL (
-         SELECT share.resource_id, share.drive
-           FROM gfs_shares share
-          WHERE share.subject_type = 'team' AND share.subject_id = tm.team_id::text
-            AND share.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')
-          ORDER BY share.resource_id
-          LIMIT $4
-       ) candidate
-       JOIN gfs_resources resource
-         ON resource.resource_id = candidate.resource_id
-        AND resource.drive = candidate.drive AND resource.deleted_at IS NULL
-      WHERE tm.user_id = $1::uuid AND tm.status = 'active'`,
       orderBy: 'cursor_id',
     },
   ]),
