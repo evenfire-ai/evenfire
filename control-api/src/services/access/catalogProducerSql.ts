@@ -41,7 +41,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
       orderBy: 'source_key',
-      distinctCanonicalBy: 'source_key',
+      duplicateCapable: true,
     },
   ]),
   context: boundedKeyUnionSql([
@@ -52,7 +52,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
                AND resource.logical_id = $6::text || '/' || uc.context_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE uc.user_id = $1 AND uc.context_id > $7`,
+      WHERE uc.user_id = $1 AND uc.context_id > $7`,
       orderBy: 'source_key',
     },
     {
@@ -65,7 +65,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
       orderBy: 'source_key',
-      distinctCanonicalBy: 'source_key',
+      duplicateCapable: true,
     },
   ]),
   mcp_server: boundedKeyUnionSql([
@@ -87,7 +87,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
     {
       sql: `SELECT edge.target_id AS logical_id
@@ -108,7 +108,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
     {
       sql: `SELECT mcp_edge.target_id AS logical_id
@@ -138,7 +138,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE ua.user_id = $1 AND mcp_edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
     {
       sql: `SELECT mcp_edge.target_id AS logical_id
@@ -169,7 +169,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND mcp_edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
   ]),
   workflow_recipe: boundedKeyUnionSql([
@@ -180,7 +180,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'workflow_recipe'
                AND resource.logical_id = uwt.recipe_namespace || '/' || uwt.recipe_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE uwt.user_id = $1
+      WHERE uwt.user_id = $1
                AND (uwt.recipe_namespace || '/' || uwt.recipe_name) > $2`,
       orderBy: 'logical_id',
     },
@@ -195,7 +195,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       WHERE tm.user_id = $1 AND tm.status = 'active'
                AND (twt.recipe_namespace || '/' || twt.recipe_name) > $2`,
       orderBy: 'logical_id',
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
   ]),
   workflow_run: boundedKeyUnionSql([
@@ -337,7 +337,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
     {
       sql: `SELECT edge.target_id AS logical_id
@@ -359,7 +359,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
-      distinctCanonicalBy: 'logical_id',
+      duplicateCapable: true,
     },
   ]),
   sandbox_app: boundedKeyUnionSql([
