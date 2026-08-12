@@ -10,6 +10,8 @@ import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { HostApprovalSection } from '../../../components/HostApprovalSection'
 import { HostEnvTable } from '../../../components/HostEnvTable'
+import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection'
+import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
@@ -52,6 +54,7 @@ const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
   approvals: 'Per-tool approval',
+  guardrails: 'Guardrails',
   contexts: 'Context',
   env: 'Env vars',
   users: 'Member access',
@@ -63,6 +66,7 @@ const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
   approvals: 'approvals',
+  guardrails: 'guardrails',
   contexts: 'contexts',
   env: 'env-vars',
   users: 'member-access',
@@ -149,6 +153,7 @@ export default function HostDetailsPage() {
   const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
     undefined
   )
+  const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   const [statelessDraft, setStatelessDraft] = useState(false)
   const [savedStateless, setSavedStateless] = useState(false)
   const [lifecycleState, setLifecycleState] = useState('')
@@ -318,6 +323,10 @@ export default function HostDetailsPage() {
       }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
+      const rawGuardrails = spec.guardrails as HostGuardrails | undefined
+      setGuardrailsData(
+        rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
+      )
       const specStateless = spec.lifecycle?.stateless === true
       setSavedStateless(specStateless)
       setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
@@ -775,6 +784,51 @@ export default function HostDetailsPage() {
     [routeName]
   )
 
+  // Persist Host.spec.guardrails (hook references + built-ins). Owns only the
+  // guardrails object — every other spec field is preserved via the
+  // `...currentHost.spec` spread (full-replace semantics). Carries the
+  // form-load resourceVersion so a concurrent change 409s instead of being
+  // overwritten (AP-6), surfacing the same reload guidance as the other saves.
+  const persistGuardrails = useCallback(
+    async (next: HostGuardrails) => {
+      setBusy(true)
+      setError('')
+      try {
+        const currentHost = await getHost(routeName)
+        const nextSpec = {
+          ...currentHost.spec,
+          guardrails: next,
+        }
+        const formResourceVersion = formResourceVersionRef.current
+        await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+          ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+          spec: nextSpec,
+        })
+        // Reload guardrails/server state while preserving any drafts left open
+        // in the Overview or Model tabs.
+        await loadData('none')
+        showToast('Guardrails saved.', { tone: 'success' })
+      } catch (e) {
+        const status = (e as { status?: number } | null)?.status
+        const code = (e as { code?: string } | null)?.code
+        if (status === 409 && code === 'conflict') {
+          setError(
+            "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
+          )
+        } else {
+          setError(e instanceof Error ? e.message : 'Failed to save guardrails')
+        }
+        // Re-throw so HostGuardrailsSection stays in edit mode and keeps the
+        // operator's draft alongside the error/conflict banner.
+        throw e
+      } finally {
+        setBusy(false)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [routeName]
+  )
+
   async function grantUserAccess() {
     if (selectedUserIdsToGrant.length === 0 || hasPendingRename) return
     setBusy(true)
@@ -941,7 +995,9 @@ export default function HostDetailsPage() {
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
-        activeTab === 'approvals' || (activeTab === 'model' && editingModel)
+        activeTab === 'approvals' ||
+        activeTab === 'guardrails' ||
+        (activeTab === 'model' && editingModel)
           ? 'cu-agent-detail-card'
           : undefined
       }
@@ -1255,6 +1311,15 @@ export default function HostDetailsPage() {
             busy={busy}
             canWrite={true /* TODO: wire to actual host:write check if/when per-field RBAC lands */}
             defaultEditing
+          />
+        )}
+
+        {activeTab === 'guardrails' && !initialLoading && (
+          <HostGuardrailsSection
+            initialGuardrails={guardrailsData}
+            onSave={persistGuardrails}
+            busy={busy}
+            canWrite={true /* TODO: wire to actual host:write check if/when per-field RBAC lands */}
           />
         )}
 

@@ -61,6 +61,9 @@ export const CONTROL_ROUTES = {
     edit: (name: string) => `/external-channels/${segment(name)}/edit`,
   },
   globalFileSystem: '/global-file-system',
+  guardrails: {
+    root: '/guardrails',
+  },
   llmModels: {
     root: '/llm-models',
     discovery: '/llm-models/discovery',

@@ -832,6 +832,27 @@ export type McpServerResource = {
   spec?: AnyRecord
   status?: { conditions?: McpServerCondition[] }
 }
+
+// Installed guardrail hook CRs (LlmHook). Reconciler-written status follows the
+// same conditions[] convention as McpServer, plus hook-specific fields.
+export type LlmHookCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+export type LlmHookStatus = {
+  conditions?: LlmHookCondition[]
+  observedDigest?: string
+  readyReplicas?: number
+  lastReconciled?: string
+}
+export type LlmHookResource = {
+  metadata?: Metadata
+  spec?: AnyRecord
+  status?: LlmHookStatus
+}
 export type ContextUser = {
   id: string
   email: string
@@ -1032,6 +1053,20 @@ export async function deleteContext(name: string) {
 
 export async function getMcpServers() {
   return apiGet('/api/v1/admin/mcp-servers') as Promise<{ items?: McpServerResource[] }>
+}
+
+// ── Installed guardrail hooks (LlmHook CRDs) — read + uninstall ─────────────
+// Creation is via the org-scoped registry install-hook saga, not a raw write.
+export async function getLlmHooks() {
+  return apiGet('/api/v1/admin/llm-hooks') as Promise<{ items?: LlmHookResource[] }>
+}
+
+export async function getLlmHook(name: string) {
+  return apiGet(`/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`) as Promise<LlmHookResource>
+}
+
+export async function deleteLlmHook(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`)
 }
 
 // ── SharedFileSystem CRD admin + per-SFS file browsing ──────────────────

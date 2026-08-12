@@ -8,6 +8,7 @@ export const HOST_TABS = [
   'users',
   'teams',
   'approvals',
+  'guardrails',
   'env',
 ] as const
 

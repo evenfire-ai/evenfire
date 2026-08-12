@@ -16,6 +16,7 @@ export default async function HostTabPage({ params }: HostTabPageProps) {
     'env-vars',
     'member-access',
     'team-access',
+    'guardrails',
   ]
   if (!tabs.includes(tab)) notFound()
 
