@@ -477,11 +477,13 @@ h3 {
   padding: var(--space-1-5);
   display: grid;
   gap: var(--space-2-5);
+  align-content: start;
 }
 
 .notification-menu-section {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-section + .notification-menu-section {
@@ -557,6 +559,7 @@ h3 {
 .notification-menu-list {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-item {
