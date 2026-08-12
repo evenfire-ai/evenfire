@@ -8,6 +8,7 @@ import {
   catalogKey,
 } from '../src/services/access/catalogContracts.js'
 import { CATALOG_KEY_SQL } from '../src/services/access/catalogProducerSql.js'
+import { listBoundedProducerKeys } from '../src/services/access/catalogProducerSupport.js'
 import {
   catalogProducers,
   requireCatalogProducer,
@@ -69,7 +70,7 @@ describe('catalog producer registry', () => {
       const sql = CATALOG_KEY_SQL[family]
       expect(sql).not.toMatch(/\bOFFSET\b/i)
       expect(sql.match(/AS MATERIALIZED/g)).toHaveLength(expectedArmCounts[family])
-      expect(sql.match(/LIMIT \$4/g)).toHaveLength(expectedArmCounts[family] + 1)
+      expect(sql.match(/LIMIT \$4/g)).toHaveLength(expectedArmCounts[family])
       expect(sql).not.toMatch(/SELECT DISTINCT ON/i)
     }
   })
@@ -80,13 +81,16 @@ describe('catalog producer protocol', () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
         {
+          source_arm: 'source_0',
           logical_id: '20000000-0000-4000-8000-000000000002',
           source_saturated: false,
         },
         {
+          source_arm: 'source_0',
           logical_id: '30000000-0000-4000-8000-000000000003',
           source_saturated: false,
         },
+        { source_arm: 'source_0', logical_id: null, source_saturated: false, source_marker: true },
       ],
       rowCount: 2,
     })
@@ -109,14 +113,16 @@ describe('catalog producer protocol', () => {
       expect.any(String),
       expect.any(String),
       '',
+      '{}',
+      null,
     ])
   })
 
   it('rejects duplicate or non-increasing producer keys', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
-        { logical_id: 'z', source_saturated: false },
-        { logical_id: 'z', source_saturated: false },
+        { source_arm: 'source_0', logical_id: '', source_saturated: false },
+        { source_arm: 'source_0', logical_id: null, source_saturated: false, source_marker: true },
       ],
       rowCount: 2,
     })
@@ -127,6 +133,57 @@ describe('catalog producer protocol', () => {
         2
       )
     ).rejects.toMatchObject({ code: 'keys_not_strictly_ordered' })
+  })
+
+  it('keeps raw continuation private to its contributing source arm', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { source_arm: 'source_0', logical_id: 'x', source_saturated: false },
+          { source_arm: 'source_0', logical_id: 'y', source_saturated: false },
+          { source_arm: 'source_0', logical_id: 'z', source_saturated: false },
+          {
+            source_arm: 'source_0',
+            logical_id: null,
+            source_saturated: false,
+            source_marker: true,
+          },
+          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
+          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
+          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
+          { source_arm: 'source_1', logical_id: null, source_saturated: true, source_marker: true },
+        ],
+        rowCount: 8,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { source_arm: 'source_1', logical_id: 'b', source_saturated: false },
+          { source_arm: 'source_1', logical_id: 'c', source_saturated: false },
+          {
+            source_arm: 'source_1',
+            logical_id: null,
+            source_saturated: false,
+            source_marker: true,
+          },
+        ],
+        rowCount: 3,
+      })
+
+    const result = await listBoundedProducerKeys({
+      context: context(query),
+      family: 'host',
+      requiredOperationalSources: [],
+      continuation: { afterKey: null, exhausted: false },
+      take: 2,
+      sql: 'SELECT 1',
+    })
+
+    expect(result.candidates.map(candidate => candidate.key[2])).toEqual(['a', 'b', 'c'])
+    expect(result.continuation.afterKey?.[2]).toBe('c')
+    expect(query).toHaveBeenCalledTimes(2)
+    expect(query.mock.calls[1]?.[1]?.[4]).toBe(JSON.stringify({ source_0: '', source_1: 'a' }))
+    expect(query.mock.calls[1]?.[1]?.[5]).toBe(JSON.stringify({ source_1: true }))
   })
 
   it('reports an operational source gap as partial without querying authority', async () => {

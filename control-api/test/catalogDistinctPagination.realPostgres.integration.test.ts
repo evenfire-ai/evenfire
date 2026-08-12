@@ -210,14 +210,26 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
     }
     const explained = await databasePool.query(
       `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${CATALOG_KEY_SQL[input.family]}`,
-      [input.userId, '', environmentId, 3, config.hostsNamespace, config.contextsNamespace, '']
+      [
+        input.userId,
+        '',
+        environmentId,
+        3,
+        config.hostsNamespace,
+        config.contextsNamespace,
+        '',
+        '{}',
+        null,
+      ]
     )
     const envelope = (explained.rows[0] as Record<string, unknown>)['QUERY PLAN']
     expect(Array.isArray(envelope)).toBe(true)
     const root = (envelope as Array<Record<string, unknown>>)[0]?.Plan as
       | (Record<string, unknown> & { Plans?: unknown[] })
       | undefined
-    expect(Number(root?.['Actual Rows'] ?? 0)).toBeLessThanOrEqual(3)
+    const armCount = (CATALOG_KEY_SQL[input.family].match(/AS MATERIALIZED/g) ?? []).length
+    // Each requested arm contributes at most take + 1 raw rows plus its marker.
+    expect(Number(root?.['Actual Rows'] ?? 0)).toBeLessThanOrEqual(armCount * 4)
     const pending: Array<Record<string, unknown> & { Plans?: unknown[] }> = root ? [root] : []
     let sawLimit = false
     while (pending.length > 0) {
@@ -297,6 +309,20 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
   })
 
   it('refills bounded duplicate team host paths without hiding later canonical IDs', async () => {
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'x'), ($1, 'y'), ($1, 'z')`,
+      [userId]
+    )
+    await databasePool.query(
+      `INSERT INTO operational_resource_index(
+         environment_id, resource_type, logical_id, source_family, source_generation,
+         provider_uid, provider_resource_version, display_name, enabled, content_bytes
+       ) VALUES
+         ($1, 'host', $2 || '/x', 'host', 1, 'host-x', '1', 'Host X', TRUE, 64),
+         ($1, 'host', $2 || '/y', 'host', 1, 'host-y', '1', 'Host Y', TRUE, 64),
+         ($1, 'host', $2 || '/z', 'host', 1, 'host-z', '1', 'Host Z', TRUE, 64)`,
+      [environmentId, config.hostsNamespace]
+    )
     const budget = AccessExecutionBudget.create('catalog')
     let hostKeyStatements = 0
     const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
@@ -754,7 +780,17 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
 
     const explained = await databasePool.query(
       `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) ${CATALOG_KEY_SQL.gfs_resource}`,
-      [actor.userId, '', environmentId, 3, config.hostsNamespace, config.contextsNamespace, '']
+      [
+        actor.userId,
+        '',
+        environmentId,
+        3,
+        config.hostsNamespace,
+        config.contextsNamespace,
+        '',
+        '{}',
+        null,
+      ]
     )
     const envelope = (explained.rows[0] as Record<string, unknown>)['QUERY PLAN'] as Array<{
       Plan: ExplainNode
