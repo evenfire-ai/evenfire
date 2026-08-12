@@ -124,7 +124,7 @@ export async function apiSend(
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) handleUnauthorized()
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
       detail = String(parsed.message || parsed.error || text)
@@ -165,7 +165,7 @@ export async function loginWithPassword(
   })
   if (!res.ok) {
     const text = await res.text()
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
       detail = String(parsed.message || parsed.error || text)
