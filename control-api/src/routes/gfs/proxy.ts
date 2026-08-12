@@ -35,6 +35,15 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(401).json({ error: 'unauthorized' })
         return
       }
+      const authGeneration = req.adminAuth?.sessionVersion
+      if (
+        typeof authGeneration !== 'number' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
 
       const scope =
         req.method === 'GET' || req.method === 'HEAD'
@@ -56,6 +65,7 @@ export function registerGfsProxyRoute(router: Router): void {
         subject,
         drive: DEFAULT_DRIVE,
         scopes: [scope],
+        authGeneration,
         principalType: 'control-admin',
       })
       const headers: Record<string, string> = {}

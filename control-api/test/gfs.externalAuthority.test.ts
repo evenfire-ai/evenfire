@@ -30,6 +30,10 @@ const LINK = {
   desktopUserId: DESKTOP_USER_ID,
   controlAdminId: CONTROL_ADMIN_ID,
   source: 'initial_setup' as const,
+  lineageId: '33333333-3333-4333-8333-333333333333',
+  generation: 1,
+  desktopUserGeneration: 1,
+  controlAdminGeneration: 1,
   createdAt: new Date('2026-08-10T00:00:00.000Z'),
 }
 
@@ -89,6 +93,11 @@ describe('resolveExternalGfsAuthority', () => {
       controlAdminId: CONTROL_ADMIN_ID,
       tokenSubject: CONTROL_ADMIN_ID,
       authoritySource: 'linked-admin',
+      authGeneration: 1,
+      linkLineageId: LINK.lineageId,
+      linkGeneration: 1,
+      desktopUserGeneration: 1,
+      controlAdminGeneration: 1,
     })
   })
 

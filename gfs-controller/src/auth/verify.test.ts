@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
 import jwt from "jsonwebtoken";
+import { generateKeyPairSync } from "node:crypto";
 import { KeyConfigError, loadVerificationKey } from "./keys";
 import { GfsAuthError, verifyGfsToken } from "./verify";
 
@@ -20,7 +20,13 @@ const AUD = "gfs-controller";
 
 function sign(
   payload: Record<string, unknown>,
-  opts: { keyid?: string; audience?: string; issuer?: string; expiresIn?: number; signer?: string } = {}
+  opts: {
+    keyid?: string;
+    audience?: string;
+    issuer?: string;
+    expiresIn?: number;
+    signer?: string;
+  } = {}
 ): string {
   return jwt.sign(payload, opts.signer ?? privateKey, {
     algorithm: "RS256",
@@ -54,6 +60,9 @@ const linkedAdminAuthority = {
   desktopUserId: DESKTOP_USER_ID,
   controlAdminId: CONTROL_ADMIN_ID,
   authoritySource: "linked-admin",
+  linkLineageId: "33333333-3333-4333-8333-333333333333",
+  linkGeneration: 1,
+  desktopUserGeneration: 1,
 };
 
 describe("loadVerificationKey", () => {
@@ -72,6 +81,26 @@ describe("verifyGfsToken", () => {
     expect(claims.pathBindings).toEqual([{ path: "/org", permissions: ["read"] }]);
     expect(claims.exp - claims.iat).toBe(300);
   });
+
+  it("preserves the authoritative auth generation for downstream lifecycle checks", () => {
+    const claims = verifyGfsToken(sign({ ...goodPayload, authGeneration: 7 }), {
+      key,
+      audience: AUD,
+    });
+    expect(claims.authGeneration).toBe(7);
+  });
+
+  it.each([0, -1, Number.MAX_SAFE_INTEGER + 1, 1.5])(
+    "rejects an invalid auth generation: %s",
+    (authGeneration) => {
+      expect(() =>
+        verifyGfsToken(sign({ ...goodPayload, principalType: "user", authGeneration }), {
+          key,
+          audience: AUD,
+        })
+      ).toThrow(/authGeneration/);
+    }
+  );
 
   it("REJECTS a token signed by a different key (bad signature)", () => {
     const token = sign(goodPayload, { signer: otherPair.privateKey });
@@ -95,9 +124,7 @@ describe("verifyGfsToken", () => {
 
   it("REJECTS a token whose kid does not match the configured key", () => {
     const token = sign(goodPayload, { keyid: "not-the-thumbprint" });
-    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(
-      /kid does not match/
-    );
+    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(/kid does not match/);
   });
 
   it("REJECTS a token missing kid entirely", () => {
@@ -116,9 +143,9 @@ describe("verifyGfsToken", () => {
   });
 
   it("REJECTS missing sub / drive / scopes", () => {
-    expect(() => verifyGfsToken(sign({ drive: "main", scopes: [] }), { key, audience: AUD })).toThrow(
-      GfsAuthError
-    );
+    expect(() =>
+      verifyGfsToken(sign({ drive: "main", scopes: [] }), { key, audience: AUD })
+    ).toThrow(GfsAuthError);
     expect(() => verifyGfsToken(sign({ sub: "u", scopes: [] }), { key, audience: AUD })).toThrow(
       GfsAuthError
     );
@@ -156,7 +183,7 @@ describe("verifyGfsToken", () => {
     { ...linkedAdminAuthority, authoritySource: "user-session" },
     { ...linkedAdminAuthority, desktopUserId: "not-a-uuid" },
     { ...linkedAdminAuthority, controlAdminId: "not-a-uuid" },
-  ])("rejects malformed brokered authority metadata: %j", brokeredAuthority => {
+  ])("rejects malformed brokered authority metadata: %j", (brokeredAuthority) => {
     const token = sign({ ...goodPayload, sub: CONTROL_ADMIN_ID, brokeredAuthority });
     expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(GfsAuthError);
   });

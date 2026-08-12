@@ -112,12 +112,50 @@ const BASE_COHERENCE_SQL =
   "AND regexp_replace(pg_get_constraintdef(oid), '\\s+', '', 'g') LIKE '%actor_on_behalf_ofISNULL%' " +
   "AND regexp_replace(pg_get_constraintdef(oid), '\\s+', '', 'g') LIKE '%actor_on_behalf_ofISNOTNULL%') AS audit_actor_correlation_constraint_ready";
 
+const AUTHORITY_PROJECTION_SQL =
+  ", (SELECT count(*) = 3 AND bool_and((attname = 'id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'lifecycle_state' AND atttypid = 'text'::regtype AND attnotnull) OR " +
+  "(attname = 'lifecycle_version' AND atttypid = 'int8'::regtype AND attnotnull)) " +
+  "FROM pg_attribute WHERE attrelid = 'users'::regclass AND attnum > 0 AND NOT attisdropped " +
+  "AND attname = ANY (ARRAY['id','lifecycle_state','lifecycle_version'])) AS authority_users_columns_ready" +
+  ", (SELECT count(*) = 3 AND bool_and((attname = 'id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'status' AND atttypid = 'text'::regtype) OR " +
+  "(attname = 'session_version' AND atttypid = 'int4'::regtype)) " +
+  "FROM pg_attribute WHERE attrelid = 'control_admin_users'::regclass AND attnum > 0 AND NOT attisdropped " +
+  "AND attname = ANY (ARRAY['id','status','session_version'])) AS authority_admin_columns_ready" +
+  ", (SELECT count(*) = 7 AND bool_and((attname = 'id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'lineage_id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'generation' AND atttypid = 'int4'::regtype) OR " +
+  "(attname = 'user_id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'control_admin_id' AND atttypid = 'uuid'::regtype) OR " +
+  "(attname = 'state' AND atttypid = 'text'::regtype) OR " +
+  "(attname = 'source' AND atttypid = 'text'::regtype)) " +
+  "FROM pg_attribute WHERE attrelid = 'gfs_desktop_operator_links'::regclass AND attnum > 0 AND NOT attisdropped " +
+  "AND attname = ANY (ARRAY['id','lineage_id','generation','user_id','control_admin_id','state','source'])) AS authority_links_columns_ready" +
+  ", (CASE WHEN to_regclass('public.users') IS NULL THEN false ELSE " +
+  "has_column_privilege(current_user, 'public.users', 'id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.users', 'lifecycle_state', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.users', 'lifecycle_version', 'SELECT') END) AS authority_users_privileges_ready" +
+  ", (CASE WHEN to_regclass('public.control_admin_users') IS NULL THEN false ELSE " +
+  "has_column_privilege(current_user, 'public.control_admin_users', 'id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.control_admin_users', 'status', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.control_admin_users', 'session_version', 'SELECT') END) AS authority_admin_privileges_ready" +
+  ", (CASE WHEN to_regclass('public.gfs_desktop_operator_links') IS NULL THEN false ELSE " +
+  "has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'lineage_id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'generation', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'user_id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'control_admin_id', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'state', 'SELECT') " +
+  "AND has_column_privilege(current_user, 'public.gfs_desktop_operator_links', 'source', 'SELECT') END) AS authority_links_privileges_ready";
+
 // The reader is deliberately read-only except for append-only audit records.
 // Positive checks alone are insufficient: a stale/manual grant would keep the
 // role Ready while silently expanding its blast radius. These checks use the
 // effective current_user privileges, so inherited or PUBLIC grants fail too.
 const READER_COHERENCE_SQL =
   BASE_COHERENCE_SQL +
+  AUTHORITY_PROJECTION_SQL +
   ", has_table_privilege(current_user, 'gfs_resources', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_resources, " +
   "has_table_privilege(current_user, 'gfs_grants', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_grants, " +
   "has_table_privilege(current_user, 'gfs_shares', 'INSERT, UPDATE, DELETE, TRUNCATE') AS can_mutate_shares, " +
@@ -127,6 +165,7 @@ const READER_COHERENCE_SQL =
 
 const WRITER_COHERENCE_SQL =
   BASE_COHERENCE_SQL +
+  AUTHORITY_PROJECTION_SQL +
   ", has_table_privilege(current_user, 'gfs_blob_manifests', 'SELECT') AS can_read_manifests, " +
   "has_table_privilege(current_user, 'gfs_blob_manifests', 'INSERT') AS can_insert_manifests, " +
   "has_table_privilege(current_user, 'gfs_blob_manifests', 'UPDATE') AS can_update_manifests, " +
@@ -168,7 +207,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
     let acquireTimedOut = false;
     const acquire = opts.pool.connect();
     acquire.then(
-      client => {
+      (client) => {
         if (acquireTimedOut) client.release();
       },
       () => undefined // late rejection: nothing was checked out
@@ -255,6 +294,19 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
         );
       }
       if (
+        row?.authority_users_columns_ready !== true ||
+        row?.authority_admin_columns_ready !== true ||
+        row?.authority_links_columns_ready !== true ||
+        row?.authority_users_privileges_ready !== true ||
+        row?.authority_admin_privileges_ready !== true ||
+        row?.authority_links_privileges_ready !== true
+      ) {
+        throw new Error(
+          "permission store coherence check failed: GFS lifecycle authority projection is missing " +
+            "(control-api migration 0095 not applied?)"
+        );
+      }
+      if (
         opts.storageRole === "reader" &&
         (row?.can_mutate_resources !== false ||
           row?.can_mutate_grants !== false ||
@@ -287,7 +339,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
     } finally {
       // Best-effort close of the ephemeral client; a close error must not mask
       // the probe verdict, but it is logged loudly (never swallowed silently).
-      await client.end().catch(err => {
+      await client.end().catch((err) => {
         console.error(`[gfsc] store-probe client close error: ${errMsg(err)}`);
       });
     }

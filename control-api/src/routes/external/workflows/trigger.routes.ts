@@ -23,7 +23,7 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
     `${BASE}/:ns/:name/trigger`,
     workflowTriggerRateLimit(),
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireExternalWorkflowCaller(req, res)
+      const caller = await requireExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params

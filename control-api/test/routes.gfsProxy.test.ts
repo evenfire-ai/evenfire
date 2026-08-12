@@ -24,11 +24,11 @@ vi.mock('../src/auth/gfsToken.js', () => ({
 
 vi.mock('../src/middleware/controlUIAuth.js', () => ({
   requireAuthForControlUI: (
-    req: { adminAuth?: { sub: string } },
+    req: { adminAuth?: { sub: string; sessionVersion?: number } },
     _res: unknown,
     next: () => void
   ) => {
-    req.adminAuth = { sub: 'operator' }
+    req.adminAuth = { sub: 'operator', sessionVersion: 1 }
     next()
   },
 }))

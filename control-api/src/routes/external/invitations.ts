@@ -116,11 +116,22 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
           }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
           return res.status(400).json({ error: 'invalid_password' })
         }
 
         const userId = result.data.userId
         if (!userId) {
+          return res.status(409).json({ error: 'invitation_not_ready' })
+        }
+        const authGeneration = Number(result.data.authGeneration)
+        if (
+          result.data.lifecycleState !== 'active' ||
+          !Number.isSafeInteger(authGeneration) ||
+          authGeneration < 1
+        ) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
@@ -129,6 +140,7 @@ export function createExternalInvitationsRouter(): Router {
           email: result.data.email,
           teamId: result.data.teamId || null,
           role: result.data.role,
+          authGeneration,
         })
 
         return res.status(200).json({
@@ -173,6 +185,9 @@ export function createExternalInvitationsRouter(): Router {
           }
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
+          }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
@@ -266,14 +281,26 @@ export function createExternalInvitationsRouter(): Router {
         if (result.error === 'expired') {
           return res.status(410).json({ error: 'expired' })
         }
+        if (result.error === 'user_retired') {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
         return res.status(400).json({ error: 'not_pending' })
       }
 
+      const authGeneration = Number(result.data.authGeneration)
+      if (
+        result.data.lifecycleState !== 'active' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        return res.status(409).json({ error: 'invitation_not_ready' })
+      }
       const sessionToken = signExternalSessionToken({
         userId: result.data.userId,
         email: result.data.email,
         teamId: result.data.teamId || null,
         role: result.data.role,
+        authGeneration,
       })
 
       return res.status(200).json({

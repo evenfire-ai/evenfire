@@ -51,6 +51,8 @@ type InvitationUserRow = {
   name: string | null
   picture: string | null
   password_hash: string | null
+  lifecycle_state?: 'active' | 'retired' | string | null
+  lifecycle_version?: number | string | null
 }
 
 type InvitationWithTeams = {
@@ -168,7 +170,7 @@ async function ensureInvitationUser(
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedInviteeName = String(inviteeName || '').trim() || null
   const existing = await db.query(
-    `SELECT id, email, name, picture, password_hash
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
        FROM users
       WHERE email = $1
       LIMIT 1`,
@@ -184,7 +186,7 @@ async function ensureInvitationUser(
        ON CONFLICT (email) DO UPDATE
            SET name = COALESCE(users.name, EXCLUDED.name),
                updated_at = NOW()
-       RETURNING id, email, name, picture, password_hash`,
+       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
         [normalizedEmail, normalizedInviteeName]
       )
     ).rows[0] as InvitationUserRow
@@ -195,7 +197,7 @@ async function ensureInvitationUser(
             SET name = $2,
                 updated_at = NOW()
           WHERE id = $1
-       RETURNING id, email, name, picture, password_hash`,
+       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
         [user.id, normalizedInviteeName]
       )
     ).rows[0] as InvitationUserRow
@@ -218,6 +220,10 @@ async function ensureInvitationUser(
   }
 
   return user
+}
+
+function invitationUserIsRetired(user: InvitationUserRow): boolean {
+  return user.lifecycle_state === 'retired'
 }
 
 function normalizeInvitationTeamAssignments(
@@ -358,6 +364,8 @@ function invitationResponse(
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  authGeneration: number | null
+  lifecycleState: string | null
 } {
   const primaryTeam = teams[0] || null
   return {
@@ -377,6 +385,11 @@ function invitationResponse(
     acceptedAt: invitation.accepted_at ? invitation.accepted_at.toISOString() : null,
     userId: invitation.accepted_user_id || user?.id || null,
     passwordPending: !user?.password_hash,
+    authGeneration:
+      user?.lifecycle_version === undefined || user.lifecycle_version === null
+        ? null
+        : Number(user.lifecycle_version),
+    lifecycleState: user?.lifecycle_state ?? null,
   }
 }
 
@@ -1015,7 +1028,7 @@ export async function getInvitationByToken(token: string) {
   const user = invitation.accepted_user_id
     ? ((
         await pool.query(
-          `SELECT id, email, name, picture, password_hash
+          `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
            FROM users
           WHERE id = $1
           LIMIT 1`,
@@ -1024,7 +1037,7 @@ export async function getInvitationByToken(token: string) {
       ).rows[0] as InvitationUserRow | undefined) || null
     : ((
         await pool.query(
-          `SELECT id, email, name, picture, password_hash
+          `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
            FROM users
           WHERE email = $1
           LIMIT 1`,
@@ -1079,6 +1092,7 @@ export async function setInvitationPasswordForUser(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
@@ -1088,7 +1102,8 @@ export async function setInvitationPasswordForUser(
           SET password_hash = $2,
               password_set_at = NOW(),
               updated_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+          AND lifecycle_state = 'active'`,
       [user.id, passwordHash]
     )
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
@@ -1164,13 +1179,15 @@ export async function setInvitationPasswordForEmail(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
           SET password_hash = $2,
               password_set_at = NOW(),
               updated_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+          AND lifecycle_state = 'active'`,
       [user.id, passwordHash]
     )
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
@@ -1229,6 +1246,7 @@ export async function acceptInvitation(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== userId) {
       return { error: 'forbidden' as const }
     }
@@ -1284,6 +1302,7 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
       await applyInvitationMemberships(db, invitation, user.id)
@@ -1337,6 +1356,7 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
       await applyInvitationMemberships(db, invitation, user.id)

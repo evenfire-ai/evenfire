@@ -16,6 +16,9 @@ export type GfsDesktopOperatorLink = {
   desktopUserId: string
   controlAdminId: string
   source: GfsDesktopOperatorLinkSource
+  /** Current parent generations read from the same authoritative snapshot. */
+  desktopUserGeneration?: number
+  controlAdminGeneration?: number
   state?: 'active' | 'revoked'
   rowVersion?: number
   createdAt: Date
@@ -146,6 +149,9 @@ type StoredLinkRow = {
   control_admin_id: unknown
   source: unknown
   created_at: unknown
+  desktop_user_lifecycle_state?: unknown
+  desktop_user_lifecycle_version?: unknown
+  control_admin_session_version?: unknown
 }
 
 function requireRowVersion(value: unknown): number {
@@ -157,6 +163,19 @@ function requireRowVersion(value: unknown): number {
         : Number.NaN
   if (!Number.isSafeInteger(normalized) || normalized < 1) {
     throw new GfsDesktopOperatorLinkError('invalid_input', 'rowVersion must be a positive integer')
+  }
+  return normalized
+}
+
+function requireGeneration(value: unknown): number {
+  const normalized =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isSafeInteger(normalized) || normalized < 0) {
+    throw new GfsDesktopOperatorLinkError('malformed_link', 'parent generation is malformed')
   }
   return normalized
 }
@@ -174,8 +193,11 @@ function requireReason(value: unknown): string {
 
 type ResolvedLinkRow = StoredLinkRow & {
   desktop_user_exists?: unknown
+  desktop_user_lifecycle_state?: unknown
+  desktop_user_lifecycle_version?: unknown
   control_admin_exists?: unknown
   control_admin_status?: unknown
+  control_admin_session_version?: unknown
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -289,6 +311,16 @@ function mapStoredLink(row: unknown): GfsDesktopOperatorLink {
       'operator-link revocation timestamp is malformed'
     )
   }
+  const desktopUserGeneration =
+    stored.desktop_user_lifecycle_version === undefined ||
+    stored.desktop_user_lifecycle_version === null
+      ? undefined
+      : requireGeneration(stored.desktop_user_lifecycle_version)
+  const controlAdminGeneration =
+    stored.control_admin_session_version === undefined ||
+    stored.control_admin_session_version === null
+      ? undefined
+      : requireGeneration(stored.control_admin_session_version)
   return {
     ...(id ? { id } : {}),
     ...(lineageId ? { lineageId } : {}),
@@ -297,6 +329,8 @@ function mapStoredLink(row: unknown): GfsDesktopOperatorLink {
     desktopUserId,
     controlAdminId,
     source: stored.source,
+    ...(desktopUserGeneration === undefined ? {} : { desktopUserGeneration }),
+    ...(controlAdminGeneration === undefined ? {} : { controlAdminGeneration }),
     ...(state === undefined ? {} : { state }),
     ...(rowVersion === undefined ? {} : { rowVersion }),
     createdAt,
@@ -357,6 +391,12 @@ function mapActiveResolvedLink(
     throw new GfsDesktopOperatorLinkError(
       'malformed_link',
       'operator link references a missing Desktop user'
+    )
+  }
+  if (row.desktop_user_lifecycle_state !== 'active') {
+    throw new GfsDesktopOperatorLinkError(
+      'desktop_user_retired',
+      'linked Desktop user is not active'
     )
   }
   if (row.control_admin_exists !== true) {
@@ -847,8 +887,11 @@ export class GfsDesktopOperatorLinkService {
                 links.source,
                 links.created_at,
                 users.id IS NOT NULL AS desktop_user_exists,
+                users.lifecycle_state AS desktop_user_lifecycle_state,
+                users.lifecycle_version AS desktop_user_lifecycle_version,
                 admins.id IS NOT NULL AS control_admin_exists,
-                admins.status AS control_admin_status
+                admins.status AS control_admin_status,
+                admins.session_version AS control_admin_session_version
            FROM gfs_desktop_operator_links links
            LEFT JOIN users ON users.id = links.user_id
            LEFT JOIN control_admin_users admins ON admins.id = links.control_admin_id
@@ -922,8 +965,11 @@ export class GfsDesktopOperatorLinkService {
                 links.source,
                 links.created_at,
                 users.id IS NOT NULL AS desktop_user_exists,
+                users.lifecycle_state AS desktop_user_lifecycle_state,
+                users.lifecycle_version AS desktop_user_lifecycle_version,
                 admins.id IS NOT NULL AS control_admin_exists,
-                admins.status AS control_admin_status
+                admins.status AS control_admin_status,
+                admins.session_version AS control_admin_session_version
            FROM gfs_desktop_operator_links links
           LEFT JOIN users ON users.id = links.user_id
           LEFT JOIN control_admin_users admins ON admins.id = links.control_admin_id

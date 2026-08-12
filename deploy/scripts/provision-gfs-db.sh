@@ -155,17 +155,54 @@ SELECT (
   NOT has_table_privilege(:'role_name', 'control_admin_users', 'SELECT')
   AND has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')
   AND has_column_privilege(:'role_name', 'control_admin_users', 'status', 'SELECT')
+  AND has_column_privilege(:'role_name', 'control_admin_users', 'session_version', 'SELECT')
   AND NOT EXISTS (
     SELECT 1
       FROM information_schema.columns
      WHERE table_schema = 'public'
        AND table_name = 'control_admin_users'
-       AND column_name NOT IN ('id', 'status')
+       AND column_name NOT IN ('id', 'status', 'session_version')
        AND has_column_privilege(:'role_name', 'control_admin_users', column_name, 'SELECT')
   )
   AND NOT has_any_column_privilege(:'role_name', 'control_admin_users',
     'INSERT,UPDATE,REFERENCES')
   AND NOT has_table_privilege(:'role_name', 'control_admin_users',
+    'DELETE,TRUNCATE,TRIGGER')
+  AND NOT has_table_privilege(:'role_name', 'users', 'SELECT')
+  AND has_column_privilege(:'role_name', 'users', 'id', 'SELECT')
+  AND has_column_privilege(:'role_name', 'users', 'lifecycle_state', 'SELECT')
+  AND has_column_privilege(:'role_name', 'users', 'lifecycle_version', 'SELECT')
+  AND NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'users'
+       AND column_name NOT IN ('id', 'lifecycle_state', 'lifecycle_version')
+       AND has_column_privilege(:'role_name', 'users', column_name, 'SELECT')
+  )
+  AND NOT has_any_column_privilege(:'role_name', 'users',
+    'INSERT,UPDATE,REFERENCES')
+  AND NOT has_table_privilege(:'role_name', 'users',
+    'DELETE,TRUNCATE,TRIGGER')
+  AND NOT has_table_privilege(:'role_name', 'gfs_desktop_operator_links', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'id', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'lineage_id', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'generation', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'user_id', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'control_admin_id', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'state', 'SELECT')
+  AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'source', 'SELECT')
+  AND NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'gfs_desktop_operator_links'
+       AND column_name NOT IN ('id', 'lineage_id', 'generation', 'user_id', 'control_admin_id', 'state', 'source')
+       AND has_column_privilege(:'role_name', 'gfs_desktop_operator_links', column_name, 'SELECT')
+  )
+  AND NOT has_any_column_privilege(:'role_name', 'gfs_desktop_operator_links',
+    'INSERT,UPDATE,REFERENCES')
+  AND NOT has_table_privilege(:'role_name', 'gfs_desktop_operator_links',
     'DELETE,TRUNCATE,TRIGGER')
   AND NOT has_table_privilege(:'role_name', 'team_members', 'SELECT')
   AND has_column_privilege(:'role_name', 'team_members', 'team_id', 'SELECT')

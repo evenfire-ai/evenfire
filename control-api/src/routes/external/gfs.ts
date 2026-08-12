@@ -410,6 +410,7 @@ export function createExternalGfsRouter(): Router {
         drive,
         scopes,
         pathBindings: [],
+        ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
         principalType: 'user',
       })
       res.status(200).json({ token, expiresInSeconds })
@@ -778,6 +779,7 @@ async function proxyReadToGfsc(
     subject: authority.tokenSubject,
     drive,
     scopes: [GFS_READ_SCOPE],
+    ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
     principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
     ...(authority.kind === 'linked-admin'
       ? {
@@ -785,6 +787,9 @@ async function proxyReadToGfsc(
             desktopUserId: authority.desktopUserId,
             controlAdminId: authority.controlAdminId,
             authoritySource: authority.authoritySource,
+            linkLineageId: authority.linkLineageId,
+            linkGeneration: authority.linkGeneration,
+            desktopUserGeneration: authority.desktopUserGeneration,
           },
         }
       : {}),
@@ -875,6 +880,7 @@ async function proxyMutationToGfsc(
     subject: authority.tokenSubject,
     drive,
     scopes: [scope],
+    ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
     principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
     ...(authority.kind === 'linked-admin'
       ? {
@@ -882,6 +888,9 @@ async function proxyMutationToGfsc(
             desktopUserId: authority.desktopUserId,
             controlAdminId: authority.controlAdminId,
             authoritySource: authority.authoritySource,
+            linkLineageId: authority.linkLineageId,
+            linkGeneration: authority.linkGeneration,
+            desktopUserGeneration: authority.desktopUserGeneration,
           },
         }
       : {}),

@@ -2923,6 +2923,36 @@ async function applyDesktopUserRetirementLifecycleSchema(db: DbClient): Promise<
   `)
 }
 
+/**
+ * Expose only the authoritative lifecycle/link projection needed by gfsc.
+ * The data-plane resolver must be able to deny a stale bearer directly, but it
+ * must not gain write access to identity or relationship tables.
+ */
+async function applyGfsLifecycleAuthorityProjectionSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Generation zero was the pre-lifecycle default. Normalize existing admins
+    -- before gfsc begins treating session_version as an authorization epoch.
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM gfs_controller, gfs_controller_reader;
+
+    GRANT SELECT (id, lifecycle_state, lifecycle_version)
+      ON users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, status, session_version)
+      ON control_admin_users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, lineage_id, generation, user_id, control_admin_id, state, source)
+      ON gfs_desktop_operator_links TO gfs_controller, gfs_controller_reader;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM PUBLIC;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5800,6 +5830,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0094_desktop_user_retirement_lifecycle',
     apply: applyDesktopUserRetirementLifecycleSchema,
+  },
+  {
+    version: '0095_gfs_lifecycle_authority_projection',
+    apply: applyGfsLifecycleAuthorityProjectionSchema,
   },
 ]
 

@@ -10,6 +10,7 @@ export type ExternalGfsUserAuthority = {
   kind: 'user-session'
   desktopUserId: string
   tokenSubject: string
+  authGeneration?: number
 }
 
 export type ExternalGfsLinkedAdminAuthority = {
@@ -18,6 +19,11 @@ export type ExternalGfsLinkedAdminAuthority = {
   controlAdminId: string
   tokenSubject: string
   authoritySource: 'linked-admin'
+  authGeneration?: number
+  linkLineageId: string
+  linkGeneration: number
+  desktopUserGeneration: number
+  controlAdminGeneration: number
 }
 
 export type ExternalGfsAuthority = ExternalGfsUserAuthority | ExternalGfsLinkedAdminAuthority
@@ -53,8 +59,13 @@ const defaultDesktopUserLifecycleGuard =
     ? (id: string) => gfsDesktopOperatorLinkService.isDesktopUserActive(id)
     : undefined
 
-function userAuthority(desktopUserId: string): ExternalGfsUserAuthority {
-  return { kind: 'user-session', desktopUserId, tokenSubject: desktopUserId }
+function userAuthority(desktopUserId: string, authGeneration?: number): ExternalGfsUserAuthority {
+  return {
+    kind: 'user-session',
+    desktopUserId,
+    tokenSubject: desktopUserId,
+    ...(authGeneration === undefined ? {} : { authGeneration }),
+  }
 }
 
 async function assertDesktopUserActive(
@@ -110,7 +121,14 @@ export async function resolveExternalGfsAuthority(
   }
   if (!link) return userAuthority(desktopUserId)
 
-  if (link.desktopUserId !== desktopUserId || link.source !== 'initial_setup') {
+  if (
+    link.desktopUserId !== desktopUserId ||
+    link.source !== 'initial_setup' ||
+    !link.lineageId ||
+    link.generation === undefined ||
+    link.desktopUserGeneration === undefined ||
+    link.controlAdminGeneration === undefined
+  ) {
     throw new ExternalGfsAuthorityError(403, 'gfs_operator_link_invalid')
   }
   return {
@@ -119,6 +137,11 @@ export async function resolveExternalGfsAuthority(
     controlAdminId: link.controlAdminId,
     tokenSubject: link.controlAdminId,
     authoritySource: 'linked-admin',
+    authGeneration: link.controlAdminGeneration,
+    linkLineageId: link.lineageId,
+    linkGeneration: link.generation,
+    desktopUserGeneration: link.desktopUserGeneration,
+    controlAdminGeneration: link.controlAdminGeneration,
   }
 }
 
@@ -138,8 +161,13 @@ export async function attachExternalGfsAuthority(
     return
   }
   try {
-    ;(req as RequestWithExternalGfsAuthority).gfsAuthority =
-      await resolveExternalGfsAuthority(desktopUserId)
+    const authority = await resolveExternalGfsAuthority(desktopUserId)
+    if (authority.kind === 'user-session') {
+      const generation = (req as Request & { externalAuth?: { authGeneration?: number } })
+        .externalAuth?.authGeneration
+      if (generation !== undefined) authority.authGeneration = generation
+    }
+    ;(req as RequestWithExternalGfsAuthority).gfsAuthority = authority
     next()
   } catch (error) {
     if (error instanceof ExternalGfsAuthorityError) {

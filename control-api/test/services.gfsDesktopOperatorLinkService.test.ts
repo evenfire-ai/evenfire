@@ -22,6 +22,10 @@ function storedLink(
     control_admin_id: controlAdminId,
     source,
     created_at: CREATED_AT,
+    desktop_user_exists: true,
+    desktop_user_lifecycle_state: 'active',
+    control_admin_exists: true,
+    control_admin_status: 'active',
   }
 }
 

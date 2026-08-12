@@ -41,7 +41,7 @@ function fakePool(): PingPool & {
     connect: async () => {
       if (pool.hangConnect) return new Promise<never>(() => undefined);
       if (pool.lateConnectMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, pool.lateConnectMs));
+        await new Promise((resolve) => setTimeout(resolve, pool.lateConnectMs));
       }
       return makeClient();
     },
@@ -67,6 +67,12 @@ interface FakeClientBehavior {
   auditDecisionEvidenceConstraintsReady?: boolean;
   auditActorCorrelationColumnsReady?: boolean;
   auditActorCorrelationConstraintReady?: boolean;
+  authorityUsersColumnsReady?: boolean;
+  authorityAdminColumnsReady?: boolean;
+  authorityLinksColumnsReady?: boolean;
+  authorityUsersPrivilegesReady?: boolean;
+  authorityAdminPrivilegesReady?: boolean;
+  authorityLinksPrivilegesReady?: boolean;
   canMutateResources?: boolean;
   canMutateGrants?: boolean;
   canMutateShares?: boolean;
@@ -122,6 +128,12 @@ function fakeClientFactory(behavior: FakeClientBehavior): {
                 behavior.auditActorCorrelationColumnsReady !== false,
               audit_actor_correlation_constraint_ready:
                 behavior.auditActorCorrelationConstraintReady !== false,
+              authority_users_columns_ready: behavior.authorityUsersColumnsReady !== false,
+              authority_admin_columns_ready: behavior.authorityAdminColumnsReady !== false,
+              authority_links_columns_ready: behavior.authorityLinksColumnsReady !== false,
+              authority_users_privileges_ready: behavior.authorityUsersPrivilegesReady !== false,
+              authority_admin_privileges_ready: behavior.authorityAdminPrivilegesReady !== false,
+              authority_links_privileges_ready: behavior.authorityLinksPrivilegesReady !== false,
               can_mutate_resources: behavior.canMutateResources === true,
               can_mutate_grants: behavior.canMutateGrants === true,
               can_mutate_shares: behavior.canMutateShares === true,
@@ -260,7 +272,7 @@ describe("createPermissionStoreProbe", () => {
 
   it.each(["actor_on_behalf_of", "desktop_user_id", "authority_source"] as const)(
     "rejects readiness before 0092 when the required %s audit column is absent or drifted",
-    async _column => {
+    async (_column) => {
       const { factory } = fakeClientFactory({ auditActorCorrelationColumnsReady: false });
       const probe = createPermissionStoreProbe({
         pool: fakePool(),
@@ -274,9 +286,32 @@ describe("createPermissionStoreProbe", () => {
     }
   );
 
+  it.each([
+    ["users columns", { authorityUsersColumnsReady: false }],
+    ["admin columns", { authorityAdminColumnsReady: false }],
+    ["link columns", { authorityLinksColumnsReady: false }],
+    ["users privileges", { authorityUsersPrivilegesReady: false }],
+    ["admin privileges", { authorityAdminPrivilegesReady: false }],
+    ["link privileges", { authorityLinksPrivilegesReady: false }],
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects readiness when the 0095 authority projection is missing (%s)",
+    async (_projection, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/migration 0095/);
+    }
+  );
+
   it.each(["reader", "writer"] as const)(
     "rejects a %s when migration 0092 audit actor-correlation constraints are missing or unvalidated",
-    async storageRole => {
+    async (storageRole) => {
       const { factory } = fakeClientFactory({ auditActorCorrelationConstraintReady: false });
       const probe = createPermissionStoreProbe({
         pool: fakePool(),
@@ -359,6 +394,14 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toContain("authority_source=''linked-admin''");
     expect(sql).toContain("desktop_user_idISNULL");
     expect(sql).toContain("NOT attnotnull");
+    expect(sql).toContain("authority_users_columns_ready");
+    expect(sql).toContain("authority_admin_columns_ready");
+    expect(sql).toContain("authority_links_columns_ready");
+    expect(sql).toContain("authority_users_privileges_ready");
+    expect(sql).toContain("authority_admin_privileges_ready");
+    expect(sql).toContain("authority_links_privileges_ready");
+    expect(sql).toContain("lifecycle_version");
+    expect(sql).toContain("gfs_desktop_operator_links");
     expect(sql).not.toContain("can_mutate_resources");
     expect(sql).not.toContain("can_update_audit_sequence");
   });
@@ -416,7 +459,7 @@ describe("createPermissionStoreProbe", () => {
     });
     await expect(probe()).rejects.toThrow(/pool ping timed out after 10ms/);
     expect(pool.releases).toHaveLength(0); // not settled yet
-    await new Promise(resolve => setTimeout(resolve, 60));
+    await new Promise((resolve) => setTimeout(resolve, 60));
     expect(pool.releases).toHaveLength(1); // late acquire returned to the pool
     expect(pool.releases[0]).toBeUndefined(); // clean release, not a destroy
   });

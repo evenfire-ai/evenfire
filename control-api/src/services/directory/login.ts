@@ -132,18 +132,24 @@ function teamlessMemberMembership(): MembershipRow {
 export async function googleLoginData(input: { email: string; name?: string; picture?: string }) {
   return withTransaction(async db => {
     const existing = await db.query(
-      `SELECT id, email, name, picture
+      `SELECT id, email, name, picture, lifecycle_state, lifecycle_version
          FROM users
         WHERE email = $1`,
       [input.email]
     )
 
     const isNewUser = (existing.rowCount ?? 0) === 0
+    if (
+      !isNewUser &&
+      (existing.rows[0] as { lifecycle_state?: unknown }).lifecycle_state !== 'active'
+    ) {
+      return { error: 'user_retired' as const }
+    }
     const userResult = isNewUser
       ? await db.query(
           `INSERT INTO users(email, name, picture)
            VALUES($1, $2, $3)
-           RETURNING id, email, name, picture`,
+           RETURNING id, email, name, picture, lifecycle_version`,
           [input.email, input.name || null, input.picture || null]
         )
       : await db.query(
@@ -152,7 +158,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
                   picture = COALESCE($3, picture),
                   updated_at = NOW()
             WHERE email = $1
-          RETURNING id, email, name, picture`,
+          RETURNING id, email, name, picture, lifecycle_version`,
           [input.email, input.name || null, input.picture || null]
         )
 
@@ -161,6 +167,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
       email: string
       name: string | null
       picture: string | null
+      lifecycle_version: number | string | null
     }
 
     await db.query(
@@ -181,6 +188,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
 
     return {
       isNewUser,
+      authGeneration: Number(user.lifecycle_version || 0),
       user,
       membership: ((membership.rows[0] as MembershipRow | undefined) ||
         teamlessMemberMembership()) as MembershipRow,
@@ -191,7 +199,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
 export async function passwordLoginData(input: { email: string; password: string }) {
   return withTransaction(async db => {
     const result = await db.query(
-      `SELECT id, email, name, picture, password_hash
+      `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
          FROM users
         WHERE email = $1
         LIMIT 1`,
@@ -207,6 +215,11 @@ export async function passwordLoginData(input: { email: string; password: string
       name: string | null
       picture: string | null
       password_hash: string | null
+      lifecycle_state?: string | null
+      lifecycle_version?: number | string | null
+    }
+    if (user.lifecycle_state !== 'active') {
+      return { error: 'user_retired' as const }
     }
     if (!user.password_hash) {
       return { error: 'password_not_set' as const }
@@ -226,6 +239,7 @@ export async function passwordLoginData(input: { email: string; password: string
 
     if ((membership.rowCount ?? 0) === 0) {
       return {
+        authGeneration: Number(user.lifecycle_version || 0),
         user: {
           id: user.id,
           email: user.email,
@@ -237,6 +251,7 @@ export async function passwordLoginData(input: { email: string; password: string
     }
 
     return {
+      authGeneration: Number(user.lifecycle_version || 0),
       user: {
         id: user.id,
         email: user.email,
@@ -259,6 +274,7 @@ export async function verifyUserPassword(input: {
          FROM users
         WHERE id = $1
           AND email = $2
+          AND lifecycle_state = 'active'
         LIMIT 1`,
       [input.userId.trim(), input.email.trim().toLowerCase()]
     )

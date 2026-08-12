@@ -188,6 +188,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0094_desktop_user_retirement_lifecycle'
     )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0095_gfs_lifecycle_authority_projection'
+    )
 
     await dbPool.query(`
       DELETE FROM schema_migrations

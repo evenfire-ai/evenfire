@@ -100,6 +100,10 @@ const ACTIVE_LINK = {
   desktopUserId: U1,
   controlAdminId: CONTROL_ADMIN_ID,
   source: 'initial_setup' as const,
+  lineageId: '88888888-eeee-4eee-8eee-888888888888',
+  generation: 1,
+  desktopUserGeneration: 1,
+  controlAdminGeneration: 1,
   createdAt: new Date('2026-08-10T00:00:00.000Z'),
 }
 
@@ -460,11 +464,15 @@ describe('linked Desktop operator authority contract', () => {
       subject: CONTROL_ADMIN_ID,
       drive: 'main',
       scopes: ['gfs.write'],
+      authGeneration: 1,
       principalType: 'control-admin',
       brokeredAuthority: {
         desktopUserId: U1,
         controlAdminId: CONTROL_ADMIN_ID,
         authoritySource: 'linked-admin',
+        linkLineageId: ACTIVE_LINK.lineageId,
+        linkGeneration: ACTIVE_LINK.generation,
+        desktopUserGeneration: ACTIVE_LINK.desktopUserGeneration,
       },
     })
     const fetchOptions = (vi.mocked(fetch).mock.calls[0]?.[1] ?? {}) as RequestInit

@@ -53,6 +53,17 @@ const rateLimitMock = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
 }))
 
+const dbMock = vi.hoisted(() => ({
+  query: vi.fn(),
+}))
+
+vi.mock('../src/db.js', () => ({
+  pool: {
+    query: (...args: unknown[]) => dbMock.query(...args),
+  },
+  withTransaction: vi.fn(),
+}))
+
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 vi.mock(
@@ -77,6 +88,7 @@ describe('routes/profile', () => {
     email: 'u@example.com',
     teamId: 't1',
     role: 'member',
+    authGeneration: 1,
   })
   const rpcAccessToken = signRpcAccessToken({
     sub: 'u1',
@@ -113,6 +125,12 @@ describe('routes/profile', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+    })
+    dbMock.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('lifecycle_state')) {
+        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
     })
   })
 
@@ -303,6 +321,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     await withInternalServiceAuth(request(app).post('/external/auth/verify'))
@@ -621,6 +640,7 @@ describe('routes/profile', () => {
       email: 'user@example.com',
       teamId: 'team-from-claims',
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -661,6 +681,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
@@ -706,6 +727,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
@@ -736,6 +758,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     sandboxUiScopeMock.userHasUiBearingRecipeAccess.mockResolvedValue(true)
     rpcMock.issueRpcAccessToken.mockReturnValue({
@@ -787,6 +810,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -812,6 +836,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -837,6 +862,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -862,6 +888,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
