@@ -7,12 +7,26 @@ import {
   declaredGfsUploadPartBytes,
   gfsUploadAdmission,
 } from '../src/middleware/gfsUploadAdmission.js'
+import {
+  requireInternalService,
+  requireInternalToken,
+} from '../src/middleware/internalServiceAuth.js'
 
-const { acquireMock, checkMock, metricDec, metricInc, releaseMock } = vi.hoisted(() => ({
+const {
+  acquireMock,
+  checkMock,
+  metricActiveInc,
+  metricBytesInc,
+  metricDec,
+  metricRequestsInc,
+  releaseMock,
+} = vi.hoisted(() => ({
   acquireMock: vi.fn(),
   checkMock: vi.fn(),
+  metricActiveInc: vi.fn(),
+  metricBytesInc: vi.fn(),
   metricDec: vi.fn(),
-  metricInc: vi.fn(),
+  metricRequestsInc: vi.fn(),
   releaseMock: vi.fn(),
 }))
 
@@ -27,6 +41,10 @@ vi.mock('../src/config.js', () => ({
     gfsUploadMaxActivePerIp: 16,
     gfsUploadMaxActiveGlobal: 32,
     gfsUploadMaxPartBytes: 16 * 1024 * 1024,
+    internalServiceTokens: {
+      'external-rest-api': 'dev-external-rest-api-token',
+      'rpc-proxy': 'dev-rpc-proxy-token',
+    },
   },
 }))
 
@@ -36,9 +54,9 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 }))
 
 vi.mock('../src/observability/metrics.js', () => ({
-  gfsUploadAdmissionActiveRequests: { inc: metricInc, dec: metricDec },
-  gfsUploadAdmissionBytesTotal: { inc: metricInc },
-  gfsUploadAdmissionRequestsTotal: { inc: metricInc },
+  gfsUploadAdmissionActiveRequests: { inc: metricActiveInc, dec: metricDec },
+  gfsUploadAdmissionBytesTotal: { inc: metricBytesInc },
+  gfsUploadAdmissionRequestsTotal: { inc: metricRequestsInc },
 }))
 
 function rateCheck(
@@ -62,7 +80,7 @@ function rateCheck(
   }
 }
 
-function buildPartApp() {
+function buildPartApp(serviceName?: string) {
   const app = express()
   app.put(
     '/external/gfs/uploads/:id/parts/:part',
@@ -70,6 +88,7 @@ function buildPartApp() {
       ;(req as typeof req & { externalAuth: { userId: string } }).externalAuth = {
         userId: 'user-1',
       }
+      if (serviceName) req.internalService = { name: serviceName }
       next()
     },
     gfsUploadAdmission,
@@ -97,11 +116,34 @@ function buildLifecycleApp() {
   return app
 }
 
+function buildAuthenticatedPartApp() {
+  const app = express()
+  app.put(
+    '/external/gfs/uploads/:id/parts/:part',
+    requireInternalToken,
+    requireInternalService('external-rest-api'),
+    (req, _res, next) => {
+      ;(req as typeof req & { externalAuth: { userId: string } }).externalAuth = {
+        userId: 'user-1',
+      }
+      next()
+    },
+    gfsUploadAdmission,
+    (req, res) => {
+      req.resume()
+      req.once('end', () => res.status(204).end())
+    }
+  )
+  return app
+}
+
 beforeEach(() => {
   acquireMock.mockReset()
   checkMock.mockReset()
+  metricActiveInc.mockReset()
+  metricBytesInc.mockReset()
   metricDec.mockReset()
-  metricInc.mockReset()
+  metricRequestsInc.mockReset()
   releaseMock.mockReset()
   checkMock.mockResolvedValue(rateCheck())
   acquireMock.mockResolvedValue({
@@ -128,6 +170,21 @@ describe('GFS upload admission', () => {
     expect(acquireMock).not.toHaveBeenCalled()
   })
 
+  it('records a rejected part-body request without charging the byte counter', async () => {
+    const response = await request(buildPartApp())
+      .put('/external/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0')
+      .set('content-type', 'application/offset+octet-stream')
+      .set('content-length', '4')
+      .set('upload-chunk-length', '3')
+      .send(Buffer.from('abc'))
+
+    expect(response.status).toBe(400)
+    expect(metricRequestsInc).toHaveBeenCalledWith({ limit: 'part_body', result: 'rejected' }, 1)
+    expect(metricRequestsInc).toHaveBeenCalledTimes(1)
+    expect(metricBytesInc).not.toHaveBeenCalled()
+    expect(metricActiveInc).not.toHaveBeenCalled()
+  })
+
   it('charges part bytes in fixed 1 MiB units before forwarding and releases its active slot', async () => {
     const bytes = Buffer.alloc(1024 * 1024 + 1, 0x61)
     const response = await request(buildPartApp())
@@ -152,6 +209,55 @@ describe('GFS upload admission', () => {
       }),
     ])
     expect(releaseMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a spoofed source IP unless the authenticated external relay asserted it', async () => {
+    const bytes = Buffer.from('a')
+    await request(buildPartApp())
+      .put('/external/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0')
+      .set('content-type', 'application/offset+octet-stream')
+      .set('upload-chunk-length', String(bytes.length))
+      .set('x-gfs-upload-source-ip', '203.0.113.7')
+      .send(bytes)
+
+    expect(checkMock.mock.calls[1][0]).not.toBe('gfs-upload:req:ip:203.0.113.7')
+    checkMock.mockClear()
+
+    await request(buildPartApp('external-rest-api'))
+      .put('/external/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0')
+      .set('content-type', 'application/offset+octet-stream')
+      .set('upload-chunk-length', String(bytes.length))
+      .set('x-gfs-upload-source-ip', '203.0.113.7')
+      .send(bytes)
+
+    expect(checkMock.mock.calls[1][0]).toBe('gfs-upload:req:ip:203.0.113.7')
+  })
+
+  it('binds source-IP assertion to the real internal service token wiring', async () => {
+    const app = buildAuthenticatedPartApp()
+    const path = '/external/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0'
+    const headers = {
+      'content-type': 'application/offset+octet-stream',
+      'upload-chunk-length': '1',
+      'x-gfs-upload-source-ip': '203.0.113.7',
+    }
+    await request(app)
+      .put(path)
+      .auth('dev-rpc-proxy-token', { type: 'bearer' })
+      .set('x-service-token', 'rpc-proxy')
+      .set(headers)
+      .send(Buffer.from('a'))
+      .expect(401)
+
+    checkMock.mockClear()
+    await request(app)
+      .put(path)
+      .auth('dev-external-rest-api-token', { type: 'bearer' })
+      .set('x-service-token', 'external-rest-api')
+      .set(headers)
+      .send(Buffer.from('a'))
+      .expect(204)
+    expect(checkMock.mock.calls[1][0]).toBe('gfs-upload:req:ip:203.0.113.7')
   })
 
   it('returns the same 429 contract when the active-request budget is exhausted', async () => {

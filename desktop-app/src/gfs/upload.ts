@@ -14,6 +14,12 @@ const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
 export const GFS_UPLOAD_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
 const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
 export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
+/**
+ * A writer restart can keep the service endpoint unavailable for longer than
+ * the ordinary application-error retry budget. Keep this separate from the
+ * lifecycle budget so 502/503/504 recovery is longer but still bounded.
+ */
+export const GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS = 6
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 
@@ -261,6 +267,16 @@ function retryableError(error: unknown): boolean {
   // A transport exception without an HTTP status is a network/timeout
   // failure. The caller still bounds it to the same two retries as a 5xx.
   return status === undefined || retryable(status)
+}
+
+function partRetryAttempts(error: unknown): number {
+  const status =
+    error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
+      ? Number((error as { status: number }).status)
+      : undefined
+  return status === undefined || status === 502 || status === 503 || status === 504
+    ? GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS
+    : GFS_UPLOAD_RETRY_MAX_ATTEMPTS
 }
 
 /** Parse an RFC 7231 Retry-After value and cap it before it reaches a timer. */
@@ -685,6 +701,7 @@ async function putPart(
   onPartSuccess?: () => void
 ): Promise<void> {
   let attempt = 0
+  let maxAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS
   for (;;) {
     assertAuthEpoch(input)
     await assertSourceIdentity(input)
@@ -732,6 +749,7 @@ async function putPart(
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error
       if (!retryableError(error)) throw error
+      maxAttempts = Math.max(maxAttempts, partRetryAttempts(error))
       onRetryableFailure?.()
       const reconciled = await reconcileAmbiguousPart(
         input,
@@ -746,7 +764,7 @@ async function putPart(
         onPartSuccess?.()
         return
       }
-      if (attempt >= 2) throw error
+      if (attempt + 1 >= maxAttempts) throw error
       await sleep(
         retryAfterOf(error) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
         signal
@@ -761,6 +779,7 @@ async function putPart(
     if (!retryable(response.status)) {
       throw uploadPartError(response.status, response.text)
     }
+    maxAttempts = Math.max(maxAttempts, partRetryAttempts(response))
     onRetryableFailure?.()
     if (ambiguousPartResponse(response.status)) {
       const reconciled = await reconcileAmbiguousPart(
@@ -777,7 +796,7 @@ async function putPart(
         return
       }
     }
-    if (attempt >= 2) throw uploadPartError(response.status, response.text)
+    if (attempt + 1 >= maxAttempts) throw uploadPartError(response.status, response.text)
     await sleep(
       retryAfterOf(response) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
       signal
@@ -882,7 +901,11 @@ async function runParts(
               )
               input.onProgress?.(calculateUploadedBytes(), session.expectedBytes)
             },
-            registerRetryableFailure,
+            () => {
+              registerRetryableFailure()
+              inFlightLoaded.delete(part.partNumber)
+              input.onProgress?.(calculateUploadedBytes(), session.expectedBytes)
+            },
             registerPartSuccess
           )
           completedParts.add(part.partNumber)

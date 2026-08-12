@@ -2,7 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
-import { checkAndIncrementWithQuery } from '../src/services/rateLimiterService.js'
+import {
+  acquireRateLimitConcurrencyLease,
+  checkAndIncrementWithQuery,
+} from '../src/services/rateLimiterService.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -69,29 +72,82 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
     expect(Number(persisted.rows[0]?.count)).toBe(32)
   })
 
-  it('serializes a bounded advisory slot across independent PostgreSQL sessions', async () => {
+  it('serializes the production bounded advisory lease across independent PostgreSQL sessions', async () => {
     const key = `gfs-upload-slot:${randomBytes(8).toString('hex')}`
     const first = await pool.connect()
     const second = await pool.connect()
     try {
-      const acquiredFirst = await first.query<{ acquired: boolean }>(
-        `SELECT pg_try_advisory_lock(hashtext($1), 0) AS acquired`,
-        [key]
+      const firstLease = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: key, maxConcurrent: 1 }],
+        { client: first }
       )
-      const acquiredSecond = await second.query<{ acquired: boolean }>(
-        `SELECT pg_try_advisory_lock(hashtext($1), 0) AS acquired`,
-        [key]
-      )
-      expect(acquiredFirst.rows[0]?.acquired).toBe(true)
-      expect(acquiredSecond.rows[0]?.acquired).toBe(false)
+      expect(firstLease).toMatchObject({ allowed: true, backendAvailable: true })
 
-      await first.query(`SELECT pg_advisory_unlock(hashtext($1), 0)`, [key])
-      const acquiredAfterRelease = await second.query<{ acquired: boolean }>(
-        `SELECT pg_try_advisory_lock(hashtext($1), 0) AS acquired`,
-        [key]
+      const secondLease = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: key, maxConcurrent: 1 }],
+        { client: second }
       )
-      expect(acquiredAfterRelease.rows[0]?.acquired).toBe(true)
-      await second.query(`SELECT pg_advisory_unlock(hashtext($1), 0)`, [key])
+      expect(secondLease).toMatchObject({ allowed: false, backendAvailable: true })
+
+      await firstLease.release()
+      const acquiredAfterRelease = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: key, maxConcurrent: 1 }],
+        { client: second }
+      )
+      expect(acquiredAfterRelease).toMatchObject({ allowed: true, backendAvailable: true })
+      await acquiredAfterRelease.release()
+    } finally {
+      first.release()
+      second.release()
+    }
+  })
+
+  it('uses distinct slots for capacity two and rolls back partial multi-bucket acquisition', async () => {
+    const slotKey = `gfs-upload-slots:${randomBytes(8).toString('hex')}`
+    const rollbackKey = `gfs-upload-rollback:${randomBytes(8).toString('hex')}`
+    const freeKey = `gfs-upload-free:${randomBytes(8).toString('hex')}`
+    const first = await pool.connect()
+    const second = await pool.connect()
+    try {
+      const firstSlot = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: slotKey, maxConcurrent: 2 }],
+        { client: first }
+      )
+      const secondSlot = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: slotKey, maxConcurrent: 2 }],
+        { client: second }
+      )
+      expect(firstSlot.allowed).toBe(true)
+      expect(secondSlot.allowed).toBe(true)
+      const exhausted = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: slotKey, maxConcurrent: 2 }],
+        { client: first }
+      )
+      expect(exhausted.allowed).toBe(false)
+
+      const held = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: rollbackKey, maxConcurrent: 1 }],
+        { client: first }
+      )
+      expect(held.allowed).toBe(true)
+      const partial = await acquireRateLimitConcurrencyLease(
+        [
+          { bucketKey: freeKey, maxConcurrent: 1 },
+          { bucketKey: rollbackKey, maxConcurrent: 1 },
+        ],
+        { client: second }
+      )
+      expect(partial.allowed).toBe(false)
+      const afterRollback = await acquireRateLimitConcurrencyLease(
+        [{ bucketKey: freeKey, maxConcurrent: 1 }],
+        { client: second }
+      )
+      expect(afterRollback.allowed).toBe(true)
+
+      await firstSlot.release()
+      await secondSlot.release()
+      await held.release()
+      await afterRollback.release()
     } finally {
       first.release()
       second.release()

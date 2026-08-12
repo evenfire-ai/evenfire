@@ -11,8 +11,14 @@ import {
 import {
   GFS_UPLOAD_V2_BOUNDARIES,
   createDiskUploadFixture,
+  createOversizedDiskUploadFixture,
   removeDiskUploadFixture,
 } from '../../tests/e2e/gfsUploadV2Fixtures'
+import {
+  readGfsUploadV2Enabled,
+  restartGfsWriter,
+  setGfsUploadV2Enabled,
+} from '../../tests/e2e/gfsUploadV2Runtime'
 import { loginControlUi, openGlobalFileSystemFromSidebar } from './support/gfs-control-ui-session'
 
 test.describe.configure({ mode: 'serial' })
@@ -210,4 +216,156 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
       await exerciseReplace(page, byteLength)
     })
   }
+})
+
+test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
+  test.skip(
+    process.env.GFS_UPLOAD_V2_NEGATIVE_E2E !== '1',
+    'Set GFS_UPLOAD_V2_NEGATIVE_E2E=1 only on an owned non-production dev host with the profile-scoped random URLs.'
+  )
+  test.setTimeout(45 * 60_000)
+
+  test('rejects a 209715201-byte file through the visible upload modal', async ({ page }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-oversize-ui')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    const source = await createOversizedDiskUploadFixture('.parquet', fixtureName)
+    try {
+      const current = await openWritableFolder(page, fixture.name)
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Upload file' })
+      await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      await expect(
+        page.getByRole('status').filter({ hasText: 'GFS uploads are limited to 200 MB per file.' })
+      ).toBeVisible({ timeout: 15_000 })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 15_000 }
+        )
+        .toBeNull()
+      await expect(current.getByRole('listitem').filter({ hasText: source.fileName })).toHaveCount(
+        0
+      )
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
+
+  test('falls back to the legacy path when v2 is disabled', async ({ page }) => {
+    const previous = await readGfsUploadV2Enabled()
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-legacy-ui')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    const source = await createDiskUploadFixture(2 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      await setGfsUploadV2Enabled(false)
+      const current = await openWritableFolder(page, fixture.name)
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Upload file' })
+      await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      await expect(
+        page
+          .getByRole('status')
+          .filter({ hasText: 'Resumable upload is unavailable; using the legacy 16 MiB path.' })
+      ).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByText('File uploaded.', { exact: true })).toBeVisible({
+        timeout: 120_000,
+      })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
+      await expect(current.getByRole('listitem').filter({ hasText: source.fileName })).toBeVisible()
+    } finally {
+      try {
+        await setGfsUploadV2Enabled(previous)
+      } finally {
+        await removeDiskUploadFixture(source)
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
+    }
+  })
+
+  test('recovers a visible upload after the writer deployment restarts', async ({ page }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-restart-ui')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      const current = await openWritableFolder(page, fixture.name)
+      const capabilitiesResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          response.url().includes('/gfs/proxy/v1/capabilities')
+      )
+      const createResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'POST' &&
+          response.url().includes('/gfs/proxy/v1/uploads') &&
+          !response.url().endsWith('/complete')
+      )
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Upload file' })
+      await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      const capabilities = await capabilitiesResponse
+      const capabilitiesBody = (await capabilities.json()) as {
+        upload?: { resumableV2?: { enabled?: boolean } }
+        data?: { upload?: { resumableV2?: { enabled?: boolean } } }
+      }
+      const resumable =
+        capabilitiesBody.upload?.resumableV2 ?? capabilitiesBody.data?.upload?.resumableV2
+      expect(
+        capabilities.status(),
+        `${capabilities.url()} ${JSON.stringify(capabilitiesBody)}`
+      ).toBe(200)
+      expect(
+        resumable?.enabled,
+        'restart journey must exercise the v2 writer, not legacy fallback'
+      ).toBe(true)
+      const created = await createResponse
+      const createdBody = await created.text()
+      expect(created.status(), `${created.url()} ${createdBody}`).toBeGreaterThanOrEqual(200)
+      expect(createdBody).toMatch(/uploadId|upload_id|data/)
+      const progress = page.getByRole('progressbar', {
+        name: `Upload progress for ${source.fileName}`,
+      })
+      // Establish the visible in-flight state, then inject a real writer pod
+      // loss. Completion after this point is the recovery assertion; the
+      // positive journeys separately enforce two intermediate progress values.
+      await expect(progress).toBeVisible({ timeout: 60_000 })
+      await restartGfsWriter()
+      await expect(page.getByText('File uploaded.', { exact: true })).toBeVisible({
+        timeout: 1_200_000,
+      })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
+      await expect(current.getByRole('listitem').filter({ hasText: source.fileName })).toBeVisible()
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
 })

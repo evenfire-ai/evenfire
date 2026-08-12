@@ -178,7 +178,7 @@ const ACCESSIBLE_RE = /^\/v1\/accessible$/;
 const COPY_RE = /^\/v1\/copy$/;
 const CAPABILITIES_RE = /^\/v1\/capabilities$/;
 const UPLOAD_COLLECTION_RE = /^\/v1\/uploads$/;
-const UPLOAD_ITEM_RE = /^\/v1\/uploads\/([0-9a-f-]{36})(?:\/(status|parts\/([0-9]+)|pause|resume|complete))?$/i;
+const UPLOAD_ITEM_RE = /^\/v1\/uploads\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/(status|parts\/([0-9]+)|pause|resume|complete))?$/i;
 const GFS_URI_RE = /^gfs:\/\/([^/]+)\/([^/?#]+)$/;
 
 function bearerToken(req: IncomingMessage): string {

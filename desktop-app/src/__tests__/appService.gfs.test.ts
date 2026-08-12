@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
+import { DesktopUploadCapabilityError } from '../gfs/upload.js'
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -212,6 +213,10 @@ type UploadScopeTestService = {
       scope: ReturnType<typeof scopedUploadRecord>['scope']
     }
   >
+  gfsClient: {
+    createResource: ReturnType<typeof vi.fn>
+    replaceFile: ReturnType<typeof vi.fn>
+  }
   desktopGfsUploadStatePath: () => Promise<string>
   startDesktopGfsUpload: ReturnType<typeof vi.fn>
   authClient: {
@@ -225,12 +230,16 @@ type UploadScopeTestService = {
   completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
   googleLogin: AppService['googleLogin']
   listGfsUploadSessions: AppService['listGfsUploadSessions']
+  getGfsUploadSnapshot: AppService['getGfsUploadSnapshot']
+  pauseGfsUpload: AppService['pauseGfsUpload']
+  cancelGfsUpload: AppService['cancelGfsUpload']
   resumeGfsUpload: AppService['resumeGfsUpload']
   logout: AppService['logout']
   runScopedLegacyGfsUpload: <T>(
     scope: ReturnType<typeof scopedUploadRecord>['scope'],
     operation: (token: string, signal: AbortSignal) => Promise<T>
   ) => Promise<T>
+  startGfsFileUpload: AppService['startGfsFileUpload']
 }
 
 function authenticatedUploadService(statePath: string): UploadScopeTestService {
@@ -267,6 +276,116 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
 }
 
 describe('AppService GFS upload security scope', () => {
+  it('falls back to the bounded legacy create path for a fresh start when v2 is disabled', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-start-fallback-'))
+    try {
+      const filePath = join(root, 'legacy.bin')
+      await writeFile(filePath, Buffer.from('legacy payload'))
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(
+        new DesktopUploadCapabilityError('resumable uploads are disabled')
+      )
+      service.gfsClient = {
+        createResource: vi.fn().mockResolvedValue({
+          resourceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          rid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          gfsUri: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          drive: 'main',
+          parentResourceId: 'parent-rid',
+          name: 'legacy.bin',
+          kind: 'file',
+          path: '/legacy.bin',
+          version: 1,
+          bytes: 14,
+        }),
+        replaceFile: vi.fn(),
+      }
+
+      const result = await service.startGfsFileUpload('parent-rid', 'legacy.bin', filePath, 'main')
+
+      expect(result).toMatchObject({
+        state: 'completed',
+        operation: 'create',
+        resultResourceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        expectedBytes: 14,
+      })
+      expect(service.gfsClient.createResource).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parentResourceId: 'parent-rid',
+          name: 'legacy.bin',
+          drive: 'main',
+          kind: 'file',
+          encodedData: Buffer.from('legacy payload').toString('base64'),
+        }),
+        'token-a',
+        expect.any(AbortSignal)
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps existing upload controls and read state available during a transient team hop', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-transient-controls-'))
+    try {
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const record = scopedUploadRecord('92929292-9292-4292-8292-929292929292')
+      await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
+      const service = authenticatedUploadService(statePath) as UploadScopeTestService & {
+        gfsTransientTeamHopDepth: number
+      }
+      const job = {
+        snapshot: vi.fn(() => ({
+          state: 'uploading',
+          session: record.session,
+          uploadedBytes: 0,
+          totalBytes: record.fileSize,
+        })),
+        pause: vi.fn(async () => ({ ...record.session, state: 'paused' as const })),
+        cancel: vi.fn(async () => undefined),
+      }
+      service.gfsTransientTeamHopDepth = 1
+      service.gfsUploadJobs.set(record.uploadId, {
+        job,
+        promise: Promise.resolve(record.session),
+        scope: record.scope,
+      })
+
+      await expect(service.getGfsUploadSnapshot(record.uploadId, 'main')).resolves.toMatchObject({
+        state: 'uploading',
+      })
+      await service.pauseGfsUpload(record.uploadId, 'main')
+      await service.cancelGfsUpload(record.uploadId, 'main')
+      expect(job.pause).toHaveBeenCalledTimes(1)
+      expect(job.cancel).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('maps a persisted active record to the renderer uploading state after restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-snapshot-state-'))
+    try {
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const record = scopedUploadRecord('93939393-9393-4393-8393-939393939393')
+      const service = authenticatedUploadService(statePath)
+      // The normal state loader converts orphaned active records to
+      // suspended_auth. This injects the already-migrated persisted branch so
+      // the IPC boundary itself is still proven not to leak `active`.
+      ;(service as any).readDesktopGfsUploadState = vi
+        .fn()
+        .mockResolvedValue({ version: 2, records: [record], quarantined: [] })
+
+      await expect(service.getGfsUploadSnapshot(record.uploadId, 'main')).resolves.toMatchObject({
+        state: 'uploading',
+        uploadedBytes: 0,
+        totalBytes: 4,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('quarantines legacy unscoped state instead of restoring it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-state-migration-'))
     try {

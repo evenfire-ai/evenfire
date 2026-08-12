@@ -128,6 +128,27 @@ function Probe() {
   )
 }
 
+function UploadProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="upload-state">{ctrl.uploadSnapshot?.state ?? 'none'}</div>
+      <button
+        type="button"
+        onClick={() =>
+          void ctrl.startFileUpload({
+            parentResourceId: 'parent-rid',
+            name: 'legacy.bin',
+            filePath: '/tmp/legacy.bin',
+          })
+        }
+      >
+        start upload
+      </button>
+    </>
+  )
+}
+
 function Harness({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<AuthContextValue['me']>(userA)
   const [client] = useState(
@@ -189,6 +210,51 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+  })
+
+  it('finishes a completed legacy receipt without polling it as a v2 session', async () => {
+    const startFileUpload = vi.fn(async () => ({
+      uploadId: 'legacy-resource-id',
+      drive: 'main',
+      operation: 'create' as const,
+      expectedBytes: 12,
+      partBytes: 12,
+      partCount: 1,
+      state: 'completed',
+      contiguousBytes: 12,
+      committedBytes: 12,
+      committedPartCount: 1,
+      activePartCount: 0,
+      expiresAt: new Date().toISOString(),
+      resultResourceId: 'legacy-resource-id',
+      resultVersion: 1,
+    }))
+    const getUploadSnapshot = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          startFileUpload,
+          getUploadSnapshot,
+        },
+      },
+    })
+
+    render(<UploadProbe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'start upload' }).click()
+    })
+
+    await waitFor(() => expect(screen.getByTestId('upload-state').textContent).toBe('completed'))
+    expect(startFileUpload).toHaveBeenCalledWith(
+      'parent-rid',
+      'legacy.bin',
+      '/tmp/legacy.bin',
+      'main',
+      undefined
+    )
+    expect(getUploadSnapshot).not.toHaveBeenCalled()
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {

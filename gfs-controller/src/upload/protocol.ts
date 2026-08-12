@@ -1,10 +1,12 @@
 /**
  * Shared, side-effect-free constants and geometry helpers for GFS Upload v2.
  *
- * The writer and both clients import this module so the capability response,
- * session admission, part routes, and UI geometry share one arithmetic
- * definition. The route remains capability-gated: disabled deployments still
- * advertise the legacy surface and reject v2 mutations.
+ * The writer owns the authoritative arithmetic used by the capability
+ * response, session admission, and part routes. The separately packaged web
+ * and Desktop clients mirror the wire values at their boundaries rather than
+ * importing writer code; contract tests pin those copies to this definition.
+ * The route remains capability-gated: disabled deployments still advertise the
+ * legacy surface and reject v2 mutations.
  */
 
 export const GFS_UPLOAD_V2_PRODUCT_MAX_BYTES = 209_715_200
@@ -22,6 +24,8 @@ export const GFS_UPLOAD_V2_SESSION_TTL_SECONDS = 24 * 60 * 60
 export const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 export const GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS = 600_000
 export const GFS_UPLOAD_V2_STALE_PART_LEASE_MS = 600_000
+
+const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 export type GfsUploadOperation = 'create' | 'replace'
 
@@ -63,7 +67,11 @@ export function partCountFor({ expectedBytes, partBytes }: GfsUploadGeometry): n
 }
 
 export function validateGeometry({ expectedBytes, partBytes }: GfsUploadGeometry): void {
-  if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0 || expectedBytes > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES) {
+  if (
+    !Number.isSafeInteger(expectedBytes) ||
+    expectedBytes < 0 ||
+    expectedBytes > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+  ) {
     throw new GfsUploadGeometryError(
       'invalid_expected_bytes',
       `expectedBytes must be an integer from 0 through ${GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES}`
@@ -113,13 +121,22 @@ export function validatePartGeometry(
   part: GfsUploadPartGeometry
 ): void {
   if (!Number.isSafeInteger(part.partNumber) || part.partNumber < 0) {
-    throw new GfsUploadGeometryError('invalid_part_number', 'partNumber must be a non-negative integer')
+    throw new GfsUploadGeometryError(
+      'invalid_part_number',
+      'partNumber must be a non-negative integer'
+    )
   }
   if (!Number.isSafeInteger(part.offsetBytes) || part.offsetBytes < 0) {
-    throw new GfsUploadGeometryError('invalid_part_offset', 'offsetBytes must be a non-negative integer')
+    throw new GfsUploadGeometryError(
+      'invalid_part_offset',
+      'offsetBytes must be a non-negative integer'
+    )
   }
   if (!Number.isSafeInteger(part.lengthBytes) || part.lengthBytes <= 0) {
-    throw new GfsUploadGeometryError('invalid_part_length', 'lengthBytes must be a positive integer')
+    throw new GfsUploadGeometryError(
+      'invalid_part_length',
+      'lengthBytes must be a positive integer'
+    )
   }
   const expected = partGeometry(geometry, part.partNumber)
   if (part.offsetBytes !== expected.offsetBytes) {
@@ -141,7 +158,12 @@ export function isGfsUploadV2Route(pathname: string): boolean {
   return (
     pathname === '/v1/capabilities' ||
     pathname === '/v1/uploads' ||
-    /^\/v1\/uploads\/[0-9a-f-]{36}(?:\/status|\/parts\/[0-9]+|\/pause|\/resume|\/complete)?$/.test(pathname)
+    new RegExp(
+      `^/v1/uploads/${UUID_PATH}(?:/status|/parts/[0-9]+|/pause|/resume|/complete)?$`,
+      'i'
+    ).test(
+      pathname
+    )
   )
 }
 

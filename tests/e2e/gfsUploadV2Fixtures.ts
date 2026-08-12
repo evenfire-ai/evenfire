@@ -44,6 +44,30 @@ export async function createDiskUploadFixture(
   }
 }
 
+/**
+ * Creates the single-byte-over-limit fixture used by the opt-in negative
+ * browser journey. Keep the normal fixture helper fail-closed at the product
+ * ceiling so a positive test can never accidentally become an oversize test.
+ */
+export async function createOversizedDiskUploadFixture(
+  extension = '.parquet',
+  label = 'gfs-v2-oversize'
+): Promise<DiskUploadFixture> {
+  const byteLength = GFS_UPLOAD_V2_MAX_BYTES + 1
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-upload-v2-'))
+  const fileName = `${label}-${byteLength}${extension}`
+  const filePath = path.join(directory, fileName)
+  await writeFile(filePath, Buffer.alloc(0))
+  await truncate(filePath, byteLength)
+  return {
+    directory,
+    filePath,
+    fileName,
+    byteLength,
+    sha256: await sha256File(filePath),
+  }
+}
+
 export async function sha256File(filePath: string): Promise<string> {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer)

@@ -139,10 +139,28 @@ export type RateLimitConcurrencyLease = {
   release: () => Promise<void>
 }
 
+export type RateLimitConcurrencyLeaseOptions = {
+  /** Test/integration seam; production callers use the dedicated pool client. */
+  client?: PoolClient
+}
+
 let concurrencyClient: PoolClient | null = null
 let concurrencyClientPromise: Promise<PoolClient> | null = null
-const heldConcurrencySlots = new Set<string>()
+// Session-scoped advisory locks are re-entrant only on the same PostgreSQL
+// connection. Keep the local guard per client so an integration test (and any
+// future multi-pool caller) still exercises the database lock across sessions.
+const heldConcurrencySlotsByClient = new WeakMap<object, Set<string>>()
 let concurrencyOperation = Promise.resolve()
+
+function heldSlotsFor(client: PoolClient): Set<string> {
+  const key = client as unknown as object
+  let slots = heldConcurrencySlotsByClient.get(key)
+  if (!slots) {
+    slots = new Set<string>()
+    heldConcurrencySlotsByClient.set(key, slots)
+  }
+  return slots
+}
 
 async function serializeConcurrencyOperation<T>(operation: () => Promise<T>): Promise<T> {
   const previous = concurrencyOperation
@@ -158,8 +176,14 @@ async function serializeConcurrencyOperation<T>(operation: () => Promise<T>): Pr
   }
 }
 
-function advisoryKey(value: string): number {
-  return createHash('sha256').update(value).digest().readInt32BE(0)
+type AdvisoryLockKey = {
+  high: number
+  low: number
+}
+
+function advisoryKey(value: string): AdvisoryLockKey {
+  const digest = createHash('sha256').update(value).digest()
+  return { high: digest.readInt32BE(0), low: digest.readInt32BE(4) }
 }
 
 async function getConcurrencyClient(): Promise<PoolClient> {
@@ -173,7 +197,7 @@ async function getConcurrencyClient(): Promise<PoolClient> {
           'rate limiter concurrency connection failed'
         )
         if (concurrencyClient === client) concurrencyClient = null
-        heldConcurrencySlots.clear()
+        heldSlotsFor(client).clear()
         client.release(true)
       })
       return client
@@ -188,16 +212,21 @@ async function getConcurrencyClient(): Promise<PoolClient> {
 
 async function unlockSlots(
   client: PoolClient,
-  slots: Array<{ key: number; slot: number; identity: string }>
-): Promise<void> {
+  slots: Array<{ key: AdvisoryLockKey; identity: string }>
+): Promise<boolean> {
+  const heldSlots = heldSlotsFor(client)
+  let success = true
   for (const acquired of slots.reverse()) {
-    heldConcurrencySlots.delete(acquired.identity)
     try {
       await client.query('SELECT pg_advisory_unlock($1::integer, $2::integer)', [
-        acquired.key,
-        acquired.slot,
+        acquired.key.high,
+        acquired.key.low,
       ])
+      heldSlots.delete(acquired.identity)
     } catch (error) {
+      // The lock state is unknown after an unlock error. Keep the local guard
+      // until the connection error path invalidates this client; otherwise a
+      // same-session reentrant pg_try_advisory_lock could admit a duplicate.
       rootLogger.warn(
         {
           event: 'rate_limit_concurrency_unlock_error',
@@ -205,8 +234,20 @@ async function unlockSlots(
         },
         'rate limiter concurrency unlock failed'
       )
+      success = false
+      break
     }
   }
+  return success
+}
+
+async function invalidateDedicatedConcurrencyClient(client: PoolClient): Promise<void> {
+  if (concurrencyClient !== client) return
+  concurrencyClient = null
+  heldSlotsFor(client).clear()
+  // Advisory locks are session-scoped. Destroying this dedicated client is the
+  // only fail-closed way to release a lock whose unlock response is unknown.
+  client.release(true)
 }
 
 /**
@@ -216,7 +257,8 @@ async function unlockSlots(
  * reentrancy from admitting the same slot twice.
  */
 export async function acquireRateLimitConcurrencyLease(
-  requirements: readonly RateLimitConcurrencyRequirement[]
+  requirements: readonly RateLimitConcurrencyRequirement[],
+  options: RateLimitConcurrencyLeaseOptions = {}
 ): Promise<RateLimitConcurrencyLease> {
   for (const requirement of requirements) {
     if (!Number.isSafeInteger(requirement.maxConcurrent) || requirement.maxConcurrent < 1)
@@ -225,7 +267,7 @@ export async function acquireRateLimitConcurrencyLease(
   return serializeConcurrencyOperation(async () => {
     let client: PoolClient
     try {
-      client = await getConcurrencyClient()
+      client = options.client ?? (await getConcurrencyClient())
     } catch (error) {
       rootLogger.warn(
         {
@@ -237,32 +279,39 @@ export async function acquireRateLimitConcurrencyLease(
       return { allowed: false, backendAvailable: false, release: async () => undefined }
     }
 
-    const acquired: Array<{ key: number; slot: number; identity: string }> = []
+    const acquired: Array<{ key: AdvisoryLockKey; identity: string }> = []
     try {
       for (const requirement of requirements) {
-        const key = advisoryKey(requirement.bucketKey)
-        let selected: { key: number; slot: number; identity: string } | null = null
+        const bucketKey = advisoryKey(requirement.bucketKey)
+        let selected: { key: AdvisoryLockKey; identity: string } | null = null
         for (let slot = 0; slot < requirement.maxConcurrent; slot += 1) {
-          const identity = `${key}:${slot}`
-          if (heldConcurrencySlots.has(identity)) continue
+          // Keep both halves of the SHA-256-derived key in the PostgreSQL
+          // advisory lock identity. The slot is folded into the low half so
+          // distinct buckets do not collide merely because their first 32
+          // digest bits match.
+          const key = { high: bucketKey.high, low: bucketKey.low ^ slot }
+          const identity = `${key.high}:${key.low}`
+          if (heldSlotsFor(client).has(identity)) continue
           const result = await client.query<{ acquired: boolean }>(
             'SELECT pg_try_advisory_lock($1::integer, $2::integer) AS acquired',
-            [key, slot]
+            [key.high, key.low]
           )
           if (result.rows[0]?.acquired === true) {
-            selected = { key, slot, identity }
-            heldConcurrencySlots.add(identity)
+            selected = { key, identity }
+            heldSlotsFor(client).add(identity)
             acquired.push(selected)
             break
           }
         }
         if (!selected) {
-          await unlockSlots(client, acquired)
+          const unlocked = await unlockSlots(client, acquired)
+          if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
           return { allowed: false, backendAvailable: true, release: async () => undefined }
         }
       }
     } catch (error) {
-      await unlockSlots(client, acquired)
+      const unlocked = await unlockSlots(client, acquired)
+      if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
       rootLogger.warn(
         {
           event: 'rate_limit_concurrency_db_error',
@@ -280,7 +329,10 @@ export async function acquireRateLimitConcurrencyLease(
       release: async () => {
         if (released) return
         released = true
-        await serializeConcurrencyOperation(() => unlockSlots(client, acquired))
+        await serializeConcurrencyOperation(async () => {
+          const unlocked = await unlockSlots(client, acquired)
+          if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
+        })
       },
     }
   })

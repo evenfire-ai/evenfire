@@ -29,7 +29,8 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
   'upload-checksum',
   'retry-after',
 ]
-const UPLOAD_PART_PATH = /^\/v1\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+(?:\?|$)/i
+const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const UPLOAD_PART_PATH = new RegExp(`^/v1/uploads/${UUID_PATH}/parts/[0-9]+(?:\\?|$)`, 'i')
 const UPLOAD_PATH = /^\/v1\/(?:capabilities|uploads)(?:\/|\?|$)/i
 const STREAM_REQUEST_HEADERS = [
   'content-type',

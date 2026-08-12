@@ -156,6 +156,26 @@ describe('rateLimiterService', () => {
     expect(mockPoolConnect).toHaveBeenCalledTimes(1)
   })
 
+  it('destroys the dedicated connection when an advisory unlock outcome is unknown', async () => {
+    const lease = await acquireRateLimitConcurrencyLease([
+      { bucketKey: 'gfs-upload:unlock-failure', maxConcurrent: 1 },
+    ])
+    expect(lease.allowed).toBe(true)
+    mockClientQuery.mockRejectedValueOnce(new Error('connection lost during unlock'))
+
+    await lease.release()
+
+    expect(mockConcurrencyClient.release).toHaveBeenCalledWith(true)
+    // The fake client does not emulate PostgreSQL's session teardown; model
+    // the advisory lock release that the destroyed real connection provides.
+    advisoryLocks.clear()
+    const replacement = await acquireRateLimitConcurrencyLease([
+      { bucketKey: 'gfs-upload:unlock-failure', maxConcurrent: 1 },
+    ])
+    expect(replacement).toMatchObject({ allowed: true, backendAvailable: true })
+    await replacement.release()
+  })
+
   it('fails open when pool.query throws (DB error)', async () => {
     mockPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
     const r = await checkAndIncrement('test:bucket:failopen', 5)

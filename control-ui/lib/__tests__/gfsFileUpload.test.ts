@@ -495,6 +495,108 @@ describe('GfsUploadJob', () => {
     expect(FakeXhr.requests).toHaveLength(2)
   })
 
+  it('uses the extended bounded part budget while a writer is restarting', async () => {
+    const file = new File([new Uint8Array([23])], 'part-writer-restart.bin')
+    const session = {
+      uploadId: '14141414-1414-4141-8141-141414141414',
+      drive: 'main',
+      expectedBytes: 1,
+      partBytes: 1,
+      partCount: 1,
+      state: 'initiated',
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    FakeXhr.statuses = [502, 502, 502, 502, 502, 204]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status'))
+          return new Response(JSON.stringify({ ok: true, data: { session, parts: [] } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({ ok: true, data: { ...session, state: 'completed' } }),
+            { status: 200 }
+          )
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-part-writer-restart' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+    expect(FakeXhr.requests).toHaveLength(6)
+  })
+
+  it('removes a failed part attempt from aggregate progress before retrying it', async () => {
+    const file = new File([new Uint8Array([31, 32, 33, 34])], 'progress-retry.bin')
+    const session = {
+      uploadId: '16161616-1616-4161-8161-161616161616',
+      drive: 'main',
+      expectedBytes: 4,
+      partBytes: 4,
+      partCount: 1,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    FakeXhr.statuses = [502, 204]
+    const progress: number[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status'))
+          return new Response(JSON.stringify({ ok: true, data: { session, parts: [] } }), {
+            status: 200,
+          })
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({ ok: true, data: { ...session, state: 'completed' } }),
+            { status: 200 }
+          )
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-progress-retry' },
+        onProgress: value => progress.push(value.uploadedBytes),
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+
+    expect(progress.some((value, index) => index > 0 && value < progress[index - 1]!)).toBe(true)
+  })
+
   it('adopts a status-confirmed committed part after its XHR response is lost', async () => {
     const file = new File([new Uint8Array([5, 6, 7, 8])], 'response-loss.bin', {
       lastModified: 13,

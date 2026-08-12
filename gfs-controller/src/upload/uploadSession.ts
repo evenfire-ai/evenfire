@@ -1354,6 +1354,12 @@ export class GfsUploadSessionService {
             )
           })
           .catch(() => undefined)
+        // A terminal session with no registered flight no longer needs the
+        // in-memory cancellation fence. Keep it only while an operation is
+        // still alive so repeated filesystem failures cannot leak one set
+        // entry per terminal upload; the durable terminal row remains the
+        // authority for the next reconciliation cycle.
+        if (!this.hasInFlight(uploadId)) this.canceledUploads.delete(uploadId)
       }
     }
     return { staleParts, expiredSessions }

@@ -14,6 +14,12 @@ const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
 export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
 const GFS_UPLOAD_MAX_INSTABILITY_FAILURE_THRESHOLD = 100
 export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
+/**
+ * A writer restart can keep the service endpoint unavailable for longer than
+ * the ordinary application-error retry budget. Keep this separate from the
+ * lifecycle budget so 502/503/504 recovery is longer but still bounded.
+ */
+export const GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS = 6
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
@@ -517,6 +523,13 @@ function ambiguousPartResponse(status: number | undefined): boolean {
   return status === undefined || isAmbiguousUploadStatus(status)
 }
 
+function partRetryAttempts(error: unknown): number {
+  const status = statusOf(error)
+  return status === undefined || status === 502 || status === 503 || status === 504
+    ? GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS
+    : GFS_UPLOAD_RETRY_MAX_ATTEMPTS
+}
+
 function partOutcomeUnknown(partNumber: number, cause?: unknown): Error {
   return new Error(
     `upload_part_outcome_unknown: could not prove whether part ${partNumber} committed; resume the persisted session`,
@@ -662,7 +675,8 @@ async function uploadPartWithRetries(
   const blob = file.slice(part.offsetBytes, part.offsetBytes + part.lengthBytes)
   const checksum = await sha256Part(blob)
   let lastError: unknown
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  let maxAttempts = GFS_UPLOAD_RETRY_MAX_ATTEMPTS
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       await putPart(
         session.uploadId,
@@ -680,6 +694,7 @@ async function uploadPartWithRetries(
       lastError = error
       if (signal?.aborted) throw signal.reason ?? error
       if (!assertRetryable(error)) throw error
+      maxAttempts = Math.max(maxAttempts, partRetryAttempts(error))
       onRetryableFailure?.()
       if (ambiguousPartResponse(statusOf(error))) {
         const reconciled = await reconcileAmbiguousPart(file, session, part, checksum, signal)
@@ -688,7 +703,7 @@ async function uploadPartWithRetries(
           return
         }
       }
-      if (attempt === 2) throw error
+      if (attempt + 1 >= maxAttempts) throw error
       await delay(
         retryAfterOf(error) ?? Math.min(1_000, GFS_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt),
         signal
@@ -707,6 +722,7 @@ async function runParts(
   shouldPause: () => boolean,
   onProgress?: (progress: GfsUploadProgress) => void,
   onByteProgress?: (progress: GfsUploadProgress) => void,
+  onRetryableFailure?: (partNumber: number) => void,
   onPartFailure?: (partNumber: number) => void,
   fallbackConcurrency = GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY,
   instabilityFailureThreshold = GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD
@@ -759,7 +775,10 @@ async function runParts(
             parts.length,
             signal,
             onByteProgress,
-            registerRetryableFailure,
+            () => {
+              registerRetryableFailure()
+              onRetryableFailure?.(part.partNumber)
+            },
             registerPartSuccess
           )
           onProgress?.({
@@ -1267,6 +1286,17 @@ export class GfsUploadJob {
         () => this.pauseRequested || this.canceled,
         progress,
         byteProgress,
+        partNumber => {
+          inFlightLoaded.delete(partNumber)
+          this.uploadedBytes = calculateUploadedBytes()
+          this.input.onProgress?.({
+            uploadedBytes: this.uploadedBytes,
+            totalBytes: this.input.file.size,
+            partNumber,
+            partCount: allParts.length,
+          })
+          this.emit()
+        },
         partNumber => {
           inFlightLoaded.delete(partNumber)
           this.uploadedBytes = calculateUploadedBytes()

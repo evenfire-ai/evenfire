@@ -239,6 +239,141 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
+  it('uses the extended bounded part budget while a writer is restarting', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-writer-restart-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([23]))
+      const statuses = [502, 502, 502, 502, 502, 204]
+      let partRequests = 0
+      const session = {
+        uploadId: '14141414-1414-4141-8141-141414141414',
+        drive: 'main',
+        operation: 'create' as const,
+        expectedBytes: 1,
+        partBytes: 1,
+        partCount: 1,
+        state: 'initiated',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST' | 'HEAD', url: string): Promise<T> {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities'))
+            return enabledCapabilities() as T
+          if (method === 'HEAD') return {} as T
+          if (method === 'GET' && requestPath(url).endsWith('/status'))
+            return { ok: true, data: { session, parts: [] } } as T
+          if (method === 'POST' && requestPath(url).endsWith('/uploads'))
+            return { ok: true, data: session } as T
+          if (method === 'POST' && requestPath(url).endsWith('/complete'))
+            return { ok: true, data: { ...session, state: 'completed' } } as T
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart(
+          _url: string,
+          _token: string,
+          _headers: Record<string, string>,
+          body: NodeJS.ReadableStream
+        ) {
+          partRequests += 1
+          for await (const _chunk of body as AsyncIterable<Buffer>) {
+            /* drain */
+          }
+          return { status: statuses.shift() ?? 204, text: '' }
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-writer-restart',
+          transport,
+        }).start()
+      ).resolves.toMatchObject({ state: 'completed' })
+      expect(partRequests).toBe(6)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('removes a failed part attempt from aggregate progress before retrying it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-progress-retry-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([31, 32, 33, 34]))
+      const session = {
+        uploadId: '16161616-1616-4161-8161-161616161616',
+        drive: 'main',
+        operation: 'create' as const,
+        expectedBytes: 4,
+        partBytes: 4,
+        partCount: 1,
+        state: 'initiated',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }
+      let partRequests = 0
+      const progress: number[] = []
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST' | 'HEAD', url: string): Promise<T> {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities'))
+            return enabledCapabilities() as T
+          if (method === 'POST' && requestPath(url).endsWith('/uploads'))
+            return { ok: true, data: session } as T
+          if (method === 'GET' && requestPath(url).endsWith('/status'))
+            return { ok: true, data: { session, parts: [] } } as T
+          if (method === 'POST' && requestPath(url).endsWith('/complete'))
+            return { ok: true, data: { ...session, state: 'completed' } } as T
+          if (method === 'HEAD') return {} as T
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart(
+          _url: string,
+          _token: string,
+          _headers: Record<string, string>,
+          body: NodeJS.ReadableStream
+        ) {
+          for await (const _chunk of body as AsyncIterable<Buffer>) {
+            /* drain */
+          }
+          partRequests += 1
+          return { status: partRequests === 1 ? 502 : 204, text: '' }
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-progress-retry',
+          transport,
+          onProgress: (uploadedBytes: number) => progress.push(uploadedBytes),
+        }).start()
+      ).resolves.toMatchObject({ state: 'completed' })
+
+      expect(partRequests).toBe(2)
+      expect(progress.some((value, index) => index > 0 && value < progress[index - 1]!)).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('resumes from sparse status and does not replay a committed part', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-resume-'))
     try {

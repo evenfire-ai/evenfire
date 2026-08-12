@@ -65,7 +65,14 @@ export function createObservedGfsUploadPartBody(
 }
 
 function sourceIp(req: ExternalAuthedRequest): string {
-  const forwarded = String(req.headers['x-gfs-upload-source-ip'] || '').trim()
+  // Only the authenticated external-rest-api service may assert the original
+  // edge address. Direct callers of Control API (including other valid
+  // service identities) must use the socket/proxy-derived address so they
+  // cannot rotate an arbitrary forwarded header to evade the IP bucket.
+  const forwarded =
+    req.internalService?.name === 'external-rest-api'
+      ? String(req.headers['x-gfs-upload-source-ip'] || '').trim()
+      : ''
   if (forwarded && forwarded.length <= 64 && isIP(forwarded)) return forwarded
   const direct = String(req.ip || req.socket.remoteAddress || 'unknown').trim()
   return direct.length <= 64 ? direct : 'unknown'
@@ -132,7 +139,7 @@ export function gfsUploadAdmission(
     if (isPart) {
       const parsed = declaredGfsUploadPartBytes(req)
       if (!parsed.ok) {
-        gfsUploadAdmissionBytesTotal.inc({ result: 'rejected' }, 0)
+        gfsUploadAdmissionRequestsTotal.inc({ limit: 'part_body', result: 'rejected' }, 1)
         res.status(parsed.status).json({ error: parsed.error })
         return
       }

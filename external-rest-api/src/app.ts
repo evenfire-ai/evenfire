@@ -21,7 +21,8 @@ import { createExternalWorkflowsRouter } from './routes/workflows.js'
 
 // Upload v2 part bodies are streamed octets and must not pass through the
 // global JSON parser (which would buffer/reject the binary payload).
-const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+$/i
+const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const GFS_UPLOAD_PART_PATH = new RegExp(`^/api/v1/me/gfs/uploads/${UUID_PATH}/parts/[0-9]+$`, 'i')
 
 export function createApp() {
   const app = express()

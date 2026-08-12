@@ -384,6 +384,10 @@ describe('GfsBrowser', () => {
         // Simulate an out-of-order in-flight part reporting a later absolute
         // offset before the accumulator commits the lower-numbered part.
         uploadInput?.onProgress?.({ uploadedBytes: 3 })
+        // A failed retry clears that part's in-flight contribution. The UI
+        // intentionally permits the truthful downward correction; the
+        // monotonic guard applies only to stale uploading snapshots.
+        uploadInput?.onProgress?.({ uploadedBytes: 1 })
         uploadInput?.onState?.({
           state: 'uploading',
           session: { ...completed, state: 'uploading' },
@@ -441,10 +445,10 @@ describe('GfsBrowser', () => {
     const progress = await within(uploadDialog).findByRole('progressbar', {
       name: /Upload progress/,
     })
-    expect(progress).toHaveAttribute('value', '3')
+    expect(progress).toHaveAttribute('value', '2')
     expect(progress).toHaveAttribute('aria-valuemin', '0')
     expect(progress).toHaveAttribute('aria-valuemax', '4')
-    expect(progress).toHaveAttribute('aria-valuenow', '3')
+    expect(progress).toHaveAttribute('aria-valuenow', '2')
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Pause' }))
     await waitFor(() => expect(job.pause).toHaveBeenCalledTimes(1))
     expect(await within(uploadDialog).findByRole('button', { name: 'Resume' })).toBeTruthy()

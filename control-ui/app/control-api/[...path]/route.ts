@@ -134,7 +134,9 @@ function buildUpstreamUrl(req: NextRequest, path: string[]): string {
 function isGfsUploadRoute(req: NextRequest, path: string[]): boolean {
   if (req.method !== 'PUT') return false
   const pathname = `/${path.join('/')}`
-  return /^\/api\/v1\/gfs\/proxy\/v1\/uploads\/[0-9a-f-]{36}\/parts\/[0-9]+$/i.test(pathname)
+  return /^\/api\/v1\/gfs\/proxy\/v1\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/parts\/[0-9]+$/i.test(
+    pathname
+  )
 }
 
 function copyRequestHeaders(req: NextRequest): Headers {

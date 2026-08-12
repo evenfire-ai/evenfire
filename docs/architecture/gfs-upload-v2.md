@@ -39,6 +39,15 @@ finite and identical in Desktop and Control UI: `408`, `425`, `429`, `500`,
 `502`, `503`, and `504`. `507 Insufficient Storage` and every other `5xx` are
 terminal until an explicit server-side recovery/retry is requested. A server
 may return `Retry-After`; clients honor it within their bounded retry budget.
+For binary part writes only, a transport failure or `502/503/504` receives a
+separate six-attempt service-recovery budget; ordinary lifecycle requests and
+other retryable statuses retain the three-attempt budget. This covers a bounded
+writer deployment restart without replaying a part blindly: each ambiguous
+attempt still reconciles the durable status and checksum first.
+The branch-owned Playwright gate can enable the negative journeys by setting
+`GFS_UPLOAD_V2_NEGATIVE_E2E=1`; they remain opt-in because they mutate HCC,
+restart the writer, and revoke only the seeded grant. The gate still requires
+an explicit non-production context and profile-owned random URLs.
 
 ## Edge admission limits
 
@@ -68,6 +77,12 @@ whole part. The authoritative PostgreSQL admission fails closed if its backend
 is unavailable. A denied budget returns stable
 `429 { error: "gfs_upload_rate_limited", limit, retryAfterSeconds }` plus
 `Retry-After`; both relays preserve that contract.
+
+The source-IP bucket is trusted only across the authenticated
+`external-rest-api` service boundary. Control API ignores a client-supplied
+`x-gfs-upload-source-ip` from any other caller and falls back to the socket or
+trusted proxy address, so a valid internal token cannot rotate the IP key to
+evade the per-IP budget.
 
 ## End-to-end shape
 
@@ -122,6 +137,13 @@ false cancellation. The publication transaction re-checks state and epoch
 before writing the resource, so a canceled response can never accompany a
 published resource.
 
+Client progress is monotonic for stale `uploading` snapshots that arrive out
+of order. A failed part retry is different: its in-flight contribution is
+removed so the next aggregate may move downward to the truthful committed
+plus in-flight value. Completion is the only state that may expose the exact
+file size; the browser and Desktop tests cover both the stale-snapshot guard
+and this failure correction.
+
 ## Persistence and safety
 
 Desktop upload persistence is a version-2 envelope. Every resumable record is
@@ -133,11 +155,15 @@ deliberate team switch, or runtime/API-base switch blocks new dispatch, advances
 the epoch, aborts and awaits active v2 and legacy fallback work, clears
 credentials, and persists the old records as local `suspended_auth`. A finite
 internal team-context hop temporarily blocks only new GFS dispatches while it
-borrows the other team's token; existing uploads keep their captured token and
-scope, and the original team scope is restored before the gate opens. Resume is
-user-explicit and succeeds only when owner, team, environment, base URL, and
-drive match exactly; the new auth epoch is bound only after the server session
-is revalidated.
+borrows the other team's token; read-only listing/snapshot and controls for an
+existing job remain available, existing uploads keep their captured token and
+scope, and the original team scope is restored before the gate opens. A
+deliberate switch fences the old uploads after the replacement session
+succeeds; if that local fence cannot be persisted, the app fails closed by
+clearing the replacement session and credentials rather than leaving an
+ambiguous team/token pairing. Resume is user-explicit and succeeds only when
+owner, team, environment, base URL, and drive match exactly; the new auth epoch
+is bound only after the server session is revalidated.
 
 The legacy compatibility fallback still accepts at most 16 MiB. It opens one
 descriptor with no-follow semantics where available, validates the descriptor

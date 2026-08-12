@@ -2136,14 +2136,33 @@ export class AppService {
     drive?: string,
     resumeUploadId?: string
   ): Promise<DesktopUploadSession> {
-    return this.startDesktopGfsUpload({
-      filePath,
-      name,
-      drive: normalizeDesktopUploadDrive(drive),
-      operation: 'create',
-      parentRid: parentResourceId,
-      resumeUploadId,
-    })
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      return await this.startDesktopGfsUpload({
+        filePath,
+        name,
+        drive: canonicalDrive,
+        operation: 'create',
+        parentRid: parentResourceId,
+        resumeUploadId,
+      })
+    } catch (error) {
+      // A legacy fallback is valid only for a fresh upload. An explicit resume
+      // must remain a v2 operation so a missing capability cannot silently turn
+      // a persisted session into a second non-resumable resource.
+      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.createResource(
+          { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'create')
+    }
   }
 
   async startGfsFileReplace(
@@ -2153,20 +2172,39 @@ export class AppService {
     ifMatch?: number,
     resumeUploadId?: string
   ): Promise<DesktopUploadSession> {
-    return this.startDesktopGfsUpload({
-      filePath,
-      name: resourceId,
-      drive: normalizeDesktopUploadDrive(drive),
-      operation: 'replace',
-      resourceRid: resourceId,
-      ifMatch,
-      resumeUploadId,
-    })
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      return await this.startDesktopGfsUpload({
+        filePath,
+        name: resourceId,
+        drive: canonicalDrive,
+        operation: 'replace',
+        resourceRid: resourceId,
+        ifMatch,
+        resumeUploadId,
+      })
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.replaceFile(
+          { resourceId, drive: canonicalDrive, ifMatch, encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'replace')
+    }
   }
 
   async getGfsUploadSnapshot(uploadId: string, drive?: string) {
-    const scope = this.currentDesktopGfsUploadScope(drive)
     const entry = this.gfsUploadJobs.get(uploadId)
+    // Snapshot is read-only and an existing job already owns its captured
+    // token/scope. It must remain observable during a finite internal team hop;
+    // only a brand-new user-facing dispatch is fenced by that hop.
+    const scope = this.currentDesktopGfsUploadScope(drive, { allowTransientTeamHop: true })
     if (entry && sameDesktopGfsUploadScope(entry.scope, scope)) return entry.job.snapshot()
     const state = await this.readDesktopGfsUploadState()
     const record = state.records.find(
@@ -2176,7 +2214,11 @@ export class AppService {
     )
     if (!record) return null
     return {
-      state: record.status,
+      // `active` is the persistence marker for a process-owned upload. The
+      // renderer contract describes the same resumable state as `uploading`;
+      // never leak the storage-only marker across the IPC boundary after a
+      // restart.
+      state: record.status === 'active' ? 'uploading' : record.status,
       session: record.session,
       uploadedBytes: record.session.committedBytes,
       totalBytes: record.fileSize,
@@ -2184,8 +2226,10 @@ export class AppService {
   }
 
   async pauseGfsUpload(uploadId: string, drive?: string): Promise<DesktopUploadSession> {
-    const scope = this.currentDesktopGfsUploadScope(drive)
     const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
     if (!entry || !sameDesktopGfsUploadScope(entry.scope, scope))
       throw new Error('GFS upload is not active in the current security scope')
     const session = await entry.job.pause()
@@ -2201,8 +2245,10 @@ export class AppService {
   }
 
   async resumeGfsUpload(uploadId: string, drive?: string): Promise<DesktopUploadSession> {
-    const scope = this.currentDesktopGfsUploadScope(drive)
     const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
     if (entry) {
       if (!sameDesktopGfsUploadScope(entry.scope, scope))
         throw new Error('GFS upload is not active in the current security scope')
@@ -2231,8 +2277,10 @@ export class AppService {
   }
 
   async cancelGfsUpload(uploadId: string, drive?: string): Promise<void> {
-    const scope = this.currentDesktopGfsUploadScope(drive)
     const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
     if (entry) {
       if (!sameDesktopGfsUploadScope(entry.scope, scope))
         throw new Error('GFS upload is not active in the current security scope')
@@ -2261,7 +2309,9 @@ export class AppService {
   }
 
   async listGfsUploadSessions(drive?: string): Promise<DesktopGfsUploadSummary[]> {
-    const scope = this.currentDesktopGfsUploadScope(drive)
+    // Listing persisted state is read-only and must remain available while a
+    // finite internal team hop temporarily borrows another team's token.
+    const scope = this.currentDesktopGfsUploadScope(drive, { allowTransientTeamHop: true })
     const state = await this.readDesktopGfsUploadState()
     return state.records
       .filter(record => sameDesktopGfsUploadScope(record.scope, scope, { includeAuthEpoch: false }))

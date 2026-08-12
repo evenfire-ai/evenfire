@@ -300,12 +300,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         input.resumeUploadId
       )
       uploadIdRef.current = session.uploadId
-      setUploadSnapshot({
-        state: session.state === 'paused' ? 'paused' : 'uploading',
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
         session,
         uploadedBytes: session.committedBytes,
         totalBytes: session.expectedBytes,
-      })
+      }
+      setUploadSnapshot(initialSnapshot)
+      // The legacy compatibility path returns a completed resource receipt,
+      // not a resumable upload session. There is no v2 snapshot to poll under
+      // that resource id; refresh the folder and finish immediately.
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
       const snapshot = await waitForUpload(session.uploadId)
       if (snapshot.state === 'completed') await refreshGfs()
       return snapshot
@@ -328,12 +336,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         input.resumeUploadId
       )
       uploadIdRef.current = session.uploadId
-      setUploadSnapshot({
-        state: session.state === 'paused' ? 'paused' : 'uploading',
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
         session,
         uploadedBytes: session.committedBytes,
         totalBytes: session.expectedBytes,
-      })
+      }
+      setUploadSnapshot(initialSnapshot)
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
       const snapshot = await waitForUpload(session.uploadId)
       if (snapshot.state === 'completed') await refreshGfs()
       return snapshot

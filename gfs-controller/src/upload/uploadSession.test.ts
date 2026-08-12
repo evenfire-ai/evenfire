@@ -697,6 +697,18 @@ describe('GfsUploadSessionService', () => {
       (uploads as unknown as { inFlightFinalizers: Map<string, unknown> }).inFlightFinalizers.size
     ).toBe(0)
 
+    // The first reconciliation attempt must exercise the terminal-session
+    // cancellation fence, then release it even though filesystem cleanup is
+    // still blocked by the non-directory path. This catches a vacuous
+    // assertion before reconcile() and proves the fence is bounded across
+    // repeated cleanup cycles.
+    await expect(uploads.reconcile()).resolves.toEqual({ staleParts: 0, expiredSessions: 0 })
+    expect(
+      (uploads as unknown as { canceledUploads: Set<string> }).canceledUploads.has(
+        created.session.uploadId
+      )
+    ).toBe(false)
+
     await rm(uploadDirectory, { force: true })
     await mkdir(uploadDirectory, { recursive: true })
     await writeFile(join(uploadDirectory, 'finalizer-marker'), 'pending')

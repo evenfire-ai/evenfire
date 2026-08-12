@@ -14,8 +14,16 @@ import {
 import {
   GFS_UPLOAD_V2_BOUNDARIES,
   createDiskUploadFixture,
+  createOversizedDiskUploadFixture,
   removeDiskUploadFixture,
 } from '../../../tests/e2e/gfsUploadV2Fixtures'
+import {
+  countGfsCreateSessions,
+  readGfsUploadV2Enabled,
+  restartGfsWriter,
+  revokeGfsUserWriteGrant,
+  setGfsUploadV2Enabled,
+} from '../../../tests/e2e/gfsUploadV2Runtime'
 import { test } from './fixtures'
 import { openResourcesNavItem } from './navigationHelpers'
 
@@ -412,4 +420,194 @@ test.describe('GFS Upload v2 — packaged Desktop project', () => {
       await exerciseReplace(appPage, byteLength)
     })
   }
+})
+
+test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
+  test.skip(
+    process.env.GFS_UPLOAD_V2_NEGATIVE_E2E !== '1',
+    'Set GFS_UPLOAD_V2_NEGATIVE_E2E=1 only on an owned non-production dev host with profile-scoped random URLs.'
+  )
+  test.setTimeout(45 * 60_000)
+
+  test('rejects a 209715201-byte file through the visible Desktop action', async ({ appPage }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-oversize-desktop')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    await seedGfsGrant({
+      resourceId: fixture.resourceId,
+      subjectType: 'user',
+      subjectId: getE2EUserId(),
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-upload-v2-negative',
+    })
+    const source = await createOversizedDiskUploadFixture('.parquet', fixtureName)
+    try {
+      const { browser, manageDialog } = await openFolder(appPage, fixture.name)
+      await selectFileThroughVisibleAction(
+        appPage,
+        manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+        source.filePath
+      )
+      await expect(
+        appPage
+          .getByRole('alert')
+          .filter({ hasText: 'GFS uploads are limited to 200 MB per file.' })
+      ).toBeVisible({ timeout: 15_000 })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 15_000 }
+        )
+        .toBeNull()
+      await expect(browser.getByRole('button', { name: source.fileName, exact: true })).toHaveCount(
+        0
+      )
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
+
+  test('falls back to the legacy path when v2 is disabled', async ({ appPage }) => {
+    const previous = await readGfsUploadV2Enabled()
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-legacy-desktop')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    await seedGfsGrant({
+      resourceId: fixture.resourceId,
+      subjectType: 'user',
+      subjectId: getE2EUserId(),
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-upload-v2-negative',
+    })
+    const source = await createDiskUploadFixture(2 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      await setGfsUploadV2Enabled(false)
+      const { browser, manageDialog } = await openFolder(appPage, fixture.name)
+      await selectFileThroughVisibleAction(
+        appPage,
+        manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+        source.filePath
+      )
+      await expect(appPage.getByText(`Uploaded ${source.fileName}`, { exact: true })).toBeVisible({
+        timeout: 120_000,
+      })
+      expect(countGfsCreateSessions(fixture.resourceId, source.fileName, getE2EUserId())).toBe(0)
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
+      await expect(
+        browser.getByRole('button', { name: source.fileName, exact: true })
+      ).toBeVisible()
+    } finally {
+      try {
+        await setGfsUploadV2Enabled(previous)
+      } finally {
+        await removeDiskUploadFixture(source)
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
+    }
+  })
+
+  test('recovers a visible upload after the writer deployment restarts', async ({ appPage }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-restart-desktop')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    await seedGfsGrant({
+      resourceId: fixture.resourceId,
+      subjectType: 'user',
+      subjectId: getE2EUserId(),
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-upload-v2-negative',
+    })
+    const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      const { browser, manageDialog } = await openFolder(appPage, fixture.name)
+      await selectFileThroughVisibleAction(
+        appPage,
+        manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+        source.filePath
+      )
+      const progress = browser.getByRole('progressbar', {
+        name: `GFS upload progress for ${source.fileName}`,
+      })
+      await expect(progress).toBeVisible({ timeout: 60_000 })
+      await restartGfsWriter()
+      await expect(appPage.getByText(`Uploaded ${source.fileName}`, { exact: true })).toBeVisible({
+        timeout: 1_200_000,
+      })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
+
+  test('fails visibly when the user grant is revoked during an upload', async ({ appPage }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-revoke-desktop')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    const userId = getE2EUserId()
+    seedGfsGrant({
+      resourceId: fixture.resourceId,
+      subjectType: 'user',
+      subjectId: userId,
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-upload-v2-negative',
+    })
+    const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      const { browser, manageDialog } = await openFolder(appPage, fixture.name)
+      await selectFileThroughVisibleAction(
+        appPage,
+        manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+        source.filePath
+      )
+      const progress = browser.getByRole('progressbar', {
+        name: `GFS upload progress for ${source.fileName}`,
+      })
+      await expect(progress).toBeVisible({ timeout: 60_000 })
+      await revokeGfsUserWriteGrant(fixture.resourceId, userId)
+      await expect(appPage.getByText('Upload needs attention', { exact: true })).toBeVisible({
+        timeout: 120_000,
+      })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toBeNull()
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
 })
