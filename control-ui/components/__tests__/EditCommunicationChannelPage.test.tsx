@@ -43,7 +43,7 @@ afterEach(() => {
 
 type ChannelSpec = Record<string, unknown>
 
-function mockChannel(name: string, spec: ChannelSpec) {
+function mockChannel(name: string, spec: ChannelSpec, annotations?: Record<string, string>) {
   navigation.params = { name }
   vi.mocked(api.apiGet).mockImplementation(async path => {
     if (path === '/api/v1/admin/hosts') {
@@ -52,7 +52,7 @@ function mockChannel(name: string, spec: ChannelSpec) {
     if (path === `/api/v1/admin/communication-channels/${name}`) {
       return {
         item: {
-          metadata: { name, namespace: 'channels' },
+          metadata: { name, namespace: 'channels', ...(annotations ? { annotations } : {}) },
           spec: { access: { users: [], teams: [] }, hostRef: 'agent-a', ...spec },
         },
       }
@@ -76,6 +76,21 @@ const SLACK_CHANNEL_SPEC: ChannelSpec = {
   credentialsSecretRef: { name: 'cc-slack-channel-credentials' },
   slackSettings: { botHandle: 'Evenfire', replyOnlyWhenMentioned: true },
 }
+
+/** A Telegram-only channel that still carries a leftover Slack label annotation. */
+const LABELLED_TELEGRAM_CHANNEL = 'telegram-labelled'
+const LABELLED_TELEGRAM_SPEC: ChannelSpec = {
+  telegramSettings: { botHandle: '@ops_bot', replyOnlyWhenMentioned: false },
+}
+const STALE_SLACK_LABEL = { 'clerum.io/slack-bot-label': 'Evenfire' }
+/**
+ * The Request URL that channel would get if the gate let an annotation through:
+ * base64url of {"namespace":"channels","name":"telegram-labelled"}, which is what
+ * the reader decodes. Written out rather than derived so a change to either the
+ * gate or the encoding has to be looked at.
+ */
+const LABELLED_TELEGRAM_REQUEST_URL =
+  'https://webhook.example.com/webhooks/slack/slack%3AeyJuYW1lc3BhY2UiOiJjaGFubmVscyIsIm5hbWUiOiJ0ZWxlZ3JhbS1sYWJlbGxlZCJ9'
 
 describe('EditCommunicationChannelPage', () => {
   it('renders Teams setup details and confirmed conversation metadata', async () => {
@@ -223,6 +238,55 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     expect(requestUrlLines[0]).toBe(
       `    request_url: ${screen.getByText(/^https:\/\/webhook\.example\.com\/webhooks\/slack\//).textContent}`
     )
+    // Nothing was persisted to get here: no PUT, and the manifest is on screen.
+    expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
+  })
+
+  it('gives a Telegram-only channel with a stale Slack label no Request URL and no manifest', async () => {
+    // clerum.io/slack-bot-label is a leftover display label, not a Slack provider.
+    // Seeding the draft from it made this channel render a full, copyable Request
+    // URL and manifest for a Slack app that does not exist, which is the paste-the-
+    // wrong-URL failure this whole page guard is for.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    // The annotation still fills the visible field. Only the URL and the manifest are gated.
+    expect(screen.getByLabelText(/Slack App Name/)).toHaveValue('Evenfire')
+    expect(screen.getByText('Available once this channel has a Slack App Name')).toBeInTheDocument()
+    expect(screen.queryByText(LABELLED_TELEGRAM_REQUEST_URL)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled()
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no public webhook address/)).not.toBeInTheDocument()
+  })
+
+  it('offers the Request URL and manifest once an App Name is typed over a stale Slack label', async () => {
+    // The draft gate exists so the manifest is reachable before anything is saved:
+    // Slack hands out the xoxb token only after the app the manifest creates has
+    // been installed. Excluding the annotation must not cost that.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/Slack App Name/), { target: { value: 'Ops Bot' } })
+
+    expect(screen.getByText(LABELLED_TELEGRAM_REQUEST_URL)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeEnabled()
+    expect(screen.getByText('Slack App Manifest')).toBeInTheDocument()
+    const lines = (screen.getByText(/display_information:/).textContent ?? '').split('\n')
+    expect(lines.filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Ops Bot"',
+      '    display_name: "Ops Bot"',
+    ])
+    expect(lines.filter(line => line.trim().startsWith('request_url:'))).toEqual([
+      `    request_url: ${LABELLED_TELEGRAM_REQUEST_URL}`,
+      `    request_url: ${LABELLED_TELEGRAM_REQUEST_URL}`,
+    ])
     // Nothing was persisted to get here: no PUT, and the manifest is on screen.
     expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
   })

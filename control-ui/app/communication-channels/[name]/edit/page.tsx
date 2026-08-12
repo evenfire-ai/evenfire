@@ -27,7 +27,7 @@ import {
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
-  hasSlackConfig,
+  hasSlackConfigForRequestUrl,
 } from '@lib/communicationChannelEdit'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
@@ -156,9 +156,11 @@ export default function EditCommunicationChannelPage() {
   // The URL depends only on namespace/name, both fixed at create time, and the
   // reader resolves that id regardless of slackSettings, so a draft-derived URL
   // is already server-truthful. The guard against a copyable dead end on a
-  // non-Slack channel is kept: no Slack config in the draft, no URL.
+  // non-Slack channel is kept: no Slack config in the draft, no URL. A bot
+  // handle the draft only inherited from the clerum.io/slack-bot-label
+  // annotation is not Slack config, which is why this is not hasSlackConfig.
   const slackRequestUrl =
-    draft && hasSlackConfig(draft)
+    draft && hasSlackConfigForRequestUrl(draft)
       ? slackWebhookUrlForChannelName(
           item?.metadata?.name?.trim() || name,
           item?.metadata?.namespace
@@ -454,7 +456,14 @@ export default function EditCommunicationChannelPage() {
                         value={draft.slackBotHandle}
                         onChange={event =>
                           setDraft(current =>
-                            current ? { ...current, slackBotHandle: event.target.value } : current
+                            current
+                              ? {
+                                  ...current,
+                                  slackBotHandle: event.target.value,
+                                  // Typed, so no longer just an inherited label.
+                                  slackBotHandleFromAnnotation: false,
+                                }
+                              : current
                           )
                         }
                         placeholder="Your Slack App"
