@@ -16,6 +16,8 @@ import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { IconCopy } from '@components/icons'
+import { Button } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
@@ -37,9 +39,12 @@ import {
   slackWebhookUrlForChannel,
   teamsWebhookUrlForChannel,
 } from '@lib/communicationChannels'
+import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 
 type ChannelProvider = CommunicationChannelProvider
 type DraftState = CommunicationChannelDraftState
+
+const DEFAULT_SLACK_APP_NAME = 'Evenfire'
 
 type HostItem = {
   metadata?: { name?: string; namespace?: string }
@@ -145,6 +150,13 @@ export default function EditCommunicationChannelPage() {
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
   const slackRequestUrl = item ? slackWebhookUrlForChannel(item) : null
   const teamsRequestUrl = item ? teamsWebhookUrlForChannel(item) : null
+  // A relative request_url is invalid to Slack, so warn instead of handing over a manifest that
+  // cannot work. slackWebhookUrlForChannel falls back to a bare path when the deployment has no
+  // public webhook address.
+  const slackManifest =
+    slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
+      ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
+      : null
 
   async function persistDraft(nextDraft: DraftState, successMessage: string) {
     setSaving(true)
@@ -203,6 +215,17 @@ export default function EditCommunicationChannelPage() {
       copied
         ? 'Slack Request URL copied.'
         : 'Could not copy to clipboard. Select the URL and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copySlackAppManifest() {
+    if (!slackManifest) return
+    const copied = await copyTextToClipboard(slackManifest)
+    showToast(
+      copied
+        ? 'Slack app manifest copied.'
+        : 'Could not copy to clipboard. Select the manifest and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
   }
@@ -446,6 +469,46 @@ export default function EditCommunicationChannelPage() {
                         Use this URL for Slack Event Subscriptions and Interactivity.
                       </span>
                     </div>
+                    {slackRequestUrl ? (
+                      slackManifest ? (
+                        <div className="cu-field">
+                          <span className="cu-field__label">Slack App Manifest</span>
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>YAML</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copySlackAppManifest}
+                                disabled={saving}
+                                aria-label="Copy Slack app manifest"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre cu-slack-manifest__pre">
+                              <code>{slackManifest}</code>
+                            </pre>
+                          </div>
+                          <span className="cu-field__hint">
+                            In Slack, Create New App → From an app manifest. It fills in both
+                            Request URLs, on Event Subscriptions and on Interactivity &amp;
+                            Shortcuts. Setting only Event Subscriptions leaves approval buttons dead
+                            with nothing in the logs.
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="cu-banner cu-banner--warning">
+                          No app manifest: this deployment has no public webhook address, so the
+                          Request URL above is a path and Slack cannot reach it. Expose the webhook
+                          proxy publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to
+                          that address, or prefix the path with it by hand in Slack.
+                        </div>
+                      )
+                    ) : null}
                   </>
                 ) : (
                   <>
