@@ -534,9 +534,7 @@ class SqlCatalogProducer implements CatalogProducer {
     if (this.family === 'gfs_resource') {
       return listGfsProducerKeys({ context, continuation, take })
     }
-    const after = continuation.afterKey?.[2] ?? ''
     const prefix = `${this.family === 'host' ? config.hostsNamespace : config.contextsNamespace}/`
-    const scopedAfter = after.startsWith(prefix) ? after.slice(prefix.length) : ''
     return listBoundedProducerKeys({
       context,
       family: this.family,
@@ -544,7 +542,11 @@ class SqlCatalogProducer implements CatalogProducer {
       continuation,
       take,
       sql: CATALOG_KEY_SQL[this.family],
-      extraValues: [config.hostsNamespace, config.contextsNamespace, scopedAfter],
+      extraValues: after => [
+        config.hostsNamespace,
+        config.contextsNamespace,
+        after.startsWith(prefix) ? after.slice(prefix.length) : '',
+      ],
     })
   }
 
