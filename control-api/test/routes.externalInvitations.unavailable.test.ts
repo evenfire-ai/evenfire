@@ -29,6 +29,9 @@ const database = vi.hoisted(() => ({
 }))
 vi.mock('../src/db.js', () => ({ withTransaction: database.withTransaction }))
 
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
+
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
@@ -82,6 +85,13 @@ describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     database.withTransaction.mockImplementation(async work => work({ query: database.query }))
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
   })
 
   it('GET token lookup returns 503 member_registration_unavailable, NOT 400 invalid_invitation', async () => {
@@ -181,6 +191,27 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(res.status).toBe(200)
     expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
     expect(directory.listPendingInvitations).not.toHaveBeenCalledWith('victim@example.com')
+  })
+
+  it('stops an authenticated pending-invitation read before the directory handler', async () => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+    })
+
+    const response = await request(app()).get('/external/invitations/pending')
+
+    expect(response.status).toBe(429)
+    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
+    expect(response.headers['retry-after']).toBeDefined()
+    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(
+      'external_invitation_read:user:caller-user',
+      10
+    )
+    expect(directory.listPendingInvitations).not.toHaveBeenCalled()
   })
 
   it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {
