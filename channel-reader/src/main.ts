@@ -1561,7 +1561,11 @@ export class ChannelReader {
     const channelId = msg.channelId?.trim()
     if (!userId || !workspaceId || !channelId) return
 
-    const key = `${workspaceId}:${userId}:${channelId}`
+    // Scope the limiter by provider identity, the same way pendingApprovalChannelScope
+    // does. The SEND still targets msg.channelId, which is what replyChannelId hands
+    // every other outbound Slack call; only the dedupe identity is provider-scoped.
+    const conversationId = identity?.providerChannelId?.trim() || channelId
+    const key = `${workspaceId}:${userId}:${conversationId}`
     if (this.unresolvedNoticesSent.has(key)) return
     // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
     // must not produce one outbound call per inbound message.
@@ -1571,7 +1575,19 @@ export class ChannelReader {
     if (!adapter?.sendEphemeral) return
     const profileUrl = config.profileUiUrl?.trim()
     const content = profileUrl ? `${UNRESOLVED_NOTICE_COPY} ${profileUrl}` : UNRESOLVED_NOTICE_COPY
-    await adapter.sendEphemeral(channelId, userId, content)
+    try {
+      await adapter.sendEphemeral(channelId, userId, content)
+    } catch (error) {
+      // Contain the failure HERE. SlackAdapter swallows its own errors today, but
+      // the ChannelAdapter interface promises nothing, and this runs inside the
+      // per-message loop in handleMessages: an adapter that ever throws would
+      // abort the rest of the batch over a notice that is best-effort by design.
+      console.warn(
+        `[Main] Could not send unresolved-sender notice to ${userId} in ${channelId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    }
   }
 
   private pendingApprovalChannelScope(msg: Message): string {

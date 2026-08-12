@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { WorkflowBrokerRequestError } from '../core/tools/workflowBrokerClient'
 import { classifyAuthorizationFailure } from '../main'
 
@@ -49,6 +49,20 @@ describe('classifyAuthorizationFailure', () => {
       'communication_channel_access_denied',
       'gateway'
     )
+    expect(classifyAuthorizationFailure(err)).toBe('error')
+  })
+
+  // Each code is bound to its ONE status. Both statuses below are themselves
+  // whitelisted, and both codes are themselves whitelisted, so only the
+  // code-to-status BINDING can reject these pairs. A plain set of codes checked
+  // against `status === 404 || status === 403` classifies both 'unresolved'.
+  it('maps a 403 medium_account_not_found to error', () => {
+    const err = new WorkflowBrokerRequestError(403, 'medium_account_not_found', 'denied')
+    expect(classifyAuthorizationFailure(err)).toBe('error')
+  })
+
+  it('maps a 404 communication_channel_access_denied to error', () => {
+    const err = new WorkflowBrokerRequestError(404, 'communication_channel_access_denied', 'nope')
     expect(classifyAuthorizationFailure(err)).toBe('error')
   })
 })

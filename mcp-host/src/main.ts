@@ -1788,9 +1788,15 @@ async function handleProviderWorkflowApprovalDecision(
   return submitProviderWorkflowApprovalDecision(decision, runtimeAuth)
 }
 
-const UNRESOLVED_BROKER_CODES = new Set([
-  'medium_account_not_found',
-  'communication_channel_access_denied',
+/**
+ * Each code is bound to the ONE status control-api emits it with. A pair that
+ * does not match exactly (403 medium_account_not_found, 404
+ * communication_channel_access_denied) is 'error', so a code reused later under a
+ * different status with a different meaning cannot silently widen this whitelist.
+ */
+const UNRESOLVED_BROKER_CODE_STATUS = new Map<string, number>([
+  ['medium_account_not_found', 404],
+  ['communication_channel_access_denied', 403],
 ])
 
 /**
@@ -1801,9 +1807,13 @@ const UNRESOLVED_BROKER_CODES = new Set([
  * unlinked.
  */
 export function classifyAuthorizationFailure(error: unknown): 'unresolved' | 'error' {
-  if (error instanceof WorkflowBrokerRequestError) {
-    if ((error.status === 404 || error.status === 403) && error.code) {
-      return UNRESOLVED_BROKER_CODES.has(error.code) ? 'unresolved' : 'error'
+  if (error instanceof WorkflowBrokerRequestError && error.code) {
+    const expectedStatus = UNRESOLVED_BROKER_CODE_STATUS.get(error.code)
+    // `expectedStatus !== undefined` first: an unrecognized code lookup and a
+    // missing status would otherwise compare undefined === undefined and classify
+    // 'unresolved'.
+    if (expectedStatus !== undefined && expectedStatus === error.status) {
+      return 'unresolved'
     }
   }
   return 'error'
