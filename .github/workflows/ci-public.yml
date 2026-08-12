@@ -93,6 +93,12 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # keytar is a native Desktop dependency. When its prebuild is unavailable,
+      # node-gyp requires libsecret development metadata on Linux.
+      - name: Install Desktop native build prerequisite
+        if: matrix.service == 'desktop-app' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libsecret-1-dev
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
