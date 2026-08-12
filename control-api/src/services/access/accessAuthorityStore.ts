@@ -19,6 +19,7 @@ import {
 import type { ValidatedOperationTarget } from './operationTarget.js'
 import type { OperationalResourceGraphResult } from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import { workflowTriggerGrantIdentitySql } from './workflowTriggerGrantIdentity.js'
 
 export type OperationalPathBinding = Readonly<{
   resourceType: 'host' | 'context' | 'mcp_server' | 'workflow_recipe' | 'shared_filesystem'
@@ -330,6 +331,8 @@ async function loadSimpleOperationalGrantCandidates(input: {
   const isContext = input.resource.type === 'context'
   const isRecipe = ['workflow_recipe', 'sandbox_app'].includes(input.resource.type)
   if (!isHost && !isContext && !isRecipe) return []
+  const directWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('direct', 'uwt')
+  const teamWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('team', 'twt')
   const result = await query(
     input.db,
     input.budget,
@@ -359,15 +362,13 @@ async function loadSimpleOperationalGrantCandidates(input: {
         WHERE $2::text = 'context' AND tm.user_id = $1 AND tm.status = 'active'
           AND tc.context_id = $4
        UNION ALL
-       SELECT 'direct', 'user_workflow_triggers:' || uwt.user_id || ':' ||
-              uwt.recipe_namespace || '/' || uwt.recipe_name,
+       SELECT 'direct', ${directWorkflowTriggerGrantId},
               NULL, NULL
          FROM user_workflow_triggers uwt
         WHERE $2::text IN ('workflow_recipe','sandbox_app') AND uwt.user_id = $1
           AND uwt.recipe_namespace = $3 AND uwt.recipe_name = $4
        UNION ALL
-       SELECT 'team', 'team_workflow_triggers:' || twt.team_id || ':' ||
-              twt.recipe_namespace || '/' || twt.recipe_name,
+       SELECT 'team', ${teamWorkflowTriggerGrantId},
               twt.team_id, tm.role
          FROM team_workflow_triggers twt
          JOIN team_members tm ON tm.team_id = twt.team_id
