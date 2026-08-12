@@ -4,6 +4,8 @@ import {
   type CatalogShadowOutcome,
   compareAccessCatalogShadow,
 } from '../src/services/access/accessCatalogShadow.js'
+import { runAccessDatabaseQuery } from '../src/services/access/accessDatabaseQuery.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const session = {
   contract: 'v1' as const,
@@ -87,5 +89,52 @@ describe('aggregate access shadow comparison', () => {
     expect(metrics).toContain('outcome="both_differ"')
     expect(metrics).not.toContain('legacy-secret-id')
     expect(metrics).not.toContain('catalog-secret-id')
+  })
+
+  it('reserves physical statement capacity for a database-consuming child build', async () => {
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { databaseStatements: 8 },
+    })
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    try {
+      await expect(
+        compareAccessCatalogShadow(
+          { session, family: 'team', legacyLogicalIds: [], legacyComplete: true },
+          {
+            enabled: true,
+            budget,
+            buildCatalog: async (_input, options) => {
+              await runAccessDatabaseQuery({ query }, options.budget!, 'SELECT 1', [], {
+                chargeRows: false,
+              })
+              return catalog([])
+            },
+          }
+        )
+      ).resolves.toBe('match')
+      expect(query).toHaveBeenCalledTimes(1)
+      expect(budget.remaining('databaseStatements')).toBe(7)
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('truthfully skips the shadow when the parent cannot reserve statements', async () => {
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { databaseStatements: 7 },
+    })
+    const buildCatalog = vi.fn()
+    try {
+      await expect(
+        compareAccessCatalogShadow(
+          { session, family: 'team', legacyLogicalIds: [], legacyComplete: true },
+          { enabled: true, budget, buildCatalog }
+        )
+      ).resolves.toBe('skipped_capacity')
+      expect(buildCatalog).not.toHaveBeenCalled()
+      expect(budget.remaining('databaseStatements')).toBe(7)
+    } finally {
+      budget.close()
+    }
   })
 })
