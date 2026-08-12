@@ -76,7 +76,8 @@ export class RemoteLlmHook {
   async preCall(request: ToolCompletionRequest): Promise<LlmContributor | null> {
     if (!this.handles('pre_call')) return null
     const res = await this.fetch({ point: 'pre_call', descriptor: this.descriptor, body: request })
-    if (res.unavailable) return this.onUnavailable()
+    // §8.1: non-200 or unavailable → fail-mode (never a silent allow).
+    if (res.unavailable || res.status !== 200) return this.onUnavailable()
 
     const body = isRecord(res.body) ? res.body : {}
     if (body.action === 'reject') {
@@ -86,14 +87,15 @@ export class RemoteLlmHook {
         audit: { modelReason: typeof body.message === 'string' ? body.message : undefined },
       })
     }
-    // action === 'continue'
-    const patch = isRecord(body.patch) ? body.patch : undefined
-    if (patch && this.has('may_rewrite')) {
-      const rewrite = this.applyPatch(request, patch)
-      return this.contribution('allow', 'shaped', { rewrite })
+    if (body.action === 'continue') {
+      const patch = isRecord(body.patch) ? body.patch : undefined
+      if (patch && this.has('may_rewrite')) {
+        return this.contribution('allow', 'shaped', { rewrite: this.applyPatch(request, patch) })
+      }
+      return null // continue with no honored patch → no contribution (allow).
     }
-    // Continue with no honored patch → no contribution (allow).
-    return null
+    // A 200 with no valid action is non-conforming (§8.1) → fail-mode.
+    return this.onUnavailable()
   }
 
   /** Apply a `pre_call` patch: NON-system messages + params only (N4). */
@@ -145,7 +147,8 @@ export class RemoteLlmHook {
       descriptor: this.descriptor,
       body: { request, error },
     })
-    if (res.unavailable) return null // can't recover a failed call if the recovery hook is also down.
+    // Recovery only on a proper 200 `recover`; anything else = no recovery (error surfaces).
+    if (res.unavailable || res.status !== 200) return null
 
     const body = isRecord(res.body) ? res.body : {}
     if (body.action !== 'recover' || !this.has('may_substitute_result')) return null

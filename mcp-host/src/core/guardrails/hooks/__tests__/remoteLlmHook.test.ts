@@ -73,6 +73,23 @@ describe('pre_call', () => {
   })
 })
 
+describe('pre_call non-conforming → fail-mode (§8.1)', () => {
+  it('non-200 with may_deny → deny (never a silent allow)', async () => {
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_deny'] }),
+      fetcher({ status: 418, body: {}, unavailable: false })
+    )
+    expect((await h.preCall(req()))?.decision).toBe('deny')
+  })
+  it('200 with no valid action + may_deny → deny', async () => {
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_deny'] }),
+      fetcher({ status: 200, body: { nonsense: true }, unavailable: false })
+    )
+    expect((await h.preCall(req()))?.decision).toBe('deny')
+  })
+})
+
 describe('moderate', () => {
   it('200 → pass (no contribution)', async () => {
     const h = new RemoteLlmHook(
