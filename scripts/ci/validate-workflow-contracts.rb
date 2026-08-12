@@ -4,6 +4,9 @@
 require 'optparse'
 require 'open3'
 require 'pathname'
+require 'shellwords'
+require 'strscan'
+require 'tmpdir'
 require 'yaml'
 
 RESULT_STATES = %w[success failure skipped cancelled].freeze
@@ -13,11 +16,201 @@ OptionParser.new do |parser|
   parser.on('--root PATH', 'Repository root containing .github/workflows') do |path|
     options[:root] = Pathname(path).expand_path
   end
+  parser.on('--resolve-release-executable-ref', 'Print the release resolver checkout ref') do
+    options[:resolve_release_executable_ref] = true
+  end
+  parser.on('--event EVENT', 'Simulated event for release checkout resolution') do |event|
+    options[:event] = event
+  end
+  parser.on('--workflow-sha SHA', 'Simulated trusted workflow SHA') do |sha|
+    options[:workflow_sha] = sha
+  end
+  parser.on('--selected-ref REF', 'Simulated operator-selected release ref') do |ref|
+    options[:selected_ref] = ref
+  end
 end.parse!
 
 root = options.fetch(:root)
 workflow_dir = root.join('.github/workflows')
 errors = []
+
+class GithubExpression
+  Token = Struct.new(:type, :value)
+
+  def initialize(source)
+    expression = source.to_s.strip
+    match = expression.match(/\A\$\{\{(.*)\}\}\z/m)
+    expression = match[1] if match
+    raise ArgumentError, 'expected a GitHub expression' if expression.empty?
+
+    @tokens = tokenize(expression)
+    @position = 0
+  end
+
+  def parse
+    expression = parse_or
+    token = peek
+    raise ArgumentError, "unexpected trailing token #{token.value.inspect}" if token
+
+    expression
+  end
+
+  def self.evaluate(source, context)
+    evaluate_node(parse(source), context)
+  end
+
+  def self.parse(source)
+    new(source).parse
+  end
+
+  def self.contexts(node)
+    type, *values = node
+    case type
+    when :literal
+      []
+    when :context
+      [values.first]
+    when :equal, :not_equal, :and, :or
+      (contexts(values[0]) + contexts(values[1])).uniq
+    else
+      raise ArgumentError, "unsupported expression node #{type.inspect}"
+    end
+  end
+
+  def self.literals(node)
+    type, *values = node
+    case type
+    when :literal
+      [values.first]
+    when :context
+      []
+    when :equal, :not_equal, :and, :or
+      (literals(values[0]) + literals(values[1])).uniq
+    else
+      raise ArgumentError, "unsupported expression node #{type.inspect}"
+    end
+  end
+
+  def self.evaluate_node(node, context)
+    type, *values = node
+    case type
+    when :literal
+      values.first
+    when :context
+      context.fetch(values.first)
+    when :equal
+      left = evaluate_node(values[0], context)
+      right = evaluate_node(values[1], context)
+      left.is_a?(String) && right.is_a?(String) ? left.casecmp?(right) : left == right
+    when :not_equal
+      left = evaluate_node(values[0], context)
+      right = evaluate_node(values[1], context)
+      !(left.is_a?(String) && right.is_a?(String) ? left.casecmp?(right) : left == right)
+    when :and
+      left = evaluate_node(values[0], context)
+      truthy?(left) ? evaluate_node(values[1], context) : left
+    when :or
+      left = evaluate_node(values[0], context)
+      truthy?(left) ? left : evaluate_node(values[1], context)
+    else
+      raise ArgumentError, "unsupported expression node #{type.inspect}"
+    end
+  end
+
+  def self.truthy?(value)
+    !value.nil? && value != false && value != 0 && value != ''
+  end
+
+  private
+
+  def tokenize(source)
+    scanner = StringScanner.new(source)
+    tokens = []
+    until scanner.eos?
+      scanner.skip(/\s+/)
+      break if scanner.eos?
+
+      if (operator = scanner.scan(/&&|\|\||==|!=|\(|\)/))
+        tokens << Token.new(operator, operator)
+      elsif (string = scanner.scan(/'(?:[^']|'')*'/))
+        tokens << Token.new(:literal, string[1...-1].gsub("''", "'"))
+      elsif (identifier = scanner.scan(/[A-Za-z_][A-Za-z0-9_.-]*/))
+        literal = { 'true' => true, 'false' => false, 'null' => nil }
+        key = identifier.downcase
+        tokens << if literal.key?(key)
+                    Token.new(:literal, literal[key])
+                  else
+                    Token.new(:context, identifier)
+                  end
+      else
+        raise ArgumentError, "unsupported token near #{scanner.rest.inspect}"
+      end
+    end
+    tokens
+  end
+
+  def parse_or
+    left = parse_and
+    while accept('||')
+      left = [:or, left, parse_and]
+    end
+    left
+  end
+
+  def parse_and
+    left = parse_equality
+    while accept('&&')
+      left = [:and, left, parse_equality]
+    end
+    left
+  end
+
+  def parse_equality
+    left = parse_primary
+    while %w[== !=].include?(peek&.type)
+      operator = advance.type
+      left = [operator == '==' ? :equal : :not_equal, left, parse_primary]
+    end
+    left
+  end
+
+  def parse_primary
+    if accept('(')
+      expression = parse_or
+      expect(')')
+      return expression
+    end
+
+    token = advance
+    raise ArgumentError, 'expression ended before an operand' unless token
+    return [token.type, token.value] if %i[literal context].include?(token.type)
+
+    raise ArgumentError, "expected an operand, got #{token.value.inspect}"
+  end
+
+  def accept(type)
+    return false unless peek&.type == type
+
+    @position += 1
+    true
+  end
+
+  def expect(type)
+    return if accept(type)
+
+    raise ArgumentError, "expected #{type.inspect}, got #{peek&.value.inspect}"
+  end
+
+  def advance
+    token = peek
+    @position += 1 if token
+    token
+  end
+
+  def peek
+    @tokens[@position]
+  end
+end
 
 def load_workflow(path)
   YAML.safe_load(path.read, permitted_classes: [], aliases: true) || {}
@@ -70,6 +263,404 @@ end
 
 def combined_run(job)
   Array(job['steps']).map { |step| step['run'] }.compact.join("\n")
+end
+
+def checkout_ref(job)
+  checkouts = Array(job['steps']).select do |step|
+    step['uses'].to_s.start_with?('actions/checkout@')
+  end
+  raise ArgumentError, "expected one checkout step, found #{checkouts.length}" unless checkouts.length == 1
+
+  (checkouts.first['with'] || {})['ref'].to_s
+end
+
+def release_checkout_context(event_name:, workflow_sha:, selected_ref:)
+  dispatch = event_name == 'workflow_dispatch'
+  {
+    'github.event.inputs.ref' => selected_ref,
+    'github.event_name' => event_name,
+    'github.ref' => dispatch ? 'refs/heads/main' : "refs/tags/#{selected_ref}",
+    'github.ref_name' => dispatch ? 'main' : selected_ref,
+    'github.sha' => dispatch ? workflow_sha : selected_ref,
+    'github.workflow_sha' => workflow_sha,
+    'inputs.ref' => selected_ref,
+  }
+end
+
+def resolve_release_executable_ref(release, event_name:, workflow_sha:, selected_ref:)
+  resolve_job = (release['jobs'] || {}).fetch('resolve-release-ref')
+  GithubExpression.evaluate(
+    checkout_ref(resolve_job),
+    release_checkout_context(
+      event_name: event_name,
+      workflow_sha: workflow_sha,
+      selected_ref: selected_ref
+    )
+  ).to_s
+end
+
+def execute_provenance_step(script, helper_exit:, source_sha:, allowed_branches:)
+  Dir.mktmpdir('evenfire-provenance-contract') do |directory|
+    shim = Pathname(directory).join('node')
+    log = Pathname(directory).join('arguments')
+    shim.write(<<~SH)
+      #!/bin/sh
+      printf '%s\\0' "$@" >> "$PROVENANCE_SHIM_LOG"
+      exit #{helper_exit}
+    SH
+    shim.chmod(0o700)
+    env = {
+      'ALLOWED_BRANCHES' => allowed_branches,
+      'HOME' => directory,
+      'PATH' => directory,
+      'PROVENANCE_SHIM_LOG' => log.to_s,
+      'SOURCE_SHA' => source_sha,
+    }
+    stdout, stderr, status = Open3.capture3(
+      env,
+      '/bin/bash', '--noprofile', '--norc', '-e', '-c', script,
+      chdir: directory,
+      unsetenv_others: true
+    )
+    arguments = log.file? ? log.binread.split("\0") : []
+    [stdout, stderr, status, arguments]
+  end
+end
+
+def validate_provenance_step(errors, provenance_workflow, provenance_job)
+  steps = Array(provenance_job['steps'])
+  unless steps.length == 2
+    errors << 'exact-ci-provenance must contain exactly trusted checkout followed by the helper'
+    return
+  end
+
+  checkout_step, helper_step = steps
+  unless checkout_step['uses'].to_s.match?(/\Aactions\/checkout@[0-9a-f]{40}\z/) &&
+         checkout_step['with'] == {
+           'fetch-depth' => 1,
+           'persist-credentials' => false,
+           'ref' => '${{ inputs.trusted_sha }}',
+         }
+    errors << 'exact-ci-provenance must begin with the pinned trusted-SHA checkout'
+  end
+  %w[if continue-on-error].each do |control|
+    errors << "exact-ci-provenance checkout step must not set #{control}" if checkout_step.key?(control)
+  end
+
+  unless helper_step['run'].is_a?(String)
+    errors << 'exact-ci-provenance trusted checkout must be followed by the helper run step'
+    return
+  end
+  script = helper_step.fetch('run')
+  expected_tokens = [
+    'node',
+    'scripts/ci/require-successful-ci-run.mjs',
+    '--sha',
+    '$SOURCE_SHA',
+    '--branches',
+    '$ALLOWED_BRANCHES',
+  ]
+  begin
+    actual_tokens = Shellwords.split(script)
+  rescue ArgumentError => e
+    errors << "exact-ci-provenance helper command is invalid: #{e.message}"
+    return
+  end
+  unless actual_tokens == expected_tokens
+    errors << 'exact-ci-provenance helper must be the exact variable-derived command without wrappers'
+    return
+  end
+
+  expected_env = {
+    'ALLOWED_BRANCHES' => '${{ inputs.allowed_branches }}',
+    'GITHUB_TOKEN' => '${{ github.token }}',
+    'SOURCE_SHA' => '${{ inputs.head_sha }}',
+  }
+  unless helper_step['env'] == expected_env
+    errors << 'exact-ci-provenance helper environment must use the exact provenance inputs and token'
+  end
+
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "exact-ci-provenance helper step must not set #{control}" if helper_step.key?(control)
+  end
+  if provenance_job.key?('continue-on-error')
+    errors << 'exact-ci-provenance job must not set continue-on-error'
+  end
+  if provenance_workflow.key?('defaults') || provenance_job.key?('defaults')
+    errors << 'exact-ci-provenance helper must not use workflow or job run defaults'
+  end
+  if provenance_workflow.key?('env') || provenance_job.key?('env')
+    errors << 'exact-ci-provenance helper must not inherit workflow or job environment overrides'
+  end
+  unless provenance_job['runs-on'] == 'ubuntu-latest'
+    errors << 'exact-ci-provenance helper must run on the trusted ubuntu-latest runner contract'
+  end
+  if provenance_job.key?('container') || provenance_job.key?('services')
+    errors << 'exact-ci-provenance helper must not use container or service execution overrides'
+  end
+
+  [
+    ['a' * 40, 'main'],
+    ['b' * 40, 'dev'],
+  ].each do |source_sha, allowed_branches|
+    expected_arguments = [
+      'scripts/ci/require-successful-ci-run.mjs',
+      '--sha',
+      source_sha,
+      '--branches',
+      allowed_branches,
+    ]
+    _stdout, _stderr, success_status, success_arguments = execute_provenance_step(
+      script,
+      helper_exit: 0,
+      source_sha: source_sha,
+      allowed_branches: allowed_branches
+    )
+    unless success_status.success? && success_arguments == expected_arguments
+      errors << 'exact-ci-provenance must expand the exact SHA and allowed branches into helper arguments'
+      next
+    end
+
+    _stdout, _stderr, failure_status, failure_arguments = execute_provenance_step(
+      script,
+      helper_exit: 23,
+      source_sha: source_sha,
+      allowed_branches: allowed_branches
+    )
+    unless failure_arguments == expected_arguments
+      errors << 'exact-ci-provenance failure path must invoke the trusted exact-SHA CI helper'
+    end
+    if failure_status.success?
+      errors << "exact-ci-provenance must propagate helper failure for #{allowed_branches}"
+    end
+  end
+end
+
+def normalized_shell(script)
+  script.to_s.lines.each_with_object([]) do |line, kept|
+    stripped = line.strip
+    kept << stripped unless stripped.empty? || stripped.start_with?('#')
+  end.join("\n")
+end
+
+def validate_release_resolution(errors, resolve_job)
+  expected_outputs = {
+    'sha' => '${{ steps.resolve.outputs.sha }}',
+    'trusted_sha' => '${{ steps.resolve.outputs.trusted_sha }}',
+  }
+  errors << 'release resolver outputs must preserve selected and trusted SHA authority' \
+    unless resolve_job['outputs'] == expected_outputs
+
+  steps = Array(resolve_job['steps'])
+  unless steps.length == 2
+    errors << 'release resolver must contain exactly trusted checkout followed by ref peeling'
+    return
+  end
+
+  checkout, peel = steps
+  checkout_with = checkout['with'] || {}
+  unless checkout['uses'].to_s.match?(/\Aactions\/checkout@[0-9a-f]{40}\z/) &&
+         checkout_with.keys.sort == %w[fetch-depth persist-credentials ref] &&
+         checkout_with['fetch-depth'] == 0 &&
+         checkout_with['persist-credentials'] == false
+    errors << 'release resolver must begin with the pinned trusted checkout contract'
+  end
+  %w[if continue-on-error].each do |control|
+    errors << "release resolver checkout must not set #{control}" if checkout.key?(control)
+  end
+
+  expected_peel = <<~'SH'.strip
+    set -euo pipefail
+    trusted_sha="$(git rev-parse HEAD)"
+    if [[ "$RELEASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    candidate="$RELEASE_REF"
+    if ! git cat-file -e "${candidate}^{commit}" 2>/dev/null; then
+    git fetch --no-tags origin "$candidate"
+    fi
+    else
+    git check-ref-format --branch "$RELEASE_REF" >/dev/null
+    git fetch --force origin "$RELEASE_REF"
+    candidate=FETCH_HEAD
+    fi
+    sha="$(git rev-parse --verify --end-of-options "${candidate}^{commit}")"
+    echo "sha=$sha" >> "$GITHUB_OUTPUT"
+    echo "trusted_sha=$trusted_sha" >> "$GITHUB_OUTPUT"
+  SH
+  unless peel['name'] == 'Peel release ref to its commit' && peel['id'] == 'resolve' &&
+         peel['env'] == { 'RELEASE_REF' => '${{ github.event.inputs.ref || github.ref_name }}' } &&
+         normalized_shell(peel['run']) == expected_peel
+    errors << 'release resolver must keep selected ref as data and bind trusted SHA to checkout HEAD'
+  end
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "release resolver peel step must not set #{control}" if peel.key?(control)
+  end
+
+  unless resolve_job['runs-on'] == 'ubuntu-latest'
+    errors << 'release resolver must run on the trusted ubuntu-latest runner contract'
+  end
+  if resolve_job.key?('container') || resolve_job.key?('services') ||
+     resolve_job.key?('defaults') || resolve_job.key?('env')
+    errors << 'release resolver must not use execution-environment overrides'
+  end
+end
+
+def validate_release_promotion(errors, release_workflow, promote_job)
+  steps = Array(promote_job['steps'])
+  unless steps.length == 5
+    errors << 'release promotion must keep the trusted five-step execution topology'
+    return
+  end
+
+  checkout, fetch_data, install_crane, login, execute = steps
+  unless checkout['uses'].to_s.match?(/\Aactions\/checkout@[0-9a-f]{40}\z/) &&
+         checkout['with'] == {
+           'fetch-depth' => 0,
+           'persist-credentials' => false,
+           'ref' => '${{ needs.resolve-release-ref.outputs.trusted_sha }}',
+         }
+    errors << 'release promotion must begin with the pinned resolved trusted-SHA checkout'
+  end
+  %w[if continue-on-error].each do |control|
+    errors << "release promotion checkout must not set #{control}" if checkout.key?(control)
+  end
+
+  expected_fetch = <<~'SH'.strip
+    set -euo pipefail
+    if ! git cat-file -e "${TAG_SHA}^{commit}" 2>/dev/null; then
+      git fetch --no-tags origin "$TAG_SHA"
+    fi
+    git cat-file -e "${TAG_SHA}^{commit}"
+  SH
+  unless fetch_data['name'] == 'Fetch the selected release commit as data' &&
+         fetch_data['env'] == { 'TAG_SHA' => '${{ needs.resolve-release-ref.outputs.sha }}' } &&
+         fetch_data['run'].to_s.strip == expected_fetch
+    errors << 'release promotion must fetch the selected SHA through the exact data-only step'
+  end
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "release data-fetch step must not set #{control}" if fetch_data.key?(control)
+  end
+
+  expected_install = <<~'SH'.strip
+    set -euo pipefail
+    VER=v0.20.2
+    curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${VER}/go-containerregistry_Linux_x86_64.tar.gz" \
+    | sudo tar -xz -C /usr/local/bin crane
+    crane version
+  SH
+  unless install_crane['name'] == 'Install crane' &&
+         !install_crane.key?('env') &&
+         normalized_shell(install_crane['run']) == expected_install
+    errors << 'release promotion must retain the trusted crane installation step'
+  end
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "release crane installation must not set #{control}" if install_crane.key?(control)
+  end
+
+  unless login['name'] == 'Log in to ghcr.io' &&
+         login['uses'].to_s.match?(/\Adocker\/login-action@[0-9a-f]{40}\z/) &&
+         login['with'] == {
+           'registry' => 'ghcr.io',
+           'username' => '${{ github.actor }}',
+           'password' => '${{ secrets.GITHUB_TOKEN }}',
+         }
+    errors << 'release promotion must retain the pinned GHCR login contract'
+  end
+
+  expected_execute_env = {
+    'DRY_RUN' => "${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}",
+    'RELEASE_REF' => '${{ github.event.inputs.ref || github.ref_name }}',
+    'TAG_SHA' => '${{ needs.resolve-release-ref.outputs.sha }}',
+  }
+  unless execute['name'] == 'Resolve and promote' &&
+         execute['env'] == expected_execute_env &&
+         Shellwords.split(execute['run'].to_s) == ['bash', 'scripts/release/promote-release-images.sh']
+    errors << 'release promotion must execute the trusted promoter with selected values as data only'
+  end
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "release promotion helper must not set #{control}" if execute.key?(control)
+  end
+
+  unless promote_job['runs-on'] == 'ubuntu-latest'
+    errors << 'release promotion must run on the trusted ubuntu-latest runner contract'
+  end
+  if release_workflow.key?('defaults') || release_workflow.key?('env') ||
+     promote_job.key?('container') || promote_job.key?('services') ||
+     promote_job.key?('defaults') || promote_job.key?('env')
+    errors << 'release promotion must not use execution-environment overrides'
+  end
+rescue ArgumentError => e
+  errors << "release promotion command is invalid: #{e.message}"
+end
+
+def validate_release_conditions(errors, resolve_job, promote_job)
+  repository = 'evenfire-ai/evenfire'
+  begin
+    resolve_ast = GithubExpression.parse(resolve_job['if'])
+    promote_ast = GithubExpression.parse(promote_job['if'])
+    literals = (GithubExpression.literals(resolve_ast) + GithubExpression.literals(promote_ast)).uniq
+    refs = literals.grep(/\Arefs\//) + ['refs/tags/v1.0.0', 'refs/heads/feature']
+    repositories = literals.grep(%r{\A(?!refs/)[^/]+/[^/]+\z}) + [repository, 'fork/evenfire']
+    shas = literals.grep(/\A[0-9a-fA-F]{40}\z/) + ['a' * 40, 'b' * 40]
+    cases = %w[push workflow_dispatch].product(refs.uniq, repositories.uniq, shas.uniq, shas.uniq).map do |event, ref, repo, workflow_sha, sha|
+      trusted = repo.casecmp?(repository) &&
+                (event != 'workflow_dispatch' ||
+                  (ref.casecmp?('refs/heads/main') && workflow_sha.casecmp?(sha)))
+      {
+        description: "event=#{event}, ref=#{ref}, repo=#{repo}, workflow_sha=#{workflow_sha}, sha=#{sha}",
+        context: {
+          'github.event_name' => event,
+          'github.ref' => ref,
+          'github.repository' => repo,
+          'github.sha' => sha,
+          'github.workflow_sha' => workflow_sha,
+        },
+        trusted: trusted,
+      }
+    end
+
+    cases.each do |entry|
+      actual = GithubExpression.truthy?(GithubExpression.evaluate_node(resolve_ast, entry.fetch(:context)))
+      next if actual == entry.fetch(:trusted)
+
+      errors << "release resolver event guard violates trust table for #{entry.fetch(:description)}"
+      break
+    end
+
+    cases.each do |entry|
+      RESULT_STATES.product(RESULT_STATES).each do |resolve_result, preflight_result|
+        context = entry.fetch(:context).merge(
+          'needs.preflight.result' => preflight_result,
+          'needs.resolve-release-ref.result' => resolve_result
+        )
+        expected = entry.fetch(:trusted) &&
+                   resolve_result == 'success' &&
+                   preflight_result == 'success'
+        actual = GithubExpression.truthy?(GithubExpression.evaluate_node(promote_ast, context))
+        next if actual == expected
+
+        errors << "release promotion event guard violates trust table for #{entry.fetch(:description)}, " \
+                  "resolve=#{resolve_result}, preflight=#{preflight_result}"
+        return
+      end
+    end
+  rescue KeyError, ArgumentError => e
+    errors << "release event guard expression is invalid: #{e.message}"
+  end
+end
+
+def validate_release_triggers(errors, release_workflow)
+  triggers = release_workflow['on'] || release_workflow[true] || {}
+  push = triggers['push'] || {}
+  dispatch = triggers['workflow_dispatch'] || {}
+  dispatch_inputs = dispatch['inputs'] || {}
+  ref_input = dispatch_inputs['ref'] || {}
+
+  unless triggers.keys.sort == %w[push workflow_dispatch] &&
+         push == { 'tags' => ['v*'] } &&
+         dispatch_inputs.keys == ['ref'] &&
+         ref_input['required'] == true
+    errors << 'release workflow must trigger only on v* tags or one required manual ref input'
+  end
 end
 
 def two_result_cases(first_name, second_name)
@@ -155,6 +746,34 @@ end
 
 workflow_paths = Dir[workflow_dir.join('*.{yml,yaml}')].sort.map { |path| Pathname(path) }
 workflows = workflow_paths.to_h { |path| [path, load_workflow(path)] }
+
+if options[:resolve_release_executable_ref]
+  required_options = %i[event workflow_sha selected_ref]
+  missing_options = required_options.reject { |name| options.key?(name) }
+  unless missing_options.empty?
+    warn "ERROR: release checkout resolution requires #{missing_options.join(', ')}"
+    exit 1
+  end
+
+  release = workflows[workflow_dir.join('release-images.yml')]
+  unless release
+    warn 'ERROR: release-images.yml is unavailable'
+    exit 1
+  end
+
+  begin
+    puts resolve_release_executable_ref(
+      release,
+      event_name: options.fetch(:event),
+      workflow_sha: options.fetch(:workflow_sha),
+      selected_ref: options.fetch(:selected_ref)
+    )
+    exit 0
+  rescue KeyError, ArgumentError => e
+    warn "ERROR: cannot resolve release executable checkout: #{e.message}"
+    exit 1
+  end
+end
 
 workflows.each do |caller_path, caller|
   (caller['jobs'] || {}).each do |job_id, job|
@@ -258,12 +877,7 @@ if provenance
   provenance_jobs = provenance['jobs'] || {}
   provenance_job = provenance_jobs['provenance'] || {}
   provenance_conclude = provenance_jobs['conclude'] || {}
-  helper_runs = Array(provenance_job['steps']).map { |step| step['run'].to_s }.join("\n")
-  unless helper_runs.include?('node scripts/ci/require-successful-ci-run.mjs') &&
-         helper_runs.include?('--sha "$SOURCE_SHA"') &&
-         helper_runs.include?('--branches "$ALLOWED_BRANCHES"')
-    errors << 'exact-ci-provenance must invoke the trusted exact-SHA CI helper'
-  end
+  validate_provenance_step(errors, provenance, provenance_job)
   unless needs(provenance_job).include?('validate-inputs')
     errors << 'exact-ci provenance job must depend on input validation'
   end
@@ -346,10 +960,14 @@ end
 
 release = workflows[workflow_dir.join('release-images.yml')]
 if release
+  validate_release_triggers(errors, release)
   jobs = release.fetch('jobs', {})
   resolve = jobs['resolve-release-ref'] || {}
   exact = jobs['preflight'] || {}
   promote = jobs['promote'] || {}
+  validate_release_resolution(errors, resolve)
+  validate_release_promotion(errors, release, promote)
+  validate_release_conditions(errors, resolve, promote)
   errors << 'release must call exact CI provenance' unless exact['uses'] == './.github/workflows/exact-ci-provenance.yml'
   errors << 'release provenance must allow only main' unless (exact['with'] || {})['allowed_branches'] == 'main'
   unless (exact['with'] || {})['trusted_sha'] == '${{ needs.resolve-release-ref.outputs.trusted_sha }}'
@@ -360,17 +978,6 @@ if release
   unless (needs(promote) & %w[resolve-release-ref preflight]).sort == %w[preflight resolve-release-ref]
     errors << 'release promotion must depend on ref resolution and exact CI provenance'
   end
-  unless promote['if'].to_s.include?("needs.resolve-release-ref.result == 'success'") &&
-         promote['if'].to_s.include?("needs.preflight.result == 'success'")
-    errors << 'release promotion must require successful ref resolution and provenance results'
-  end
-  [resolve, promote].each do |job|
-    condition = job['if'].to_s
-    unless condition.include?("github.ref == 'refs/heads/main'") &&
-           condition.include?('github.workflow_sha == github.sha')
-      errors << 'manual release jobs must require the trusted main workflow revision'
-    end
-  end
   promote_permissions = permissions(promote['permissions']) || {}
   errors << 'release promotion is expected to own the only release package write' unless promote_permissions['packages'] == 'write'
   promote_runs = Array(promote['steps']).map { |step| step['run'].to_s }.join("\n")
@@ -380,10 +987,36 @@ if release
          promote_env['TAG_SHA'].to_s.include?('needs.resolve-release-ref.outputs.sha')
     errors << 'release rehearsal must remain dry-run while the selected SHA is passed as data'
   end
-  resolve_checkout = Array(resolve['steps']).find { |step| step['uses'].to_s.start_with?('actions/checkout@') }
-  resolve_ref = ((resolve_checkout || {})['with'] || {})['ref'].to_s
-  unless resolve_ref.include?('github.workflow_sha') && resolve_ref.include?('refs/heads/main')
-    errors << 'release ref resolution must use the manual workflow SHA or trusted main'
+  begin
+    resolve_ast = GithubExpression.parse(checkout_ref(resolve))
+    allowed_contexts = %w[github.event_name github.workflow_sha]
+    untrusted_contexts = GithubExpression.contexts(resolve_ast) - allowed_contexts
+    unless untrusted_contexts.empty?
+      errors << 'release executable checkout must ignore selected refs and unknown contexts: ' \
+                "#{untrusted_contexts.sort.join(', ')}"
+    end
+    sha_classes = GithubExpression.literals(resolve_ast).grep(/\A[0-9a-fA-F]{40}\z/)
+    sha_classes.concat(['a' * 40, 'b' * 40]).uniq!
+    sha_classes.each do |workflow_sha|
+      dispatch_result = resolve_release_executable_ref(
+        release,
+        event_name: 'workflow_dispatch',
+        workflow_sha: workflow_sha,
+        selected_ref: 'malicious-candidate'
+      )
+      tag_result = resolve_release_executable_ref(
+        release,
+        event_name: 'push',
+        workflow_sha: workflow_sha,
+        selected_ref: 'malicious-candidate'
+      )
+      unless dispatch_result == workflow_sha && tag_result == 'refs/heads/main'
+        errors << 'release executable checkout must ignore selected refs and choose workflow SHA or trusted main'
+        break
+      end
+    end
+  rescue KeyError, ArgumentError => e
+    errors << "release executable checkout expression is invalid: #{e.message}"
   end
   promote_checkout = Array(promote['steps']).find { |step| step['uses'].to_s.start_with?('actions/checkout@') }
   promote_ref = ((promote_checkout || {})['with'] || {})['ref'].to_s
