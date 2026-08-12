@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
@@ -28,6 +28,8 @@ function allowedResult() {
 }
 
 describe('external user rate-limit policy', () => {
+  beforeEach(() => vi.clearAllMocks())
+
   it.each(operations)(
     'keys authenticated %s by the server-authenticated user',
     async (operation, bucket) => {
@@ -39,7 +41,7 @@ describe('external user rate-limit policy', () => {
         }
         next()
       })
-      app.get('/protected', authenticatedExternalUserRateLimit(operation), (_req, res) => {
+      app.get('/protected', ...authenticatedExternalUserRateLimit(operation), (_req, res) => {
         res.status(204).end()
       })
 
@@ -108,5 +110,42 @@ describe('external user rate-limit policy', () => {
       expect.not.stringContaining('198.51.100.52'),
       10
     )
+  })
+
+  it('uses canonical denial behavior and short-circuits the protected handler', async () => {
+    limiter.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+    })
+    const handler = vi.fn((_req, res) => res.status(204).end())
+    const app = express()
+    app.use((req, _res, next) => {
+      ;(req as express.Request & { externalAuth?: { userId: string } }).externalAuth = {
+        userId: 'server-user',
+      }
+      next()
+    })
+    app.get('/protected', ...authenticatedExternalUserRateLimit('session_lifecycle'), handler)
+
+    const response = await request(app).get('/protected').expect(429)
+
+    expect(response.body).toMatchObject({ error: { code: 'rate_limited', retryable: true } })
+    expect(response.headers['retry-after']).toBeDefined()
+    expect(response.headers['x-ratelimit-limit']).toBe('10')
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('fails closed before the authenticated limiter when trusted context is absent', async () => {
+    const handler = vi.fn((_req, res) => res.status(204).end())
+    const app = express()
+    app.get('/protected', ...authenticatedExternalUserRateLimit('session_lifecycle'), handler)
+
+    await request(app).get('/protected').expect(401)
+
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(handler).not.toHaveBeenCalled()
   })
 })

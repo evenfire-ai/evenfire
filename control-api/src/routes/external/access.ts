@@ -174,7 +174,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/access/capabilities',
-    authenticatedExternalUserRateLimit('access_capabilities'),
+    ...authenticatedExternalUserRateLimit('access_capabilities'),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       try {
         const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })
