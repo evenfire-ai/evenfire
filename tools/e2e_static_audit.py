@@ -31,7 +31,15 @@ def audit_file(path: Path) -> list[str]:
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{path}:{line}: {label}")
 
-    if "waitForResponse" not in text and "waitForRequest" not in text:
+    # Electron GFS browser discovery is brokered through the main process IPC
+    # bridge, so there is no renderer HTTP request to await. Such specs must
+    # opt in with an explicit, explanatory marker rather than adding a fake
+    # network wait that can hide a broken user transition.
+    if (
+        "waitForResponse" not in text
+        and "waitForRequest" not in text
+        and "E2E_GUARDIAN_IPC_FLOW" not in text
+    ):
         findings.append(f"{path}: missing critical network-response/request wait")
 
     # Direct navigation is allowed only in an explicitly negative terminal

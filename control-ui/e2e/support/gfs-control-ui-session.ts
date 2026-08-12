@@ -65,13 +65,10 @@ export async function loginControlUi(page: Page): Promise<void> {
   })
 
   // The account reminder is allowed to arrive after the shell becomes ready.
-  // Register a user-visible dismissal handler so it cannot intercept a later
-  // GFS action, while retaining an immediate dismissal for the already-rendered
-  // case. This is test setup only; it does not mutate account state or mock the
-  // Control UI request path.
-  await page.addLocatorHandler(accountAlert, async () => {
-    if (await remindLater.isVisible().catch(() => false)) await remindLater.click()
-  })
+  // Dismiss it explicitly when it is present. A locator handler is deliberately
+  // not used here: Playwright invokes handlers before actions on matching
+  // descendants, so a handler that clicks `remindLater` can intercept its own
+  // dismissal and wait forever for the alert to disappear.
   if (await accountAlert.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await remindLater.click()
     await expect(accountAlert).toBeHidden({ timeout: 10_000 })

@@ -218,21 +218,19 @@ async function openFolder(
   page: Page,
   folderName: string
 ): Promise<{ browser: Locator; manageDialog: Locator }> {
+  /*
+   * E2E_GUARDIAN_IPC_FLOW: Desktop GFS discovery is brokered through the
+   * main-process `window.clerum.gfs.listAccessible` bridge, so the renderer
+   * has no HTTP response to await for this transition. The Files heading,
+   * browser region, and seeded folder row are the visible/business signals.
+   */
   const filesHeading = page.getByRole('heading', { name: 'Files', exact: true })
   const openFilesAttempt = async (timeout: number): Promise<void> => {
-    const accessibleResponse = page
-      .waitForResponse(
-        response =>
-          response.request().method() === 'GET' && response.url().includes('/external/gfs'),
-        { timeout }
-      )
-      .then(() => true)
-      .catch(() => false)
     await openResourcesNavItem(page, 'nav-files')
     await expect(filesHeading).toBeVisible({ timeout })
-    if (!(await accessibleResponse)) {
-      throw new Error('Desktop Files navigation did not produce the GFS accessibility response')
-    }
+    await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible({
+      timeout,
+    })
   }
 
   try {
