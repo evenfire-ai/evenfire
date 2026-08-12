@@ -21,6 +21,7 @@ import {
 } from '../../oauth/mcpServerOAuthSpec.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
 import { getAccessToken } from '../../oauth/tokenHelper.js'
+import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
 
@@ -171,6 +172,30 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
             return res.status(400).json({ error: 'context_mismatch' })
           }
+        }
+
+        // DEC-U5-1 (+ security fix): defence in depth — fail EARLY (before
+        // sending the user to the provider) unless the consenting user is a
+        // member of the server's Context. This runs for EVERY grantScope, not
+        // just `context`: even a per-user server lives inside a Context, and
+        // connect shares the `mcp:server:invoke` scope with invoke — which
+        // additionally requires the server to be in the caller's per-context
+        // allowlist. Without a universal gate, any user could start consent for
+        // (and enumerate) another Context's integration on a `user`-scope server.
+        //
+        // `spec.contextRef` is CRD-required + singular, so every server has one;
+        // a server that somehow lacks it cannot be membership-verified → fail
+        // closed. Same rule + primitive as the callback bootstrap
+        // (getUserContexts → user_contexts) so membership lives in ONE place
+        // (D4). Deliberately NOT resolveInvocableMcpServersForContexts: that
+        // applies U3's grant-presence gate, which filters out servers WITHOUT a
+        // grant — exactly the ones connect exists to bootstrap (chicken-and-egg).
+        if (!resolved.contextRef) {
+          return res.status(403).json({ error: 'context_membership_denied' })
+        }
+        const { contextIds } = await getUserContexts(userId)
+        if (!contextIds.includes(resolved.contextRef)) {
+          return res.status(403).json({ error: 'context_membership_denied' })
         }
 
         const oauthClientId = resolved.decl.id

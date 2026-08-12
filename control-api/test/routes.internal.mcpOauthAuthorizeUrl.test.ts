@@ -84,6 +84,9 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
 
   it('mints an authorize-URL whose signed state binds the forwarded userId + the SERVER oauthClientId', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    // Membership check runs for EVERY scope: user-7 is a member of the server's
+    // Context (default contextRef ctx-9).
+    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-9' }], rowCount: 1 })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -155,14 +158,71 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(res.body.error).toBe('context_mismatch')
   })
 
-  it('context server: accepts a matching body contextId and mints the URL', async () => {
+  it('context server: accepts a matching body contextId from a MEMBER and mints the URL', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    // Membership check (getUserContexts → user_contexts): user-2 is a member of ctx-A.
+    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-A' }], rowCount: 1 })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
       .send({ mcpServerName: 'gdrive', userId: 'user-2', contextId: 'ctx-A' })
     expect(res.status).toBe(200)
     expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
+  })
+
+  // T5 (DEC-U5-1): a NON-member of a context-identity server's Context must be
+  // rejected at the MINT boundary — fail early, never sent to the provider.
+  it('context server: a NON-member is rejected 403 at mint, with NO authorizeUrl', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    // getUserContexts returns contexts that do NOT include ctx-A.
+    mockPoolQuery.mockResolvedValue({
+      rows: [{ context_id: 'ctx-other' }, { context_id: 'ctx-else' }],
+      rowCount: 2,
+    })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-nomember' })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('context_membership_denied')
+    // Observable: no authorize URL was minted.
+    expect(res.body.authorizeUrl).toBeUndefined()
+  })
+
+  // Security fix: the per-user flavor ALSO runs the membership gate now — a
+  // user-scope server still lives in a Context, and connect shares the invoke
+  // scope. A MEMBER mints fine.
+  it('user flavor: a MEMBER of the server Context mints OK', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-9' }], rowCount: 1 })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(200)
+    expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
+    // The membership lookup DID run (universal gate).
+    const membershipQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM user_contexts')
+    )
+    expect(membershipQuery).toBeDefined()
+    expect(membershipQuery?.[1]).toEqual(['user-7'])
+  })
+
+  // Security fix (the asymmetry hole): a `user`-scope server whose Context the
+  // user is NOT in must be rejected — no consent for another Context's
+  // integration, no cross-context enumeration oracle.
+  it('user flavor: a NON-member is rejected 403 at mint, with NO authorizeUrl', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    // user-8 is a member of other Contexts, but NOT ctx-9.
+    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-other' }], rowCount: 1 })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-8' })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('context_membership_denied')
+    expect(res.body.authorizeUrl).toBeUndefined()
   })
 
   it('503 integration_not_configured when the client_id Secret is absent', async () => {
@@ -184,6 +244,8 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
       },
       MCP_NS
     )
+    // Member of ctx-9 so we reach the Secret read (past the membership gate).
+    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-9' }], rowCount: 1 })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
