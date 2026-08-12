@@ -170,7 +170,7 @@ export async function createSdkWorkloadGrants(
         capabilityFamily: 'clientNotifications',
         allowedEventTypes: [EVENT_TYPE],
         allowedUserRefs: [userRef],
-        allowedCallers: [WORKLOAD_ID],
+        allowedCallers,
         quotaLimits: { maxNotificationsPerRun: 10 },
       }),
     }
