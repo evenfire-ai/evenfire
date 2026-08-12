@@ -144,6 +144,17 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(tool.calls).toHaveLength(0)
   })
 
+  it('ask in unattended mode → fail-safe deny, no suspension (§6.3)', async () => {
+    const tool = new StubTool('do_thing')
+    const config = makeConfig(tool, fixedGuardrail('ask', 'needs_ok'))
+    config.executionMode = 'unattended'
+    const { toolResults, pendingApproval } = await executeToolCalls([call], config, 0)
+    expect(pendingApproval).toBeUndefined()
+    expect(toolResults[0].is_error).toBe(true)
+    expect(toolResults[0].content).toContain('no approver is available')
+    expect(tool.calls).toHaveLength(0)
+  })
+
   it('doom-loop: 3rd consecutive identical call is denied (§6.4)', async () => {
     const tool = new StubTool('do_thing')
     const config = makeConfig(tool, fixedGuardrail('allow'))

@@ -283,8 +283,10 @@ export async function executeToolCalls(
         timestamp: new Date(),
       })
 
+      const mode = config.executionMode ?? 'interactive'
+
       if (gd.decision === 'deny') {
-        recordDecision('tool', 'deny', gd.source, 'denied', gd.reasonCode)
+        recordDecision('tool', 'deny', gd.source, 'denied', gd.reasonCode, mode)
         toolResults.push({
           tool_call_id: call.id,
           name: call.name,
@@ -306,17 +308,28 @@ export async function executeToolCalls(
         const pending = config.conversation.pending_approval
         if (pending && pending.tool_name === call.name) {
           config.conversation.pending_approval = undefined
-          recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode)
+          recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode, mode)
           gate = 'proceed'
+        } else if (mode === 'unattended') {
+          // §6.3: an `ask` with no human to answer it fails safe to deny.
+          recordDecision('tool', 'deny', gd.source, 'denied', 'approval_unavailable', mode)
+          toolResults.push({
+            tool_call_id: call.id,
+            name: call.name,
+            content:
+              'Blocked: approval required but no approver is available in an autonomous run.',
+            is_error: true,
+          })
+          continue
         } else {
-          recordDecision('tool', 'ask', gd.source, 'ask', gd.reasonCode)
+          recordDecision('tool', 'ask', gd.source, 'ask', gd.reasonCode, mode)
           gate = buildGuardrailSuspension(call, config, gd.reasonCode)
         }
       } else {
         // allow / no_decision → the existing approval path. Phase 1: guardrail
         // `allow` does NOT bypass existing approvals (separating containment from
         // approval is deferred — the safe direction).
-        recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode)
+        recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode, mode)
         gate = loopController.beforeTool(call.name, call.arguments)
       }
     } else {

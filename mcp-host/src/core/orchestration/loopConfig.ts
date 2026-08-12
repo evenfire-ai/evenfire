@@ -49,6 +49,14 @@ export interface LoopConfig {
    */
   guardrails?: ToolLaneGuardrail
 
+  /**
+   * Execution mode for the guardrail lane (spec §6.3): `unattended` when there is
+   * no human to answer an approval (e.g. a cron/autonomous task). A guardrail
+   * `ask` in unattended mode fails safe to deny (`approval_unavailable`).
+   * Absent → treated as interactive.
+   */
+  executionMode?: 'interactive' | 'unattended'
+
   // Progress reporting
   progressReporter?: ProgressReporter
 

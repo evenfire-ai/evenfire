@@ -1193,6 +1193,9 @@ export class TaskExecutor {
     // Undefined when no rules are configured (no-config compatibility, §5); a
     // malformed set throws here (fail-closed admission, §3/§5).
     loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
+    // §6.3: cron/autonomous tasks have no human to answer an approval, so a
+    // guardrail `ask` there fails safe to deny.
+    loopConfig.executionMode = this.task.source === 'cron' ? 'unattended' : 'interactive'
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist

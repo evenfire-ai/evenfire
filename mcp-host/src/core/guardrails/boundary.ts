@@ -82,18 +82,21 @@ export async function evaluateBoundary<Input, Result, Identity>(
   return { decision, reasonCode, effectiveInput, source }
 }
 
+type ExecutionMode = 'interactive' | 'unattended' | 'unknown'
+
 function record(
   lane: 'tool' | 'llm',
   decision: Decision,
   source: string,
   outcome: 'executed' | 'denied' | 'ask',
-  reasonCode: string
+  reasonCode: string,
+  executionMode: ExecutionMode = 'unknown'
 ): void {
   guardrailDecisionsTotal.inc({
     lane,
     decision,
     source,
-    execution_mode: 'unknown', // enriched by the lane adapter when known (spec §6.3)
+    execution_mode: executionMode, // enriched by the lane adapter when known (spec §6.3)
     phase: 'pre',
     outcome,
     reason_code: reasonCode,
@@ -106,9 +109,10 @@ export function recordDecision(
   decision: Decision,
   source: string,
   outcome: 'executed' | 'denied' | 'ask',
-  reasonCode: string
+  reasonCode: string,
+  executionMode: ExecutionMode = 'unknown'
 ): void {
-  record(lane, decision, source, outcome, reasonCode)
+  record(lane, decision, source, outcome, reasonCode, executionMode)
 }
 
 export function createGuardrailBoundary<Input, Result, Identity>(
