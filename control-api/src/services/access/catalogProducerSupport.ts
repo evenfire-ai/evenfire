@@ -137,7 +137,7 @@ export async function listBoundedProducerKeys(input: {
   continuation: ProducerContinuation
   take: number
   sql: string
-  extraValues?: readonly unknown[]
+  extraValues?: readonly unknown[] | ((after: string) => readonly unknown[])
 }): Promise<CatalogProducerPage> {
   const { context } = input
   if (
@@ -170,42 +170,61 @@ export async function listBoundedProducerKeys(input: {
     })
   }
   const after = validateContinuation(input.family, context.environmentId, input.continuation)
-  const result = await catalogQuery(context.db, context.budget, input.sql, [
-    context.principal.userId,
-    after,
-    context.environmentId,
-    input.take + 1,
-    ...(input.extraValues ?? []),
-  ])
-  if (result.rows.length > input.take + 1) {
-    throw new CatalogProducerContractError('key_query_exceeded_take')
-  }
   const candidates: CatalogIdentityCandidate[] = []
-  let sourceSaturated = false
   let prior = after
-  for (const row of result.rows as Record<string, unknown>[]) {
-    if (typeof row.source_saturated !== 'boolean') {
-      throw new CatalogProducerContractError('source_saturation_invalid')
+  let sourceSaturated = true
+  let firstQuery = true
+  while (candidates.length < input.take + 1 && sourceSaturated) {
+    const result = await catalogQuery(
+      context.db,
+      context.budget,
+      input.sql,
+      [
+        context.principal.userId,
+        prior,
+        context.environmentId,
+        input.take + 1,
+        ...(typeof input.extraValues === 'function'
+          ? input.extraValues(prior)
+          : (input.extraValues ?? [])),
+      ],
+      { chargeProducer: firstQuery }
+    )
+    firstQuery = false
+    if (result.rows.length > input.take + 1) {
+      throw new CatalogProducerContractError('key_query_exceeded_take')
     }
-    sourceSaturated ||= row.source_saturated
-    const logicalId = typeof row.logical_id === 'string' ? row.logical_id : ''
-    if (!logicalId || logicalId <= prior) {
-      throw new CatalogProducerContractError('keys_not_strictly_ordered')
-    }
-    const key = catalogKey(context.environmentId, input.family, logicalId)
-    if (candidates.length > 0 && compareCatalogKey(candidates.at(-1)!.key, key) >= 0) {
-      throw new CatalogProducerContractError('keys_not_strictly_ordered')
-    }
-    let validUntil: string | null = null
-    if (row.valid_until !== null && row.valid_until !== undefined) {
-      const timestamp = new Date(String(row.valid_until))
-      if (Number.isNaN(timestamp.getTime())) {
-        throw new CatalogProducerContractError('candidate_valid_until_invalid')
+    sourceSaturated = false
+    for (const row of result.rows as Record<string, unknown>[]) {
+      if (typeof row.source_saturated !== 'boolean') {
+        throw new CatalogProducerContractError('source_saturation_invalid')
       }
-      validUntil = timestamp.toISOString()
+      sourceSaturated ||= row.source_saturated
+      const logicalId = typeof row.logical_id === 'string' ? row.logical_id : ''
+      if (!logicalId || logicalId <= prior) {
+        throw new CatalogProducerContractError('keys_not_strictly_ordered')
+      }
+      const key = catalogKey(context.environmentId, input.family, logicalId)
+      if (candidates.length > 0 && compareCatalogKey(candidates.at(-1)!.key, key) >= 0) {
+        throw new CatalogProducerContractError('keys_not_strictly_ordered')
+      }
+      let validUntil: string | null = null
+      if (row.valid_until !== null && row.valid_until !== undefined) {
+        const timestamp = new Date(String(row.valid_until))
+        if (Number.isNaN(timestamp.getTime())) {
+          throw new CatalogProducerContractError('candidate_valid_until_invalid')
+        }
+        validUntil = timestamp.toISOString()
+      }
+      candidates.push(
+        Object.freeze({ key, canonicalId: `${input.family}:${logicalId}`, validUntil })
+      )
+      prior = logicalId
+      if (candidates.length >= input.take + 1) break
     }
-    candidates.push(Object.freeze({ key, canonicalId: `${input.family}:${logicalId}`, validUntil }))
-    prior = logicalId
+    if (sourceSaturated && result.rows.length === 0) {
+      throw new CatalogProducerContractError('source_saturation_without_progress')
+    }
   }
   const hasMore = candidates.length > input.take || sourceSaturated
   return Object.freeze({
