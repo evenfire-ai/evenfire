@@ -41,6 +41,33 @@ describe('buildToolLaneGuardrail', () => {
     expect(d.decision).toBe('ask')
   })
 
+  it('a PreToolUse installed hook can deny (no rules needed)', async () => {
+    const fetchImpl = async (url: string) => ({
+      status: 200,
+      text: async () =>
+        url.endsWith('/v1/pre_tool_use') ? '{"decision":"deny","reasonCode":"hook_blocked"}' : '{}',
+    })
+    const g = buildToolLaneGuardrail(
+      {
+        hookDescriptors: [
+          {
+            id: 'th',
+            endpoint: 'http://svc',
+            path: '/',
+            lifecyclePoints: ['pre_tool_use'],
+            capabilities: ['may_deny'],
+            failMode: 'closed',
+            order: 100,
+          },
+        ],
+      },
+      { getAuthToken: () => '', fetchImpl }
+    )!
+    const d = await g.decide(fileWrite, { path: '/etc/passwd' })
+    expect(d.decision).toBe('deny')
+    expect(d.reasonCode).toBe('hook_blocked')
+  })
+
   it('an allow rule → allow', async () => {
     const g = buildToolLaneGuardrail({
       rules: [

@@ -33,6 +33,8 @@ const POINT_PATH: Record<LifecyclePoint, string> = {
   moderate: 'moderate',
   post_call: 'post_call',
   on_error: 'on_error',
+  pre_tool_use: 'pre_tool_use',
+  post_tool_use: 'post_tool_use',
 }
 
 /** Build `{endpoint}{path}/v1/{point}`, normalizing slashes (spec §8.1). */

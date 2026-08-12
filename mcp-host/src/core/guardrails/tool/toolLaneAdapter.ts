@@ -10,9 +10,38 @@
  */
 import { type CoreBoundaryDeps, evaluateBoundary } from '../boundary'
 import type { GuardrailsConfig } from '../config'
-import type { Decision } from '../types'
+import { type FetchLike, createHookFetcher } from '../hooks/hookFetcher'
+import { RemoteToolHook } from '../hooks/remoteToolHook'
+import type { HookDescriptor } from '../hooks/types'
+import type { Contributor, Decision } from '../types'
 import type { ToolIdentity } from './provenance'
 import { compileRules, evaluateRules } from './rules'
+
+export interface ToolLaneGuardrailDeps {
+  getAuthToken?: () => string
+  fetchImpl?: FetchLike
+}
+
+/** Build the tool-lane installed `PreToolUse` hooks (spec §6.2), ordered by `order`. */
+function buildToolLaneHooks(
+  descriptors: HookDescriptor[] | undefined,
+  deps: ToolLaneGuardrailDeps
+): RemoteToolHook[] {
+  return (descriptors ?? [])
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .filter(d => d.lifecyclePoints.includes('pre_tool_use'))
+    .map(
+      d =>
+        new RemoteToolHook(
+          d,
+          createHookFetcher({
+            getAuthToken: deps.getAuthToken ?? (() => ''),
+            fetchImpl: deps.fetchImpl,
+          })
+        )
+    )
+}
 
 export type ToolLaneInput = Record<string, unknown>
 export type ToolLaneResult = string
@@ -42,20 +71,26 @@ export interface ToolLaneGuardrail {
  * gate is wired with per-task state.
  */
 export function buildToolLaneGuardrail(
-  config: GuardrailsConfig | undefined
+  config: GuardrailsConfig | undefined,
+  hookDeps: ToolLaneGuardrailDeps = {}
 ): ToolLaneGuardrail | undefined {
   const compiled = compileRules(config?.rules, config?.limits?.maxRules)
-  if (!compiled.hasRules) return undefined
+  const hooks = buildToolLaneHooks(config?.hookDescriptors, hookDeps)
+  if (!compiled.hasRules && hooks.length === 0) return undefined
 
   const deps: CoreBoundaryDeps<ToolLaneInput, ToolLaneResult, ToolIdentity> = {
     lane: 'tool',
-    hasRules: compiled.hasRules,
+    hasRules: compiled.hasRules, // unmatched default keys on RULES; a hook returning null is just no opinion.
     contributors: {
       async pre(input, identity) {
-        return evaluateRules(compiled, identity, input)
+        const ruleContribs = evaluateRules(compiled, identity, input)
+        const hookContribs = (
+          await Promise.all(hooks.map(h => h.preToolUse(identity, input)))
+        ).filter((c): c is Contributor<ToolLaneInput, ToolLaneResult> => c !== null)
+        return [...ruleContribs, ...hookContribs]
       },
       async post() {
-        return [] // Phase 1: no tool-lane post transforms (PostToolUse = Phase 3).
+        return [] // PostToolUse (post-execution result transform) is a later increment.
       },
     },
   }

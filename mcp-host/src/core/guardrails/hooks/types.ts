@@ -9,8 +9,14 @@
  */
 import type { Capability } from '../types'
 
-/** The four `/v1` lifecycle endpoints (spec §8.1). */
-export type LifecyclePoint = 'pre_call' | 'moderate' | 'post_call' | 'on_error'
+/** The `/v1` lifecycle endpoints (spec §8.1) — LLM lane + tool lane. */
+export type LifecyclePoint =
+  | 'pre_call'
+  | 'moderate'
+  | 'post_call'
+  | 'on_error'
+  | 'pre_tool_use'
+  | 'post_tool_use'
 
 /** A resolved installed hook: its endpoint + admin-granted grants (from the LlmHook CR + Host block). */
 export interface HookDescriptor {
