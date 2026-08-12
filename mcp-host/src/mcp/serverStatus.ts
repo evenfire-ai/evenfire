@@ -100,7 +100,18 @@ function errorMessage(error: unknown): string {
   return String(error)
 }
 
-function extractHttpStatus(error: unknown, msg: string): number | null {
+/**
+ * Extract an HTTP status from the *structured* error shape only — never from
+ * the message string. This is the trustworthy signal: `.status`/`.statusCode`,
+ * or a numeric `.code` that falls in the HTTP range (the MCP SDK puts the HTTP
+ * status in `code` for StreamableHTTP errors).
+ *
+ * Deliberately excludes the message regex: a JSON-RPC error carrying
+ * `code: -32003` would let the regex extract "320" from the digits, which is a
+ * false HTTP status. Auth classification (see `isAuthError`) must use ONLY this
+ * structured signal.
+ */
+export function extractStructuredHttpStatus(error: unknown): number | null {
   if (error && typeof error === 'object') {
     const status =
       (error as Record<string, unknown>).status ?? (error as Record<string, unknown>).statusCode
@@ -109,6 +120,12 @@ function extractHttpStatus(error: unknown, msg: string): number | null {
     // MCP SDK sometimes puts an HTTP status in `code` for StreamableHTTP errors.
     if (typeof code === 'number' && code >= 100 && code < 600) return code
   }
+  return null
+}
+
+export function extractHttpStatus(error: unknown, msg: string): number | null {
+  const structured = extractStructuredHttpStatus(error)
+  if (structured !== null) return structured
   // Fallback: "HTTP 401", "status 500", "returned 404"
   const m = msg.match(/(?:HTTP|status|returned|code)[^\d]{0,6}(\d{3})/i)
   if (m) {
@@ -116,6 +133,18 @@ function extractHttpStatus(error: unknown, msg: string): number | null {
     if (n >= 100 && n < 600) return n
   }
   return null
+}
+
+/**
+ * Strict auth-failure detection for a *live* tool call.
+ *
+ * True iff the STRUCTURED HTTP status is exactly 401 or 403. Never consults the
+ * message regex, so a JSON-RPC `-32003` (session-lost) error is NOT an auth
+ * error — that class must keep flowing through the session-recovery path.
+ */
+export function isAuthError(error: unknown): boolean {
+  const status = extractStructuredHttpStatus(error)
+  return status === 401 || status === 403
 }
 
 function extractErrorCode(error: unknown): string | null {

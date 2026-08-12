@@ -64,7 +64,13 @@ import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
-import { McpManager } from './mcp'
+import {
+  McpManager,
+  type McpPrincipal,
+  type McpTokenProvider,
+  type McpTokenProviderFactory,
+  staticTokenProvider,
+} from './mcp'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -73,6 +79,7 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from './mcp/authoritativeFleet'
+import { type BrokerTokenProviderDeps, createBrokerTokenProvider } from './mcp/brokerTokenProvider'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
@@ -136,7 +143,10 @@ import { resolvePendingProviderWorkflowApproval } from './workflow/providerWorkf
 import { confirmProviderWorkflowApprovalTelegramVerification } from './workflow/providerWorkflowApprovalTelegramVerificationClient'
 import { resolveProviderWorkflowCallerContext } from './workflow/providerWorkflowCallerContextClient'
 import { wireWorkflowApprovalRuntimeRoutes } from './workflow/runtimeApprovalRouteWiring'
-import { createMcpHostRuntimeAuth } from './workflow/runtimeAuthFactory'
+import {
+  createMcpHostRuntimeAuth,
+  workflowControlTokenFromConfig,
+} from './workflow/runtimeAuthFactory'
 import {
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
@@ -779,6 +789,67 @@ export async function admitDevelopmentMcpServers(
   }
 }
 
+/**
+ * Idle timeout (ms) for oauth grantScope='user' partitions. Bounds revocation
+ * latency for a revoked grant (mini-spec §6): an idle per-user connection is
+ * evicted after this window; a live one keeps its short-lived access token.
+ */
+const OAUTH_USER_PARTITION_IDLE_MS = 15 * 60 * 1000
+/** Hard cap on live oauth-user partitions per manager (LRU eviction beyond it). */
+const OAUTH_USER_PARTITION_MAX = 500
+
+/**
+ * Build the per-connection token-provider factory used by the McpManager for
+ * oauth servers. Static servers do NOT use this (the manager builds their static
+ * provider from the eagerly-resolved secretRef token).
+ *
+ *  - oauth grantScope='user', principal=userId  → broker (server, userId)
+ *  - oauth grantScope='user', principal=SHARED   → token-less representative
+ *  - oauth grantScope='context', principal=SHARED → broker (server, contextRef)
+ *
+ * The broker is reached via the workflow-approval gateway (decision #6/B): a
+ * POST-only L7 allowlisted location, NOT a new direct egress to control-api.
+ */
+function createMcpTokenProviderFactory(): McpTokenProviderFactory {
+  return (server: McpServerInfo, principal: McpPrincipal): McpTokenProvider => {
+    if (server.auth?.type !== 'oauth') {
+      // Defensive: static providers are built by the manager, not here.
+      return staticTokenProvider(undefined)
+    }
+    const grantScope = server.oauth?.grantScope ?? 'user'
+    if (grantScope === 'context') {
+      // U6 (host): shared identity — one broker grant per (server, context).
+      return createBrokerTokenProvider(
+        server,
+        { contextId: server.contextRef },
+        brokerTokenProviderDeps()
+      )
+    }
+    // grantScope === 'user'
+    if (principal.kind === 'user') {
+      return createBrokerTokenProvider(
+        server,
+        { userId: principal.userId },
+        brokerTokenProviderDeps()
+      )
+    }
+    // SHARED principal on a user-scoped oauth server = catalog representative.
+    return staticTokenProvider(undefined)
+  }
+}
+
+/**
+ * Broker deps shared by every per-connection token provider: reads the gateway
+ * URL and mcp-host control JWT from config at call time (so token rotation is
+ * picked up). See mcp/brokerTokenProvider.ts for the fail-closed contract.
+ */
+function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
+  return {
+    gatewayUrl: () => config.mcpHostGatewayUrl,
+    controlToken: () => workflowControlTokenFromConfig(),
+  }
+}
+
 async function initializeMcpServers(contextRef: string): Promise<void> {
   console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
   const initializationGeneration = ++mcpInitializationGeneration
@@ -790,7 +861,12 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
     await replaceAuthoritativeMcpFleet({
       servers,
       previousManager,
-      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      createManager: () =>
+        new McpManager(
+          config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+          undefined,
+          createMcpTokenProviderFactory()
+        ),
       getAuthToken: async serverName => {
         if (!contextMapperClient) {
           throw new Error('Context Mapper client is required to fetch MCP server auth')
@@ -975,6 +1051,19 @@ function startMcpStatusHeartbeat(): void {
   console.log(`[Main] Starting MCP status heartbeat (interval: ${interval}ms)`)
   mcpStatusHeartbeatTimer = setInterval(() => {
     if (!mcpManager) return
+    // Evict idle oauth grantScope='user' partitions (LRU + TTL, mini-spec §6).
+    // SHARED/static/representative partitions are exempt.
+    try {
+      const evicted = mcpManager.evictIdleUserPartitions(
+        OAUTH_USER_PARTITION_IDLE_MS,
+        OAUTH_USER_PARTITION_MAX
+      )
+      if (evicted > 0) {
+        console.log(`[Main] Evicted ${evicted} idle oauth per-user MCP partition(s)`)
+      }
+    } catch (err: unknown) {
+      console.error('[Main] MCP per-user partition eviction failed:', err)
+    }
     mcpManager.refreshAllServerStatus().catch((err: unknown) => {
       console.error('[Main] MCP status heartbeat failed:', err)
     })
@@ -2589,7 +2678,11 @@ async function startDevMode(): Promise<void> {
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
+  mcpManager = new McpManager(
+    config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+    undefined,
+    createMcpTokenProviderFactory()
+  )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
@@ -2871,7 +2964,7 @@ async function main(): Promise<void> {
       console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
 
       const { WorkflowService } = await import('./workflow/workflowService')
-      const { McpClient } = await import('./mcp/client')
+      const { McpClient, staticTokenProvider } = await import('./mcp/client')
 
       rpcServer = new RPCServer(config.serverPort)
 
@@ -2886,7 +2979,7 @@ async function main(): Promise<void> {
           enabled: true,
           status: { deployed: true, ready: true },
         } as McpServerInfo
-        const client = new McpClient(info, server.authToken)
+        const client = new McpClient(info, staticTokenProvider(server.authToken))
         return {
           connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
             client.connect(options),

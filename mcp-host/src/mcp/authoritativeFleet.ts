@@ -463,6 +463,15 @@ async function resolveRequiredMcpAuthToken(
   server: McpServerInfo,
   getAuthToken: (serverName: string) => Promise<string | undefined>
 ): Promise<string | undefined> {
+  // oauth servers never resolve a token eagerly here: the eager/reconcile path
+  // admits only the token-less representative connection (which populates the
+  // catalog), and per-user/per-context tokens are resolved lazily by the
+  // per-connection tokenProvider at connect time. Returning undefined (never
+  // throwing) keeps the representative admissible without a grant.
+  if (server.auth?.type === 'oauth') {
+    return undefined
+  }
+
   if (
     !server.enabled ||
     !server.status?.ready ||

@@ -137,9 +137,25 @@ export interface McpServerTransport {
  * McpServer authentication configuration.
  */
 export interface McpServerAuth {
-  type: 'none' | 'bearer' | 'basic' | 'apiKey'
+  type: 'none' | 'bearer' | 'basic' | 'apiKey' | 'oauth'
   secretRef?: string
   secretKey?: string
+}
+
+/**
+ * OAuth broker configuration for an mcp-server (auth.type === 'oauth').
+ *
+ * Mirrors the separate `spec.oauth` block on the CRD (projected by HCC). Only
+ * `grantScope` is strictly required for the mcp-host connection seam (dispatch
+ * of the per-connection partition); the rest is carried for the token-provider
+ * factory / diagnostics. `grantScope` defaults to 'user' when absent.
+ */
+export interface McpServerOAuth {
+  id?: string
+  provider?: string
+  grantScope?: 'user' | 'context'
+  scopes?: string[]
+  backgroundAccess?: boolean
 }
 
 /**
@@ -170,6 +186,11 @@ export interface McpServerInfo {
   contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  /**
+   * OAuth broker config; present iff auth.type === 'oauth'. Carries `grantScope`
+   * so the manager can dispatch the per-connection partition (user vs shared).
+   */
+  oauth?: McpServerOAuth
   enabled: boolean
   status: McpServerStatus
 }

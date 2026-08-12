@@ -1627,7 +1627,13 @@ export class TaskExecutor {
     )
     await registerDesktopTools(nativeRegistry)
     const mcpRegistry = this.deps.mcpManager
-      ? new McpToolRegistryAdapter(this.deps.mcpManager)
+      ? // Thread the authenticated caller identity so oauth grantScope='user'
+        // tools dispatch to the caller's per-user partition (fail-closed when
+        // absent). buildToolRegistry runs per turn, so one userId per adapter.
+        new McpToolRegistryAdapter(
+          this.deps.mcpManager,
+          this.task.sourceMessage?.sender ?? undefined
+        )
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager
       ? new CompositeToolRegistry(nativeRegistry, mcpRegistry)

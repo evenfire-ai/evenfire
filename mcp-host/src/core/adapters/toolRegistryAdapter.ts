@@ -78,7 +78,8 @@ class McpToolAdapter implements Tool {
     private readonly fullName: string,
     private readonly desc: string,
     private readonly schema: Record<string, unknown>,
-    private readonly mcpManager: McpManager
+    private readonly mcpManager: McpManager,
+    private readonly userId?: string
   ) {}
 
   name() {
@@ -107,7 +108,9 @@ class McpToolAdapter implements Tool {
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
-      const result = await this.mcpManager.callTool(this.fullName, params)
+      const result = await this.mcpManager.callTool(this.fullName, params, {
+        userId: this.userId,
+      })
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
       let content: string
@@ -144,7 +147,16 @@ class McpToolAdapter implements Tool {
 export class McpToolRegistryAdapter implements ToolRegistry {
   private tools = new Map<string, Tool>()
 
-  constructor(private readonly mcpManager: McpManager) {
+  /**
+   * @param userId caller identity (authenticated session `sender`) threaded to
+   *   `manager.callTool` so oauth grantScope='user' tools dispatch to the
+   *   caller's per-user partition. A fresh adapter is built per turn, so it
+   *   always carries exactly one userId.
+   */
+  constructor(
+    private readonly mcpManager: McpManager,
+    private readonly userId?: string
+  ) {
     this.refresh()
   }
 
@@ -184,7 +196,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           mcpTool.name,
           mcpTool.description || '',
           mcpTool.inputSchema || {},
-          this.mcpManager
+          this.mcpManager,
+          this.userId
         )
       )
     }
