@@ -24,6 +24,18 @@ data:
   CLERUM_CHANNEL_READER_HANDOFF_PORT: "8099"
   CLERUM_NAMESPACE: ""
   CLERUM_POLL_INTERVAL_SECONDS: "2"
+  # OPTIONAL. Base URL of the Profile UI. When set, the notice sent to an
+  # unverified Slack sender ends with this link so they can find the account
+  # they need to link; when unset the notice still sends, just without a link.
+  # Deliberately left unset here: this ConfigMap ships to every deployment and
+  # the value is per-operator, so a placeholder default would point real users
+  # at somebody else's (or their own) machine. Uncomment and set it, or supply
+  # it from your overlay -- HCC's per-Host channel-reader Deployment consumes
+  # this whole ConfigMap via envFrom (hostReconciler.ts
+  # buildChannelReaderDeployment), so any key added here reaches the pod with
+  # no controller change. The minikube overlay sets it to the local profile-ui
+  # address as a worked example.
+  # CLERUM_PROFILE_UI_URL: "https://profile.example.com"
 # The legacy static `clerum-channel-reader` Deployment that lived here has
 # been retired in favor of per-Host channel-reader Deployments managed by
 # HCC (`channel-reader-<host>`). HCC sweeps any lingering copy on startup
