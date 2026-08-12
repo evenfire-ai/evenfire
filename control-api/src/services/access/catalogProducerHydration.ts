@@ -1,5 +1,5 @@
 import type { CatalogFamily, CatalogRequestContext } from './catalogContracts.js'
-import { CatalogProducerContractError } from './catalogProducerSupport.js'
+import { CatalogProducerContractError } from './catalogProducerErrors.js'
 
 /** Validates the ordered canonical keys passed to selected-ID hydration. */
 export function validateHydrationKeys(input: {
