@@ -1379,18 +1379,17 @@ export class ChannelReader {
         console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
         continue
       }
-      if (
-        msg.providerIdentity &&
-        this.rpcClient.authorizeProviderMessage &&
-        !(await this.rpcClient.authorizeProviderMessage(msg.providerIdentity))
-      ) {
-        if (providerEventKey) {
-          this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+      if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
+        const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+        if (!authorization.authorized) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          console.warn(
+            `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
+          )
+          continue
         }
-        console.warn(
-          `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
-        )
-        continue
       }
 
       const traceContext = mintChannelTraceContext(msg)
