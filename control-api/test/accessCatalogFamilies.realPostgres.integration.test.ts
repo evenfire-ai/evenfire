@@ -370,7 +370,10 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     it(`${family} producer paths round-trip through catalog and live resolution`, async () => {
       const catalog = await buildAccessCatalog(
         { session, families: [family], limit: 100 },
-        { transaction: transaction(databasePool) }
+        {
+          transaction: transaction(databasePool),
+          ...(family === 'gfs_resource' ? { teamGfsMembershipAdmissionLimit: 1 } : {}),
+        }
       )
       expect(catalog.complete).toBe(true)
       expect(catalog.partialErrors).toEqual([])
