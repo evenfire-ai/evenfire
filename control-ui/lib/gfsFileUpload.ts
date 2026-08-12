@@ -303,7 +303,10 @@ function retryAfterOf(error: unknown): number | undefined {
 
 function ambiguousLifecycleError(error: unknown): boolean {
   const status = statusOf(error)
-  return status === undefined || status === 408 || (status !== undefined && status >= 500)
+  // Transport failures have no HTTP status; keep them ambiguous so completion
+  // reconciles durable state instead of assuming that the request was lost.
+  if (typeof status !== 'number') return true
+  return status === 408 || status >= 500
 }
 
 function terminalReconciliationError(error: unknown): boolean {
