@@ -1,94 +1,25 @@
-import type { DbClient } from '../../db.js'
-import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
-import type { AccessExecutionBudget } from './accessExecutionBudget.js'
-import { revisionOfValues } from './authorizationRevision.js'
 import {
   type CatalogFamily,
   type CatalogIdentityCandidate,
-  type CatalogOperationalSourceState,
   type CatalogProducerPage,
   type CatalogRequestContext,
   type ProducerContinuation,
-  type SafeCatalogPartialError,
   catalogKey,
-  compareCatalogKey,
 } from './catalogContracts.js'
+import { catalogQuery } from './catalogProducerDatabase.js'
+import { operationalReadiness } from './catalogProducerReadiness.js'
 import type { OperationalSourceFamily } from './operationalAccessProjection.js'
+
+export { catalogQuery } from './catalogProducerDatabase.js'
+export { validateHydrationKeys } from './catalogProducerHydration.js'
+export { type BoundedKeyArm, boundedKeyUnionSql } from './catalogProducerArms.js'
+export { operationalReadiness } from './catalogProducerReadiness.js'
 
 export class CatalogProducerContractError extends Error {
   constructor(readonly code: string) {
     super(`Catalog producer contract violation: ${code}`)
     this.name = 'CatalogProducerContractError'
   }
-}
-
-export async function catalogQuery(
-  db: Pick<DbClient, 'query'>,
-  budget: AccessExecutionBudget,
-  text: string,
-  values: unknown[],
-  options: { chargeProducer?: boolean } = {}
-) {
-  return runAccessDatabaseQuery(db, budget, text, values, options)
-}
-
-export type BoundedKeyArm = Readonly<{
-  sql: string
-  orderBy?: string
-  duplicateCapable?: boolean
-  hasValidUntil?: boolean
-}>
-
-export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): string {
-  if (arms.length === 0) throw new CatalogProducerContractError('key_arms_missing')
-  const names = arms.map((_, index) => `source_${index}`)
-  const sources = arms
-    .map((arm, index) => {
-      const definition = typeof arm === 'string' ? { sql: arm } : arm
-      const after = `arm_after_${index}`
-      const sourceSql = definition.sql.replaceAll('$2', `${after}.after_key`).replaceAll(
-        '$7',
-        `CASE WHEN POSITION('/' IN ${after}.after_key) > 0
-                THEN SPLIT_PART(${after}.after_key, '/', 2) ELSE '' END`
-      )
-      return `${names[index]} AS MATERIALIZED (
-          SELECT '${names[index]}'::text AS source_arm, bounded_arm.logical_id,
-                 ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
-                   AS valid_until
-            FROM (
-              SELECT COALESCE(NULLIF($8::jsonb ->> '${names[index]}', ''), $2) AS after_key
-               WHERE $9::jsonb IS NULL OR $9::jsonb ? '${names[index]}'
-            ) ${after}
-            CROSS JOIN LATERAL (${sourceSql}) bounded_arm
-          ORDER BY ${definition.orderBy ?? 'logical_id'}
-          LIMIT $4
-        )`
-    })
-    .join(',\n')
-  const union = names
-    .map(
-      (name, index) => `SELECT '${name}'::text AS source_arm,
-                       COALESCE((
-                         SELECT jsonb_agg(jsonb_build_object(
-                           'logical_id', logical_id,
-                           'valid_until', valid_until
-                         ) ORDER BY logical_id)
-                           FROM ${name}
-                       ), '[]'::jsonb) AS source_rows,
-                       ${
-                         (typeof arms[index] === 'string' ? false : arms[index].duplicateCapable)
-                           ? `(SELECT COUNT(*) FROM ${name}) >= $4`
-                           : 'FALSE'
-                       } AS source_saturated
-                 WHERE $9::jsonb IS NULL OR $9::jsonb ? '${name}'`
-    )
-    .join('\nUNION ALL\n')
-  return `WITH ${sources}
-    SELECT source_arm, source_rows, source_saturated
-      FROM (${union}) bounded_sources
-     WHERE $1::uuid IS NOT NULL AND $2::text IS NOT NULL AND $3::text IS NOT NULL
-       AND $5::text IS NOT NULL AND $6::text IS NOT NULL AND $7::text IS NOT NULL
-     ORDER BY source_arm`
 }
 
 function validateContinuation(
@@ -103,53 +34,6 @@ function validateContinuation(
     throw new CatalogProducerContractError('continuation_family_mismatch')
   }
   return logicalId
-}
-
-function sourceRevision(states: readonly CatalogOperationalSourceState[]): string {
-  return revisionOfValues(
-    states.map(state => [state.family, state.generation, state.resourceVersion, state.status])
-  )
-}
-
-export function operationalReadiness(
-  context: CatalogRequestContext,
-  family: CatalogFamily,
-  required: readonly OperationalSourceFamily[]
-):
-  | Readonly<{ status: 'current'; sourceRevision: string }>
-  | Readonly<{
-      status: 'partial'
-      sourceRevision: string
-      errors: readonly SafeCatalogPartialError[]
-    }> {
-  if (required.length === 0) return { status: 'current', sourceRevision: 'database' }
-  const states = required.flatMap(source => {
-    const value = context.sourceStates.get(source)
-    return value ? [value] : []
-  })
-  const errors: SafeCatalogPartialError[] = []
-  for (const source of required) {
-    const state = context.sourceStates.get(source)
-    if (!state || state.status !== 'current') {
-      errors.push(
-        Object.freeze({
-          producer: family,
-          code:
-            state?.status === 'relisting'
-              ? 'operational_source_relisting'
-              : 'operational_source_unavailable',
-          retryable: true,
-        })
-      )
-    }
-  }
-  return errors.length === 0
-    ? { status: 'current', sourceRevision: sourceRevision(states) }
-    : {
-        status: 'partial',
-        sourceRevision: sourceRevision(states),
-        errors: Object.freeze(errors),
-      }
 }
 
 export async function listBoundedProducerKeys(input: {
@@ -325,25 +209,4 @@ export async function listBoundedProducerKeys(input: {
     sourceCompleteness: 'complete',
     partialErrors: Object.freeze([]),
   })
-}
-
-export function validateHydrationKeys(input: {
-  context: CatalogRequestContext
-  family: CatalogFamily
-  keys: readonly (readonly [string, CatalogFamily, string])[]
-}): string[] {
-  if (input.keys.length > input.context.budget.limits.keyCandidatesPerCall) {
-    throw new CatalogProducerContractError('hydrate_key_count_exceeded')
-  }
-  const logicalIds: string[] = []
-  for (const key of input.keys) {
-    if (key[0] !== input.context.environmentId || key[1] !== input.family || !key[2]) {
-      throw new CatalogProducerContractError('hydrate_key_mismatch')
-    }
-    if (logicalIds.at(-1) !== undefined && key[2] <= logicalIds.at(-1)!) {
-      throw new CatalogProducerContractError('hydrate_keys_not_strictly_ordered')
-    }
-    logicalIds.push(key[2])
-  }
-  return logicalIds
 }
