@@ -143,7 +143,8 @@ export const AppHeader = React.memo(function AppHeader({
   }, [])
 
   useEffect(() => {
-    const updateCompactSearch = () => setCompactSearch(window.innerWidth <= COMPACT_SEARCH_BREAKPOINT)
+    const updateCompactSearch = () =>
+      setCompactSearch(window.innerWidth <= COMPACT_SEARCH_BREAKPOINT)
     window.addEventListener('resize', updateCompactSearch)
     return () => window.removeEventListener('resize', updateCompactSearch)
   }, [])
