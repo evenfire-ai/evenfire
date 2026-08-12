@@ -1809,7 +1809,7 @@ export function classifyAuthorizationFailure(error: unknown): 'unresolved' | 'er
   return 'error'
 }
 
-async function handleProviderMessageAuthorization(
+export async function handleProviderMessageAuthorization(
   input: ProviderMessageAuthorization
 ): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
   const identity = input.providerIdentity
