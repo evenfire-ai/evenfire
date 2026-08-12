@@ -613,10 +613,14 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
     for (const table of ['gfs_grants', 'gfs_shares'] as const) {
       await databasePool.query(
         `INSERT INTO ${table}(drive, resource_id, subject_type, subject_id, permissions)
-         SELECT drive, resource_id, 'user', 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+         SELECT resource.drive, resource.resource_id, subject.subject_type, subject.subject_id,
                 ARRAY['read']::text[]
-           FROM gfs_resources
-          WHERE drive LIKE 'sparse-unrelated-%'`
+           FROM gfs_resources resource
+     CROSS JOIN (VALUES
+                  ('user', 'ffffffff-ffff-4fff-8fff-ffffffffffff'),
+                  ('team', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'))
+                subject(subject_type, subject_id)
+          WHERE resource.drive LIKE 'sparse-unrelated-%'`
       )
     }
     for (const table of ['gfs_grants', 'gfs_shares'] as const) {

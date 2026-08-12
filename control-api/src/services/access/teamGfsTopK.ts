@@ -35,30 +35,36 @@ const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
       AS stream(kind text, subject_id text, after_id uuid, take integer)
 ), heads AS (
   SELECT requested.kind, requested.subject_id, candidate.resource_id
-    FROM requested
+    FROM (SELECT * FROM requested WHERE kind = 'grant') requested
    CROSS JOIN LATERAL (
      SELECT grant_row.resource_id
        FROM gfs_grants grant_row
-       JOIN gfs_resources resource
-         ON resource.resource_id = grant_row.resource_id
-        AND resource.drive = grant_row.drive AND resource.deleted_at IS NULL
-      WHERE requested.kind = 'grant'
-        AND grant_row.subject_type = 'team' AND grant_row.subject_id = requested.subject_id
+ CROSS JOIN LATERAL (
+         SELECT 1
+           FROM gfs_resources resource
+          WHERE resource.resource_id = grant_row.resource_id
+            AND resource.drive = grant_row.drive AND resource.deleted_at IS NULL
+          OFFSET 0
+       ) live_resource
+      WHERE grant_row.subject_type = 'team' AND grant_row.subject_id = requested.subject_id
         AND grant_row.resource_id > requested.after_id
       ORDER BY grant_row.resource_id
       LIMIT requested.take
    ) candidate
   UNION ALL
   SELECT requested.kind, requested.subject_id, candidate.resource_id
-    FROM requested
+    FROM (SELECT * FROM requested WHERE kind = 'share') requested
    CROSS JOIN LATERAL (
      SELECT share.resource_id
        FROM gfs_shares share
-       JOIN gfs_resources resource
-         ON resource.resource_id = share.resource_id
-        AND resource.drive = share.drive AND resource.deleted_at IS NULL
-      WHERE requested.kind = 'share'
-        AND share.subject_type = 'team' AND share.subject_id = requested.subject_id
+ CROSS JOIN LATERAL (
+         SELECT 1
+           FROM gfs_resources resource
+          WHERE resource.resource_id = share.resource_id
+            AND resource.drive = share.drive AND resource.deleted_at IS NULL
+          OFFSET 0
+       ) live_resource
+      WHERE share.subject_type = 'team' AND share.subject_id = requested.subject_id
         AND share.resource_id > requested.after_id
       ORDER BY share.resource_id
       LIMIT requested.take
