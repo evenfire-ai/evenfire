@@ -40,6 +40,14 @@ export function createExternalInvitationsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
   })
+  const externalDesktopAuthorizationRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
+
+  router.use('/external/invitations/desktop-authorization', externalDesktopAuthorizationRateLimit)
   router.get(
     '/external/invitations/token/:token',
     rateLimitMiddleware({
@@ -209,12 +217,6 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/desktop-authorization',
-    rateLimit({
-      windowMs: 60_000,
-      limit: config.approvalRlExternalPerMin,
-      standardHeaders: 'draft-7',
-      legacyHeaders: false,
-    }),
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
