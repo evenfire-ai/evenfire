@@ -159,9 +159,18 @@ function buildReader(options: BuildReaderOptions = {}) {
   })
 
   let eventSeq = 0
-  const deliver = async (channelId: string, userId: string, workspaceId = 'T1'): Promise<void> => {
+  /**
+   * `providerChannelId` defaults to `channelId` because that is what Slack does
+   * today; the tests that pin WHICH id scopes the limiter pass a different value.
+   */
+  const buildMessage = (
+    channelId: string,
+    userId: string,
+    workspaceId = 'T1',
+    providerChannelId = channelId
+  ): Message => {
     eventSeq += 1
-    const message: Message = {
+    return {
       channelType: medium,
       channelId,
       sender: userId,
@@ -172,24 +181,41 @@ function buildReader(options: BuildReaderOptions = {}) {
         medium,
         providerUserId: userId,
         providerWorkspaceId: workspaceId,
-        providerChannelId: channelId,
+        providerChannelId,
         // Unique per delivery on purpose. A repeated providerEventId is dropped by
         // the provider-event dedupe *before* authorization runs, which would make
         // every "sent only once" assertion below pass with no rate limiter at all.
         providerEventId: `evt-${eventSeq}`,
       },
     }
-    // The real Slack adapter never throws (channels/slack.ts swallows Slack
-    // errors); the ephemeralThrows stub throws only to prove the limiter key is
-    // recorded before the send, so a rejection here is expected in that one case.
-    await reader.handleMessages([message]).catch(() => undefined)
   }
+
+  // Deliberately NOT wrapped in `.catch()`: sendUnresolvedSenderNotice has to
+  // contain a throwing adapter itself, so an escaped throw must surface here as a
+  // rejected promise rather than being absorbed by the harness.
+  const deliver = async (
+    channelId: string,
+    userId: string,
+    workspaceId = 'T1',
+    providerChannelId = channelId
+  ): Promise<void> =>
+    reader.handleMessages([buildMessage(channelId, userId, workspaceId, providerChannelId)])
+
+  const deliverBatch = async (messages: Message[]): Promise<void> => reader.handleMessages(messages)
 
   const runSweep = (): void => {
     ;(reader as unknown as { cleanupStaleApprovals(): void }).cleanupStaleApprovals()
   }
 
-  return { deliver, runSweep, sendEphemeral, adapter, authorizeProviderMessage }
+  return {
+    buildMessage,
+    deliver,
+    deliverBatch,
+    runSweep,
+    sendEphemeral,
+    adapter,
+    authorizeProviderMessage,
+  }
 }
 
 describe('unresolved sender notice', () => {
@@ -246,6 +272,25 @@ describe('unresolved sender notice', () => {
     expect(sendEphemeral).toHaveBeenCalledTimes(2)
   })
 
+  // The two ids are identical for Slack today, so these two tests hold the limiter
+  // to the PROVIDER id from both directions: a differing transport channelId must
+  // not split the key, and a differing providerChannelId must.
+  it('scopes the limiter by the provider channel id, not the transport channel id', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C-transport', 'U1', 'T1', 'C1')
+    await deliver('C-transport', 'U1', 'T1', 'C2')
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not re-notify when only the transport channel id changes', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C-transport-a', 'U1', 'T1', 'C1')
+    await deliver('C-transport-b', 'U1', 'T1', 'C1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(1)
+  })
+
   it('treats the same user and channel in a second workspace as its own conversation', async () => {
     vi.useFakeTimers()
     const { deliver, sendEphemeral } = buildReader()
@@ -257,9 +302,26 @@ describe('unresolved sender notice', () => {
   it('records the key even when sendEphemeral throws, so one failure is not retried forever', async () => {
     vi.useFakeTimers()
     const { deliver, sendEphemeral } = buildReader({ ephemeralThrows: true })
-    await deliver('C1', 'U1')
+    // Nothing catches for us: an uncontained throw rejects this and fails the test.
+    await expect(deliver('C1', 'U1')).resolves.toBeUndefined()
     await deliver('C1', 'U1')
     expect(sendEphemeral).toHaveBeenCalledTimes(1)
+  })
+
+  // The notice is best-effort; the batch is not. SlackAdapter swallows its own
+  // errors today, but ChannelAdapter.sendEphemeral does not promise that, and this
+  // runs inside the per-message loop in handleMessages.
+  it('keeps processing the rest of the batch when sendEphemeral throws', async () => {
+    const { buildMessage, deliverBatch, sendEphemeral, authorizeProviderMessage } = buildReader({
+      ephemeralThrows: true,
+    })
+    await expect(
+      deliverBatch([buildMessage('C1', 'U1'), buildMessage('C2', 'U2')])
+    ).resolves.toBeUndefined()
+    // Both messages reached authorization, and both got their own notice attempt:
+    // a throw escaping the first would have aborted the loop at one apiece.
+    expect(authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
   })
 
   it('never sends on reason error', async () => {
