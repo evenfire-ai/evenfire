@@ -41,6 +41,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
       orderBy: 'source_key',
+      distinctCanonicalBy: 'source_key',
     },
   ]),
   context: boundedKeyUnionSql([
@@ -64,10 +65,12 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
       orderBy: 'source_key',
+      distinctCanonicalBy: 'source_key',
     },
   ]),
   mcp_server: boundedKeyUnionSql([
-    `SELECT edge.target_id AS logical_id
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
@@ -84,7 +87,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-    `SELECT edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
@@ -102,7 +108,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
-    `SELECT mcp_edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT mcp_edge.target_id AS logical_id
        FROM user_agents ua
        JOIN operational_resource_relationships host_edge
          ON host_edge.environment_id = $3
@@ -129,7 +138,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE ua.user_id = $1 AND mcp_edge.target_id > $2`,
-    `SELECT mcp_edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT mcp_edge.target_id AS logical_id
        FROM team_agents ta
        JOIN team_members tm ON tm.team_id = ta.team_id
        JOIN operational_resource_relationships host_edge
@@ -157,6 +169,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND mcp_edge.target_id > $2`,
+      distinctCanonicalBy: 'logical_id',
+    },
   ]),
   workflow_recipe: boundedKeyUnionSql([
     {
@@ -181,6 +195,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       WHERE tm.user_id = $1 AND tm.status = 'active'
                AND (twt.recipe_namespace || '/' || twt.recipe_name) > $2`,
       orderBy: 'logical_id',
+      distinctCanonicalBy: 'logical_id',
     },
   ]),
   workflow_run: boundedKeyUnionSql([
@@ -303,7 +318,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     },
   ]),
   shared_filesystem: boundedKeyUnionSql([
-    `SELECT edge.target_id AS logical_id
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
@@ -321,7 +337,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE uc.user_id = $1 AND edge.target_id > $2`,
-    `SELECT edge.target_id AS logical_id
+      distinctCanonicalBy: 'logical_id',
+    },
+    {
+      sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
@@ -340,6 +359,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
+      distinctCanonicalBy: 'logical_id',
+    },
   ]),
   sandbox_app: boundedKeyUnionSql([
     `SELECT edge.target_id AS logical_id
