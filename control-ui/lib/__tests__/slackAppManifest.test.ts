@@ -22,6 +22,15 @@ function listItemsUnder(yaml: string, header: string): string[] {
   return items
 }
 
+/**
+ * The two lines that carry the app name, whole. `toContain('name: Evenfire')` is
+ * satisfied by an unquoted scalar, by a suffixed one, and by only one of the two
+ * lines being right.
+ */
+function nameLines(yaml: string): string[] {
+  return yaml.split('\n').filter(line => /^\s+(name|display_name):/.test(line))
+}
+
 describe('slackAppManifest', () => {
   const yaml = slackAppManifest('Evenfire', URL)
 
@@ -77,13 +86,37 @@ describe('slackAppManifest', () => {
   })
 
   it('uses the app name given', () => {
-    expect(yaml).toContain('name: Evenfire')
+    expect(nameLines(yaml)).toEqual(['  name: "Evenfire"', '    display_name: "Evenfire"'])
   })
 
   it('quotes an app name that would otherwise break the YAML', () => {
     const quoted = slackAppManifest('Acme: support bot', URL)
-    expect(quoted).toContain('name: "Acme: support bot"')
-    expect(quoted).not.toContain('name: Acme: support bot')
+    expect(nameLines(quoted)).toEqual([
+      '  name: "Acme: support bot"',
+      '    display_name: "Acme: support bot"',
+    ])
+  })
+
+  it('quotes an app name YAML would otherwise read as a boolean or a number', () => {
+    // Unquoted, `no` is YAML 1.1 false and `123` is an integer, so Slack receives
+    // a manifest whose app name is not a string at all.
+    expect(nameLines(slackAppManifest('no', URL))).toEqual([
+      '  name: "no"',
+      '    display_name: "no"',
+    ])
+    expect(nameLines(slackAppManifest('123', URL))).toEqual([
+      '  name: "123"',
+      '    display_name: "123"',
+    ])
+  })
+
+  it('escapes a newline in the app name instead of emitting a second line', () => {
+    // A raw newline inside a quoted scalar would split the value across lines and
+    // make the rest of the manifest unparseable.
+    expect(nameLines(slackAppManifest('Acme\nBot', URL))).toEqual([
+      '  name: "Acme\\nBot"',
+      '    display_name: "Acme\\nBot"',
+    ])
   })
 })
 

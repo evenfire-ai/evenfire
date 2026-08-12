@@ -144,7 +144,10 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     expect(requestUrlLines).toHaveLength(2)
     expect(new Set(requestUrlLines).size).toBe(1)
     expect(requestUrlLines[0]).toContain('https://webhook.example.com/webhooks/slack/')
-    expect(manifest).toContain('name: Evenfire')
+    expect(manifest.split('\n').filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Evenfire"',
+      '    display_name: "Evenfire"',
+    ])
   })
 
   it('warns instead of emitting a manifest when the Request URL is only a path', async () => {
@@ -170,5 +173,57 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
     expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
     expect(screen.queryByText(/no public webhook address/)).not.toBeInTheDocument()
+  })
+
+  it('names the cause and the next step instead of a bare Unavailable', async () => {
+    // With the URL guard in place this is the DEFAULT state of the Slack tab, so
+    // "Unavailable" with no cause, under a hint telling the operator to use a URL
+    // that is not there, is the copy most operators will actually see.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(screen.getByText('Available once this channel has a Slack App Name')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Enter the Slack App Name above and this channel gets its Request URL and app manifest.'
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Use this URL for Slack Event Subscriptions and Interactivity.')
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the Request URL and manifest as soon as an App Name is typed, before any save', async () => {
+    // Slack's order is manifest first, credentials second: the xoxb token only
+    // exists once the app the manifest creates has been installed. Deriving the
+    // manifest from the PERSISTED spec made it appear only after the operator had
+    // already done, by hand, the step the manifest is for.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/Slack App Name/), { target: { value: 'Ops Bot' } })
+
+    expect(screen.getByText('Slack App Manifest')).toBeInTheDocument()
+    const manifest = screen.getByText(/display_information:/).textContent ?? ''
+    const lines = manifest.split('\n')
+    expect(lines.filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Ops Bot"',
+      '    display_name: "Ops Bot"',
+    ])
+    const requestUrlLines = lines.filter(line => line.trim().startsWith('request_url:'))
+    expect(requestUrlLines).toHaveLength(2)
+    expect(new Set(requestUrlLines).size).toBe(1)
+    expect(requestUrlLines[0]).toBe(
+      `    request_url: ${screen.getByText(/^https:\/\/webhook\.example\.com\/webhooks\/slack\//).textContent}`
+    )
+    // Nothing was persisted to get here: no PUT, and the manifest is on screen.
+    expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
   })
 })

@@ -21,18 +21,25 @@ const BOT_EVENTS = [
   'message.mpim',
 ]
 
-/** Plain YAML scalars cannot carry ': ', '#', quotes, or leading punctuation. */
-const YAML_PLAIN_SAFE = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/
-
+/**
+ * A double-quoted YAML scalar, always. Quoting only what looks unsafe leaves the
+ * YAML type traps behind: `123`, `no`, `true`, and `null` are all valid app
+ * names and all parse as non-strings when written plain. Double quotes also give
+ * the only style that carries escapes, which a name with a newline in it needs.
+ */
 function yamlScalar(value: string): string {
-  const trimmed = value.trim()
-  if (YAML_PLAIN_SAFE.test(trimmed)) return trimmed
-  return `"${trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  const escaped = value
+    .trim()
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+  return `"${escaped}"`
 }
 
 /**
- * Slack rejects a manifest whose `request_url` is relative, and
- * `slackWebhookUrlForChannel` falls back to a bare path when the deployment has
+ * Slack rejects a manifest whose `request_url` is relative, and the
+ * `slackWebhookUrlFor*` helpers fall back to a bare path when the deployment has
  * no public webhook address (the minikube case). Callers must warn instead of
  * handing over a manifest Slack cannot accept.
  */

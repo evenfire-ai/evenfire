@@ -27,6 +27,7 @@ import {
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
+  hasSlackConfig,
 } from '@lib/communicationChannelEdit'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
@@ -36,7 +37,7 @@ import {
 } from '@lib/communicationChannelProviders'
 import {
   type CommunicationChannelItem,
-  slackWebhookUrlForChannel,
+  slackWebhookUrlForChannelName,
   teamsWebhookUrlForChannel,
 } from '@lib/communicationChannels'
 import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
@@ -148,11 +149,25 @@ export default function EditCommunicationChannelPage() {
 
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeTab], [activeTab])
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
-  const slackRequestUrl = item ? slackWebhookUrlForChannel(item) : null
+  // Gated on the DRAFT, not the persisted item. Slack's own order is manifest
+  // first, credentials second: the bot token only exists after the app has been
+  // created and installed, so a manifest that needed a saved Slack spec could
+  // only ever appear after the operator had already done the step it describes.
+  // The URL depends only on namespace/name, both fixed at create time, and the
+  // reader resolves that id regardless of slackSettings, so a draft-derived URL
+  // is already server-truthful. The guard against a copyable dead end on a
+  // non-Slack channel is kept: no Slack config in the draft, no URL.
+  const slackRequestUrl =
+    draft && hasSlackConfig(draft)
+      ? slackWebhookUrlForChannelName(
+          item?.metadata?.name?.trim() || name,
+          item?.metadata?.namespace
+        )
+      : null
   const teamsRequestUrl = item ? teamsWebhookUrlForChannel(item) : null
   // A relative request_url is invalid to Slack, so warn instead of handing over a manifest that
-  // cannot work. slackWebhookUrlForChannel falls back to a bare path when the deployment has no
-  // public webhook address.
+  // cannot work. slackWebhookUrlForChannelName falls back to a bare path when the deployment has
+  // no public webhook address.
   const slackManifest =
     slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
       ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
@@ -454,7 +469,7 @@ export default function EditCommunicationChannelPage() {
                       <span className="cu-field__label">Slack Request URL</span>
                       <div className="cu-copy-field">
                         <div className="cu-readonly-field cu-copy-field__value">
-                          {slackRequestUrl || 'Unavailable'}
+                          {slackRequestUrl || 'Available once this channel has a Slack App Name'}
                         </div>
                         <button
                           type="button"
@@ -466,7 +481,9 @@ export default function EditCommunicationChannelPage() {
                         </button>
                       </div>
                       <span className="cu-field__hint">
-                        Use this URL for Slack Event Subscriptions and Interactivity.
+                        {slackRequestUrl
+                          ? 'Use this URL for Slack Event Subscriptions and Interactivity.'
+                          : 'Enter the Slack App Name above and this channel gets its Request URL and app manifest.'}
                       </span>
                     </div>
                     {slackRequestUrl ? (
@@ -494,10 +511,11 @@ export default function EditCommunicationChannelPage() {
                             </pre>
                           </div>
                           <span className="cu-field__hint">
-                            In Slack, Create New App → From an app manifest. It fills in both
-                            Request URLs, on Event Subscriptions and on Interactivity &amp;
-                            Shortcuts. Setting only Event Subscriptions leaves approval buttons dead
-                            with nothing in the logs.
+                            Paste this into Slack, either at Create New App → From an app manifest
+                            for a new app, or in an existing app under Settings → App Manifest. It
+                            fills in both Request URLs, on Event Subscriptions and on Interactivity
+                            &amp; Shortcuts. Setting only Event Subscriptions leaves approval
+                            buttons dead with nothing in the logs.
                           </span>
                         </div>
                       ) : (

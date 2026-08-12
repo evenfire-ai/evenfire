@@ -67,17 +67,61 @@ function base64UrlEncode(value: string): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
 }
 
+/**
+ * Absolute webhook URL for a reader path, or the bare path when this deployment
+ * has no public webhook address (the minikube case).
+ */
+function webhookUrlForPath(path: string): string {
+  const base = process.env.NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL?.replace(/\/+$/, '')
+  if (base) return `${base}${path}`
+  if (typeof window !== 'undefined' && window.location.hostname.startsWith('app.')) {
+    const rootDomain = window.location.hostname.slice('app.'.length)
+    return `${window.location.protocol}//webhook.${rootDomain}${path}`
+  }
+  return path
+}
+
+/**
+ * The Slack target id depends only on the channel's namespace and name, both
+ * fixed when the channel is created, which is why callers may build this from an
+ * unsaved edit draft: the reader resolves the id whether or not `slackSettings`
+ * has been persisted yet. Deciding WHETHER a channel should show a Slack URL is
+ * the caller's job, and it is a real decision — a URL on a channel with no Slack
+ * provider is a copyable dead end.
+ */
+export function slackWebhookTargetIdForChannelName(
+  name: string,
+  namespace = 'channels'
+): string | null {
+  const trimmedName = name.trim()
+  if (!trimmedName) return null
+  return `slack:${base64UrlEncode(JSON.stringify({ namespace: namespace.trim() || 'channels', name: trimmedName }))}`
+}
+
+export function slackWebhookPathForChannelName(
+  name: string,
+  namespace = 'channels'
+): string | null {
+  const targetId = slackWebhookTargetIdForChannelName(name, namespace)
+  return targetId ? `/webhooks/slack/${encodeURIComponent(targetId)}` : null
+}
+
+export function slackWebhookUrlForChannelName(name: string, namespace = 'channels'): string | null {
+  const path = slackWebhookPathForChannelName(name, namespace)
+  return path ? webhookUrlForPath(path) : null
+}
+
 export function slackWebhookTargetIdForChannel(item: CommunicationChannelItem): string | null {
-  const namespace = item.metadata?.namespace?.trim() || 'channels'
-  const name = item.metadata?.name?.trim()
-  if (!name) return null
   const spec = item.spec
   const slackConfigured =
     (spec?.slack?.length ?? 0) > 0 ||
     !!spec?.slackSettings?.workspaceId?.trim() ||
     !!spec?.slackSettings?.botHandle?.trim()
   if (!slackConfigured) return null
-  return `slack:${base64UrlEncode(JSON.stringify({ namespace, name }))}`
+  return slackWebhookTargetIdForChannelName(
+    item.metadata?.name ?? '',
+    item.metadata?.namespace ?? 'channels'
+  )
 }
 
 export function slackWebhookPathForChannel(item: CommunicationChannelItem): string | null {
@@ -87,14 +131,7 @@ export function slackWebhookPathForChannel(item: CommunicationChannelItem): stri
 
 export function slackWebhookUrlForChannel(item: CommunicationChannelItem): string | null {
   const path = slackWebhookPathForChannel(item)
-  if (!path) return null
-  const base = process.env.NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL?.replace(/\/+$/, '')
-  if (base) return `${base}${path}`
-  if (typeof window !== 'undefined' && window.location.hostname.startsWith('app.')) {
-    const rootDomain = window.location.hostname.slice('app.'.length)
-    return `${window.location.protocol}//webhook.${rootDomain}${path}`
-  }
-  return path
+  return path ? webhookUrlForPath(path) : null
 }
 
 export function teamsWebhookTargetIdForChannel(item: CommunicationChannelItem): string | null {
@@ -123,14 +160,7 @@ export function teamsWebhookPathForChannelName(
 
 export function teamsWebhookUrlForChannel(item: CommunicationChannelItem): string | null {
   const path = teamsWebhookPathForChannel(item)
-  if (!path) return null
-  const base = process.env.NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL?.replace(/\/+$/, '')
-  if (base) return `${base}${path}`
-  if (typeof window !== 'undefined' && window.location.hostname.startsWith('app.')) {
-    const rootDomain = window.location.hostname.slice('app.'.length)
-    return `${window.location.protocol}//webhook.${rootDomain}${path}`
-  }
-  return path
+  return path ? webhookUrlForPath(path) : null
 }
 
 export function teamsWebhookUrlForChannelName(name: string, namespace = 'channels'): string | null {
