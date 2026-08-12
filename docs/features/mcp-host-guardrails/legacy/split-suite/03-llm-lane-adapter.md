@@ -4,7 +4,7 @@
 |---|---|
 | **Type** | design spec (lane adapter) |
 | **Status** | draft for discussion |
-| **Conforms to** | S1 [core](./01-guardrail-core.md) · **Consumes** S4 [trust & delivery](./04-hook-trust-and-delivery.md) (Tier A built-ins + Tier B remote) |
+| **Conforms to** | S1 [core](./01-guardrail-core.md) · **Consumes** S4 [trust & delivery](./04-hook-trust-and-delivery.md) (built-ins + installed hooks) |
 
 Specializes the `GuardrailBoundary` over the **LLM completion call**. Decision algebra, aggregation,
 at-most-once, admin policy, and audit come from S1; hook delivery (in-process built-ins and remote hooks)
@@ -79,48 +79,48 @@ stateDiagram-v2
 `OnError` is the single convergence point for a `pre` reject, a moderation block, and a call failure; any
 gated hook may `recover` (return a safe response) instead of surfacing the error.
 
-## 3 · Built-in hooks (in-process, Tier A)
+## 3 · Built-in hooks (in-process)
 
-First-party, compiled into mcp-host, no network — Tier-A-equivalent (S4):
+First-party, compiled into mcp-host, no network — built-in hooks (S4 §2):
 
 - **`prompt-shaping`** — inject a system prompt part; force `temperature`/`max_tokens`/`tool_choice`.
 - **`token-trim`** — reduce input tokens to a budget, reusing the existing `core/extensions/prePrune.ts`
   passes; exposed as an `LlmHook` so ordering/config are uniform with the chain.
 
 Both are `pre`-only rewrite contributors. Registered in `mcp-host/src/llm/hooks/builtins/registry.ts`,
-selected/ordered by `Host.spec.llmHooks`.
+selected/ordered by `Host.spec.guardrails.builtins` (S1 §7).
 
-## 4 · Remote hooks (Tier B)
+## 4 · Installed hooks
 
-Guardrail / PII-redaction and other third-party contributors run as **Tier B** hooks (S4): remote
-services reached over the `/v1` protocol, declared by an `LlmHook` CR, `trust_level`-gated, and delivered
-by any of the three modes (self-hosted pod / in-cluster Service / direct external egress). Their content
-exposure is need-based + trust-gated (S4); mcp-host discovers them by watching the CRs and orders the
-chain **built-ins → global remote → context remote**.
+Guardrail / PII-redaction and other custom contributors run as **installed** hooks (S4): a container in
+any language reached over the `/v1` protocol, declared by an `LlmHook` CR, `trust_level`-gated, and
+delivered by any of the three modes (self-hosted pod / in-cluster Service / direct external egress). Their
+content exposure is need-based + trust-gated (S4). A mcp-host runs the installed hooks its
+`Host.spec.guardrails.hooks` block lists (opt-in — S1 §7), resolving each via its `LlmHook` CR; the chain
+is **built-ins → installed** in the configured `order`.
 
 ## 5 · Aux/compaction lane
 
 The internal summarization/compaction calls (`stateMachine.ts`) run only **`token-trim` + observability**
 contributors — no guardrail/PII on internal calls — via an explicit per-lane flag on the chain builder.
 
-## 6 · Config — `Host.spec.llmHooks` (additive field on the Host CRD)
+## 6 · Config — `Host.spec.guardrails.builtins`
 
-Built-in selection/order lives on `Host.spec.llmHooks`, parsed by `mcp-host/src/llm/hooks/parseLlmHooks.ts`
-and hot-reloaded like `spec.llmPolicy`. Remote hooks are declared by their `LlmHook` CR (S4), not here.
-Schema (rendered into the Host CRD `openAPIV3Schema`):
+LLM built-in selection/order lives in the `builtins` array of `Host.spec.guardrails` (the single block
+defined in S1 §7), parsed by `mcp-host/src/llm/hooks/parseLlmHooks.ts` and hot-reloaded like
+`spec.llmPolicy`. Installed hooks are declared by their `LlmHook` CR (S4) and listed under
+`guardrails.hooks`, not here. Shape of a `builtins[]` item:
 
 ```yaml
-llmHooks:
-  type: array
-  items:
-    type: object
-    required: [type]
-    properties:
-      type:      { type: string, enum: [prompt-shaping, token-trim] }
-      order:     { type: integer, default: 100 }
-      failMode:  { type: string, enum: [open, closed] }
-      timeoutMs: { type: integer, minimum: 1 }
-      config:    { type: object, x-kubernetes-preserve-unknown-fields: true }
+# item of Host.spec.guardrails.builtins (S1 §7)
+type: object
+required: [type]
+properties:
+  type:      { type: string, enum: [prompt-shaping, token-trim] }
+  order:     { type: integer, default: 100 }
+  failMode:  { type: string, enum: [open, closed] }
+  timeoutMs: { type: integer, minimum: 1 }
+  config:    { type: object, x-kubernetes-preserve-unknown-fields: true }
 ```
 
 ## 7 · Lane-specific notes

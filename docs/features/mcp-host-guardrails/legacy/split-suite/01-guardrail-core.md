@@ -101,26 +101,34 @@ tagged as contributor-originated, and is audited.
 
 ## 7 · Administrative policy
 
-- **Shape** — `Context.spec.guardrails.adminPolicy`, an additive field on the Context CRD (rendered into
-  its `openAPIV3Schema`):
+- **Shape** — a **single** admin-authored block, `Host.spec.guardrails`, on the **Host CRD** (the
+  mcp-host's own CR that HCC reconciles to instantiate the process). There is **no separate `adminPolicy`
+  sub-object**: the whole Host CR is admin-authored and the runtime can't mutate it, so everything in the
+  block is already non-overridable. A mcp-host runs exactly the hooks this block lists — installed hooks
+  are **opt-in per Host**. Rendered into the Host `openAPIV3Schema`:
 
 ```yaml
-adminPolicy:
+guardrails:
   type: object
   properties:
-    denyRules:               { type: array, items: { type: object } }   # host-rule shape, action fixed = deny (S2 §2)
-    allowedHooks:                                                        # id + phase + expected digest
+    rules:                       # ordered allow/ask/deny rules — tool-lane predicate shape in S2 §2
       type: array
-      items:
-        type: object
-        required: [id, phase, digest]
-        properties:
-          id:     { type: string }
-          phase:  { type: string, enum: [preToolUse, postToolUse, preCall, moderate, postCallSuccess, onError] }
-          digest: { type: string }
-    allowedHookTiers:        { type: array, items: { type: string, enum: [A, B] } }
-    allowedApprovalPolicies: { type: array, items: { type: string, enum: [cli_only, channel_users, designated_approvers] } }
-    allowedCapabilities:     { type: array, items: { type: string, enum: [may_deny, may_rewrite, may_substitute_result, may_add_context] } }
+      items: { type: object }    #   { id, action: allow|ask|deny, reasonCode, match{ tool, arguments[] } }
+    hooks:                       # installed hooks this mcp-host runs, by phase (each an installed LlmHook CR, S4)
+      type: object               #   each entry: { id: string, digest: string }  (expected sha256 of the hook image)
+      properties:
+        preToolUse:      { type: array, items: { type: object } }
+        postToolUse:     { type: array, items: { type: object } }
+        preCall:         { type: array, items: { type: object } }
+        moderate:        { type: array, items: { type: object } }
+        postCallSuccess: { type: array, items: { type: object } }
+        onError:         { type: array, items: { type: object } }
+    builtins:                    # first-party hooks compiled into mcp-host — types in S3 §3
+      type: array
+      items: { type: object }    #   { type: prompt-shaping|token-trim|…, order, failMode, timeoutMs, config }
+    minInstalledHookTrustLevel: { type: string, enum: [low, mid, high] }   # trust floor for installed hooks
+    approvalPolicies:  { type: array, items: { type: string, enum: [cli_only, channel_users, designated_approvers] } }
+    capabilityCeiling: { type: array, items: { type: string, enum: [may_deny, may_rewrite, may_substitute_result, may_add_context] } }
     limits:
       type: object
       properties:
@@ -129,14 +137,14 @@ adminPolicy:
         maxHookTimeoutMs:   { type: integer, default: 5000 }
         maxHookOutputBytes: { type: integer, default: 65536 }
 ```
-- **Admin cannot be weakened:** host rules, hooks, approvals, and wildcards can only *tighten*, never
-  override, an administrative `deny` or limit.
-- **Delivery:** the Host Context Controller reads the authorized Context policy, validates schema/digests/
-  limits, normalizes it, and **atomically materializes a read-only, digest-checked artifact** in the Host
-  namespace. The Host reads that artifact and gains no general Context RBAC. If policy is declared but no
-  valid artifact exists, the Host is **not Ready** and guarded execution **fails closed**; a malformed
-  update never replaces the last valid artifact; a policy-digest mismatch never falls back to Host-only
-  policy.
+- **Non-overridable by construction:** the Host CR is authored only through control-api admin RBAC and
+  reconciled by HCC; the **mcp-host runtime cannot mutate its own Host CR**, so it cannot weaken the
+  guardrails. Within the block, no rule or hook can weaken a `deny` — the strictest contribution wins (§3).
+- **Delivery:** the admin policy rides the path HCC **already** uses to instantiate the mcp-host from its
+  Host CR — no cross-object artifact. HCC validates schema/digests/limits and normalizes it; mcp-host
+  reads its Host state. If policy is declared but the Host is not reconciled/Ready, guarded execution
+  **fails closed**; a malformed policy never replaces the last valid one; the enforced policy digest is
+  recorded for integrity/audit and never falls back to a weaker policy on mismatch.
 - **No-config compatibility:** with no admin policy, host rules, or hooks, behavior is identical to
   current — absence contributes `no_decision`.
 
@@ -154,5 +162,6 @@ adminPolicy:
 ## 9 · Invariants (lane-neutral)
 
 Universal mediation · resolved-identity evaluation · strict aggregation · rewrite-then-revalidate ·
-at-most-once · authoritative-outcome-immutable · admin-cannot-be-weakened · authoritative-delivery
-(atomic, digest-checked) · bounded/redacted evidence · no-config compatibility.
+at-most-once · authoritative-outcome-immutable · admin-cannot-be-weakened (policy on the Host CRD, which
+the mcp-host runtime can't mutate) · authoritative-delivery (HCC-reconciled, digest-checked) ·
+bounded/redacted evidence · no-config compatibility.

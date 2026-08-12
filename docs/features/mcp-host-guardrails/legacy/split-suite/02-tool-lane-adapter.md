@@ -4,12 +4,12 @@
 |---|---|
 | **Type** | design spec (lane adapter) |
 | **Status** | draft for discussion |
-| **Conforms to** | S1 [core](./01-guardrail-core.md) · **Consumes** S4 [trust & delivery](./04-hook-trust-and-delivery.md) (Tier A) |
+| **Conforms to** | S1 [core](./01-guardrail-core.md) · **Consumes** S4 [trust & delivery](./04-hook-trust-and-delivery.md) |
 | **Source of record** | the colleague's draft *MCP Host Guardrails — Permission Rules, Hooks & Admin Policy* (full tool-lane detail); this adapter re-homes it on S1/S4 |
 
 Specializes the `GuardrailBoundary` over **tool execution** (native + MCP tools). Everything not below —
-the decision algebra, aggregation, at-most-once/resume, admin policy, audit — comes from S1; hook
-execution (Tier A local child-processes) comes from S4.
+the decision algebra, aggregation, at-most-once/resume, admin policy, audit — comes from S1; hook delivery
+(installed containers, any language) comes from S4.
 
 ---
 
@@ -24,7 +24,7 @@ execution (Tier A local child-processes) comes from S4.
 ```mermaid
 flowchart TB
   T["resolved tool call<br/>(provenance from registry)"] --> R["permission rules<br/>(typed predicates)"]
-  T --> P["PreToolUse hooks (Tier A)<br/>sequential · may rewrite"]
+  T --> P["PreToolUse hooks (installed)<br/>sequential · may rewrite"]
   R --> A{"aggregate (S1)<br/>+ doom-loop guard"}
   P --> A
   A -->|deny| D["Denied<br/>bounded result + audit"]
@@ -39,48 +39,41 @@ flowchart TB
 ## 2 · Permission rules (declarative contributors)
 
 `Host.spec.guardrails.rules[]` with `action: allow | ask | deny`, matched on provenance + **typed
-argument predicates**. Schema — `Host.spec.guardrails`, additive on the Host CRD:
+argument predicates**. The containing `Host.spec.guardrails` block (rules, hooks, knobs) is defined in
+**S1 §7**; this is the tool-lane shape of a `rules[]` **item**:
 
 ```yaml
-guardrails:
-  type: object
-  properties:
-    rules:
-      type: array
-      items:
+# item of Host.spec.guardrails.rules (S1 §7)
+type: object
+required: [id, action, match]
+properties:
+  id:         { type: string }
+  action:     { type: string, enum: [allow, ask, deny] }
+  reasonCode: { type: string }
+  match:
+    type: object
+    required: [tool]
+    properties:
+      tool:
         type: object
-        required: [id, action, match]
+        required: [provenance]
         properties:
-          id:         { type: string }
-          action:     { type: string, enum: [allow, ask, deny] }
-          reasonCode: { type: string }
-          match:
-            type: object
-            required: [tool]
-            properties:
-              tool:
-                type: object
-                required: [provenance]
-                properties:
-                  provenance: { type: string, enum: [native, mcp] }
-                  server:     { type: string }
-                  name:       { type: string }
-              arguments:
-                type: array
-                items:
-                  type: object
-                  required: [type, pointer, op]
-                  properties:
-                    type:    { type: string, enum: [path, url, command, json] }
-                    pointer: { type: string }                    # constrained RFC 6901 JSON Pointer
-                    op:      { type: string }                    # per type — see the predicate list below
-                    value:   { x-kubernetes-preserve-unknown-fields: true }
-    hooks:
-      type: object
-      properties:
-        preToolUse:  { type: array, items: { type: string } }   # hook ids — must be in adminPolicy.allowedHooks
-        postToolUse: { type: array, items: { type: string } }
+          provenance: { type: string, enum: [native, mcp] }   # from the registry, never string-parsed
+          server:     { type: string }
+          name:       { type: string }
+      arguments:
+        type: array
+        items:
+          type: object
+          required: [type, pointer, op]
+          properties:
+            type:    { type: string, enum: [path, url, command, json] }
+            pointer: { type: string }                    # constrained RFC 6901 JSON Pointer
+            op:      { type: string }                    # per type — see the predicate list below
+            value:   { x-kubernetes-preserve-unknown-fields: true }
 ```
+
+The `preToolUse`/`postToolUse` **hooks** this lane runs are listed under `Host.spec.guardrails.hooks` (S1 §7).
 
 Predicate `op` values by `type`:
 
@@ -96,15 +89,16 @@ limit values are **rejected at admission**. Wildcards support only `*` and `?`, 
 
 Unmatched default follows S1: non-empty rules → `ask`; absent → `no_decision` (defer to the existing approval path).
 
-## 3 · Pre/PostToolUse hooks (Tier A)
+## 3 · Pre/PostToolUse hooks
 
-Executable contributors, delivered as **Tier A** local hooks (S4): admin-allowlisted, digest-verified,
-least-privilege child processes, no shell, no secrets, bounded stdio.
+Executable contributors, delivered as **installed** hooks (S4): a container image in any language, run
+out-of-process (pod / in-cluster Service / external endpoint), reached over the `/v1` protocol, and
+governed by image-allowlist + digest + `trust_level` + NetworkPolicy. There is no local-executable /
+CRD-scripting hook (S4 §1); deny-authoritative custom logic that must be guaranteed-local is a built-in.
 
 - **PreToolUse** — runs sequentially **before** approval; returns `{decision, reasonCode, updatedInput,
   additionalContext}`. `updatedInput` (only with `allow`/`ask`) is a full input replacement, canonicalized
-  + revalidated (S1 §4). Failure/timeout/digest-mismatch → declared fail-mode (decision-making pre hooks
-  default **closed**).
+  + revalidated (S1 §4). Failure/timeout → declared fail-mode (decision-making pre hooks default **closed**).
 - **PostToolUse** — runs **once** after the single execution attempt; may redact/replace the *model-visible*
   result, add bounded context, or recommend stop. It **cannot** undo side effects, mark the execution
   denied, or alter the stored outcome (S1 §5/§6).

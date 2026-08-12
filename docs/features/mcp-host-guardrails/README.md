@@ -1,4 +1,4 @@
-# MCP Host Guardrails — spec suite
+# MCP Host Guardrails
 
 One guardrail/policy framework for the MCP Host, spanning **two lanes**:
 
@@ -7,21 +7,27 @@ One guardrail/policy framework for the MCP Host, spanning **two lanes**:
 - **Tool lane** — guardrails on *tool execution* (permission rules + `Pre/PostToolUse` hooks + admin
   policy + approvals).
 
-The two lanes share one decision/policy/audit machine (**S1**) and one hook trust/delivery substrate
-(**S4**); each lane is an adapter (**S2**, **S3**) over that shared foundation.
+Both lanes use one shared decision engine (the `allow`/`ask`/`deny` logic, admin policy, at-most-once
+execution, audit) and one shared "how hooks run and are trusted" layer.
 
-## Suite
+## Spec
 
-| Spec | Scope |
-|---|---|
-| [`00-unified-architecture.md`](./00-unified-architecture.md) | **S0** — the umbrella: the shared abstraction, the suite map, and how the lanes' differences reconcile |
-| [`01-guardrail-core.md`](./01-guardrail-core.md) | **S1** — lane-neutral core: decision algebra + aggregation, contributor contract, at-most-once/resume, admin policy + HCC delivery, bounded audit |
-| [`02-tool-lane-adapter.md`](./02-tool-lane-adapter.md) | **S2** — tool lane: permission rules + typed predicates, `Pre/PostToolUse`, provenance, approvals, doom-loop, persistence |
-| [`03-llm-lane-adapter.md`](./03-llm-lane-adapter.md) | **S3** — LLM lane: `HookedLlmPort`, `pre_call`/`moderation`/`post_call`/`on_error`, built-ins |
-| [`04-hook-trust-and-delivery.md`](./04-hook-trust-and-delivery.md) | **S4** — hook tiers (local digest-verified vs remote/marketplace), invocation, install, egress, credential isolation |
+**→ [`mcp-host-guardrails-spec.md`](./mcp-host-guardrails-spec.md)** — the single, self-contained design
+spec. Read top-to-bottom: overview → the shared `GuardrailBoundary` machine → decision algebra →
+execution safety → the one `Host.spec.guardrails` config block → the tool lane → the LLM lane → hook
+trust & delivery → evidence → open decisions → invariants.
 
 ## Status
 
-All documents are **drafts for discussion**. No runtime, CRD, or deployment change is authorized by this
-suite — it is a specification. Each spec is self-contained; cross-references stay within the suite
-(S0–S4).
+**Draft for discussion.** No runtime, CRD, or deployment change is authorized by this spec — it is a
+specification.
+
+## History
+
+Superseded material is archived under [`legacy/`](./legacy/), in two folders:
+
+- [`legacy/split-suite/`](./legacy/split-suite/) — the five-document version this spec merges (S0
+  architecture, S1 core, S2 tool lane, S3 LLM lane, S4 hook trust & delivery).
+- [`legacy/early-drafts/`](./legacy/early-drafts/) — the earlier exploratory drafts that preceded the
+  suite (the original LLM-hooks spec, the tool-lane-vs-LLM-hooks comparison, and the first unified
+  architecture sketch).
