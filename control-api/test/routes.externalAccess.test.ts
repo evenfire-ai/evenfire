@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   resolveAuthorization: vi.fn(),
 }))
 
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: mocks.verifyV1,
 }))
@@ -37,6 +39,7 @@ vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
 vi.mock('../src/services/access/liveAuthorizationResolver.js', () => ({
   resolveLiveAuthorization: mocks.resolveAuthorization,
 }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 function effectivePolicy(overrides: Record<string, unknown> = {}) {
   return {
@@ -95,6 +98,13 @@ describe('external user-access contracts', () => {
         jti: '30000000-0000-4000-8000-000000000003',
         sessionVersion: 1,
       },
+    })
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
     })
   })
 
@@ -171,6 +181,29 @@ describe('external user-access contracts', () => {
       .set('x-user-session-token', 'invalid')
     expect(response.status).toBe(401)
     expect(response.body.error.code).toBe('invalid_session')
+  })
+
+  it('stops a limited capability read before resolving the capability manifest', async () => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+    })
+
+    const response = await request(app())
+      .get('/external/access/capabilities')
+      .set('x-user-session-token', 'v1-session')
+
+    expect(response.status).toBe(429)
+    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
+    expect(response.headers['retry-after']).toBeDefined()
+    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(
+      'external_access_capabilities:user:10000000-0000-4000-8000-000000000001',
+      10
+    )
+    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(1)
   })
 
   it('uses the authoritative target schema for team management actions', async () => {
