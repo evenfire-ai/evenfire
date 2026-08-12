@@ -8,7 +8,6 @@ import {
   catalogKey,
 } from '../src/services/access/catalogContracts.js'
 import { CATALOG_KEY_SQL } from '../src/services/access/catalogProducerSql.js'
-import { CatalogProducerContractError } from '../src/services/access/catalogProducerSupport.js'
 import {
   catalogProducers,
   requireCatalogProducer,
@@ -114,7 +113,10 @@ describe('catalog producer protocol', () => {
 
   it('rejects duplicate or non-increasing producer keys', async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ logical_id: 'z' }, { logical_id: 'z' }],
+      rows: [
+        { logical_id: 'z', source_saturated: false },
+        { logical_id: 'z', source_saturated: false },
+      ],
       rowCount: 2,
     })
     await expect(
@@ -123,7 +125,7 @@ describe('catalog producer protocol', () => {
         { afterKey: null, exhausted: false },
         2
       )
-    ).rejects.toBeInstanceOf(CatalogProducerContractError)
+    ).rejects.toMatchObject({ code: 'keys_not_strictly_ordered' })
   })
 
   it('reports an operational source gap as partial without querying authority', async () => {
