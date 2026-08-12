@@ -1,5 +1,6 @@
 import type { TaskBrakeConfig } from '../../budget/taskBrake'
 import type { ProgressReporter } from '../../progress/types.js'
+import type { ToolLaneBoundary } from '../guardrails'
 import {
   AgentEventEmitter,
   ContextManageOptions,
@@ -39,6 +40,13 @@ export interface LoopConfig {
   loopController: LoopController
   contextManager: ContextManager
   toolOutputProcessor: ToolOutputProcessor
+
+  /**
+   * Tool-lane guardrail boundary (spec §6). Absent = no guardrails configured =
+   * today's behavior (no-config compatibility, spec §5). Phase 1 scaffold: the
+   * live gate in `executeToolCalls` is not yet wired — see `toolLaneAdapter.ts`.
+   */
+  guardrails?: ToolLaneBoundary
 
   // Progress reporting
   progressReporter?: ProgressReporter

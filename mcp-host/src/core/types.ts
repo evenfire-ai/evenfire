@@ -520,6 +520,7 @@ export type AgentEventType =
   | 'llm:completed'
   | 'safety:input_blocked'
   | 'safety:output_sanitized'
+  | 'guardrail:decision'
   | 'context:compacted'
   | 'compaction:skipped'
   | 'compaction:thrashing'

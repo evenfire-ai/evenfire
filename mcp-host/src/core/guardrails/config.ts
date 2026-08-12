@@ -1,0 +1,49 @@
+/**
+ * `Host.spec.guardrails` config block (spec §5).
+ *
+ * mcp-host CONSUMES this block; the CRD schema is owned by the CRD chart. Kept
+ * additive and loosely typed where Phase 1 does not yet interpret a field
+ * (hooks/builtins land in Phases 2–3). Absent/empty = no guardrails =
+ * byte-identical to today (no-config compatibility, spec §5).
+ *
+ * TODO(phase1): parse + validate (limits, predicate admission) — see spec §5/§6.1.
+ */
+import type { Capability } from './types'
+
+/** A single permission rule item (spec §6.1). Predicate shapes: spec §6.1. */
+export interface GuardrailRule {
+  id: string
+  action: 'allow' | 'ask' | 'deny'
+  reasonCode?: string
+  match: {
+    tool: { provenance: 'native' | 'mcp'; server?: string; name?: string }
+    arguments?: Array<{
+      type: 'path' | 'url' | 'command' | 'json'
+      pointer: string
+      op: string
+      value?: unknown
+    }>
+  }
+}
+
+/** Engine limits (spec §5). */
+export interface GuardrailLimits {
+  maxRules?: number
+  maxHooksPerPhase?: number
+  maxHookTimeoutMs?: number
+  maxHookOutputBytes?: number
+}
+
+/**
+ * The whole admin-authored block. `hooks`/`builtins` are RAW here — Phase 1 does
+ * not interpret them (installed hooks = Phase 3, built-ins = Phase 2).
+ */
+export interface GuardrailsConfig {
+  rules?: GuardrailRule[]
+  hooks?: Record<string, unknown>
+  builtins?: unknown[]
+  minInstalledHookTrustLevel?: 'low' | 'mid' | 'high'
+  approvalPolicies?: string[]
+  capabilityCeiling?: Capability[]
+  limits?: GuardrailLimits
+}
