@@ -75,6 +75,7 @@ export async function runAccessDatabaseQuery(
       : budget.runProducer.bind(budget)
   return run(async signal => {
     budget.assertActive()
+    budget.charge({ kind: 'databaseStatements' })
     let cancellation: Promise<void> | undefined
     const onAbort = () => {
       cancellation ??= cancelPostgresBackend(db as PostgresCancellationTarget).catch(

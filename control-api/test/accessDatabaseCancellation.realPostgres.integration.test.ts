@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import { withAccessDatabaseTransaction } from '../src/services/access/accessDatabaseQuery.js'
 import {
@@ -8,6 +8,47 @@ import {
 } from '../src/services/access/accessExecutionBudget.js'
 import { catalogQuery } from '../src/services/access/catalogProducerSupport.js'
 import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
+
+describe('physical access database statement accounting', () => {
+  it('charges before execution and rejects the statement after the configured limit', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { databaseStatements: 2 },
+    })
+    try {
+      await catalogQuery({ query }, budget, 'SELECT 1', [])
+      await catalogQuery({ query }, budget, 'SELECT 2', [])
+      await expect(catalogQuery({ query }, budget, 'SELECT 3', [])).rejects.toMatchObject({
+        name: 'AccessBudgetExceededError',
+        limit: 'databaseStatements',
+        authorityRequired: true,
+      })
+      expect(query).toHaveBeenCalledTimes(2)
+      expect(budget.remaining('databaseStatements')).toBe(0)
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('accounts bounded internal statements without consuming additional logical producer calls', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { producerCalls: 1, databaseStatements: 2 },
+    })
+    try {
+      await catalogQuery({ query }, budget, 'SELECT 1', [])
+      await catalogQuery({ query }, budget, 'SELECT 2', [], { chargeProducer: false })
+      expect(budget.remaining('producerCalls')).toBe(0)
+      expect(budget.remaining('databaseStatements')).toBe(0)
+      await expect(
+        catalogQuery({ query }, budget, 'SELECT 3', [], { chargeProducer: false })
+      ).rejects.toMatchObject({ limit: 'databaseStatements' })
+      expect(query).toHaveBeenCalledTimes(2)
+    } finally {
+      budget.close()
+    }
+  })
+})
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
