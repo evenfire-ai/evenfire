@@ -140,7 +140,6 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
   async function seedDirect(first: number, last: number): Promise<void> {
     if (first > last) return
     const seriesValues = [userId, first, last]
-    const values = [...seriesValues, environmentId]
     await databasePool.query(
       `WITH requester AS (SELECT $1::uuid AS user_id), ids AS (
          SELECT value, LPAD(value::text, 5, '0') AS suffix
@@ -319,7 +318,6 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
   async function seedTeams(teamIds: readonly string[], resourcesPerTeam: number): Promise<void> {
     if (teamIds.length === 0) return
     const seriesValues = [teamIds, userId, resourcesPerTeam]
-    const values = [...seriesValues, environmentId]
     await databasePool.query(
       `WITH requester AS (SELECT $2::uuid AS user_id), requested AS (
          SELECT team_id, ordinal FROM UNNEST($1::uuid[]) WITH ORDINALITY value(team_id, ordinal)
