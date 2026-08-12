@@ -215,6 +215,22 @@ export async function listAllowedModels(db: DbClient = pool): Promise<LlmAllowed
   return (result.rows as Record<string, unknown>[]).map(rowToModel)
 }
 
+/**
+ * Stale rows only — models the Fase 4 sync flagged as vanished from the external
+ * catalog (`stale=true`) but left `enabled` intact. The operator-attention feed
+ * (Fase 5) enumerates these and reports the ones still referenced. Deterministic
+ * ordering keeps the feed stable across calls.
+ */
+export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAllowedModel[]> {
+  const result = await db.query(
+    `SELECT ${MODEL_COLUMNS}
+       FROM llm_allowed_models
+      WHERE stale
+      ORDER BY provider ASC, model ASC`
+  )
+  return (result.rows as Record<string, unknown>[]).map(rowToModel)
+}
+
 export async function getAllowedModel(
   id: string,
   db: DbClient = pool

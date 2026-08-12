@@ -12,9 +12,11 @@ import {
   deleteAllowedModel,
   getAllowedModel,
   listAllowedModels,
+  listStaleAllowedModels,
   updateAllowedModel,
   updateLlmAllowedModelSchema,
 } from '../../services/llmAllowedModels.js'
+import { computeAttention } from '../../services/llmAttention.js'
 import { getLastCatalogSyncRun, syncDiscoveredModels } from '../../services/llmCatalogSync.js'
 import {
   computeModelImpact,
@@ -126,6 +128,25 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
     })
     return true
   }
+
+  // ── Operator attention feed (Fase 5, Pieza C) ───────────────────────────────
+  // Persistent alert backing the non-destructive Fase 4 cron: every `stale`
+  // catalog model that is STILL referenced by a Host/grant, so the operator can
+  // disable it through the impact-gated PUT. Only actionable items (referenced)
+  // appear; an unreferenced stale model yields nothing. Reuses `impactSources`
+  // (the same fail-loud enumeration the `?force` gate uses, regla D4): if any
+  // Host LIST fails, `computeAttention` propagates → asyncHandler → 500, never a
+  // partial feed that hides a live reference. Inherits the `/admin/*` control-ui
+  // admin auth gate (app.ts) — no new auth. Extensible: `items[].kind` is an
+  // open union with one member today (`stale_model_referenced`).
+  router.get(
+    '/admin/attention',
+    asyncHandler(async (_req: Request, res: Response) => {
+      const staleModels = await listStaleAllowedModels()
+      const report = await computeAttention(staleModels, impactSources)
+      res.status(200).json(report)
+    })
+  )
 
   // ── Discovery (F2, spec 09 §2 + §8-F2) ──────────────────────────────────────
   // On-demand catalog sync from the public models.dev catalog into
