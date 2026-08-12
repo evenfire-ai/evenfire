@@ -295,7 +295,7 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
     }
   })
 
-  it('does not let duplicate team paths hide later canonical host IDs', async () => {
+  it('refills bounded duplicate team host paths without hiding later canonical IDs', async () => {
     const budget = AccessExecutionBudget.create('catalog')
     let hostKeyStatements = 0
     const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
@@ -334,6 +334,51 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       ])
       expect(page.hasMore).toBe(true)
       expect(page.continuation.exhausted).toBe(false)
+      expect(hostKeyStatements).toBe(2)
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('fails before an unbudgeted duplicate-refill statement can execute', async () => {
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { databaseStatements: 1 },
+    })
+    let hostKeyStatements = 0
+    const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
+      family => ({ family, generation: '1', resourceVersion: '1', status: 'current' })
+    )
+    const context: CatalogRequestContext = {
+      db: {
+        query: (text, values) => {
+          if (text === CATALOG_KEY_SQL.host) hostKeyStatements += 1
+          return databasePool.query(text, values)
+        },
+      },
+      budget,
+      principal: {
+        userId,
+        sessionContract: 'v2',
+        sessionRevision: '1',
+        userRevision: '1',
+        catalogRevision: '1',
+        authorizationRevision: '1',
+        memberships: teamIds.map(teamId => ({ teamId, role: 'member' })),
+      },
+      environmentId,
+      sourceStates: new Map(sourceStates.map(state => [state.family, state])),
+    }
+    try {
+      await expect(
+        requireCatalogProducer('host').listCanonicalKeys(
+          context,
+          { afterKey: null, exhausted: false },
+          2
+        )
+      ).rejects.toMatchObject({
+        limit: 'databaseStatements',
+        authorityRequired: true,
+      } satisfies Partial<AccessBudgetExceededError>)
       expect(hostKeyStatements).toBe(1)
     } finally {
       budget.close()
