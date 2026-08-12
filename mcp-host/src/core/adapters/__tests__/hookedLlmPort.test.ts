@@ -95,6 +95,57 @@ describe('installed hooks (end-to-end via HookedLlmPort)', () => {
     await hooked.completeWithTools({ messages: [], tools: [] })
     expect(inner.lastToolReq?.temperature).toBe(0.1)
   })
+
+  it('a post_call hook redacts the model result', async () => {
+    const inner = fakePort()
+    const redact: FetchLike = async url => ({
+      status: 200,
+      text: async () =>
+        url.endsWith('/v1/post_call') ? '{"response":{"content":"[redacted]"}}' : '{}',
+    })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['post_call'], capabilities: ['may_substitute_result'] })],
+      { getAuthToken: () => '', fetchImpl: redact }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const res = await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(res.content).toBe('[redacted]') // inner returned "main"
+  })
+
+  it('an on_error recover substitutes a safe result when the model call throws', async () => {
+    const inner = fakePort()
+    inner.completeWithTools = vi.fn(async () => {
+      throw new Error('upstream 500')
+    })
+    const recover: FetchLike = async url => ({
+      status: 200,
+      text: async () =>
+        url.endsWith('/v1/on_error') ? '{"action":"recover","response":{"content":"safe"}}' : '{}',
+    })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['on_error'], capabilities: ['may_substitute_result'] })],
+      { getAuthToken: () => '', fetchImpl: recover }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const res = await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(res.content).toBe('safe')
+    expect(res.tool_calls).toBeNull()
+  })
+
+  it('the model error surfaces when no on_error hook recovers', async () => {
+    const inner = fakePort()
+    inner.completeWithTools = vi.fn(async () => {
+      throw new Error('upstream 500')
+    })
+    const hooked = new HookedLlmPort(
+      inner,
+      r => r,
+      buildLlmLaneHooks([], { getAuthToken: () => '' })
+    )
+    await expect(hooked.completeWithTools({ messages: [], tools: [] })).rejects.toThrow(
+      'upstream 500'
+    )
+  })
 })
 
 describe('maybeWrapHookedLlmPort', () => {

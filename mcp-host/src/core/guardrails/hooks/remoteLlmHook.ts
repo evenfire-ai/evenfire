@@ -19,7 +19,12 @@
  * fetcher-injected. Content projection (§8.4) and the concrete fetcher land next.
  */
 import { FinishReason } from '../../types'
-import type { ChatMessage, ToolCompletionRequest, ToolCompletionResponse } from '../../types'
+import type {
+  ChatMessage,
+  ToolCall,
+  ToolCompletionRequest,
+  ToolCompletionResponse,
+} from '../../types'
 import type { Capability, Contributor } from '../types'
 import type { HookDescriptor, HookFetcher, LifecyclePoint } from './types'
 
@@ -32,6 +37,33 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /** Strip system-role messages from a hook's messages patch (N4 — system prompt is first-party). */
 function stripSystemRole(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter(m => m.role !== 'system')
+}
+
+/** Stable, key-sorted serialization so a tool-call's argument digest is order-independent. */
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`
+  if (isRecord(v)) {
+    return `{${Object.keys(v)
+      .sort()
+      .map(k => `${JSON.stringify(k)}:${stableStringify(v[k])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(v) ?? 'null'
+}
+
+/** Identity + argument digest — the key that decides whether a tool_call is the model's own (N5). */
+function toolCallDigest(tc: { name?: unknown; arguments?: unknown }): string {
+  return `${typeof tc.name === 'string' ? tc.name : ''}:${stableStringify(tc.arguments)}`
+}
+
+/** Content-filtered stand-in returned when a fail-closed redactor is unavailable (§8.6). */
+function filteredPostResponse(usage: ToolCompletionResponse['usage']): ToolCompletionResponse {
+  return {
+    content: 'This response was withheld by a content guardrail policy.',
+    tool_calls: null,
+    usage,
+    finish_reason: FinishReason.ContentFilter,
+  }
 }
 
 export class RemoteLlmHook {
@@ -134,6 +166,66 @@ export class RemoteLlmHook {
     return this.contribution(decision, String(body.code ?? 'moderation_blocked'), {
       audit: { modelReason: typeof body.message === 'string' ? body.message : undefined },
     })
+  }
+
+  /**
+   * `post_call` (spec §8.1): transform the model-visible result — may redact
+   * `content` or DROP `tool_calls`, but NEVER introduce a `tool_call` absent from
+   * the model's own output (N5, digest-checked). Gated by `may_substitute_result`
+   * (it changes the caller-visible result, not the authoritative action flow, §4.3).
+   * A fail-closed redactor that's unavailable withholds the un-redacted body (§8.6).
+   */
+  async postCall(
+    request: ToolCompletionRequest,
+    response: ToolCompletionResponse
+  ): Promise<LlmContributor | null> {
+    if (!this.handles('post_call')) return null
+    const res = await this.fetch({
+      point: 'post_call',
+      descriptor: this.descriptor,
+      body: {
+        response: {
+          content: response.content,
+          tool_calls: response.tool_calls,
+          finish_reason: response.finish_reason,
+        },
+        usage: response.usage,
+      },
+    })
+    // §8.6: a fail-closed redactor that can't run must NOT leak the un-redacted body.
+    if (res.unavailable || res.status !== 200) {
+      if (this.descriptor.failMode === 'closed' && this.has('may_substitute_result')) {
+        return this.contribution('allow', 'post_hook_unavailable', {
+          phase: 'post',
+          substitute: filteredPostResponse(response.usage),
+        })
+      }
+      return null
+    }
+
+    const body = isRecord(res.body) ? res.body : {}
+    const patched = isRecord(body.response) ? body.response : undefined
+    if (!patched || !this.has('may_substitute_result')) return null
+
+    // N5: the result may keep only tool_calls the model itself emitted. We intersect
+    // the hook's kept digests with the ORIGINAL calls, so returned entries are always
+    // the model's own objects — a hook can drop, never add or rewrite, a call.
+    let toolCalls = response.tool_calls
+    if (Array.isArray(patched.tool_calls)) {
+      const kept = new Set(patched.tool_calls.filter(isRecord).map(toolCallDigest))
+      const filtered = (response.tool_calls ?? []).filter((tc: ToolCall) =>
+        kept.has(toolCallDigest(tc))
+      )
+      toolCalls = filtered.length > 0 ? filtered : null
+    }
+
+    const substitute: ToolCompletionResponse = {
+      content: typeof patched.content === 'string' ? patched.content : response.content,
+      tool_calls: toolCalls,
+      usage: response.usage,
+      finish_reason: response.finish_reason,
+    }
+    return this.contribution('allow', 'post_transformed', { phase: 'post', substitute })
   }
 
   /**

@@ -9,14 +9,17 @@
  *   2. run installed `pre_call` hooks (each may rewrite the request or reject);
  *   3. run installed `moderate` hooks;
  *   4. aggregate (spec §3) — a `deny` returns a content-filtered response WITHOUT
- *      calling the model; otherwise dispatch the (possibly rewritten) request.
+ *      calling the model; otherwise dispatch the (possibly rewritten) request;
+ *   5. if the model call throws, run installed `on_error` hooks — a gated hook may
+ *      `substitute` a safe text-only result (else the error surfaces);
+ *   6. run installed `post_call` hooks over the result — each may redact content or
+ *      drop tool_calls (never add them, N5), chained in `order`.
  * The aux/compaction lane (`complete`) runs the REDUCED set — no guardrail/PII
  * (spec §7.4) — a passthrough here.
  *
  * Response-capability enforcement (F4), system-prompt immutability (N4), and
- * subtractive actions (N5) are enforced inside `RemoteLlmHook`. `post_call` /
- * `on_error`, and the concurrent-moderation latency optimization (spec §7.1),
- * are later increments.
+ * subtractive actions (N5) are enforced inside `RemoteLlmHook`. The
+ * concurrent-moderation latency optimization (spec §7.1) is a later increment.
  */
 import { aggregateDecision } from '../guardrails'
 import type { Contributor, GuardrailsConfig } from '../guardrails'
@@ -36,7 +39,7 @@ import {
   type ToolCompletionResponse,
 } from '../types'
 
-const EMPTY_HOOKS: LlmLaneHooks = { preCall: [], moderate: [] }
+const EMPTY_HOOKS: LlmLaneHooks = { preCall: [], moderate: [], postCall: [], onError: [] }
 
 /** A safe content-filtered response returned in place of a denied model call (spec §7.1). */
 function filteredResponse(): ToolCompletionResponse {
@@ -92,7 +95,26 @@ export class HookedLlmPort implements LlmPort {
     if (aggregateDecision(contributions) === 'deny') {
       return filteredResponse()
     }
-    return this.inner.completeWithTools(req)
+
+    let response: ToolCompletionResponse
+    try {
+      response = await this.inner.completeWithTools(req)
+    } catch (err) {
+      // on_error (spec §8.1): a gated hook may substitute a safe text-only result;
+      // first substitute wins. No hook recovers → the error surfaces unchanged.
+      for (const hook of this.hooks.onError) {
+        const c = await hook.onError(req, err)
+        if (c?.substitute) return c.substitute
+      }
+      throw err
+    }
+
+    // post_call (spec §8.1): redact/subtract over the result, chained in `order`.
+    for (const hook of this.hooks.postCall) {
+      const c = await hook.postCall(req, response)
+      if (c?.substitute) response = c.substitute
+    }
+    return response
   }
 }
 
@@ -111,7 +133,11 @@ export function maybeWrapHookedLlmPort(
     getAuthToken: deps.getAuthToken ?? (() => ''),
     fetchImpl: deps.fetchImpl,
   })
-  const hasHooks = hooks.preCall.length > 0 || hooks.moderate.length > 0
+  const hasHooks =
+    hooks.preCall.length > 0 ||
+    hooks.moderate.length > 0 ||
+    hooks.postCall.length > 0 ||
+    hooks.onError.length > 0
   if (!hasBuiltins && !hasHooks) return port
   return new HookedLlmPort(port, buildLlmBuiltinChain(config?.builtins), hooks)
 }

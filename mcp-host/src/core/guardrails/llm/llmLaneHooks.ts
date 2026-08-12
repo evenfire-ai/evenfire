@@ -11,6 +11,8 @@ import type { HookDescriptor } from '../hooks/types'
 export interface LlmLaneHooks {
   preCall: RemoteLlmHook[]
   moderate: RemoteLlmHook[]
+  postCall: RemoteLlmHook[]
+  onError: RemoteLlmHook[]
 }
 
 export interface LlmLaneHookDeps {
@@ -25,6 +27,8 @@ export function buildLlmLaneHooks(
 ): LlmLaneHooks {
   const preCall: RemoteLlmHook[] = []
   const moderate: RemoteLlmHook[] = []
+  const postCall: RemoteLlmHook[] = []
+  const onError: RemoteLlmHook[] = []
   const ordered = (descriptors ?? []).slice().sort((a, b) => a.order - b.order)
   for (const d of ordered) {
     const hook = new RemoteLlmHook(
@@ -33,6 +37,8 @@ export function buildLlmLaneHooks(
     )
     if (d.lifecyclePoints.includes('pre_call')) preCall.push(hook)
     if (d.lifecyclePoints.includes('moderate')) moderate.push(hook)
+    if (d.lifecyclePoints.includes('post_call')) postCall.push(hook)
+    if (d.lifecyclePoints.includes('on_error')) onError.push(hook)
   }
-  return { preCall, moderate }
+  return { preCall, moderate, postCall, onError }
 }
