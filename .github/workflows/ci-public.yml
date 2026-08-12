@@ -178,6 +178,8 @@ jobs:
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+          FORCE_COLOR: '0'
+          NO_COLOR: '1'
         # The `realPostgres` filter matches all 8 *.realPostgres.integration
         # suites: the DB migration plus the 7 GFS suites (reader role, blob
         # migration, blob reconciler, audit evidence, copy, readiness, structural
@@ -185,14 +187,16 @@ jobs:
         run: |
           set -euo pipefail
           log_file="$(mktemp)"
-          trap 'rm -f "$log_file"' EXIT
+          normalized_log="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
-          npm test -- --run realPostgres 2>&1 | tee "$log_file"
-          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$log_file" || {
+          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres 2>&1 | tee "$log_file"
+          sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
+          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing test files' >&2
             exit 1
           }
-          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$log_file" || {
+          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing tests' >&2
             exit 1
           }
@@ -205,19 +209,23 @@ jobs:
         working-directory: gfs-controller
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+          FORCE_COLOR: '0'
+          NO_COLOR: '1'
         # rename-publication concurrency suite — also admin-URL-gated, so the
         # gfs-controller matrix entry skips it.
         run: |
           set -euo pipefail
           log_file="$(mktemp)"
-          trap 'rm -f "$log_file"' EXIT
+          normalized_log="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
-          npm test -- --run realPostgres 2>&1 | tee "$log_file"
-          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$log_file" || {
+          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres 2>&1 | tee "$log_file"
+          sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
+          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres gfs-controller lane executed zero passing test files' >&2
             exit 1
           }
-          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$log_file" || {
+          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres gfs-controller lane executed zero passing tests' >&2
             exit 1
           }
