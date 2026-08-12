@@ -30,6 +30,9 @@ function seedSecretKeys(namespace: string, name: string, keys: string[]): void {
   secretKeys.set(`${namespace}/${name}`, keys)
 }
 
+/** Both keys the write path requires before a channel may claim the Slack provider. */
+const WORKING_SLACK_KEYS = ['slack-signing-secret', 'slack-bot-token']
+
 async function seedSlackChannel(
   gateway: MockGateway,
   options: {
@@ -79,7 +82,7 @@ describe('listSlackApprovalTargets Secret filtering', () => {
     })
   })
 
-  it('lists a channel whose Secret holds a Slack signing secret', async () => {
+  it('lists a channel whose Secret holds both Slack keys', async () => {
     const gateway = new MockGateway('channels')
     await seedSlackChannel(gateway, { name: 'agent-a-slack' })
     seedSecretKeys('channels', 'agent-a-slack-credentials', [
@@ -105,8 +108,25 @@ describe('listSlackApprovalTargets Secret filtering', () => {
     const gateway = new MockGateway('channels')
     await seedSlackChannel(gateway, { name: 'agent-a-slack' })
     await seedSlackChannel(gateway, { name: 'agent-a-impostor' })
-    seedSecretKeys('channels', 'agent-a-slack-credentials', ['slack-signing-secret'])
+    seedSecretKeys('channels', 'agent-a-slack-credentials', WORKING_SLACK_KEYS)
     seedSecretKeys('channels', 'agent-a-impostor-credentials', ['telegram-bot-token'])
+
+    const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
+
+    expect(targets.items.map(target => target.channelName)).toEqual(['agent-a-slack'])
+  })
+
+  it('hides a channel whose Secret holds the signing secret but no bot token', async () => {
+    // The picker filter and the write-path validator must agree on what "Slack
+    // works" means: PROVIDER_REQUIRED_KEYS.slack requires both keys. The signing
+    // secret only verifies INBOUND requests, so a half-configured channel is
+    // listed, accepts the events, and then fails when the approval message is
+    // posted through the Web API.
+    const gateway = new MockGateway('channels')
+    await seedSlackChannel(gateway, { name: 'agent-a-slack' })
+    await seedSlackChannel(gateway, { name: 'agent-a-half-configured' })
+    seedSecretKeys('channels', 'agent-a-slack-credentials', WORKING_SLACK_KEYS)
+    seedSecretKeys('channels', 'agent-a-half-configured-credentials', ['slack-signing-secret'])
 
     const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
 
@@ -128,8 +148,8 @@ describe('listSlackApprovalTargets Secret filtering', () => {
       hostRef: 'agent-b',
       users: ['user-2'],
     })
-    seedSecretKeys('channels', 'agent-a-slack-credentials', ['slack-signing-secret'])
-    seedSecretKeys('other-tenant', 'agent-b-slack-credentials', ['slack-signing-secret'])
+    seedSecretKeys('channels', 'agent-a-slack-credentials', WORKING_SLACK_KEYS)
+    seedSecretKeys('other-tenant', 'agent-b-slack-credentials', WORKING_SLACK_KEYS)
 
     const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
 
@@ -146,7 +166,7 @@ describe('listSlackApprovalTargets Secret filtering', () => {
     const gateway = new MockGateway('channels')
     await seedSlackChannel(gateway, { name: 'agent-a-slack-one', secretName: 'shared-credentials' })
     await seedSlackChannel(gateway, { name: 'agent-a-slack-two', secretName: 'shared-credentials' })
-    seedSecretKeys('channels', 'shared-credentials', ['slack-signing-secret'])
+    seedSecretKeys('channels', 'shared-credentials', WORKING_SLACK_KEYS)
 
     const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
 
@@ -160,12 +180,31 @@ describe('listSlackApprovalTargets Secret filtering', () => {
     const gateway = new MockGateway('channels')
     await seedSlackChannel(gateway, { name: 'agent-a-slack' })
     await seedSlackChannel(gateway, { name: 'agent-a-unreadable' })
-    seedSecretKeys('channels', 'agent-a-slack-credentials', ['slack-signing-secret'])
+    seedSecretKeys('channels', 'agent-a-slack-credentials', WORKING_SLACK_KEYS)
     // agent-a-unreadable-credentials is intentionally unseeded: the mock throws
     // a 403 for it, the same shape secretKeyNames rethrows on an RBAC denial.
 
     const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
 
     expect(targets.items.map(target => target.channelName)).toEqual(['agent-a-slack'])
+  })
+
+  it('warns with the Secret ref and the cause when a target is dropped for an unreadable Secret', async () => {
+    // Failing open is right here, but silence is not: RBAC drift is a real
+    // condition on these clusters, and without this line a target disappears
+    // from the picker with nothing anywhere to say why.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const gateway = new MockGateway('channels')
+    await seedSlackChannel(gateway, { name: 'agent-a-unreadable' })
+
+    const targets = await listSlackApprovalTargets({ gateway: gateway as never, userId: 'user-1' })
+
+    expect(targets.items).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toBe(
+      '[WorkflowApprovalMedium] Slack target hidden: cannot read Secret ' +
+        '"channels/agent-a-unreadable-credentials": secrets "agent-a-unreadable-credentials" unreadable'
+    )
+    warn.mockRestore()
   })
 })

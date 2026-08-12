@@ -65,6 +65,16 @@ export type SlackIdentity = {
 
 const SLACK_WORKSPACE_ID_RE = /^T[A-Z0-9]+$/
 
+/**
+ * Keys a channel's credentials Secret must hold before it can serve Slack.
+ * Kept identical to `PROVIDER_REQUIRED_KEYS.slack` in
+ * `routes/admin/resources.ts`, which is the write-side gate: the picker must not
+ * offer a target the write path would have refused to create. Not imported from
+ * there — a service importing an admin route would invert the layering and
+ * close an import cycle.
+ */
+const SLACK_REQUIRED_SECRET_KEYS = ['slack-signing-secret', 'slack-bot-token']
+
 function optionalString(value: unknown): string | null {
   if (value === undefined || value === null) return null
   const normalized = String(value).trim()
@@ -223,17 +233,28 @@ export async function listSlackApprovalTargets(params: {
       if (!keysBySecret.has(cacheKey)) {
         // Fails OPEN, unlike the write-path validator, and deliberately so: this
         // is a read-only listing, and one channel with a broken or unreadable
-        // Secret must not blank the user's entire verification picker.
+        // Secret must not blank the user's entire verification picker. Log the
+        // cause anyway: RBAC drift is a real condition on these clusters, and a
+        // target that silently vanishes from the picker is unreportable.
         keysBySecret.set(
           cacheKey,
-          secretKeyNames(params.gateway, secretName, target.channelNamespace).catch(() => [])
+          secretKeyNames(params.gateway, secretName, target.channelNamespace).catch(error => {
+            console.warn(
+              `[WorkflowApprovalMedium] Slack target hidden: cannot read Secret "${cacheKey}": ${error instanceof Error ? error.message : String(error)}`
+            )
+            return []
+          })
         )
       }
       const keys = await keysBySecret.get(cacheKey)!
       // A channel can carry a Slack App Name while its Secret only ever held
       // another provider's credentials. It projects as ready and then 409s on
       // use, so it must not be offered as a target at all.
-      return keys.includes('slack-signing-secret') ? target : null
+      //
+      // Both keys, matching PROVIDER_REQUIRED_KEYS.slack on the write path
+      // (routes/admin/resources.ts). Signing-secret-only would list a target
+      // that accepts events and then fails when the approval message is posted.
+      return SLACK_REQUIRED_SECRET_KEYS.every(key => keys.includes(key)) ? target : null
     })
   )
 

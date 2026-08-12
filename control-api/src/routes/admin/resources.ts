@@ -266,7 +266,11 @@ async function providerTransitionError(
 
   for (const provider of added) {
     for (const key of PROVIDER_REQUIRED_KEYS[provider] || []) {
-      if (!credentials?.[key] && !existingKeys.includes(key)) {
+      // Trimmed, because this reads the RAW envelope while the Secret is written
+      // from the CLEANED values: `validateCommunicationChannelCredentials` drops
+      // whitespace-only entries, so a truthy "   " here would satisfy the guard
+      // and then never reach the Secret.
+      if (!credentials?.[key]?.trim() && !existingKeys.includes(key)) {
         return `credentials["${key}"] is required to enable the ${provider} provider on this CommunicationChannel`
       }
     }

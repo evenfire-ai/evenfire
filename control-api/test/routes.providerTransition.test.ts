@@ -104,6 +104,28 @@ describe('admin communicationchannels — provider transition validation (#312)'
     expect(gatewayMock.createResource).not.toHaveBeenCalled()
   })
 
+  it('POST declaring email with a whitespace-only credential → 400 naming the key', async () => {
+    // This guard reads the RAW envelope while the Secret is written from the
+    // CLEANED values, which drop whitespace-only entries. Untrimmed, "   " is
+    // truthy here, `missingCreateCredentialKey` has no email branch to catch it,
+    // and the channel is created 201 advertising a provider whose Secret holds
+    // only email-password: exactly the #312 state, through the API.
+    const res = await request(makeApp())
+      .post('/admin/communicationchannels')
+      .send({
+        metadata: { name: 'jose-email' },
+        spec: { hostRef: 'h1', email: [{ emails: ['ops@example.com'] }] },
+        credentials: { 'email-username': '   ', 'email-password': 'pw' },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe(
+      'credentials["email-username"] is required to enable the email provider on this CommunicationChannel'
+    )
+    expect(gatewayMock.createResource).not.toHaveBeenCalled()
+    expect(gatewayMock.createSecret).not.toHaveBeenCalled()
+  })
+
   // ── ALLOWING ─────────────────────────────────────────────────────────────
   // Without these, a validator that reads nothing at all still passes every
   // blocking case above.
