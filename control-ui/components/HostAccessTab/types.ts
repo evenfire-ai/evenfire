@@ -10,6 +10,9 @@ export type AccessUserRow = {
 export type AccessTeamRow = {
   id: string
   name: string
+}
+
+export type AccessTeamDirectoryRow = AccessTeamRow & {
   memberCount: number
 }
 

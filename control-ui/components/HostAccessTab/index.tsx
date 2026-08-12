@@ -17,7 +17,13 @@ import {
   updateAdminTeamAgents,
   updateAdminUserAgents,
 } from '@lib/api'
-import type { AccessSubTab, AccessTeamRow, AccessUserRow, HostAccessTabProps } from './types'
+import type {
+  AccessSubTab,
+  AccessTeamDirectoryRow,
+  AccessTeamRow,
+  AccessUserRow,
+  HostAccessTabProps,
+} from './types'
 
 const ACCESS_SUB_TABS: { key: AccessSubTab; label: string }[] = [
   { key: 'members', label: 'Members' },
@@ -26,14 +32,14 @@ const ACCESS_SUB_TABS: { key: AccessSubTab; label: string }[] = [
 
 export function HostAccessTab({ hostName }: HostAccessTabProps) {
   const router = useRouter()
-  const { confirm, dialog: confirmDialog } = useConfirmDialog()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const mountedRef = useRef(true)
   const loadRequestId = useRef(0)
 
   const [subTab, setSubTab] = useState<AccessSubTab>('members')
   const [allUsers, setAllUsers] = useState<AccessUserRow[]>([])
-  const [allTeams, setAllTeams] = useState<AccessTeamRow[]>([])
+  const [allTeams, setAllTeams] = useState<AccessTeamDirectoryRow[]>([])
   const [usersWithAccess, setUsersWithAccess] = useState<AccessUserRow[]>([])
   const [teamsWithAccess, setTeamsWithAccess] = useState<AccessTeamRow[]>([])
   const [selectedUserIdsToGrant, setSelectedUserIdsToGrant] = useState<string[]>([])
