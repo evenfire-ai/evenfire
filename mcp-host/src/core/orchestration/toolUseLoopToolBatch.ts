@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
-import { recordDecision, resolveToolIdentityFromRegistry } from '../guardrails'
+import { recordAndCheck, recordDecision, resolveToolIdentityFromRegistry } from '../guardrails'
 import type { ChatMessage, PendingApproval, TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool, reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
@@ -240,6 +240,36 @@ export async function executeToolCalls(
         config.toolRegistry,
         call.arguments
       )
+
+      // Doom-loop guard (spec §6.4): deny 3 consecutive identical (tool, input)
+      // calls within a task. Best-effort runaway/cost guard, not a security
+      // control (alternation evades it, §12.4/N12). Cross-turn state lives on the
+      // conversation (ephemeral; resets on resume).
+      const dlKey = `${identity.provenance}:${identity.server ?? ''}:${identity.name}:${JSON.stringify(call.arguments)}`
+      const dl = recordAndCheck(config.conversation.guardrail_doom_loop ?? { count: 0 }, dlKey)
+      config.conversation.guardrail_doom_loop = dl.state
+      if (dl.tripped) {
+        recordDecision('tool', 'deny', 'current', 'denied', 'repeated_identical_call')
+        events.emit({
+          type: 'guardrail:decision',
+          data: {
+            toolName: call.name,
+            decision: 'deny',
+            reasonCode: 'repeated_identical_call',
+            source: 'current',
+            iteration,
+          },
+          timestamp: new Date(),
+        })
+        toolResults.push({
+          tool_call_id: call.id,
+          name: call.name,
+          content: 'Blocked: repeated identical tool call (doom-loop guard).',
+          is_error: true,
+        })
+        continue
+      }
+
       const gd = await config.guardrails.decide(identity, call.arguments)
       events.emit({
         type: 'guardrail:decision',

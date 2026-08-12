@@ -21,4 +21,6 @@ export type {
 } from './tool/toolLaneAdapter'
 export { resolveToolIdentity, resolveToolIdentityFromRegistry } from './tool/provenance'
 export type { ToolIdentity } from './tool/provenance'
+export { recordAndCheck } from './tool/doomLoop'
+export type { DoomLoopState } from './tool/doomLoop'
 export { guardrailDecisionsTotal, guardrailBoundaryDurationMs } from './metrics'

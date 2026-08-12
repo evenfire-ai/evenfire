@@ -144,6 +144,29 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(tool.calls).toHaveLength(0)
   })
 
+  it('doom-loop: 3rd consecutive identical call is denied (§6.4)', async () => {
+    const tool = new StubTool('do_thing')
+    const config = makeConfig(tool, fixedGuardrail('allow'))
+    // Same conversation across calls carries the doom-loop counter.
+    const r1 = await executeToolCalls([call], config, 0)
+    const r2 = await executeToolCalls([{ ...call, id: 'c2' }], config, 1)
+    const r3 = await executeToolCalls([{ ...call, id: 'c3' }], config, 2)
+    expect(r1.toolResults[0].is_error).toBe(false)
+    expect(r2.toolResults[0].is_error).toBe(false)
+    expect(r3.toolResults[0].is_error).toBe(true)
+    expect(r3.toolResults[0].content).toContain('doom-loop')
+    expect(tool.calls).toHaveLength(2) // 3rd blocked
+  })
+
+  it('doom-loop resets when a different call intervenes (§6.4)', async () => {
+    const tool = new StubTool('do_thing')
+    const config = makeConfig(tool, fixedGuardrail('allow'))
+    await executeToolCalls([call], config, 0)
+    await executeToolCalls([{ id: 'x', name: 'do_thing', arguments: { a: 2 } }], config, 1) // different args → reset
+    const r3 = await executeToolCalls([{ ...call, id: 'c3' }], config, 2)
+    expect(r3.toolResults[0].is_error).toBe(false) // counter was reset
+  })
+
   it('ask + matching one-shot approval → proceeds and clears pending', async () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {
