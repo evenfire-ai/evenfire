@@ -82,15 +82,12 @@ describe('catalog producer protocol', () => {
       rows: [
         {
           source_arm: 'source_0',
-          logical_id: '20000000-0000-4000-8000-000000000002',
+          source_rows: [
+            { logical_id: '20000000-0000-4000-8000-000000000002', valid_until: null },
+            { logical_id: '30000000-0000-4000-8000-000000000003', valid_until: null },
+          ],
           source_saturated: false,
         },
-        {
-          source_arm: 'source_0',
-          logical_id: '30000000-0000-4000-8000-000000000003',
-          source_saturated: false,
-        },
-        { source_arm: 'source_0', logical_id: null, source_saturated: false, source_marker: true },
       ],
       rowCount: 2,
     })
@@ -121,8 +118,11 @@ describe('catalog producer protocol', () => {
   it('rejects duplicate or non-increasing producer keys', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
-        { source_arm: 'source_0', logical_id: '', source_saturated: false },
-        { source_arm: 'source_0', logical_id: null, source_saturated: false, source_marker: true },
+        {
+          source_arm: 'source_0',
+          source_rows: [{ logical_id: '', valid_until: null }],
+          source_saturated: false,
+        },
       ],
       rowCount: 2,
     })
@@ -140,34 +140,39 @@ describe('catalog producer protocol', () => {
       .fn()
       .mockResolvedValueOnce({
         rows: [
-          { source_arm: 'source_0', logical_id: 'x', source_saturated: false },
-          { source_arm: 'source_0', logical_id: 'y', source_saturated: false },
-          { source_arm: 'source_0', logical_id: 'z', source_saturated: false },
           {
             source_arm: 'source_0',
-            logical_id: null,
+            source_rows: [
+              { logical_id: 'x', valid_until: null },
+              { logical_id: 'y', valid_until: null },
+              { logical_id: 'z', valid_until: null },
+            ],
             source_saturated: false,
-            source_marker: true,
           },
-          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
-          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
-          { source_arm: 'source_1', logical_id: 'a', source_saturated: true },
-          { source_arm: 'source_1', logical_id: null, source_saturated: true, source_marker: true },
+          {
+            source_arm: 'source_1',
+            source_rows: [
+              { logical_id: 'a', valid_until: null },
+              { logical_id: 'a', valid_until: null },
+              { logical_id: 'a', valid_until: null },
+            ],
+            source_saturated: true,
+          },
         ],
-        rowCount: 8,
+        rowCount: 2,
       })
       .mockResolvedValueOnce({
         rows: [
-          { source_arm: 'source_1', logical_id: 'b', source_saturated: false },
-          { source_arm: 'source_1', logical_id: 'c', source_saturated: false },
           {
             source_arm: 'source_1',
-            logical_id: null,
+            source_rows: [
+              { logical_id: 'b', valid_until: null },
+              { logical_id: 'c', valid_until: null },
+            ],
             source_saturated: false,
-            source_marker: true,
           },
         ],
-        rowCount: 3,
+        rowCount: 1,
       })
 
     const result = await listBoundedProducerKeys({
