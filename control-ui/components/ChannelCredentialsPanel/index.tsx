@@ -19,6 +19,14 @@ const MASKED_VALUE = '**********'
 /** Shown while `storedKeys` is unknown. Distinct from the per-field placeholder
  *  so a page load cannot flash "nothing stored" before the answer arrives. */
 const PENDING_PLACEHOLDER = 'Checking stored credentials…'
+/**
+ * Slack offers four secrets and this platform uses two of them. The "app is
+ * ready" dialog puts the App-Level Token next to the bot token, and the Signing
+ * Secret is filed next to a Client Secret on a page the dialog never links to,
+ * so both wrong values are the easy ones to grab.
+ */
+const SLACK_CREDENTIAL_NOTE =
+  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack hands out the xapp- token beside the xoxb- one, and the Signing Secret is not in that dialog at all: find it on Basic Information, under App Credentials.'
 
 /**
  * Per-CommunicationChannel provider credential form.
@@ -339,6 +347,11 @@ export function ChannelCredentialsPanel({
                   </div>
                 )
               })}
+              {fields.some(field => field.channelType === 'slack') ? (
+                <p className="cu-field__hint cu-channel-credentials__note">
+                  {SLACK_CREDENTIAL_NOTE}
+                </p>
+              ) : null}
             </div>
           )}
         </>

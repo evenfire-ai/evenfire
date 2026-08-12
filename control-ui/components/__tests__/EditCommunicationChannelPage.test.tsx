@@ -240,6 +240,44 @@ describe('EditCommunicationChannelPage channel credentials', () => {
   })
 })
 
+/** Both strings are written out rather than imported: this copy IS the feature,
+ *  so a reworded page must fail here instead of quietly passing. */
+const EMPTY_CONVERSATIONS_COPY =
+  'No conversations confirmed yet. Each user links their own by sending the verify command from their profile page in the conversation they want to link.'
+const THREAD_MENTION_COPY =
+  'Replies inside a thread still require a mention: even in a thread the app started, a follow-up that does not mention the app is ignored.'
+
+describe('EditCommunicationChannelPage setup guidance', () => {
+  it('reads an empty conversation list as the next step, not a broken setup', async () => {
+    // A bare "No conversations have been confirmed yet." looks like the channel
+    // is broken. Only the end user can confirm one, and nothing on this page
+    // used to say so.
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.getByText(EMPTY_CONVERSATIONS_COPY)).toBeInTheDocument()
+  })
+
+  it('warns that a thread does not exempt a follow-up from the mention rule', async () => {
+    // With "Reply in threads" on, the app answers inside a thread and then
+    // ignores every unmentioned follow-up there, which reads as the app
+    // breaking mid-conversation.
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.getByText('Answer only when the app is mentioned')).toBeInTheDocument()
+    expect(screen.getByText(THREAD_MENTION_COPY)).toBeInTheDocument()
+  })
+
+  it('keeps the Slack thread warning off a Telegram channel', async () => {
+    mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
+    await renderLoadedPage()
+
+    expect(screen.getByText('Answer only when the bot is mentioned')).toBeInTheDocument()
+    expect(screen.queryByText(THREAD_MENTION_COPY)).not.toBeInTheDocument()
+  })
+})
+
 describe('EditCommunicationChannelPage Slack app manifest', () => {
   it('renders the manifest with both request URLs when the webhook is publicly reachable', async () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')

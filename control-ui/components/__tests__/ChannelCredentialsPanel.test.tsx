@@ -293,3 +293,33 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     expect(signingSecret).not.toBeDisabled()
   })
 })
+
+/** The Slack note, written out rather than imported: this copy IS the feature,
+ *  so a reworded panel must fail here instead of quietly passing. */
+const SLACK_CREDENTIAL_NOTE =
+  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack hands out the xapp- token beside the xoxb- one, and the Signing Secret is not in that dialog at all: find it on Basic Information, under App Credentials.'
+
+describe('ChannelCredentialsPanel — Slack credential note', () => {
+  it('tells the operator which Slack values are NOT needed and where the Signing Secret is', () => {
+    // Slack's "app is ready" dialog hands out xoxb- and xapp- side by side, and
+    // the Signing Secret sits next to a Client Secret on another page entirely.
+    // Without this note the operator pastes the wrong two values.
+    renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
+    expect(screen.getByText(SLACK_CREDENTIAL_NOTE)).toBeInTheDocument()
+  })
+
+  it('shows the Slack note on the create (pending) panel too', () => {
+    renderPanel({ ccName: 'cc-slack-new', pending: true, visibleChannelTypes: ['slack'] })
+    expect(screen.getByText(SLACK_CREDENTIAL_NOTE)).toBeInTheDocument()
+  })
+
+  it('does not show the Slack note on a panel with no Slack fields', () => {
+    renderPanel({ ccName: 'cc-tg', visibleChannelTypes: ['telegram'] })
+    expect(screen.queryByText(SLACK_CREDENTIAL_NOTE)).not.toBeInTheDocument()
+  })
+
+  it('does not show the Slack note when no provider is selected', () => {
+    renderPanel({ ccName: 'cc-empty', visibleChannelTypes: [] })
+    expect(screen.queryByText(SLACK_CREDENTIAL_NOTE)).not.toBeInTheDocument()
+  })
+})

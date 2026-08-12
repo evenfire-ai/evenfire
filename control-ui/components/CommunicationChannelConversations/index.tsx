@@ -48,9 +48,17 @@ function conversationKey(conversation: CommunicationChannelConversation, index: 
   ].join(':')
 }
 
+/**
+ * An empty list is the normal state of a channel that was just set up, and the
+ * step that fills it belongs to the end user, not the operator reading this
+ * page. Saying only "none confirmed" made a working channel read as broken.
+ */
+const EMPTY_CONVERSATIONS_LABEL =
+  'No conversations confirmed yet. Each user links their own by sending the verify command from their profile page in the conversation they want to link.'
+
 export function CommunicationChannelConversationsTable({
   conversations,
-  emptyLabel = 'No conversations have been confirmed yet.',
+  emptyLabel = EMPTY_CONVERSATIONS_LABEL,
   onDelete,
   showUserColumn = false,
   userLabelsById = {},

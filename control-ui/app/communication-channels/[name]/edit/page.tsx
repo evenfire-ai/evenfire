@@ -365,36 +365,47 @@ export default function EditCommunicationChannelPage() {
                     </p>
                   </div>
                 </div>
-                <label className="cu-toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={
-                      activeTab === 'telegram'
-                        ? draft.telegramReplyOnlyWhenMentioned
-                        : activeTab === 'slack'
-                          ? draft.slackReplyOnlyWhenMentioned
-                          : draft.teamsReplyOnlyWhenMentioned
-                    }
-                    disabled={saving}
-                    onChange={event =>
-                      setDraft(current =>
-                        current
-                          ? activeTab === 'telegram'
-                            ? {
-                                ...current,
-                                telegramReplyOnlyWhenMentioned: event.target.checked,
-                              }
-                            : activeTab === 'slack'
-                              ? { ...current, slackReplyOnlyWhenMentioned: event.target.checked }
-                              : { ...current, teamsReplyOnlyWhenMentioned: event.target.checked }
-                          : current
-                      )
-                    }
-                  />
-                  <span>
-                    Answer only when the {activeTab === 'slack' ? 'app' : 'bot'} is mentioned
-                  </span>
-                </label>
+                <div className="cu-toggle-field">
+                  <label className="cu-toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={
+                        activeTab === 'telegram'
+                          ? draft.telegramReplyOnlyWhenMentioned
+                          : activeTab === 'slack'
+                            ? draft.slackReplyOnlyWhenMentioned
+                            : draft.teamsReplyOnlyWhenMentioned
+                      }
+                      disabled={saving}
+                      onChange={event =>
+                        setDraft(current =>
+                          current
+                            ? activeTab === 'telegram'
+                              ? {
+                                  ...current,
+                                  telegramReplyOnlyWhenMentioned: event.target.checked,
+                                }
+                              : activeTab === 'slack'
+                                ? { ...current, slackReplyOnlyWhenMentioned: event.target.checked }
+                                : { ...current, teamsReplyOnlyWhenMentioned: event.target.checked }
+                            : current
+                        )
+                      }
+                    />
+                    <span>
+                      Answer only when the {activeTab === 'slack' ? 'app' : 'bot'} is mentioned
+                    </span>
+                  </label>
+                  {activeTab === 'slack' ? (
+                    // Operators assume a thread is an implicit mention. It is not:
+                    // with "Reply in threads" on, the app answers in a thread and
+                    // then drops every unmentioned follow-up posted there.
+                    <p className="cu-field__hint cu-toggle-row__hint">
+                      Replies inside a thread still require a mention: even in a thread the app
+                      started, a follow-up that does not mention the app is ignored.
+                    </p>
+                  ) : null}
+                </div>
                 {activeTab === 'slack' ? (
                   <label className="cu-toggle-row">
                     <input

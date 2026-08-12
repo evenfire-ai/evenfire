@@ -4637,6 +4637,10 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+.cu-channel-credentials__note {
+  margin: 0;
+}
+
 .cu-channel-credentials__actions {
   display: flex;
   justify-content: flex-end;
@@ -9669,6 +9673,18 @@ textarea.cu-input {
   width: 1rem;
   height: 1rem;
   accent-color: var(--cu-accent);
+}
+
+/* A cu-toggle-row plus its note, kept together so the surrounding panel gap
+   does not separate the note from the control it explains. */
+.cu-toggle-field {
+  display: grid;
+  gap: var(--cu-space-1);
+}
+
+/* Indented past the checkbox so the note reads as that control's, not a new row. */
+.cu-toggle-row__hint {
+  margin: 0 0 0 calc(1rem + var(--cu-space-2));
 }
 
 .cu-credential-field {
