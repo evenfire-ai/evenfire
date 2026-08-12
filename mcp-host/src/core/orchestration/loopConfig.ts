@@ -206,6 +206,7 @@ export function buildLoopConfig(params: {
   maxIterations?: number
   toolTimeout?: number
   toolProgressInterval?: number
+  guardrails?: ToolLaneGuardrail
 }): LoopConfig {
   const dc = new DefaultLoopController()
 
@@ -235,6 +236,7 @@ export function buildLoopConfig(params: {
     contextManager: params.contextManager ?? new DefaultContextManager(),
     toolOutputProcessor:
       params.toolOutputProcessor ?? new DefaultToolOutputProcessor(params.safety),
+    guardrails: params.guardrails,
     progressReporter: params.progressReporter,
     maxIterations: params.maxIterations ?? 10,
     toolTimeout: params.toolTimeout ?? 60000,

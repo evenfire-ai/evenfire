@@ -18,6 +18,7 @@ import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
+import { type GuardrailsConfig, buildToolLaneGuardrail } from '../core/guardrails'
 import type { AgentEventEmitter, LlmPort, LoopController, ToolRegistry } from '../core/interfaces'
 import { DeferrableToolController } from '../core/orchestration/deferrableToolController'
 import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
@@ -137,6 +138,7 @@ export interface TaskExecutorDeps {
    */
   contextWindowTokens?: number
   approvalConfig: ApprovalConfig | undefined
+  guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
   taskLifecycle: TaskLifecycle
@@ -1187,6 +1189,10 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
+    // Undefined when no rules are configured (no-config compatibility, §5); a
+    // malformed set throws here (fail-closed admission, §3/§5).
+    loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist

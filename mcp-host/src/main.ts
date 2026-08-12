@@ -1257,6 +1257,9 @@ async function initializeAgent(): Promise<void> {
   // Phase 6: Set approval config
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
   agent.setApprovalConfig(approvalCfg)
+
+  // Guardrails (spec §5/§6) — Host block, dev-env fallback. Absent = today.
+  agent.setGuardrailsConfig(currentHost?.spec.guardrails ?? config.guardrailsConfig)
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   console.log(
     `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`

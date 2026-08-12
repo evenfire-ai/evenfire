@@ -2,6 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
@@ -95,6 +96,9 @@ export interface Config {
   // Dev-mode approval config parsed from CLERUM_APPROVAL_CONFIG; in prod the
   // values come from the Host CRD.
   approvalConfig?: ApprovalConfig
+  // Dev-mode guardrails config parsed from CLERUM_GUARDRAILS_CONFIG (spec §5); in
+  // prod the block comes from the Host CRD. Absent = no guardrails = today.
+  guardrailsConfig?: GuardrailsConfig
 
   // Nudge controller (default OFF).
   enableNudge: boolean
@@ -475,6 +479,22 @@ function parseDevMcpServers(): McpServerInfo[] | undefined {
  * Parse CLERUM_APPROVAL_CONFIG JSON for dev mode.
  * Format: {"defaultPolicy":"designated_approvers","channels":{"telegram":{"enabled":true,"approvers":["123"]}}}
  */
+/** Parse CLERUM_GUARDRAILS_CONFIG JSON for dev mode (the `Host.spec.guardrails` block, spec §5). */
+function parseGuardrailsConfig(): GuardrailsConfig | undefined {
+  const configJson = process.env.CLERUM_GUARDRAILS_CONFIG
+  if (!configJson) return undefined
+  try {
+    const parsed = JSON.parse(configJson) as GuardrailsConfig
+    console.log('[Config] Parsed guardrails config from CLERUM_GUARDRAILS_CONFIG:', {
+      rules: parsed.rules?.length ?? 0,
+    })
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_GUARDRAILS_CONFIG:', error)
+    return undefined
+  }
+}
+
 function parseApprovalConfig(): ApprovalConfig | undefined {
   const configJson = process.env.CLERUM_APPROVAL_CONFIG
   if (!configJson) {
@@ -581,6 +601,7 @@ export const config: Config = {
   enableApproval: getEnvBool('CLERUM_ENABLE_APPROVAL', true),
   // Dev-mode override; in prod the values come from the Host CRD.
   approvalConfig: parseApprovalConfig(),
+  guardrailsConfig: parseGuardrailsConfig(),
 
   // Nudge controller (default OFF).
   enableNudge: getEnvBool('CLERUM_ENABLE_NUDGE', false),
