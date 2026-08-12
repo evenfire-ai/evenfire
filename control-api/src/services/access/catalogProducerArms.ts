@@ -1,4 +1,4 @@
-import { CatalogProducerContractError } from './catalogProducerSupport.js'
+import { CatalogProducerContractError } from './catalogProducerErrors.js'
 
 export type BoundedKeyArm = Readonly<{
   sql: string
