@@ -143,10 +143,14 @@ export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }
       identifier: `gfs-edge-${bucket}`,
       ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
       handler: (_req, res) => {
+        const retryAfterHeader = Number(res.getHeader('Retry-After'))
+        const retryAfterSeconds =
+          Number.isSafeInteger(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 1
         res.status(429).json({
           error: 'Too Many Requests',
           rateLimitLayer: 'external-rest-edge',
           rateLimitBucket: bucket,
+          retryAfterSeconds,
         })
       },
     })

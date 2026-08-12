@@ -1,4 +1,5 @@
 import { Request, Response, Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
@@ -91,9 +92,16 @@ function setStreamHeaders(res: Response): void {
 
 export function createExternalNotificationsRouter(): Router {
   const router = Router()
+  const externalNotificationsEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   router.get(
     '/external/notifications/stream',
+    externalNotificationsEdgeRateLimit,
     mcpHostHttpMetrics('external_notifications_stream'),
     requireValidExternalSessionToken,
     rateLimitMiddleware({
@@ -326,6 +334,7 @@ export function createExternalNotificationsRouter(): Router {
 
   router.post(
     '/external/notifications/:id/ack',
+    externalNotificationsEdgeRateLimit,
     mcpHostHttpMetrics('external_notification_ack'),
     requireValidExternalSessionToken,
     rateLimitMiddleware({
@@ -358,6 +367,7 @@ export function createExternalNotificationsRouter(): Router {
 
   router.get(
     '/external/me/notification-preferences',
+    externalNotificationsEdgeRateLimit,
     mcpHostHttpMetrics('external_notification_preferences_get'),
     requireValidExternalSessionToken,
     asyncHandler(async (req: Request, res: Response) => {
@@ -373,6 +383,7 @@ export function createExternalNotificationsRouter(): Router {
 
   router.put(
     '/external/me/notification-preferences',
+    externalNotificationsEdgeRateLimit,
     mcpHostHttpMetrics('external_notification_preferences_put'),
     requireValidExternalSessionToken,
     asyncHandler(async (req: Request, res: Response) => {

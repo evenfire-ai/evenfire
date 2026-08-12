@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
+import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import {
   type ExternalAuthedRequest,
@@ -70,9 +72,16 @@ function displayNameFromBody(body: unknown): string | null {
 
 export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway): Router {
   const router = Router()
+  const externalWorkflowApprovalEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   router.post(
     '/external/workflow-approval-mediums/challenges',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_challenge'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -160,6 +169,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.post(
     '/external/workflow-approval-mediums/link-sessions',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_link_session'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -249,6 +259,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.post(
     '/external/workflow-approval-mediums/challenges/:id/confirm',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_confirm'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -294,6 +305,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.get(
     '/external/workflow-approval-mediums',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_list'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -327,6 +339,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.get(
     '/external/workflow-approval-mediums/targets',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_targets'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -361,6 +374,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.put(
     '/external/workflow-approval-mediums/:id/preference',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_preference'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -385,6 +399,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.patch(
     '/external/workflow-approval-mediums/:id/display-name',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_display_name'),
     requireValidExternalSessionToken,
     (req, res, next) => {
@@ -422,6 +437,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
 
   router.delete(
     '/external/workflow-approval-mediums/:id',
+    externalWorkflowApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_workflow_approval_medium_delete'),
     requireValidExternalSessionToken,
     (req, res, next) => {

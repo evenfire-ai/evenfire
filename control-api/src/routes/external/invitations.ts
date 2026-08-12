@@ -1,5 +1,7 @@
 import { Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { randomBytes } from 'node:crypto'
+import { config } from '../../config.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -32,6 +34,12 @@ function invitationLookupIpKey(req: {
 
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
+  const externalInvitationsEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   router.get(
     '/external/invitations/token/:token',
@@ -67,6 +75,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password-token',
+    externalInvitationsEdgeRateLimit,
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
@@ -155,6 +164,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password',
+    externalInvitationsEdgeRateLimit,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
@@ -200,6 +210,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/desktop-authorization',
+    externalInvitationsEdgeRateLimit,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {

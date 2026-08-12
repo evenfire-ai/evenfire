@@ -50,11 +50,7 @@ export async function requireExternalWorkflowCaller(
 
   const claims = verifyExternalSessionToken(userSessionToken)
   if (!claims) return unauthorized(res)
-  // The cryptographic verifier always supplies authGeneration in production.
-  // Isolated route fixtures may inject the historic structural shape without
-  // a generation field; those fixtures remain focused on workflow policy, not
-  // the session lifecycle gate itself.
-  if (claims.authGeneration !== undefined && !(await isCurrentExternalSession(claims))) {
+  if (!(await isCurrentExternalSession(claims))) {
     return unauthorized(res)
   }
   return { kind: 'user-session', claims }

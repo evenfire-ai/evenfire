@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
+import { config } from '../../config.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -26,7 +28,13 @@ function currentUserId(req: ExternalAuthedRequest): string | null {
 
 export function createExternalMembersRouter(): Router {
   const router = Router()
-  router.use('/external/members', requireValidExternalSessionToken)
+  const externalMembersRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
+  router.use('/external/members', externalMembersRateLimit, requireValidExternalSessionToken)
 
   router.get(
     '/external/members/manageable-teams',

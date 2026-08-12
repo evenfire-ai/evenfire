@@ -366,9 +366,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // remains the sole authority that can restore the operator root.
     setAccessState('active')
   }, [])
-  const queryAuthorizationError = [accessibleQuery.error, childrenQuery.error]
-    .map(error => (error ? toMessage(error) : null))
-    .find(error => error !== null && isGfsSessionAuthorityFailure(error, 'discovery'))
+  // Root discovery is a session/authority boundary. A children request is a
+  // per-resource read: a generic 401/403 there can mean that one shared
+  // folder was revoked while the rest of the session remains valid. Only
+  // explicit lifecycle codes may revoke from that surface; do not collapse
+  // the entire browser state for a resource-scoped policy denial.
+  const queryAuthorizationError = [
+    accessibleQuery.error
+      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
+      : null,
+    childrenQuery.error
+      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
+      : null,
+  ]
+    .filter(
+      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
+    )
+    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
   useEffect(() => {
     if (queryAuthorizationError && accessState !== 'revoked') revokeAccess()
   }, [accessState, queryAuthorizationError, revokeAccess])

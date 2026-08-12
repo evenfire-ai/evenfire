@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response, Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { requireApprovalDecisionAccess } from '../../middleware/approvalDecisionAccess.js'
 import { requireValidExternalSessionToken } from '../../middleware/externalSessionAuth.js'
@@ -43,9 +44,16 @@ function userAgent(req: Request): string | null {
 
 export function createExternalUserApprovalDecisionsRouter(): Router {
   const router = Router()
+  const externalApprovalEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   router.get(
     '/external/workflow-approvals/pending',
+    externalApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_user_approval_requests_pending'),
     requireValidExternalSessionToken,
     rateLimitMiddleware({
@@ -83,6 +91,7 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
 
   router.post(
     '/external/workflow-approvals/:id/decide',
+    externalApprovalEdgeRateLimit,
     mcpHostHttpMetrics('external_user_approval_requests_decide'),
     requireValidExternalSessionToken,
     requireValidApprovalIdParam,

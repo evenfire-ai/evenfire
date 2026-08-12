@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
@@ -36,6 +36,15 @@ function app() {
 }
 
 describe('external session lifecycle gate', () => {
+  beforeEach(() => {
+    poolQuery.mockClear()
+    verifyToken.mockClear()
+    poolQuery.mockResolvedValue({
+      rows: [{ lifecycle_state: 'active', lifecycle_version: 4 }],
+      rowCount: 1,
+    })
+  })
+
   it('accepts an active session whose generation matches the user row', async () => {
     verifyToken.mockReturnValueOnce(claims)
     poolQuery.mockResolvedValueOnce({
@@ -55,5 +64,12 @@ describe('external session lifecycle gate', () => {
     poolQuery.mockResolvedValueOnce({ rows: row, rowCount: row.length })
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(401)
+  })
+
+  it('denies a verified legacy marker before querying the lifecycle row', async () => {
+    verifyToken.mockReturnValueOnce({ ...claims, authGeneration: 0 })
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    expect(response.status).toBe(401)
+    expect(poolQuery).not.toHaveBeenCalled()
   })
 })

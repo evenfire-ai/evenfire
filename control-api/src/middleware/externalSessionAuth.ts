@@ -14,6 +14,13 @@ export type ExternalAuthedRequest = Request & {
  * same denial to avoid user enumeration.
  */
 export async function isCurrentExternalSession(claims: AuthClaims): Promise<boolean> {
+  const authGeneration = claims.authGeneration
+  if (
+    typeof authGeneration !== 'number' ||
+    !Number.isSafeInteger(authGeneration) ||
+    authGeneration < 1
+  )
+    return false
   const result = await pool.query(
     `SELECT lifecycle_state, lifecycle_version
        FROM users
@@ -25,11 +32,7 @@ export async function isCurrentExternalSession(claims: AuthClaims): Promise<bool
     | { lifecycle_state?: unknown; lifecycle_version?: unknown }
     | undefined
   if (row?.lifecycle_state !== 'active') return false
-  // Real verifier output always contains the explicit legacy marker (0). The
-  // undefined branch is only for isolated route doubles that inject the old
-  // structural shape without bypassing production verification.
-  if (claims.authGeneration === undefined) return true
-  return Number(row.lifecycle_version) === claims.authGeneration
+  return Number(row.lifecycle_version) === authGeneration
 }
 
 export async function assertCurrentExternalSession(claims: AuthClaims): Promise<void> {
@@ -68,11 +71,7 @@ async function requireValidExternalSessionTokenAsync(
       return
     }
 
-    // Real verifier output always carries authGeneration (0 marks a legacy
-    // token). Test doubles that inject the pre-generation structural shape are
-    // intentionally left to their own route fixture; they never reach this
-    // branch in production because the verifier rejects that shape.
-    if (claims.authGeneration !== undefined && !(await isCurrentExternalSession(claims))) {
+    if (!(await isCurrentExternalSession(claims))) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }

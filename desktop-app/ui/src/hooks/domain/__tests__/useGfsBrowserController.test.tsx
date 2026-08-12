@@ -547,6 +547,58 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('current').textContent).toBe(rootResourceId)
   })
 
+  it('keeps the browser session active when a resource children listing returns a generic 403', async () => {
+    const resource = {
+      resourceId: 'shared-folder',
+      rid: 'sharedfolder',
+      gfsUri: 'gfs://main/sharedfolder',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Shared folder',
+      kind: 'directory' as const,
+      path: '/Shared folder',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const listChildren = vi.fn(async () => {
+      throw new Error('403 Forbidden')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [resource], nextCursor: null })),
+          resolve: vi.fn(),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Shared folder' }).click()
+    })
+
+    await waitFor(() =>
+      expect(listChildren).toHaveBeenCalledWith('shared-folder', 'main', undefined)
+    )
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
+    expect(screen.getByTestId('current').textContent).toBe('shared-folder')
+  })
+
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
     let held = ['read']
     const affordances = vi.fn(async () => ({

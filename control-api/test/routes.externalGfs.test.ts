@@ -89,6 +89,7 @@ const SESSION = {
   email: 'u@example.com',
   teamId: T1,
   role: 'member' as const,
+  authGeneration: 1,
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 const R = '11111111-1111-1111-1111-111111111111'
@@ -161,6 +162,12 @@ beforeEach(() => {
   mockIsDesktopUserActive.mockReset()
   mockResolveActiveLink.mockResolvedValue(null)
   mockIsDesktopUserActive.mockResolvedValue(true)
+  mockQuery.mockImplementation(async (text: string) => {
+    if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
+      return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
+    }
+    return { rows: [] }
+  })
   mockWithTransaction.mockImplementation(
     async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
       work({ query: mockQuery })
@@ -174,6 +181,14 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 const auth = () => mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+
+function activeSessionLifecycleResult(
+  text: string
+): { rows: [{ lifecycle_state: string; lifecycle_version: number }] } | null {
+  return text.includes('SELECT lifecycle_state, lifecycle_version')
+    ? { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
+    : null
+}
 
 function combinedAuthorityRow(
   grants: Record<string, unknown>[],
@@ -209,6 +224,8 @@ function dbReturning(
   // host-grant fixtures represent an in-directory agent.
   const callerAgentNames = opts.callerAgentNames ?? ['agent-a']
   mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+    const lifecycle = activeSessionLifecycleResult(text)
+    if (lifecycle) return lifecycle
     if (text.includes('FROM user_agents')) {
       return { rows: callerAgentNames.map(name => ({ agent_name: name })) }
     }
@@ -255,7 +272,10 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
 
     expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(31)
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
-    expect(mockQuery).not.toHaveBeenCalled()
+    expect(mockQuery.mock.calls).toHaveLength(31)
+    expect(mockQuery.mock.calls.every(call => String(call[0]).includes('lifecycle_state'))).toBe(
+      true
+    )
   })
 
   it('enforces the configurable ingress backstop before session or authority work', async () => {
@@ -280,7 +300,10 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       expect(exhausted.status).toBe(429)
       expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(3)
       expect(mockResolveActiveLink).not.toHaveBeenCalled()
-      expect(mockQuery).not.toHaveBeenCalled()
+      expect(mockQuery.mock.calls).toHaveLength(3)
+      expect(mockQuery.mock.calls.every(call => String(call[0]).includes('lifecycle_state'))).toBe(
+        true
+      )
     } finally {
       ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin =
         previousIngressLimit
@@ -361,6 +384,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       drive: 'main',
       scopes: ['gfs.read', 'gfs.write'],
       pathBindings: [],
+      authGeneration: 1,
       principalType: 'user',
     })
   })
@@ -482,6 +506,8 @@ describe('linked Desktop operator authority contract', () => {
   it('uses the existing root tree primitive for a full operator root view', async () => {
     linked()
     mockQuery.mockImplementation(async (text: string) => {
+      const lifecycle = activeSessionLifecycleResult(text)
+      if (lifecycle) return lifecycle
       if (text.includes('parent_resource_id IS NULL')) {
         return {
           rows: [{ resource_id: R, drive: 'main', name: '', kind: 'directory', path_cache: '/' }],
@@ -594,9 +620,9 @@ describe('linked Desktop operator authority contract', () => {
     // The boundary rate limiter is deliberately the only DB-backed work that
     // precedes the authority resolver. A resolver failure must not invoke a
     // route handler or any of its database queries.
-    expect(mockQuery.mock.calls.every(call => String(call[0]).includes('rate_limit_buckets'))).toBe(
-      true
-    )
+    expect(
+      mockQuery.mock.calls.every(call => /rate_limit_buckets|lifecycle_state/.test(String(call[0])))
+    ).toBe(true)
     expect(mockSignGfsToken).not.toHaveBeenCalled()
   })
 
@@ -614,7 +640,8 @@ describe('linked Desktop operator authority contract', () => {
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'Not Found' })
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
-    expect(mockQuery).not.toHaveBeenCalled()
+    expect(mockQuery.mock.calls).toHaveLength(1)
+    expect(mockQuery.mock.calls[0]?.[0]).toContain('lifecycle_state')
   })
 
   it('rejects a pre-resolution rate limit before resolver or route work', async () => {
@@ -623,6 +650,8 @@ describe('linked Desktop operator authority contract', () => {
       true
     mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
     mockQuery.mockImplementation(async (text: string) => {
+      const lifecycle = activeSessionLifecycleResult(text)
+      if (lifecycle) return lifecycle
       if (text.includes('rate_limit_buckets')) return { rows: [{ count: 121 }] }
       throw new Error(`unexpected route query: ${text}`)
     })
@@ -636,14 +665,17 @@ describe('linked Desktop operator authority contract', () => {
     expect(res.headers['x-ratelimit-limit']).toBe('120')
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
     expect(mockSignGfsToken).not.toHaveBeenCalled()
-    expect(mockQuery.mock.calls).toHaveLength(1)
-    expect(mockQuery.mock.calls[0]?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
+    expect(mockQuery.mock.calls).toHaveLength(2)
+    expect(mockQuery.mock.calls[0]?.[0]).toContain('lifecycle_state')
+    expect(mockQuery.mock.calls[1]?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
   })
 
   it('does not resolve or elevate when the feature flag is off', async () => {
     auth()
     mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
-    mockQuery.mockResolvedValue({ rows: [] })
+    mockQuery.mockImplementation(
+      async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+    )
 
     const res = await request(await buildApp())
       .get('/external/gfs/resources')
@@ -715,6 +747,8 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
       },
     ]
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      const lifecycle = activeSessionLifecycleResult(text)
+      if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
       if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
         return combinedAuthorityRow(teamGrants, values)
@@ -1185,7 +1219,9 @@ describe('authenticated bulk grant/share transport', () => {
     'gives subject transport precedence for %s even when resourceId is invalid',
     async (_label, method, path, subjectFields) => {
       auth()
-      mockQuery.mockResolvedValue({ rows: [] })
+      mockQuery.mockImplementation(
+        async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+      )
       const app = await buildApp()
 
       const res = await request(app)
@@ -1209,7 +1245,9 @@ describe('authenticated bulk grant/share transport', () => {
     'serializes an invalid resource consistently for %s writes',
     async (_label, method, path) => {
       auth()
-      mockQuery.mockResolvedValue({ rows: [] })
+      mockQuery.mockImplementation(
+        async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+      )
       const app = await buildApp()
 
       const res = await request(app)
@@ -1415,6 +1453,8 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
   it('includes permissions held through any active team, not only the session teamId', async () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      const lifecycle = activeSessionLifecycleResult(text)
+      if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
       if (text.includes('WITH RECURSIVE chain'))
         return { rows: [{ resource_id: String(values?.[1]) }] }
@@ -1485,6 +1525,7 @@ describe('user resource mutations via gfsc proxy', () => {
       subject: U1,
       drive: 'main',
       scopes: ['gfs.write'],
+      authGeneration: 1,
       principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1519,6 +1560,7 @@ describe('user resource mutations via gfsc proxy', () => {
       subject: U1,
       drive: 'main',
       scopes: ['gfs.delete'],
+      authGeneration: 1,
       principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1603,6 +1645,8 @@ describe('GET /external/gfs/resources', () => {
   it('lists readable direct user resources and active-team resources as Desktop entry points', async () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      const lifecycle = activeSessionLifecycleResult(text)
+      if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T1 }] }
       if (text.includes('FROM gfs_grants') && text.includes('JOIN requested_subjects')) {
         expect(values?.[1]).toEqual(['user', 'team'])
@@ -1904,6 +1948,7 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
       subject: U1,
       drive: 'main',
       scopes: ['gfs.read'],
+      authGeneration: 1,
       principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledWith(

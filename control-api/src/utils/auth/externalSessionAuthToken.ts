@@ -16,9 +16,10 @@ export function signExternalSessionToken(
   return jwt.sign(
     {
       ...claims,
-      // A zero generation is an explicit legacy marker. Current issuers pass
-      // the user's lifecycle_version; consumers reject the marker when the
-      // authoritative row is checked, so an old token cannot survive a retire.
+      // A zero generation is an explicit legacy marker. The lifecycle gate
+      // rejects it after verification, so old sessions cannot survive a
+      // retirement even while isolated legacy issuers remain structurally
+      // compatible during rollout.
       authGeneration: typeof claims.authGeneration === 'number' ? claims.authGeneration : 0,
     },
     config.sessionJwtPrivateKey,
@@ -48,7 +49,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       typeof payload?.role !== 'string' ||
       typeof payload?.exp !== 'number' ||
       !Number.isSafeInteger(authGeneration) ||
-      Number(authGeneration) < 0
+      Number(authGeneration) < 1
     ) {
       return null
     }

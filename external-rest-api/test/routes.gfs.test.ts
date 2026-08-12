@@ -225,6 +225,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       error: 'Too Many Requests',
       rateLimitLayer: 'external-rest-edge',
       rateLimitBucket: 'aggregate-ip',
+      retryAfterSeconds: expect.any(Number),
     })
     expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(2)
     expect(clientMock.controlApiRequest).not.toHaveBeenCalled()

@@ -1,8 +1,10 @@
 import { Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
+import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import {
-  requireValidExternalSessionToken,
   type ExternalAuthedRequest,
+  requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { deleteOAuthGrant, listUserOAuthGrants } from '../../oauth/store.js'
 
@@ -21,11 +23,18 @@ function dbClient() {
  */
 export function createExternalOauthGrantsRouter(): Router {
   const router = Router()
+  const externalOauthGrantsRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   // GET /external/oauth/grants
   // Returns all grants for the authenticated user.
   router.get(
     '/external/oauth/grants',
+    externalOauthGrantsRateLimit,
     requireValidExternalSessionToken,
     (req: ExternalAuthedRequest, res, next) => {
       void (async () => {
@@ -51,6 +60,7 @@ export function createExternalOauthGrantsRouter(): Router {
   // row existed (no information leak).
   router.delete(
     '/external/oauth/grants/:recipeNamespace/:recipeName/:oauthClientId',
+    externalOauthGrantsRateLimit,
     requireValidExternalSessionToken,
     (req: ExternalAuthedRequest, res, next) => {
       void (async () => {

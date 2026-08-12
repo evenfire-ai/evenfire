@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
@@ -40,7 +41,13 @@ function sendInvitationServiceError(
 
 export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   const router = Router()
-  router.use('/external/teams', requireValidExternalSessionToken)
+  const externalTeamsRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.approvalRlExternalPerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
+  router.use('/external/teams', externalTeamsRateLimit, requireValidExternalSessionToken)
 
   router.get(
     '/external/teams/:teamId/users/:userId/current',
