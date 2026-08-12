@@ -59,4 +59,18 @@ describe('authorizeProviderMessage response shape', () => {
     const client = new RPCClient('http://mcp-host.test')
     expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
   })
+
+  it('drops an unrecognized reason value instead of passing it through', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ authorized: false, reason: 'banana' })))
+    )
+    const client = new RPCClient('http://mcp-host.test')
+    const result = await client.authorizeProviderMessage(identity as never)
+    expect(result).toEqual({ authorized: false })
+    // toEqual alone would not catch a `reason: undefined` key surviving the
+    // whitelist check, since it treats an undefined-valued key as absent.
+    // Assert the key itself is gone.
+    expect('reason' in result).toBe(false)
+  })
 })
