@@ -10,7 +10,7 @@
  */
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
@@ -244,6 +244,32 @@ describe('ChatThread tool-steps fallback (#582)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Load older messages' }))
     expect(threadStateValue.handleLoadOlderMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports when the reader is away from the bottom of the conversation', () => {
+    const onScrollPositionChange = vi.fn()
+    setThreadState([{ role: 'user', items: [userMsg] }])
+
+    render(<ChatThread onScrollPositionChange={onScrollPositionChange} />)
+
+    const chatThread = screen.getByTestId('message-list')
+    Object.defineProperties(chatThread, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 800 },
+      scrollTop: { configurable: true, value: 0, writable: true },
+    })
+
+    fireEvent.scroll(chatThread)
+    expect(onScrollPositionChange).toHaveBeenLastCalledWith(true)
+
+    Object.defineProperty(chatThread, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    })
+    fireEvent.scroll(chatThread)
+
+    expect(onScrollPositionChange).toHaveBeenLastCalledWith(false)
   })
 
   it('wraps long histories in virtualized message chunks', () => {
