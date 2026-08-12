@@ -48,18 +48,26 @@ export async function requestPasswordReset(email: string): Promise<{ requested: 
   })
 }
 
-export async function renewUserSession(sessionToken: string): Promise<{
+export async function renewUserSession(
+  sessionToken: string,
+  clientIp?: string
+): Promise<{
   token: string
   expiresInSeconds: number
   absoluteExpiresAt: string
 }> {
   return controlApiRequest('POST', '/external/auth/session/renew', {
     userSessionToken: sessionToken,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
 }
 
-export async function logoutUserSession(sessionToken: string): Promise<{ revoked: boolean }> {
+export async function logoutUserSession(
+  sessionToken: string,
+  clientIp?: string
+): Promise<{ revoked: boolean }> {
   return controlApiRequest('POST', '/external/auth/session/logout', {
     userSessionToken: sessionToken,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
 }

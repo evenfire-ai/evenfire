@@ -169,7 +169,7 @@ export function createAuthRouter(): Router {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
-      const renewed = await renewUserSession(token)
+      const renewed = await renewUserSession(token, req.ip)
       setProfileSessionCookie(req, res, renewed.token)
       const body = shouldExposeBearerToken(req)
         ? { token: renewed.token, expiresInSeconds: renewed.expiresInSeconds }
@@ -191,7 +191,7 @@ export function createAuthRouter(): Router {
         .replace(/^bearer\s+/i, '')
         .trim()
       const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
-      if (token) await logoutUserSession(token)
+      if (token) await logoutUserSession(token, req.ip)
       clearProfileSessionCookie(req, res)
       res.status(200).json({ ok: true })
     } catch (error) {

@@ -29,7 +29,11 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
 }
 
 function boundedIp(req: Request): string {
-  const value = req.ip ?? req.socket?.remoteAddress ?? 'unknown'
+  const forwardedClientIp =
+    req.internalService?.name === 'external-rest-api'
+      ? String(req.header('x-evenfire-client-ip') || '').trim()
+      : ''
+  const value = forwardedClientIp || req.ip || req.socket?.remoteAddress || 'unknown'
   return String(value).slice(0, 128)
 }
 
