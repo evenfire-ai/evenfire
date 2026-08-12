@@ -2064,6 +2064,16 @@ textarea.cu-input {
   flex-basis: 100%;
 }
 
+.cu-marketplace-detail .cu-expandable-field,
+.cu-marketplace-row-detail .cu-expandable-field {
+  flex: 0 0 auto;
+}
+
+.cu-marketplace-detail .cu-expandable-detail__fields,
+.cu-marketplace-row-detail .cu-expandable-detail__fields {
+  gap: var(--cu-space-4);
+}
+
 .cu-expandable-field__label {
   color: var(--cu-text-muted);
   font-size: 0.7rem;
