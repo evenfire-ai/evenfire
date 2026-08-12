@@ -88,11 +88,19 @@ export interface McpServerResources {
  * External egress binding — allows an MCP server to reach an external API.
  */
 export interface EgressBinding {
-  egressClass?: 'exact-host' | 'public-web'
+  egressClass?: 'exact-host' | 'public-web' | 'provider'
   dns?: string
   cidr?: string
   port?: number
   protocol?: 'TCP' | 'UDP'
+  /**
+   * issue #299 Phase 2 — provider-netblock intent for a large rotating pool
+   * behind `dns`. Valid ONLY with egressClass 'provider' + dns. `name` and
+   * `categories` are OPEN strings (validity = presence in the
+   * clerum-provider-netblocks catalog, checked at reconcile) — NEVER a
+   * TS/CRD enum, so adding a provider needs no schema change.
+   */
+  provider?: { name: string; categories?: string[] }
 }
 
 /**

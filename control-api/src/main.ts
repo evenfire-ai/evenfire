@@ -17,6 +17,11 @@ import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
+import { resolveProviderNetblocksCronConfig } from './services/providerNetblocks/providerNetblocksConfig.js'
+import {
+  startProviderNetblocksCron,
+  stopProviderNetblocksCron,
+} from './services/providerNetblocks/providerNetblocksCron.js'
 import { startRateLimiterCleanup, stopRateLimiterCleanup } from './services/rateLimiterService.js'
 import {
   reconcileRegistryPullSecret,
@@ -129,6 +134,20 @@ async function main(): Promise<void> {
     )
   }
 
+  // issue #299 Phase 2 — provider-netblocks fetcher (§8 kill switch). Off the hot
+  // path, best-effort; the seed CM covers cold start so this never gates startup.
+  const providerNetblocksCfg = resolveProviderNetblocksCronConfig()
+  if (providerNetblocksCfg.enabled) {
+    startProviderNetblocksCron(providerNetblocksCfg)
+    console.log(
+      `[ControlAPI] Provider netblocks fetcher enabled (interval=${providerNetblocksCfg.intervalMs}ms, issue #299 Phase 2)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] Provider netblocks fetcher disabled (PROVIDER_NETBLOCKS_FETCHER_ENABLED=false)'
+    )
+  }
+
   if (config.workflowApprovalNotificationDeliveryEnabled) {
     // Pass the K8sGateway so the worker resolves each delivery's per-channel bot
     // from its CommunicationChannel Secret (Figure D multi-bot).
@@ -171,6 +190,7 @@ main().catch(error => {
   stopUsageRollupCron()
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
+  stopProviderNetblocksCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)

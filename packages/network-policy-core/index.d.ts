@@ -140,3 +140,90 @@ export declare const RESOLVED_AT_ANNOTATION: string
 export declare function classifyDnsError(
   errOrCode: unknown
 ): 'transient' | 'permanent'
+
+// ─── issue #299 Phase 2 — provider-CIDR pipeline (Part A). Provider-blind. ───
+
+/** Config bounds for provider-range validation (injected; the module stays pure). */
+export interface ProviderRangeBounds {
+  /** Reject any range with prefix < this (default 16). Per-provider override injected by the caller. */
+  minPrefixLength?: number
+  /** Max ranges after canonicalization (default 256 — H1: must fit a full /meta category union). */
+  maxRanges?: number
+  /** Max total distinct addresses across all ranges (default 2**22 = 4194304). */
+  maxSpanAddresses?: number
+}
+
+export type ProviderRangeValidation =
+  | { kind: 'ok'; ranges: string[] } // canonical: network-addr normalized, deduped, containment-collapsed, sorted
+  | { kind: 'invalid'; reasons: string[] }
+
+export interface ProviderRegistryRow {
+  provider: string
+  categories: string[]
+}
+
+export type ProviderRegistryLookup =
+  | { kind: 'mapped'; row: ProviderRegistryRow }
+  | { kind: 'unmapped'; note: string }
+  | undefined
+
+/** The blocked external-egress set (RFC1918/link-local/metadata/CGNAT/…), shared by all controllers (G2). */
+export declare const BLOCKED_EXTERNAL_EGRESS_CIDRS: readonly string[]
+
+/** Strict IPv4 CIDR parse: exactly "a.b.c.d/nn", no trailing garbage or leading-zero octets/prefix. */
+export declare function cidrRange(
+  cidr: string
+): { start: number; end: number; prefix: number; canonical: boolean } | undefined
+
+/** True iff two IPv4 CIDRs share any address. */
+export declare function cidrOverlaps(left: string, right: string): boolean
+
+/** Promoted HCC predicate: a valid public IPv4 CIDR not overlapping the blocked set. */
+export declare function isAllowedExternalEgressCidr(cidr: string): boolean
+
+/** Split CIDRs by family (H5): ipv4 rendered, ipv6 stored inert, invalid rejected loudly by the writer. */
+export declare function partitionCidrsByFamily(
+  cidrs: readonly string[]
+): { ipv4: string[]; ipv6: string[]; invalid: string[] }
+
+/**
+ * Validate + canonicalize declared provider ranges for one binding: syntactic
+ * IPv4 CIDR, prefix >= minPrefixLength, zero overlap with the blocked set, count
+ * cap, span cap, dedup/containment-collapse. Collects ALL reasons; never partial.
+ */
+export declare function validateProviderRanges(
+  ranges: readonly string[],
+  bounds?: ProviderRangeBounds
+): ProviderRangeValidation
+
+/**
+ * Partition one resolution's fresh IPs against declared ranges. `covered` are
+ * enforced by the range rules (do NOT enter the window); `uncovered` are the
+ * residue fed to the window — and the drift-canary signal.
+ */
+export declare function partitionIpsByProviderRanges(
+  ips: readonly string[],
+  ranges: readonly string[]
+): { covered: string[]; uncovered: string[] }
+
+/**
+ * Read the provider-netblocks ConfigMap data (provider-blind: `<provider>.<category>`
+ * keys are opaque). IPv6 keys are skipped (H5); `_meta` is parsed as JSON.
+ */
+export declare function parseProviderNetblocks(
+  cmData: Record<string, string> | undefined
+): { categories: Record<string, string[]>; meta: unknown; errors: string[] }
+
+/**
+ * The single shared classification/validation composition used by the HCC
+ * reconciler, both WRC call sites, and the control-api writer. The registry row
+ * is injected data so this stays provider-blind.
+ */
+export declare function resolveProviderRanges(input: {
+  fqdn: string
+  declaredName: string
+  declaredCategories?: readonly string[]
+  registryLookup: ProviderRegistryLookup
+  cmCategories: Record<string, string[]>
+  bounds: ProviderRangeBounds
+}): { kind: 'ok'; ranges: string[]; categories: string[] } | { kind: 'invalid'; reasons: string[] }

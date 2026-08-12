@@ -43,10 +43,13 @@ export interface DelegationDeps {
 }
 
 type ManifestEgressBinding = {
-  egressClass?: 'exact-host' | 'public-web'
+  egressClass?: 'exact-host' | 'public-web' | 'provider'
   dns?: string
   port?: number
   protocol?: 'TCP' | 'UDP'
+  // issue #299 Phase 2 — provider-netblock intent, delegated verbatim to the
+  // McpServer the workload creates (open strings, catalog-checked at reconcile).
+  provider?: { name: string; categories?: string[] }
 }
 
 type ConditionLike = {
@@ -88,6 +91,7 @@ function sanitizeEgressBindings(
           ...(binding.dns ? { dns: binding.dns } : {}),
           ...(binding.port !== undefined ? { port: binding.port } : {}),
           ...(binding.protocol ? { protocol: binding.protocol } : {}),
+          ...(binding.provider ? { provider: binding.provider } : {}),
         }
   )
 }

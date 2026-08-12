@@ -200,10 +200,16 @@ export interface BindingDef {
 // ─── Egress Binding Definition ──────────────────────────────────────────
 
 export interface EgressBindingDef {
-  egressClass?: 'exact-host' | 'public-web'
+  egressClass?: 'exact-host' | 'public-web' | 'provider'
   dns?: string
   port?: number
   protocol?: 'TCP' | 'UDP'
+  /**
+   * issue #299 Phase 2 — provider-netblock intent (valid only with egressClass
+   * 'provider' + dns). name/categories are OPEN strings validated against the
+   * clerum-provider-netblocks catalog at reconcile, never an enum.
+   */
+  provider?: { name: string; categories?: string[] }
 }
 
 // ─── Supporting Types ───────────────────────────────────────────────────
@@ -403,6 +409,12 @@ export interface SandboxUiExternalEgress {
   fqdn: string
   port: number
   reason?: string
+  /**
+   * issue #299 Phase 2 — provider-netblock intent for this fqdn. Presence opts
+   * this entry into provider-CIDR rendering; name/categories are open strings
+   * validated against the clerum-provider-netblocks catalog at reconcile.
+   */
+  provider?: { name: string; categories?: string[] }
 }
 
 export interface SandboxUiEgress {

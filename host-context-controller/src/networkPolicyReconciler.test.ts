@@ -25,6 +25,9 @@ vi.mock('./config', () => ({
     // #299 sliding-window knobs read by reconcileExternalEgress.
     externalEgressOverlapSec: 300,
     externalEgressMaxEntries: 128,
+    // #299 Phase 2 — provider-CIDR catalog. providerRangeBoundsOverrides omitted
+    // ⇒ the registry per-provider bounds win.
+    providerNetblocksConfigMapName: 'clerum-provider-netblocks',
   },
 }))
 
@@ -56,10 +59,18 @@ function makeMockCustomApi() {
   }
 }
 
+// issue #299 Phase 2 — provider-netblocks catalog reader (HCC only reads it).
+function makeMockCoreApi() {
+  return {
+    readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),
+  }
+}
+
 function makeReconciler(
   mockApi: ReturnType<typeof makeMockNetworkingApi>,
   serverCache?: Map<string, McpServerCRD>,
-  mockCustomApi: ReturnType<typeof makeMockCustomApi> = makeMockCustomApi()
+  mockCustomApi: ReturnType<typeof makeMockCustomApi> = makeMockCustomApi(),
+  mockCoreApi: ReturnType<typeof makeMockCoreApi> = makeMockCoreApi()
 ): NetworkPolicyReconciler {
   const kc = new k8s.KubeConfig()
   kc.loadFromOptions({
@@ -72,6 +83,7 @@ function makeReconciler(
   const reconciler = new NetworkPolicyReconciler(kc, cache)
   ;(reconciler as unknown as { networkingApi: unknown }).networkingApi = mockApi
   ;(reconciler as unknown as { customApi: unknown }).customApi = mockCustomApi
+  ;(reconciler as unknown as { coreApi: unknown }).coreApi = mockCoreApi
   return reconciler
 }
 
@@ -636,6 +648,118 @@ describe('NetworkPolicyReconciler', () => {
             }),
           ]),
         })
+      )
+    })
+
+    // ── issue #299 Phase 2 — provider-CIDR mode (D.3). HCC-7, HCC-9. ──
+    const PROVIDER_API_24 = [
+      '192.30.252.0/22',
+      '185.199.108.0/22',
+      '140.82.112.0/20',
+      '143.55.64.0/20',
+      '20.201.28.148/32',
+      '20.205.243.168/32',
+      '20.87.245.6/32',
+      '4.237.22.34/32',
+      '4.228.31.149/32',
+      '20.207.73.85/32',
+      '20.27.177.116/32',
+      '20.200.245.245/32',
+      '20.175.192.149/32',
+      '20.233.83.146/32',
+      '20.29.134.17/32',
+      '20.199.39.228/32',
+      '20.217.135.0/32',
+      '4.225.11.201/32',
+      '4.208.26.200/32',
+      '20.26.156.210/32',
+      '172.182.252.137/32',
+      '4.249.131.166/32',
+      '48.202.248.39/32',
+      '48.204.201.2/32',
+    ].join('\n')
+
+    const providerServer = (): McpServerCRD => ({
+      name: 'gh-mcp',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'dev',
+        image: 'x:latest',
+        transport: { type: 'streamableHttp', url: 'http://x:3000', port: 3000 },
+        egressBindings: [
+          {
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'github' },
+          },
+        ],
+      },
+    })
+
+    it('HCC-7: a provider binding renders the catalog ranges and stamps provenance', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const r = makeReconciler(mockApi, undefined, makeMockCustomApi(), mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }]) // covered by the /20
+
+      await r.reconcileExternalEgress(providerServer())
+
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const body = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body
+      expect(body.spec.egress).toHaveLength(24) // the 24 catalog ranges; covered IP never entered the window
+      for (const rule of body.spec.egress) {
+        expect(rule.ports).toEqual([{ port: 443, protocol: 'TCP' }])
+      }
+      expect(body.metadata.labels['clerum.io/egress-class']).toBe('provider')
+      expect(body.metadata.annotations['clerum.io/egress-provider-ranges']).toContain(
+        'api.github.com='
+      )
+    })
+
+    it('HCC-9 (H3): a catalog read failure RETAINS the live policy (LKG, never egress loss)', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
+
+      // Phase 1: a successful reconcile creates the policy; capture its name.
+      await r.reconcileExternalEgress(providerServer())
+      const name = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body.metadata
+        .name as string
+
+      // Phase 2: the policy is now live and the catalog read fails.
+      vi.clearAllMocks()
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name,
+              labels: {
+                'clerum.io/policy-type': 'external-egress',
+                'clerum.io/mcpserver': 'gh-mcp',
+              },
+            },
+          },
+        ],
+      })
+      mockCore.readNamespacedConfigMap.mockRejectedValue(
+        Object.assign(new Error('not found'), { statusCode: 404 })
+      )
+
+      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+
+      // H3: the live NetworkPolicy is RETAINED — neither deleted nor rewritten.
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      // Ready=False was surfaced with the rejection reason.
+      expect(JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
+        'ExternalEgressRejected'
       )
     })
 

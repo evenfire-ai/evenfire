@@ -316,3 +316,37 @@ describe('accumulateExternalEgress — H3 eviction / overCap', () => {
     expect(out.resolved.map(r => r.cidr)).toContain('10.0.0.99/32')
   })
 })
+
+describe('accumulateExternalEgress — provider mode (issue #299 Phase 2, WRC-1)', () => {
+  it('renders declared ranges, keeps covered IPs out of the window, and flags uncovered', () => {
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'api.github.com', port: 443, providerRanges: ['140.82.112.0/20'] }],
+      resolveResult: okResolve([
+        { fqdn: 'api.github.com', port: 443, ip: '140.82.121.5', ttlSeconds: 60 }, // covered by the /20
+        { fqdn: 'api.github.com', port: 443, ip: '8.8.8.8', ttlSeconds: 60 }, // uncovered → window + canary
+      ]),
+      previousAnnotations: undefined,
+      now: NOW,
+      config: CONFIG,
+    })
+    const cidrs = out.resolved.map(r => r.cidr).sort()
+    expect(cidrs).toEqual(['140.82.112.0/20', '8.8.8.8/32'])
+    // The covered IP never entered the /32 window; only the uncovered one did.
+    expect(out.entries.map(e => e.ip)).toEqual(['8.8.8.8'])
+    expect(out.uncoveredFreshIpsByFqdn).toEqual({ 'api.github.com': ['8.8.8.8'] })
+  })
+
+  it('is byte-identical /32 mode without providerRanges (no canary)', () => {
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'api.example.com', port: 443 }],
+      resolveResult: okResolve([
+        { fqdn: 'api.example.com', port: 443, ip: '203.0.113.5', ttlSeconds: 60 },
+      ]),
+      previousAnnotations: undefined,
+      now: NOW,
+      config: CONFIG,
+    })
+    expect(out.resolved.map(r => r.cidr)).toEqual(['203.0.113.5/32'])
+    expect(out.uncoveredFreshIpsByFqdn).toEqual({})
+  })
+})

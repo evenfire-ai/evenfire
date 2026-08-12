@@ -4,10 +4,10 @@
  * (`@clerum/network-policy-core`), for issue #299.
  *
  * The resolver produces a single-generation DNS snapshot (one /32 per A record
- * of this reconcile). A provider that serves ONE rotating A record (GitHub's
- * api.github.com, TTL ~15s over 140.82.112.0/20) makes that snapshot pin one IP
- * of ~16, so the pod's next resolution lands on an un-pinned IP and the
- * NetworkPolicy drops it. This adapter folds each snapshot into the accumulated
+ * of this reconcile). A provider that serves ONE rotating A record out of a
+ * large pool (TTL ~15-60s) makes that snapshot pin one IP of many, so the pod's
+ * next resolution lands on an un-pinned IP and the NetworkPolicy drops it. This
+ * adapter folds each snapshot into the accumulated
  * set persisted on the policy's annotations, so the effective egress set is the
  * union of recently-live IPs rather than a single photo.
  *
@@ -32,6 +32,7 @@ import {
   RESOLVED_AT_ANNOTATION,
   emptyState,
   parseState,
+  partitionIpsByProviderRanges,
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
@@ -42,6 +43,11 @@ import type { ResolvedExternalEgressInput } from './resourceBuilder'
 export interface DeclaredExternal {
   fqdn: string
   port: number
+  /**
+   * Phase 2 (issue #299): canonicalized provider ranges resolved from the
+   * clerum-provider-netblocks catalog for this fqdn. Undefined ⇒ pure /32 mode.
+   */
+  providerRanges?: readonly string[]
 }
 
 export interface AccumulateInput {
@@ -73,6 +79,12 @@ export interface AccumulateOutput {
   overCap: boolean
   /** FQDNs frozen this round because their observation was transient. */
   frozenFqdns: string[]
+  /**
+   * Per-fqdn fresh IPs that resolved OUTSIDE the declared provider ranges (the
+   * drift canary). One policy carries many fqdns, so this is keyed by fqdn. Empty
+   * for /32-mode fqdns and on non-ok resolutions.
+   */
+  uncoveredFreshIpsByFqdn: Record<string, string[]>
 }
 
 /**
@@ -85,7 +97,7 @@ export interface AccumulateOutput {
 function buildObservations(
   externals: DeclaredExternal[],
   resolveResult: ResolveResult
-): Observation[] {
+): { observations: Observation[]; uncoveredByFqdn: Record<string, string[]> } {
   // A failing fqdn yields one failure per declared entry; retryability is
   // consistent per fqdn (one lookup), so index by fqdn.
   const retryableByFqdn = new Map<string, boolean>()
@@ -109,6 +121,7 @@ function buildObservations(
   }
 
   const observations: Observation[] = []
+  const uncoveredByFqdn: Record<string, string[]> = {}
   for (const ext of externals) {
     const failure = retryableByFqdn.get(ext.fqdn)
     if (failure !== undefined) {
@@ -120,15 +133,23 @@ function buildObservations(
       continue
     }
     const ok = okByFqdn.get(ext.fqdn)
+    let ips = ok?.ips ?? []
+    // Phase 2 (provider mode): covered IPs are already allowed by the range rule,
+    // so only the residual (uncovered) IPs ride the /32 window and feed the canary.
+    if (ext.providerRanges && ext.providerRanges.length > 0 && ips.length > 0) {
+      const { uncovered } = partitionIpsByProviderRanges(ips, ext.providerRanges)
+      ips = uncovered
+      if (uncovered.length > 0) uncoveredByFqdn[ext.fqdn] = uncovered
+    }
     observations.push({
       fqdn: ext.fqdn,
       port: ext.port,
       kind: 'ok',
-      ips: ok?.ips ?? [],
+      ips,
       ttlMs: ok?.ttlMs ?? 0,
     })
   }
-  return observations
+  return { observations, uncoveredByFqdn }
 }
 
 /**
@@ -145,14 +166,31 @@ export function accumulateExternalEgress(input: AccumulateInput): AccumulateOutp
     ? parseState(previousAnnotations, now, config, externals)
     : emptyState()
 
-  const observations = buildObservations(externals, resolveResult)
+  const { observations, uncoveredByFqdn } = buildObservations(externals, resolveResult)
   const out = reconcileEgressState(previous, observations, now, config)
 
-  const resolved: ResolvedExternalEgressInput[] = out.entries.map(entry => ({
-    cidr: `${entry.ip}/32`,
-    port: entry.port,
-    source: { kind: 'fqdn', fqdn: entry.fqdn },
-  }))
+  // Effective rendered set = declared provider ranges (per fqdn) ∪ residual /32
+  // window entries, deduped on (cidr,port). With no providerRanges anywhere the
+  // range list is empty and this is byte-identical to Phase 1 (residual only).
+  const seen = new Set<string>()
+  const rangeRules: ResolvedExternalEgressInput[] = []
+  for (const ext of externals) {
+    if (!ext.providerRanges) continue
+    for (const range of ext.providerRanges) {
+      const key = `${range}\u0000${ext.port}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      rangeRules.push({ cidr: range, port: ext.port, source: { kind: 'fqdn', fqdn: ext.fqdn } })
+    }
+  }
+  const residualRules = out.entries
+    .map(entry => ({
+      cidr: `${entry.ip}/32`,
+      port: entry.port,
+      source: { kind: 'fqdn' as const, fqdn: entry.fqdn },
+    }))
+    .filter(r => !seen.has(`${r.cidr}\u0000${r.port}`))
+  const resolved: ResolvedExternalEgressInput[] = [...rangeRules, ...residualRules]
 
   const annotations: Record<string, string> = {
     ...serializeState(out.state),
@@ -168,5 +206,6 @@ export function accumulateExternalEgress(input: AccumulateInput): AccumulateOutp
     evicted: out.evicted,
     overCap: out.overCap,
     frozenFqdns: out.frozenFqdns,
+    uncoveredFreshIpsByFqdn: uncoveredByFqdn,
   }
 }

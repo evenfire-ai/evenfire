@@ -153,4 +153,127 @@ describe('accumulateHostExactHostEgress — issue #299 sliding window (HCC)', ()
     expect(r.annotations[STATE_ANNOTATION]).toBeTruthy()
     expect(r.annotations[RESOLVED_AT_ANNOTATION]).toBe(new Date(T0).toISOString())
   })
+
+  // ── issue #299 Phase 2 — provider-CIDR mode (D.2). HCC-1..6. ──
+  const API_24 = [
+    '192.30.252.0/22',
+    '185.199.108.0/22',
+    '140.82.112.0/20',
+    '143.55.64.0/20',
+    '20.201.28.148/32',
+    '20.205.243.168/32',
+    '20.87.245.6/32',
+    '4.237.22.34/32',
+    '4.228.31.149/32',
+    '20.207.73.85/32',
+    '20.27.177.116/32',
+    '20.200.245.245/32',
+    '20.175.192.149/32',
+    '20.233.83.146/32',
+    '20.29.134.17/32',
+    '20.199.39.228/32',
+    '20.217.135.0/32',
+    '4.225.11.201/32',
+    '4.208.26.200/32',
+    '20.26.156.210/32',
+    '172.182.252.137/32',
+    '4.249.131.166/32',
+    '48.202.248.39/32',
+    '48.204.201.2/32',
+  ]
+  const stateEntries = (annotations: Record<string, string>) =>
+    JSON.parse(annotations[STATE_ANNOTATION] ?? '[]') as unknown[]
+
+  it('HCC-1: covered IPs render as ranges only; none enter the window', () => {
+    const r = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['140.82.121.5', '140.82.121.6'], 15), providerRanges: API_24 })
+    )
+    expect(new Set(r.cidrs)).toEqual(new Set(API_24))
+    expect(r.cidrs).toHaveLength(24)
+    expect(r.uncoveredFreshIps).toEqual([])
+    expect(stateEntries(r.annotations)).toEqual([]) // covered IPs never enter the /32 window
+  })
+
+  it('HCC-2: an uncovered fresh IP rides the window and fires the drift canary', () => {
+    const r = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['140.82.121.5', '8.8.8.8'], 15), providerRanges: API_24 })
+    )
+    expect(new Set(r.cidrs)).toEqual(new Set([...API_24, '8.8.8.8/32']))
+    expect(r.cidrs).toHaveLength(25)
+    expect(r.uncoveredFreshIps).toEqual(['8.8.8.8'])
+  })
+
+  it('HCC-3 (G1): without providerRanges the output is /32 mode with no canary', () => {
+    const r = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['140.82.112.3', '140.82.112.4'], 15) })
+    )
+    expect(r.cidrs).toEqual(['140.82.112.3/32', '140.82.112.4/32'])
+    expect(r.uncoveredFreshIps).toEqual([])
+    expect(r.changed).toBe(true)
+  })
+
+  it('HCC-4 (H8): steady state with a different covered IP writes nothing', () => {
+    const r1 = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['140.82.121.5'], 15), providerRanges: API_24 })
+    )
+    const r2 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: ok(['140.82.121.6'], 15), // a DIFFERENT covered IP
+        providerRanges: API_24,
+        previousAnnotations: r1.annotations,
+        now: T0 + 5_000,
+      })
+    )
+    expect(r2.changed).toBe(false)
+    expect(r2.renewalDue).toBe(false)
+    expect(new Set(r2.cidrs)).toEqual(new Set(API_24))
+  })
+
+  it('HCC-5 (H8 drain): pre-existing /32s covered by new ranges drain then stop writing', () => {
+    // Seed Phase-1 state with three /32 entries (no providerRanges yet).
+    const seed = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['140.82.112.10', '140.82.112.11', '140.82.112.12'], 15) })
+    )
+    expect(seed.cidrs).toHaveLength(3)
+    const ranges = ['140.82.112.0/20'] // covers all three seeded /32s
+    const r1 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: ok(['140.82.121.9'], 15), // covered → nothing new enters the window
+        providerRanges: ranges,
+        previousAnnotations: seed.annotations,
+        now: T0 + 320_000, // past TTL+overlap → the seeded /32s expire
+      })
+    )
+    expect(r1.changed).toBe(true) // drain write
+    expect(stateEntries(r1.annotations)).toEqual([])
+    expect(r1.cidrs).toEqual(ranges)
+    const r2 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: ok(['140.82.121.8'], 15),
+        providerRanges: ranges,
+        previousAnnotations: r1.annotations,
+        now: T0 + 330_000,
+      })
+    )
+    expect(r2.changed).toBe(false)
+    expect(r2.cidrs).toEqual(ranges)
+  })
+
+  it('HCC-6: a transient failure keeps frozen residual /32s alongside the provider ranges', () => {
+    const r1 = accumulateHostExactHostEgress(
+      baseInput({ resolution: ok(['8.8.8.8', '9.9.9.9'], 15), providerRanges: API_24 })
+    )
+    expect(r1.uncoveredFreshIps).toEqual(['8.8.8.8', '9.9.9.9'])
+    const r2 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: { kind: 'transient' },
+        providerRanges: API_24,
+        previousAnnotations: r1.annotations,
+        now: T0 + 400_000, // past TTL+overlap: fail-static must freeze
+      })
+    )
+    expect(r2.frozen).toBe(true)
+    expect(new Set(r2.cidrs)).toEqual(new Set([...API_24, '8.8.8.8/32', '9.9.9.9/32']))
+    expect(r2.uncoveredFreshIps).toEqual([])
+  })
 })

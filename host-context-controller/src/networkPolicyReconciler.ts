@@ -16,7 +16,13 @@
 import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
-import { STATE_ANNOTATION, classifyDnsError } from '@clerum/network-policy-core'
+import {
+  STATE_ANNOTATION,
+  classifyDnsError,
+  parseProviderNetblocks,
+  resolveProviderRanges,
+} from '@clerum/network-policy-core'
+import { lookupFqdnProvider, providerBounds } from '@clerum/network-policy-core/providerRegistry'
 import { config } from './config'
 import {
   EXTERNAL_EGRESS_POLICY_TYPE,
@@ -27,6 +33,7 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
+import { externalEgressProviderDriftTotal } from './metrics'
 import {
   ContextCRD,
   EgressBinding,
@@ -201,6 +208,10 @@ function k8sApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
 export class NetworkPolicyReconciler {
   private networkingApi: k8s.NetworkingV1Api
   private customApi: k8s.CustomObjectsApi
+  // issue #299 Phase 2 — reads the provider-netblocks catalog ConfigMap (HCC never writes it).
+  private coreApi: k8s.CoreV1Api
+  // H7: last drift-warning epoch (ms) per policy, for the transition/1h log throttle.
+  private providerDriftLastWarned = new Map<string, number>()
 
   /** Reference to the MCP server cache so we can look up ports. */
   private serverCache: Map<string, McpServerCRD>
@@ -215,7 +226,29 @@ export class NetworkPolicyReconciler {
   constructor(kc: k8s.KubeConfig, serverCache: Map<string, McpServerCRD>) {
     this.networkingApi = kc.makeApiClient(k8s.NetworkingV1Api)
     this.customApi = kc.makeApiClient(k8s.CustomObjectsApi)
+    this.coreApi = kc.makeApiClient(k8s.CoreV1Api)
     this.serverCache = serverCache
+  }
+
+  // issue #299 Phase 2 — H7: log the provider-range drift canary on TRANSITION
+  // (or at most once per hour per policy) so chronic drift does not spam the log
+  // every resync. The metric is unthrottled; the paging alert is an ops concern.
+  private warnProviderDrift(
+    namespace: string,
+    policyName: string,
+    dns: string,
+    ips: string[]
+  ): void {
+    const key = `${namespace}/${policyName}`
+    const now = Date.now()
+    const last = this.providerDriftLastWarned.get(key)
+    if (last !== undefined && now - last < 3_600_000) return
+    this.providerDriftLastWarned.set(key, now)
+    console.warn(
+      `[NetPol] provider-range drift for "${dns}" (policy ${namespace}/${policyName}): ` +
+        `resolved IP(s) outside declared ranges: ${ips.join(', ')} — declared ranges may be ` +
+        `stale or the host is mis-mapped (issue #299)`
+    )
   }
 
   /**
@@ -859,9 +892,43 @@ export class NetworkPolicyReconciler {
     const failures: string[] = []
     const resolvedAt = new Date().toISOString()
 
+    // issue #299 Phase 2 — read the provider-netblocks catalog ONCE per reconcile,
+    // only when some binding declares provider mode. HCC only READS this CM
+    // (control-api materializes it). A read failure is NON-FATAL: provider bindings
+    // fall to the H3 retain-NP path (LKG, Ready=False), never egress loss;
+    // non-provider bindings are unaffected.
+    let netblocksCm: { categories: Record<string, string[]> } | null = null
+    let netblocksCmError: string | null = null
+    if (bindings.some(b => b.egressClass === 'provider')) {
+      try {
+        const cm = await this.coreApi.readNamespacedConfigMap({
+          name: config.providerNetblocksConfigMapName,
+          namespace: config.controlPlaneNamespace,
+        })
+        netblocksCm = parseProviderNetblocks(cm.data)
+      } catch (err) {
+        netblocksCmError = `failed to read ConfigMap "${config.providerNetblocksConfigMapName}": ${this.errorMessage(err)}`
+      }
+    }
+
+    // H4: a policy NAME is (server,dns,port)-derived, so two bindings on the same
+    // (dns,port) would render the same name with different specs → write thrash.
+    // Count (dns,port) pairs up front so colliding bindings can fail loud below.
+    const dnsPortCounts = new Map<string, number>()
+    for (const b of bindings) {
+      if (b.dns && b.port !== undefined) {
+        const k = `${b.dns} ${b.port}`
+        dnsPortCounts.set(k, (dnsPortCounts.get(k) ?? 0) + 1)
+      }
+    }
+
     for (const binding of bindings) {
       const egressClass = binding.egressClass ?? 'exact-host'
-      if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
+      if (
+        egressClass !== 'exact-host' &&
+        egressClass !== 'public-web' &&
+        egressClass !== 'provider'
+      ) {
         failures.push(`egressClass "${String(binding.egressClass)}" is not supported`)
         continue
       }
@@ -963,6 +1030,61 @@ export class NetworkPolicyReconciler {
         continue
       }
 
+      // H4: a colliding (dns,port) would overwrite another binding's policy — fail
+      // loud and RETAIN any live NP rather than thrash between two specs.
+      if (
+        binding.dns &&
+        binding.port !== undefined &&
+        (dnsPortCounts.get(`${binding.dns} ${binding.port}`) ?? 0) > 1
+      ) {
+        if (existingPolicy) desiredPolicyNames.add(name)
+        failures.push(
+          `duplicate egress binding for "${binding.dns}:${binding.port}" — NetworkPolicy names would collide`
+        )
+        continue
+      }
+
+      // A provider object is only meaningful on a provider-class binding.
+      if (egressClass !== 'provider' && binding.provider !== undefined) {
+        failures.push('provider declarations require egressClass "provider"')
+        continue
+      }
+
+      // issue #299 Phase 2 — resolve provider ranges from the catalog. H3: on ANY
+      // spec/CM problem, RETAIN the live NP (add its name to desiredPolicyNames so
+      // the stale-policy GC below does not delete it) and fail loud — a CM outage
+      // becomes LKG + Ready=False, NEVER egress loss.
+      let providerRanges: string[] | undefined
+      if (egressClass === 'provider') {
+        if (!binding.dns || binding.cidr) {
+          failures.push('provider egress bindings must declare dns (and must not declare cidr)')
+          if (existingPolicy) desiredPolicyNames.add(name)
+          continue
+        }
+        if (netblocksCmError || !netblocksCm) {
+          failures.push(netblocksCmError ?? 'provider netblocks catalog unavailable')
+          if (existingPolicy) desiredPolicyNames.add(name)
+          continue
+        }
+        const resolved = resolveProviderRanges({
+          fqdn: binding.dns,
+          declaredName: binding.provider?.name ?? '',
+          declaredCategories: binding.provider?.categories,
+          registryLookup: lookupFqdnProvider(binding.dns),
+          cmCategories: netblocksCm.categories,
+          bounds: {
+            ...providerBounds(binding.provider?.name ?? ''),
+            ...(config.providerRangeBoundsOverrides ?? {}),
+          },
+        })
+        if (resolved.kind === 'invalid') {
+          failures.push(`provider egress for "${binding.dns}": ${resolved.reasons.join('; ')}`)
+          if (existingPolicy) desiredPolicyNames.add(name)
+          continue
+        }
+        providerRanges = resolved.ranges
+      }
+
       if (binding.cidr) {
         if (!isAllowedExternalEgressCidr(binding.cidr)) {
           failures.push(
@@ -1031,6 +1153,7 @@ export class NetworkPolicyReconciler {
             previousAnnotations,
             now,
             config: coreConfig,
+            providerRanges,
           })
           // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own
           // annotations) bypass the fresh-snapshot CIDR gate, so a tampered/corrupt
@@ -1045,6 +1168,23 @@ export class NetworkPolicyReconciler {
             ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
             resolvedAt,
           })
+          // issue #299 Phase 2 — drift canary (H7): count + throttled-log any fresh
+          // IP that resolved OUTSIDE the declared ranges (they may be stale or the
+          // host mis-mapped). Availability is preserved — those IPs enter the /32
+          // window — but the signal is loud. Clear the throttle when drift resolves.
+          if (providerRanges) {
+            if (accumulated.uncoveredFreshIps.length > 0) {
+              externalEgressProviderDriftTotal.inc({ server: server.name, dns: binding.dns })
+              this.warnProviderDrift(
+                server.namespace,
+                name,
+                binding.dns,
+                accumulated.uncoveredFreshIps
+              )
+            } else {
+              this.providerDriftLastWarned.delete(`${server.namespace}/${name}`)
+            }
+          }
           if (accumulated.overCap) {
             console.warn(
               `[NetPol] "${binding.dns}" egress set hit the cap (${config.externalEgressMaxEntries}); evicted ${accumulated.evicted} least-recently-observed IP(s)`
@@ -1064,6 +1204,7 @@ export class NetworkPolicyReconciler {
             previousAnnotations,
             now,
             config: coreConfig,
+            providerRanges,
           })
           if (accumulated.cidrs.length === 0) {
             failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
@@ -1108,7 +1249,20 @@ export class NetworkPolicyReconciler {
           },
           // Persist the sliding-window state so the next reconcile rehydrates the
           // accumulated set instead of collapsing to a single snapshot (#299).
-          ...(stateAnnotations ? { annotations: stateAnnotations } : {}),
+          // Provider mode also stamps a provenance annotation — EXCLUDED from the
+          // write-gate identity (egressSignature hashes spec only, :142-151).
+          ...(stateAnnotations
+            ? {
+                annotations: {
+                  ...stateAnnotations,
+                  ...(providerRanges
+                    ? {
+                        'clerum.io/egress-provider-ranges': `${binding.dns}=${providerRanges.join(',')}`,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
         },
         spec: {
           podSelector: {

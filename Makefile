@@ -811,6 +811,11 @@ test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-d
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
 
+.PHONY: test-e2e-provider-cidr-egress
+test-e2e-provider-cidr-egress: ## Run issue #299 Phase 2 provider-CIDR egress render + admission + H3 + drift E2E gate (minikube; Calico)
+	@echo "Running provider-CIDR egress E2E gate (issue #299 Phase 2)..."
+	CONTEXT=$(MINIKUBE_PROFILE) MINIKUBE_PROFILE=$(MINIKUBE_PROFILE) bash scripts/e2e/e2e-provider-cidr-egress.sh
+
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)
 	@echo "Running Plugin Workload SDK E2E gate..."
@@ -982,6 +987,19 @@ sync-check: ## Diff prod vs minikube manifests, alert divergences
 	else \
 		echo "Skipped: deploy/overlays/minikube/ or charts/ not found."; \
 	fi
+
+# ── Generality gate (issue #299 Phase 2) ────────────────────────────
+.PHONY: validate-provider-generality
+validate-provider-generality: ## Fail if a provider name leaks into a provider-blind layer (forbidden set derived from providerRegistry)
+	@./scripts/ci/check-provider-generality.sh
+
+.PHONY: vendor-provider-netblocks
+vendor-provider-netblocks: ## Regenerate the provider-netblocks seed ConfigMap from live provider feeds (issue #299)
+	@node scripts/vendor-provider-netblocks.mjs
+
+.PHONY: validate-provider-netblocks-seed
+validate-provider-netblocks-seed: ## Validate the vendored provider-netblocks seed parses and passes core bounds
+	@node scripts/ci/validate-provider-netblocks-seed.mjs
 
 # ── Full Pipeline ────────────────────────────────────────────────────
 .PHONY: validate-all

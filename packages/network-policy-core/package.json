@@ -10,11 +10,16 @@
       "types": "./index.d.ts",
       "require": "./index.cjs",
       "default": "./index.cjs"
+    },
+    "./providerRegistry": {
+      "types": "./providerRegistry.d.ts",
+      "require": "./providerRegistry.cjs",
+      "default": "./providerRegistry.cjs"
     }
   },
   "scripts": {
     "build": "node --check index.cjs",
-    "test": "node --test index.test.cjs"
+    "test": "node --test index.test.cjs providerRegistry.test.cjs"
   },
   "license": "MIT"
 }

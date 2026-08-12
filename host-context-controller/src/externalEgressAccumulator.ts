@@ -5,9 +5,9 @@
  *
  * HCC's `reconcileExternalEgress` materializes a single-generation DNS snapshot
  * per McpServer egress binding (`dns.resolve4(binding.dns)` → one /32 per A
- * record). A provider that serves ONE rotating A record (GitHub's api.github.com,
- * TTL ~15s over 140.82.112.0/20) makes that snapshot pin one IP of ~16, so the
- * pod's next resolution lands on an un-pinned IP and the NetworkPolicy drops it.
+ * record). A provider that serves ONE rotating A record out of a large pool
+ * (TTL ~15-60s) makes that snapshot pin one IP of many, so the pod's next
+ * resolution lands on an un-pinned IP and the NetworkPolicy drops it.
  *
  * This adapter folds each per-binding snapshot into the accumulated set persisted
  * on THAT policy's annotations, so the effective egress set is the union of
@@ -29,6 +29,7 @@ import {
   RESOLVED_AT_ANNOTATION,
   emptyState,
   parseState,
+  partitionIpsByProviderRanges,
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
@@ -53,6 +54,12 @@ export interface AccumulateHostEgressInput {
   /** Injected clock (epoch ms). */
   now: number
   config: EgressCoreConfig
+  /**
+   * Phase 2 (issue #299): canonicalized provider ranges resolved from the
+   * clerum-provider-netblocks catalog (output of core resolveProviderRanges).
+   * Undefined ⇒ pure /32 mode (byte-identical to Phase 1).
+   */
+  providerRanges?: readonly string[]
 }
 
 export interface AccumulateHostEgressOutput {
@@ -70,6 +77,11 @@ export interface AccumulateHostEgressOutput {
   evicted: number
   /** True iff the cap was hit and eviction happened. */
   overCap: boolean
+  /**
+   * Fresh resolved IPs OUTSIDE every declared provider range this round (the
+   * drift canary). Always empty in /32 mode and on non-ok resolutions.
+   */
+  uncoveredFreshIps: string[]
 }
 
 /**
@@ -80,7 +92,8 @@ export interface AccumulateHostEgressOutput {
 export function accumulateHostExactHostEgress(
   input: AccumulateHostEgressInput
 ): AccumulateHostEgressOutput {
-  const { fqdn, port, protocol, resolution, previousAnnotations, now, config } = input
+  const { fqdn, port, protocol, resolution, previousAnnotations, now, config, providerRanges } =
+    input
 
   // This policy owns exactly one exact-host binding, so its declared identity is
   // (fqdn,port,protocol). Pass it so a legacy (portless) migration keeps that
@@ -89,17 +102,28 @@ export function accumulateHostExactHostEgress(
     ? parseState(previousAnnotations, now, config, [{ fqdn, port, protocol }])
     : emptyState()
 
+  // Phase 2 (provider mode): fresh IPs already inside a declared range are allowed
+  // by the range rule, so they never enter the /32 window (state shrinks). Only
+  // the residual (uncovered) IPs ride the window and feed the drift canary.
+  let uncoveredFreshIps: string[] = []
+  let effectiveResolution = resolution
+  if (providerRanges && providerRanges.length > 0 && resolution.kind === 'ok') {
+    const { uncovered } = partitionIpsByProviderRanges(resolution.ips, providerRanges)
+    uncoveredFreshIps = uncovered
+    effectiveResolution = { ...resolution, ips: uncovered }
+  }
+
   let observation: Observation
-  if (resolution.kind === 'ok') {
+  if (effectiveResolution.kind === 'ok') {
     observation = {
       fqdn,
       port,
       protocol,
       kind: 'ok',
-      ips: resolution.ips,
-      ttlMs: resolution.ttlSeconds * 1000,
+      ips: effectiveResolution.ips,
+      ttlMs: effectiveResolution.ttlSeconds * 1000,
     }
-  } else if (resolution.kind === 'transient') {
+  } else if (effectiveResolution.kind === 'transient') {
     observation = { fqdn, port, protocol, kind: 'transient' }
   } else {
     observation = { fqdn, port, protocol, kind: 'permanent' }
@@ -107,8 +131,14 @@ export function accumulateHostExactHostEgress(
 
   const out = reconcileEgressState(previous, [observation], now, config)
 
+  // Effective rendered set = declared provider ranges ∪ residual /32 window.
+  // Deduped + sorted for a deterministic policy spec. In /32 mode (no ranges)
+  // this is byte-identical to Phase 1 (the residual list is already sorted+unique).
+  const residual = out.entries.map(entry => `${entry.ip}/32`)
+  const cidrs = [...new Set([...(providerRanges ?? []), ...residual])].sort()
+
   return {
-    cidrs: out.entries.map(entry => `${entry.ip}/32`),
+    cidrs,
     annotations: {
       ...serializeState(out.state),
       [RESOLVED_AT_ANNOTATION]: new Date(now).toISOString(),
@@ -118,5 +148,6 @@ export function accumulateHostExactHostEgress(
     frozen: out.frozenFqdns.includes(fqdn),
     evicted: out.evicted.length,
     overCap: out.overCap,
+    uncoveredFreshIps,
   }
 }

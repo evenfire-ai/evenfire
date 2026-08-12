@@ -45,6 +45,7 @@ interface EgressBinding {
   cidr?: unknown
   port?: unknown
   protocol?: unknown
+  provider?: unknown
 }
 
 export type DnsResolver = (hostname: string) => Promise<string[]>
@@ -282,10 +283,14 @@ export function validateMcpServerSpec(
         }
         const binding = rawBinding as EgressBinding
         const egressClass = binding.egressClass ?? 'exact-host'
-        if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
+        if (
+          egressClass !== 'exact-host' &&
+          egressClass !== 'public-web' &&
+          egressClass !== 'provider'
+        ) {
           errors.push({
             field: `${field}.egressClass`,
-            message: 'egressClass must be exact-host or public-web',
+            message: 'egressClass must be exact-host, public-web, or provider',
           })
           return
         }
@@ -304,31 +309,83 @@ export function validateMcpServerSpec(
           return
         }
 
-        const hasDns = typeof binding.dns === 'string' && binding.dns.trim().length > 0
-        const hasCidr = typeof binding.cidr === 'string' && binding.cidr.trim().length > 0
-        if (hasDns === hasCidr) {
-          errors.push({
-            field,
-            message: 'exact-host egressBindings must declare exactly one of dns or cidr',
-          })
-        }
-        if (hasDns) {
-          const dns = (binding.dns as string).trim()
-          if (!isPublicDnsHostname(dns)) {
-            errors.push({
-              field: `${field}.dns`,
-              message: 'dns must be a public DNS hostname',
-            })
-          }
-        }
-        if (hasCidr) {
-          const cidr = (binding.cidr as string).trim()
-          const cidrError = validatePublicCidr(cidr)
-          if (cidrError) {
+        if (egressClass === 'provider') {
+          // issue #299 Phase 2 — provider mode: dns required (public), cidr
+          // forbidden, and a provider object with an open-string name. Validity of
+          // name/categories against the catalog is a reconcile-time check (G4).
+          if (binding.cidr !== undefined) {
             errors.push({
               field: `${field}.cidr`,
-              message: cidrError,
+              message: 'provider egressBindings must not declare cidr',
             })
+          }
+          const hasDns = typeof binding.dns === 'string' && binding.dns.trim().length > 0
+          if (!hasDns) {
+            errors.push({
+              field: `${field}.dns`,
+              message: 'provider egressBindings must declare dns',
+            })
+          } else if (!isPublicDnsHostname((binding.dns as string).trim())) {
+            errors.push({ field: `${field}.dns`, message: 'dns must be a public DNS hostname' })
+          }
+          if (!isPlainObject(binding.provider)) {
+            errors.push({
+              field: `${field}.provider`,
+              message: 'provider egressBindings must declare a provider object with name',
+            })
+          } else {
+            const p = binding.provider as { name?: unknown; categories?: unknown }
+            if (typeof p.name !== 'string' || !/^[a-z0-9-]{1,63}$/.test(p.name)) {
+              errors.push({
+                field: `${field}.provider.name`,
+                message: 'provider.name must be a lowercase alphanumeric-dash string (1-63 chars)',
+              })
+            }
+            if (
+              p.categories !== undefined &&
+              (!Array.isArray(p.categories) ||
+                p.categories.length > 10 ||
+                p.categories.some(c => typeof c !== 'string' || c.length < 1 || c.length > 63))
+            ) {
+              errors.push({
+                field: `${field}.provider.categories`,
+                message: 'provider.categories must be an array of up to 10 non-empty strings',
+              })
+            }
+          }
+        } else {
+          if (binding.provider !== undefined) {
+            errors.push({
+              field: `${field}.provider`,
+              message: 'provider declarations require egressClass "provider"',
+            })
+          }
+          const hasDns = typeof binding.dns === 'string' && binding.dns.trim().length > 0
+          const hasCidr = typeof binding.cidr === 'string' && binding.cidr.trim().length > 0
+          if (hasDns === hasCidr) {
+            errors.push({
+              field,
+              message: 'exact-host egressBindings must declare exactly one of dns or cidr',
+            })
+          }
+          if (hasDns) {
+            const dns = (binding.dns as string).trim()
+            if (!isPublicDnsHostname(dns)) {
+              errors.push({
+                field: `${field}.dns`,
+                message: 'dns must be a public DNS hostname',
+              })
+            }
+          }
+          if (hasCidr) {
+            const cidr = (binding.cidr as string).trim()
+            const cidrError = validatePublicCidr(cidr)
+            if (cidrError) {
+              errors.push({
+                field: `${field}.cidr`,
+                message: cidrError,
+              })
+            }
           }
         }
         if (
@@ -350,6 +407,30 @@ export function validateMcpServerSpec(
           errors.push({ field: `${field}.protocol`, message: 'protocol must be TCP or UDP' })
         }
       })
+
+      // H4: two bindings on the same (dns,port) render the same NetworkPolicy name
+      // with different specs → write thrash. Reject both loudly (parity with the
+      // reconciler guard and the CRD spec-level CEL).
+      const seenDnsPort = new Map<string, number[]>()
+      s.egressBindings.forEach((raw, i) => {
+        if (!isPlainObject(raw)) return
+        const b = raw as EgressBinding
+        if (typeof b.dns === 'string' && typeof b.port === 'number') {
+          const k = `${b.dns.trim()} ${b.port}`
+          seenDnsPort.set(k, [...(seenDnsPort.get(k) ?? []), i])
+        }
+      })
+      for (const [k, idxs] of seenDnsPort) {
+        if (idxs.length > 1) {
+          const [dns, port] = k.split(' ')
+          idxs.forEach(i =>
+            errors.push({
+              field: `spec.egressBindings[${i}]`,
+              message: `duplicate (dns, port) binding "${dns}:${port}" — NetworkPolicy names would collide`,
+            })
+          )
+        }
+      }
     }
   }
   if (
@@ -401,7 +482,11 @@ export async function validateMcpServerSpecPreflight(
     if (!isPlainObject(rawBinding)) return
     const binding = rawBinding as EgressBinding
     const egressClass = binding.egressClass ?? 'exact-host'
-    if (egressClass !== 'exact-host' || typeof binding.dns !== 'string') return
+    if (
+      (egressClass !== 'exact-host' && egressClass !== 'provider') ||
+      typeof binding.dns !== 'string'
+    )
+      return
     const dns = binding.dns.trim()
     if (!isPublicDnsHostname(dns)) return
     const fields = hostFields.get(dns) ?? []

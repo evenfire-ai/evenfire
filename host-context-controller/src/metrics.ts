@@ -201,3 +201,14 @@ export const hostDeleteCleanupTotal = counter({
   help: 'Host deletion cleanup by outcome (queued/confirmed/completed/retried/superseded).',
   labelNames: ['outcome'] as const,
 })
+
+// issue #299 Phase 2 — provider-CIDR drift canary. Incremented every reconcile
+// in which a provider-mode binding resolved IP(s) OUTSIDE its declared ranges
+// (the declared ranges may be stale or the host mis-mapped). Availability is
+// still protected — those IPs enter the /32 window — but this makes staleness
+// loud. Low-cardinality: `dns` is the declared host, never a resolved IP.
+export const externalEgressProviderDriftTotal = counter({
+  name: 'clerum_hcc_external_egress_provider_drift_total',
+  help: 'Resolved IPs outside declared provider ranges (issue #299 drift canary).',
+  labelNames: ['server', 'dns'] as const,
+})

@@ -49,6 +49,11 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
     resourceNames: ["clerum-wrc-public-key"]
+  # issue #299 Phase 2: read-only access to the provider netblocks catalog.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["clerum-provider-netblocks"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -83,3 +88,62 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list"]
+---
+# issue #299 Phase 2: provider-netblocks catalog. Writer scoped to the ONE CM
+# name (G5). `create` cannot carry resourceNames (K8s authz evaluates create
+# before the name exists); the seed ships in deploy/base so create is only the
+# fresh-cluster path.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-provider-netblocks-writer
+  namespace: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "update", "patch"]
+    resourceNames: ["clerum-provider-netblocks"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-provider-netblocks-writer
+  namespace: control-plane
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-provider-netblocks-writer
+---
+# HCC reads the catalog on its existing resync (no HCC ConfigMap Role exists in
+# control-plane today).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-provider-netblocks-reader
+  namespace: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["clerum-provider-netblocks"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-provider-netblocks-reader
+  namespace: control-plane
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-provider-netblocks-reader

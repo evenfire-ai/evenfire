@@ -112,3 +112,12 @@ export const governedTraceGapsTotal = counter({
   help: 'WRC governed trace evidence gaps that block complete trace or cost coverage',
   labelNames: ['family', 'type', 'reason'] as const,
 })
+
+// issue #299 Phase 2 — provider-CIDR drift canary. Incremented every reconcile
+// per fqdn that resolved IP(s) OUTSIDE its declared provider ranges (unthrottled;
+// the log is throttled). Low-cardinality: `fqdn` is the declared host, never an IP.
+export const externalEgressProviderDriftTotal = counter({
+  name: 'clerum_wrc_external_egress_provider_drift_total',
+  help: 'Resolved IPs outside declared provider ranges (issue #299 drift canary).',
+  labelNames: ['recipe', 'fqdn'] as const,
+})

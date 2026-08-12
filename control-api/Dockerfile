@@ -7,6 +7,11 @@ COPY packages/image-policy ./packages/image-policy
 # both the workflow-runtime-core build (it depends on it) and control-api's
 # npm ci (control-api validates the provider set from it, R4).
 COPY packages/llm-providers ./packages/llm-providers
+# Shared pure-CJS @clerum/network-policy-core (no build step). control-api's
+# provider-netblocks fetch pipeline validates provider CIDRs through it and reads
+# the provider registry (issue #299 Phase 2), so its file: dependency must resolve
+# at `npm ci` below.
+COPY packages/network-policy-core ./packages/network-policy-core
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

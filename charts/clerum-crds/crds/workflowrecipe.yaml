@@ -919,6 +919,29 @@ spec:
                                 type: string
                                 maxLength: 500
                                 description: Free-text rationale for security review.
+                              provider:
+                                type: object
+                                description: >-
+                                  Provider-netblock intent for this fqdn (issue #299
+                                  Phase 2). Presence opts this entry into provider-CIDR
+                                  rendering; name and categories are open strings
+                                  validated against the clerum-provider-netblocks
+                                  catalog at reconcile — never an enum.
+                                required:
+                                  - name
+                                properties:
+                                  name:
+                                    type: string
+                                    minLength: 1
+                                    maxLength: 63
+                                    pattern: "^[a-z0-9-]+$"
+                                  categories:
+                                    type: array
+                                    maxItems: 10
+                                    items:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 63
                   x-kubernetes-validations:
                     # CEL `!= null` is rejected by the schema validator; use
                     # `has()` instead, which is the idiomatic null-check.
@@ -1138,7 +1161,7 @@ spec:
                           declare dns, port, or protocol.
                         items:
                           type: object
-                          maxProperties: 4
+                          maxProperties: 5
                           properties:
                             egressClass:
                               type: string
@@ -1146,6 +1169,7 @@ spec:
                               enum:
                                 - exact-host
                                 - public-web
+                                - provider
                               default: exact-host
                               description: >-
                                 exact-host targets one DNS hostname plus port.
@@ -1169,6 +1193,34 @@ spec:
                                 - TCP
                                 - UDP
                               description: Network protocol.
+                            provider:
+                              type: object
+                              description: >-
+                                Provider-netblock intent for a large rotating pool
+                                behind dns (issue #299 Phase 2). name and categories
+                                are open strings validated against the
+                                clerum-provider-netblocks catalog at reconcile — never
+                                an enum.
+                              required:
+                                - name
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 63
+                                  pattern: "^[a-z0-9-]+$"
+                                categories:
+                                  type: array
+                                  maxItems: 10
+                                  items:
+                                    type: string
+                                    minLength: 1
+                                    maxLength: 63
+                          x-kubernetes-validations:
+                            - rule: "!has(self.provider) || (has(self.egressClass) && self.egressClass == 'provider')"
+                              message: "provider declarations require egressClass 'provider'"
+                            - rule: "!has(self.egressClass) || self.egressClass != 'provider' || (has(self.provider) && has(self.dns) && has(self.port))"
+                              message: "egressClass 'provider' requires provider, dns, and port"
                       includeWhen:
                         type: string
                         description: >-

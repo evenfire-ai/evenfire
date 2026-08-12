@@ -1302,11 +1302,13 @@ export type EnvVar = { name: string; value: string }
 export type EnvSecretKeyMapping = { secretKey: string; envVar: string }
 export type EnvSecret = { name: string; keys: EnvSecretKeyMapping[] }
 export type EgressBinding = {
-  egressClass?: 'exact-host' | 'public-web'
+  egressClass?: 'exact-host' | 'public-web' | 'provider'
   dns?: string
   cidr?: string
   port?: number
   protocol?: 'TCP' | 'UDP'
+  /** issue #299 Phase 2 — provider-netblock intent (open strings, catalog-checked). */
+  provider?: { name: string; categories?: string[] }
 }
 
 export async function createMcpServer(payload: {

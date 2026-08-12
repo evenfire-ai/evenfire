@@ -25,6 +25,109 @@ describe('validateMcpServerSpec', () => {
       expect(errors).toEqual([])
     })
 
+    // ── issue #299 Phase 2 — provider mode admission (G-E parity matrix) ──
+    describe('provider mode (G-E parity)', () => {
+      const check = (binding: unknown) => validateMcpServerSpec({ egressBindings: [binding] })
+
+      it('accepts a provider binding (categories from registry)', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'github' },
+          })
+        ).toEqual([])
+      })
+      it('accepts a provider binding with explicit categories', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'github', categories: ['api'] },
+          })
+        ).toEqual([])
+      })
+      it('accepts an unknown provider name (open string, catalog-checked at reconcile)', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.example.com',
+            port: 443,
+            provider: { name: 'newco' },
+          })
+        ).toEqual([])
+      })
+      it('rejects a provider binding with no provider object', () => {
+        expect(check({ egressClass: 'provider', dns: 'api.github.com', port: 443 })).toContainEqual(
+          expect.objectContaining({ field: 'spec.egressBindings[0].provider' })
+        )
+      })
+      it('rejects a provider binding with no dns', () => {
+        expect(
+          check({ egressClass: 'provider', port: 443, provider: { name: 'github' } })
+        ).toContainEqual(expect.objectContaining({ field: 'spec.egressBindings[0].dns' }))
+      })
+      it('rejects a provider binding that declares cidr', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            cidr: '1.2.3.0/24',
+            port: 443,
+            provider: { name: 'github' },
+          })
+        ).toContainEqual(expect.objectContaining({ field: 'spec.egressBindings[0].cidr' }))
+      })
+      it('rejects a provider object on a non-provider binding', () => {
+        expect(
+          check({
+            egressClass: 'exact-host',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'github' },
+          })
+        ).toContainEqual(
+          expect.objectContaining({
+            field: 'spec.egressBindings[0].provider',
+            message: expect.stringContaining('egressClass'),
+          })
+        )
+      })
+      it('rejects an unknown egressClass', () => {
+        expect(check({ egressClass: 'weird' })).toContainEqual(
+          expect.objectContaining({ field: 'spec.egressBindings[0].egressClass' })
+        )
+      })
+      it('rejects an uppercase provider name (pattern)', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'GitHub' },
+          })
+        ).toContainEqual(expect.objectContaining({ field: 'spec.egressBindings[0].provider.name' }))
+      })
+      it('rejects two bindings sharing the same (dns, port) — H4', () => {
+        const errors = validateMcpServerSpec({
+          egressBindings: [
+            { dns: 'api.github.com', port: 443 },
+            {
+              egressClass: 'provider',
+              dns: 'api.github.com',
+              port: 443,
+              provider: { name: 'github' },
+            },
+          ],
+        })
+        expect(errors).toContainEqual(
+          expect.objectContaining({ message: expect.stringContaining('duplicate (dns, port)') })
+        )
+      })
+    })
+
     it('rejects more than 20 egress bindings before Kubernetes', () => {
       const errors = validateMcpServerSpec({
         egressBindings: Array.from({ length: 21 }, (_, index) => ({

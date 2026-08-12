@@ -14,9 +14,15 @@
  * 11. Handle delete (reverse dependency order, skip PVCs)
  */
 import * as k8s from '@kubernetes/client-node'
-import { STATE_ANNOTATION } from '@clerum/network-policy-core'
+import {
+  STATE_ANNOTATION,
+  parseProviderNetblocks,
+  resolveProviderRanges,
+} from '@clerum/network-policy-core'
+import { lookupFqdnProvider, providerBounds } from '@clerum/network-policy-core/providerRegistry'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
+import { externalEgressProviderDriftTotal } from '../metrics'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -3957,6 +3963,97 @@ export class WorkflowRecipeReconciler {
    * it carries no ownerReference and relies on this method (and reconcileDelete)
    * for cleanup.
    */
+  // issue #299 Phase 2 — resolve provider-mode declarations against the
+  // clerum-provider-netblocks catalog (read at most once per call). ANY failure
+  // THROWS (H3-by-throw): the reconciler's existing throw path retains the live
+  // policy and surfaces the failure — a CM outage becomes LKG, never egress loss.
+  private async resolveProviderRangesByFqdn(
+    declared: Array<{ fqdn: string; provider?: { name: string; categories?: string[] } }>,
+    label: string
+  ): Promise<Map<string, string[]>> {
+    const wanting = declared.filter(d => d.provider)
+    const out = new Map<string, string[]>()
+    if (wanting.length === 0) return out
+    let cm: k8s.V1ConfigMap
+    try {
+      cm = await this.coreApi.readNamespacedConfigMap({
+        name: 'clerum-provider-netblocks',
+        namespace: this.config.controlPlaneNamespace,
+      })
+    } catch (err) {
+      throw egressResolutionError(
+        `${label} provider netblocks catalog unavailable`,
+        wanting.map(d => ({
+          fqdn: d.fqdn,
+          error: err instanceof Error ? err.message : String(err),
+          retryable: true,
+        }))
+      )
+    }
+    const parsed = parseProviderNetblocks(cm.data)
+    const failures: Array<{ fqdn: string; error: string; retryable: boolean }> = []
+    for (const d of wanting) {
+      const resolved = resolveProviderRanges({
+        fqdn: d.fqdn,
+        declaredName: d.provider!.name,
+        declaredCategories: d.provider!.categories,
+        registryLookup: lookupFqdnProvider(d.fqdn),
+        cmCategories: parsed.categories,
+        bounds: providerBounds(d.provider!.name),
+      })
+      if (resolved.kind === 'invalid') {
+        failures.push({ fqdn: d.fqdn, error: resolved.reasons.join('; '), retryable: false })
+      } else {
+        out.set(d.fqdn, resolved.ranges)
+      }
+    }
+    if (failures.length > 0) {
+      throw egressResolutionError(`${label} provider declaration invalid`, failures)
+    }
+    return out
+  }
+
+  // issue #299 Phase 2 — stamp the provenance annotation (EXCLUDED from the WRC
+  // write gate, which compares the spec-derived egressSignature only). Pure audit
+  // view; unchanged when no provider ranges exist (byte-identical /32 mode).
+  private withProviderProvenance(
+    annotations: Record<string, string>,
+    providerRangesByFqdn: Map<string, string[]>
+  ): Record<string, string> {
+    if (providerRangesByFqdn.size === 0) return annotations
+    const value = [...providerRangesByFqdn.entries()]
+      .map(([fqdn, ranges]) => `${fqdn}=${ranges.join(',')}`)
+      .sort()
+      .join(';')
+    return { ...annotations, 'clerum.io/egress-provider-ranges': value }
+  }
+
+  // issue #299 Phase 2 — H7: log the drift canary on transition (or at most once
+  // per hour per policy) so chronic drift does not spam the log. The paging alert
+  // is an ops concern (deferred). `fqdn` labels are declared hosts, never IPs.
+  private providerDriftLastWarned = new Map<string, number>()
+  private warnProviderDrift(
+    policyName: string,
+    namespace: string,
+    uncoveredByFqdn: Record<string, string[]>
+  ): void {
+    const fqdns = Object.keys(uncoveredByFqdn)
+    const key = `${namespace}/${policyName}`
+    if (fqdns.length === 0) {
+      this.providerDriftLastWarned.delete(key)
+      return
+    }
+    const now = Date.now()
+    const last = this.providerDriftLastWarned.get(key)
+    if (last !== undefined && now - last < 3_600_000) return
+    this.providerDriftLastWarned.set(key, now)
+    const detail = fqdns.map(f => `${f}: ${uncoveredByFqdn[f].join(', ')}`).join('; ')
+    console.warn(
+      `[WR-Reconciler] provider-range drift on ${namespace}/${policyName}: ${detail} — ` +
+        `declared ranges may be stale or a host mis-mapped (issue #299)`
+    )
+  }
+
   private async reconcileUiEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
     const policyName = `ui-egress-${recipe.metadata.name}`
     const ns = this.config.sandboxUiNamespace
@@ -3992,10 +4089,20 @@ export class WorkflowRecipeReconciler {
     // external egress it also seeds the accumulator's rehydration (H5).
     existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
+      // issue #299 Phase 2 — resolve provider ranges from the catalog first
+      // (H3-by-throw: a CM/spec problem throws, retaining the live policy).
+      const providerRangesByFqdn = await this.resolveProviderRangesByFqdn(
+        externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+        `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
+      )
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
-        externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
+        externals: externals.map(e => ({
+          fqdn: e.fqdn,
+          port: e.port,
+          providerRanges: providerRangesByFqdn.get(e.fqdn),
+        })),
         resolveResult: { resolved, failures },
         previousAnnotations: existing?.metadata?.annotations,
         now: Date.now(),
@@ -4028,9 +4135,15 @@ export class WorkflowRecipeReconciler {
       effectiveResolved = acc.resolved.filter(
         r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
       )
-      stateAnnotations = acc.annotations
+      stateAnnotations = this.withProviderProvenance(acc.annotations, providerRangesByFqdn)
       egressRenewalDue = acc.renewalDue
       egressStateChanged = acc.changed
+      for (const [driftFqdn, driftIps] of Object.entries(acc.uncoveredFreshIpsByFqdn)) {
+        if (driftIps.length > 0) {
+          externalEgressProviderDriftTotal.inc({ recipe: recipe.metadata.name, fqdn: driftFqdn })
+        }
+      }
+      this.warnProviderDrift(policyName, ns, acc.uncoveredFreshIpsByFqdn)
 
       this.assertClusterEnforcesExternalEgress(
         recipe,
@@ -4401,7 +4514,11 @@ export class WorkflowRecipeReconciler {
       }
 
       // Split into cluster-local sibling targets vs external FQDNs.
-      const externalDeclared: { fqdn: string; port: number }[] = []
+      const externalDeclared: {
+        fqdn: string
+        port: number
+        provider?: { name: string; categories?: string[] }
+      }[] = []
       for (const b of bindings) {
         if (!b.dns || b.port == null) continue
         const port = b.port
@@ -4417,7 +4534,11 @@ export class WorkflowRecipeReconciler {
           ingressSourcesByTarget.set(resolved.workloadId, sources)
         } else if (!resolved) {
           // null = treat as external FQDN
-          externalDeclared.push({ fqdn: b.dns, port })
+          externalDeclared.push({
+            fqdn: b.dns,
+            port,
+            provider: b.egressClass === 'provider' ? b.provider : undefined,
+          })
         }
         // resolved.kind === 'mismatch' is unreachable here — validation
         // ran upstream and would have thrown.
@@ -4449,9 +4570,18 @@ export class WorkflowRecipeReconciler {
       // every reconcile; for external egress it also seeds rehydration (H5).
       existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
+        // issue #299 Phase 2 — resolve provider ranges (H3-by-throw retains the NP).
+        const providerRangesByFqdn = await this.resolveProviderRangesByFqdn(
+          externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
+        )
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
-          externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
+          externals: externalDeclared.map(e => ({
+            fqdn: e.fqdn,
+            port: e.port,
+            providerRanges: providerRangesByFqdn.get(e.fqdn),
+          })),
           resolveResult: { resolved: resolvedExternal, failures },
           previousAnnotations: existingWlPolicy?.metadata?.annotations,
           now: Date.now(),
@@ -4472,9 +4602,15 @@ export class WorkflowRecipeReconciler {
         effectiveExternal = acc.resolved.filter(
           r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
         )
-        wlStateAnnotations = acc.annotations
+        wlStateAnnotations = this.withProviderProvenance(acc.annotations, providerRangesByFqdn)
         wlEgressRenewalDue = acc.renewalDue
         wlEgressStateChanged = acc.changed
+        for (const [driftFqdn, driftIps] of Object.entries(acc.uncoveredFreshIpsByFqdn)) {
+          if (driftIps.length > 0) {
+            externalEgressProviderDriftTotal.inc({ recipe: recipe.metadata.name, fqdn: driftFqdn })
+          }
+        }
+        this.warnProviderDrift(wlPolicyName, wlNs, acc.uncoveredFreshIpsByFqdn)
 
         this.assertClusterEnforcesExternalEgress(
           recipe,

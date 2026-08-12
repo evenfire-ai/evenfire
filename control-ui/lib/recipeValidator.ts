@@ -866,12 +866,16 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
           }
 
           const egressClass = binding.egressClass ?? 'exact-host'
-          if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
+          if (
+            egressClass !== 'exact-host' &&
+            egressClass !== 'public-web' &&
+            egressClass !== 'provider'
+          ) {
             issues.push({
               phase: 'schema',
               severity: 'error',
               path: `${bindingPath}.egressClass`,
-              message: 'egressClass must be exact-host or public-web',
+              message: 'egressClass must be exact-host, public-web, or provider',
             })
           }
 
@@ -884,7 +888,7 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
             })
           }
 
-          const allowedKeys = new Set(['egressClass', 'dns', 'port', 'protocol'])
+          const allowedKeys = new Set(['egressClass', 'dns', 'port', 'protocol', 'provider'])
           for (const key of Object.keys(binding)) {
             if (!allowedKeys.has(key)) {
               issues.push({
@@ -936,6 +940,52 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
               severity: 'error',
               path: `${bindingPath}.port`,
               message: 'port must be an integer between 1 and 65535',
+            })
+          }
+
+          // issue #299 Phase 2 — provider mode: validate the provider object shape
+          // (name/categories are open strings, catalog-checked at reconcile). A
+          // provider object on a non-provider binding is an error.
+          if (egressClass === 'provider') {
+            const provider = binding.provider
+            if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {
+              issues.push({
+                phase: 'schema',
+                severity: 'error',
+                path: `${bindingPath}.provider`,
+                message: 'provider egressBindings must declare a provider object with name',
+              })
+            } else {
+              const p = provider as { name?: unknown; categories?: unknown }
+              if (typeof p.name !== 'string' || !/^[a-z0-9-]{1,63}$/.test(p.name)) {
+                issues.push({
+                  phase: 'schema',
+                  severity: 'error',
+                  path: `${bindingPath}.provider.name`,
+                  message:
+                    'provider.name must be a lowercase alphanumeric-dash string (1-63 chars)',
+                })
+              }
+              if (
+                p.categories !== undefined &&
+                (!Array.isArray(p.categories) ||
+                  p.categories.length > 10 ||
+                  p.categories.some(c => typeof c !== 'string' || c.length < 1 || c.length > 63))
+              ) {
+                issues.push({
+                  phase: 'schema',
+                  severity: 'error',
+                  path: `${bindingPath}.provider.categories`,
+                  message: 'provider.categories must be an array of up to 10 non-empty strings',
+                })
+              }
+            }
+          } else if (Object.prototype.hasOwnProperty.call(binding, 'provider')) {
+            issues.push({
+              phase: 'schema',
+              severity: 'error',
+              path: `${bindingPath}.provider`,
+              message: 'provider declarations require egressClass "provider"',
             })
           }
 

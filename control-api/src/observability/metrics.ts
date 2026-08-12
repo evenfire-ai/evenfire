@@ -485,3 +485,25 @@ export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
   labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot
 })
+
+// ─── issue #299 Phase 2 — provider-netblocks fetch pipeline ────────────────
+export const providerNetblocksFetchFailuresTotal = getOrCreateCounter({
+  name: 'clerum_provider_netblocks_fetch_failures_total',
+  help: 'Provider-netblocks fetch/validate/write failures, labelled by source and reason.',
+  labelNames: ['source', 'reason'] as const as Array<'source' | 'reason'>,
+})
+export const providerNetblocksTicksTotal = getOrCreateCounter({
+  name: 'clerum_provider_netblocks_ticks_total',
+  help: 'Provider-netblocks fetch ticks by result (ok|skipped_lock|error).',
+  labelNames: ['result'] as const as Array<'result'>,
+})
+export const providerNetblocksLastSuccessTimestampSeconds = getOrCreateGauge({
+  name: 'clerum_provider_netblocks_last_success_timestamp_seconds',
+  help: 'Unix time of the last successful provider-netblocks materialization, by source.',
+  labelNames: ['source'] as const as Array<'source'>,
+})
+export const providerNetblocksCidrs = getOrCreateGauge({
+  name: 'clerum_provider_netblocks_cidrs',
+  help: 'IPv4 CIDR count materialized per provider source and category.',
+  labelNames: ['source', 'category'] as const as Array<'source' | 'category'>,
+})

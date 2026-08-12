@@ -4,11 +4,13 @@ export const PUBLIC_WEB_PORTS = [80, 443] as const
 export type EgressMode = 'none' | 'exact-host' | 'exact-cidr' | 'public-web' | 'advanced'
 
 export type EgressBinding = {
-  egressClass?: 'exact-host' | 'public-web'
+  egressClass?: 'exact-host' | 'public-web' | 'provider'
   dns?: string
   cidr?: string
   port?: number
   protocol?: 'TCP' | 'UDP'
+  /** issue #299 Phase 2 — provider-netblock intent (open strings, catalog-checked). */
+  provider?: { name: string; categories?: string[] }
 }
 
 export type EgressSummary = {

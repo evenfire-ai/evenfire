@@ -396,6 +396,272 @@ function parseState(annotations, now, config, declarations) {
   return { entries: [] }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// issue #299 Phase 2 — provider-CIDR pipeline (Part A). Provider-BLIND: every
+// function here takes ranges / registry data as INPUTS. No provider name ever
+// appears in this file (generality invariant, CI grep-gated).
+// ───────────────────────────────────────────────────────────────────────────
+
+// Blocked external-egress set — promoted byte-identically from HCC's
+// PUBLIC_EGRESS_EXCEPT_CIDRS (networkPolicyReconciler.ts) so HCC/WRC/control-ui/
+// control-api enforce ONE list (G2: verified identical 18/18). RFC1918,
+// link-local, metadata 169.254/16, CGNAT, benchmarking, TEST-NET, multicast,
+// reserved.
+const BLOCKED_EXTERNAL_EGRESS_CIDRS = Object.freeze([
+  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
+  '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
+  '192.31.196.0/24', '192.52.193.0/24', '192.88.99.0/24', '192.168.0.0/16',
+  '192.175.48.0/24', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24',
+  '224.0.0.0/4', '240.0.0.0/4',
+])
+
+const DEFAULT_PROVIDER_BOUNDS = { minPrefixLength: 16, maxRanges: 256, maxSpanAddresses: 2 ** 22 }
+
+// STRICT octet: no leading zeros (except "0" itself), 0-255. Rejects the
+// leading-zero inputs the old HCC parser accepted (G2 intentional strictening).
+function strictIpv4ToNumber(ip) {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return undefined
+  let value = 0
+  for (const part of parts) {
+    if (!/^(0|[1-9]\d{0,2})$/.test(part)) return undefined
+    const octet = Number(part)
+    if (octet > 255) return undefined
+    value = (value << 8) + octet
+  }
+  return value >>> 0
+}
+
+function numberToIpv4(n) {
+  return `${(n >>> 24) & 0xff}.${(n >>> 16) & 0xff}.${(n >>> 8) & 0xff}.${n & 0xff}`
+}
+
+// STRICT CIDR parse: exactly "a.b.c.d/nn" — no trailing garbage, no leading-zero
+// octets/prefix. Promoted (and strictened) from HCC's cidrRange (G2 deltas in
+// the CORE-16 test enumerate the intentional differences).
+function cidrRange(cidr) {
+  if (typeof cidr !== 'string') return undefined
+  const m = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(0|[1-9]\d?)$/)
+  if (!m) return undefined
+  const prefix = Number(m[2])
+  const ipNumber = strictIpv4ToNumber(m[1])
+  if (ipNumber === undefined || prefix > 32) return undefined
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+  const start = (ipNumber & mask) >>> 0
+  const size = 2 ** (32 - prefix)
+  return { start, end: (start + size - 1) >>> 0, prefix, canonical: ipNumber === start }
+}
+
+function cidrOverlaps(left, right) {
+  const a = cidrRange(left)
+  const b = cidrRange(right)
+  if (!a || !b) return false
+  return a.start <= b.end && b.start <= a.end
+}
+
+// Promoted HCC predicate: a syntactically-valid public IPv4 CIDR that does not
+// overlap the blocked set. Same semantics as HCC's for well-formed inputs;
+// strictly narrower on malformed inputs (G2).
+function isAllowedExternalEgressCidr(cidr) {
+  if (!cidrRange(cidr)) return false
+  return !BLOCKED_EXTERNAL_EGRESS_CIDRS.some(blocked => cidrOverlaps(cidr, blocked))
+}
+
+// Family split (H5). ipv4 = strict "a.b.c.d/nn" shape; anything with ':' is ipv6
+// (stored inert, never rendered, never fails a binding); the rest is invalid.
+function partitionCidrsByFamily(cidrs) {
+  const ipv4 = []
+  const ipv6 = []
+  const invalid = []
+  for (const c of cidrs) {
+    if (typeof c !== 'string') {
+      invalid.push(String(c))
+      continue
+    }
+    const t = c.trim()
+    if (t.includes(':')) ipv6.push(t)
+    else if (/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(t)) ipv4.push(t)
+    else invalid.push(t)
+  }
+  return { ipv4, ipv6, invalid }
+}
+
+// Validate + canonicalize declared provider ranges for one binding. Deterministic;
+// collects ALL reasons; never partial-applies. See Part A.6.
+function validateProviderRanges(ranges, bounds) {
+  const b = bounds || {}
+  const minPrefixLength = b.minPrefixLength != null ? b.minPrefixLength : DEFAULT_PROVIDER_BOUNDS.minPrefixLength
+  const maxRanges = b.maxRanges != null ? b.maxRanges : DEFAULT_PROVIDER_BOUNDS.maxRanges
+  const maxSpanAddresses = b.maxSpanAddresses != null ? b.maxSpanAddresses : DEFAULT_PROVIDER_BOUNDS.maxSpanAddresses
+
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    return { kind: 'invalid', reasons: ['no ranges declared'] }
+  }
+
+  // Steps 1-3: per-range syntactic + prefix floor + blocked overlap.
+  const reasons = []
+  const parsed = []
+  for (const r of ranges) {
+    const range = cidrRange(r)
+    if (!range) {
+      reasons.push(`"${r}" is not a valid IPv4 CIDR`)
+      continue
+    }
+    if (range.prefix < minPrefixLength) {
+      reasons.push(`"${r}" is broader than the /${minPrefixLength} prefix floor`)
+    }
+    const blocked = BLOCKED_EXTERNAL_EGRESS_CIDRS.find(cidr => cidrOverlaps(r, cidr))
+    if (blocked) {
+      reasons.push(`"${r}" overlaps blocked range ${blocked}`)
+    }
+    parsed.push(range)
+  }
+  if (reasons.length > 0) return { kind: 'invalid', reasons }
+
+  // Step 4: canonicalize to network address.
+  const canon = parsed.map(range => ({
+    cidr: `${numberToIpv4(range.start)}/${range.prefix}`,
+    start: range.start,
+    end: range.end,
+    prefix: range.prefix,
+  }))
+  // Step 5: dedup (canonical string) then containment-collapse (drop a range
+  // strictly contained in a wider retained one). CIDRs never partially overlap.
+  const byCidr = new Map()
+  for (const c of canon) byCidr.set(c.cidr, c)
+  const unique = [...byCidr.values()]
+  const collapsed = unique.filter(
+    a => !unique.some(o => o !== a && o.start <= a.start && a.end <= o.end && o.end - o.start > a.end - a.start)
+  )
+  const sorted = collapsed.slice().sort((x, y) => x.start - y.start || x.prefix - y.prefix)
+
+  // Step 6: count cap.
+  if (sorted.length > maxRanges) reasons.push(`${sorted.length} ranges exceed the cap of ${maxRanges}`)
+
+  // Step 7: span cap over merged (disjoint) intervals — distinct addresses.
+  let span = 0
+  let curStart = null
+  let curEnd = null
+  for (const c of sorted) {
+    if (curStart === null) {
+      curStart = c.start
+      curEnd = c.end
+    } else if (c.start <= curEnd + 1) {
+      if (c.end > curEnd) curEnd = c.end
+    } else {
+      span += curEnd - curStart + 1
+      curStart = c.start
+      curEnd = c.end
+    }
+  }
+  if (curStart !== null) span += curEnd - curStart + 1
+  if (span > maxSpanAddresses) {
+    reasons.push(`declared ranges span ${span} addresses, exceeding the cap of ${maxSpanAddresses}`)
+  }
+
+  if (reasons.length > 0) return { kind: 'invalid', reasons }
+  return { kind: 'ok', ranges: sorted.map(c => c.cidr) }
+}
+
+// Partition one resolution's fresh IPs against declared ranges. `covered` are
+// enforced by the range rules (never enter the /32 window); `uncovered` are the
+// residue fed to the window and the drift-canary signal. See Part A.7.
+function partitionIpsByProviderRanges(ips, ranges) {
+  const parsed = ranges.map(cidrRange).filter(Boolean)
+  const covered = []
+  const uncovered = []
+  for (const ip of [...new Set(ips)].sort()) {
+    const n = strictIpv4ToNumber(ip)
+    if (n !== undefined && parsed.some(r => n >= r.start && n <= r.end)) covered.push(ip)
+    else uncovered.push(ip)
+  }
+  return { covered, uncovered }
+}
+
+// Read the provider-netblocks ConfigMap data (provider-blind: keys are opaque
+// `<provider>.<category>.<family>` strings). IPv6 keys are skipped (H5); `_meta`
+// is JSON. See Part A.8.
+function parseProviderNetblocks(cmData) {
+  const categories = Object.create(null)
+  const errors = []
+  let meta = null
+  if (!cmData) return { categories, meta, errors: ['configmap has no data'] }
+  for (const [key, value] of Object.entries(cmData)) {
+    if (key === '_meta') {
+      try {
+        meta = JSON.parse(value)
+      } catch (_err) {
+        errors.push('_meta is not valid JSON')
+      }
+      continue
+    }
+    const m = key.match(/^([a-z0-9-]+)\.([A-Za-z0-9_-]+)\.(ipv4|ipv6)$/)
+    if (!m) {
+      errors.push(`unrecognized data key "${key}"`)
+      continue
+    }
+    if (m[3] === 'ipv6') continue // stored, inert (H5)
+    categories[`${m[1]}.${m[2]}`] = value
+      .split('\n')
+      .map(s => s.trim())
+      .filter(Boolean)
+  }
+  return { categories, meta, errors }
+}
+
+// The single shared classification/validation composition used identically by
+// the HCC reconciler, both WRC call sites, and the control-api writer. The
+// registry row is INJECTED data (from providerRegistry.cjs) so this stays
+// provider-blind. See Part A.9.
+function resolveProviderRanges(input) {
+  const { fqdn, declaredName, declaredCategories, registryLookup, cmCategories, bounds } = input
+
+  // Step 1: effective categories (+ hostname-suffix-never-classifies guard).
+  let categories
+  if (Array.isArray(declaredCategories) && declaredCategories.length > 0) {
+    if (registryLookup && registryLookup.kind === 'mapped' && registryLookup.row.provider !== declaredName) {
+      return { kind: 'invalid', reasons: [`registry maps "${fqdn}" to provider "${registryLookup.row.provider}", not "${declaredName}"`] }
+    }
+    // An EXPLICIT off-pool/unmapped registry row (an enforced counterexample, e.g.
+    // Azure Front Door behind a githubusercontent host) outranks a user category
+    // declaration — declared categories cannot smuggle a mis-attributed pool onto
+    // a host the registry deliberately excluded. (The unknown-fqdn escape hatch —
+    // no registry row at all — still allows an explicit declaration below.)
+    if (registryLookup && registryLookup.kind === 'unmapped') {
+      return { kind: 'invalid', reasons: [`"${fqdn}" is registry-unmapped for provider mode (${registryLookup.note})`] }
+    }
+    categories = declaredCategories
+  } else if (!registryLookup) {
+    return { kind: 'invalid', reasons: [`provider mapping for "${fqdn}" is unknown — declare provider.categories explicitly or add a registry row`] }
+  } else if (registryLookup.kind === 'unmapped') {
+    return { kind: 'invalid', reasons: [`"${fqdn}" is registry-unmapped for provider mode (${registryLookup.note})`] }
+  } else if (registryLookup.kind === 'mapped' && registryLookup.row.provider !== declaredName) {
+    return { kind: 'invalid', reasons: [`registry maps "${fqdn}" to provider "${registryLookup.row.provider}", not "${declaredName}"`] }
+  } else {
+    categories = registryLookup.row.categories
+  }
+
+  // Step 2: every category present in the catalog.
+  const reasons = []
+  for (const c of categories) {
+    if (!Object.prototype.hasOwnProperty.call(cmCategories, `${declaredName}.${c}`)) {
+      reasons.push(`category "${declaredName}.${c}" is not present in the netblocks catalog`)
+    }
+  }
+  if (reasons.length > 0) return { kind: 'invalid', reasons }
+
+  // Step 3: union → IPv4 family filter (H5 defense) → zero check.
+  const union = []
+  for (const c of categories) union.push(...cmCategories[`${declaredName}.${c}`])
+  const ipv4 = partitionCidrsByFamily(union).ipv4
+  if (ipv4.length === 0) return { kind: 'invalid', reasons: [`provider "${declaredName}" resolved to zero IPv4 ranges`] }
+
+  // Step 4: shared bounds validation.
+  const v = validateProviderRanges(ipv4, bounds)
+  if (v.kind === 'invalid') return v
+  return { kind: 'ok', ranges: v.ranges, categories }
+}
+
 module.exports = {
   STATE_ANNOTATION,
   TARGETS_ANNOTATION,
@@ -406,4 +672,13 @@ module.exports = {
   serializeState,
   parseState,
   classifyDnsError,
+  BLOCKED_EXTERNAL_EGRESS_CIDRS,
+  cidrRange,
+  cidrOverlaps,
+  isAllowedExternalEgressCidr,
+  partitionCidrsByFamily,
+  validateProviderRanges,
+  partitionIpsByProviderRanges,
+  parseProviderNetblocks,
+  resolveProviderRanges,
 }

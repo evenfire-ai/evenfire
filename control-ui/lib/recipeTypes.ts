@@ -41,10 +41,11 @@ export type WorkflowRecipeWorkload = {
     keys: Array<{ secretKey: string; envVar: string }>
   }
   egressBindings?: Array<{
-    egressClass?: 'exact-host' | 'public-web'
+    egressClass?: 'exact-host' | 'public-web' | 'provider'
     dns?: string
     port?: number
     protocol?: 'TCP' | 'UDP'
+    provider?: { name: string; categories?: string[] }
   }>
 }
 

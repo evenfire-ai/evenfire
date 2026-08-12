@@ -460,3 +460,278 @@ test('R2-M1 byte cap: multi-byte FQDN is bounded by UTF-8 bytes, not UTF-16 leng
   assert.ok(out.entries.length < 900, 'byte-budget eviction dropped the overflow')
   assert.equal(out.overCap, true, 'overCap flags the eviction for the alarm/metric')
 })
+
+// ───────────────────────────────────────────────────────────────────────────
+// issue #299 Phase 2 — provider-CIDR core (Part A). RED-first: CORE-1..17.
+// These functions are provider-BLIND; provider data is injected by the caller.
+// ───────────────────────────────────────────────────────────────────────────
+
+const registry = require('./providerRegistry.cjs')
+
+// Real GitHub /meta `api` IPv4 set (Part 0.3; fetched live 2026-08-12). All 24
+// entries are already canonical network addresses and mutually disjoint.
+const API_24 = [
+  '192.30.252.0/22', '185.199.108.0/22', '140.82.112.0/20', '143.55.64.0/20',
+  '20.201.28.148/32', '20.205.243.168/32', '20.87.245.6/32', '4.237.22.34/32',
+  '4.228.31.149/32', '20.207.73.85/32', '20.27.177.116/32', '20.200.245.245/32',
+  '20.175.192.149/32', '20.233.83.146/32', '20.29.134.17/32', '20.199.39.228/32',
+  '20.217.135.0/32', '4.225.11.201/32', '4.208.26.200/32', '20.26.156.210/32',
+  '172.182.252.137/32', '4.249.131.166/32', '48.202.248.39/32', '48.204.201.2/32',
+]
+
+const ipToNum = ip => ip.split('.').reduce((a, o) => ((a << 8) + Number(o)) >>> 0, 0)
+const startOf = cidr => {
+  const [ip, p] = cidr.split('/')
+  const prefix = Number(p)
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+  return (ipToNum(ip) & mask) >>> 0
+}
+const isSortedByStart = ranges => ranges.every((r, i) => i === 0 || startOf(ranges[i - 1]) <= startOf(r))
+
+test('CORE-1 (G1) export surface snapshot: exactly the Phase-1 + provider-CIDR names', () => {
+  assert.deepEqual(Object.keys(core).sort(), [
+    'BLOCKED_EXTERNAL_EGRESS_CIDRS', 'RESOLVED_AT_ANNOTATION', 'STATE_ANNOTATION',
+    'TARGETS_ANNOTATION', 'cidrOverlaps', 'cidrRange', 'classifyDnsError', 'emptyState',
+    'isAllowedExternalEgressCidr', 'parseProviderNetblocks', 'parseState',
+    'partitionCidrsByFamily', 'partitionIpsByProviderRanges', 'reconcileEgressState',
+    'resolveProviderRanges', 'serializeState', 'stateHash', 'validateProviderRanges',
+  ])
+})
+
+test('CORE-2 (H1) the real 24-CIDR GitHub api set validates and stays 24 (DOA count-cap fix)', () => {
+  const r = core.validateProviderRanges(API_24)
+  assert.equal(r.kind, 'ok')
+  assert.equal(r.ranges.length, 24)
+  assert.deepEqual(new Set(r.ranges), new Set(API_24))
+  assert.ok(isSortedByStart(r.ranges), 'ranges sorted ascending by numeric start')
+  assert.equal(r.ranges[0], '4.208.26.200/32')
+  assert.equal(r.ranges[23], '192.30.252.0/22')
+})
+
+test('CORE-3 (H1) count cap rejects 257, accepts 256', () => {
+  const many = Array.from({ length: 257 }, (_, i) => `5.${Math.floor(i / 256)}.${i % 256}.0/24`)
+  const bad = core.validateProviderRanges(many)
+  assert.equal(bad.kind, 'invalid')
+  assert.deepEqual(bad.reasons, ['257 ranges exceed the cap of 256'])
+  const ok = core.validateProviderRanges(many.slice(0, 256))
+  assert.equal(ok.kind, 'ok')
+  assert.equal(ok.ranges.length, 256)
+})
+
+test('CORE-4 a blocked-overlapping range is rejected; its valid sibling does not partially apply', () => {
+  const r = core.validateProviderRanges(['140.82.112.0/20', '10.1.0.0/16'])
+  assert.equal(r.kind, 'invalid')
+  assert.deepEqual(r.reasons, ['"10.1.0.0/16" overlaps blocked range 10.0.0.0/8'])
+})
+
+test('CORE-5 prefix floor rejects too-broad; per-provider override accepts', () => {
+  assert.deepEqual(core.validateProviderRanges(['140.82.0.0/15']).reasons, [
+    '"140.82.0.0/15" is broader than the /16 prefix floor',
+  ])
+  const ok = core.validateProviderRanges(['140.82.0.0/15'], { minPrefixLength: 12 })
+  assert.equal(ok.kind, 'ok')
+  assert.deepEqual(ok.ranges, ['140.82.0.0/15'])
+})
+
+test('CORE-6 span cap rejects 65 /16s, accepts 64 (boundary inclusive)', () => {
+  const mk = n => Array.from({ length: n }, (_, i) => `13.${i * 2}.0.0/16`)
+  const bad = core.validateProviderRanges(mk(65))
+  assert.equal(bad.kind, 'invalid')
+  assert.deepEqual(bad.reasons, ['declared ranges span 4259840 addresses, exceeding the cap of 4194304'])
+  assert.equal(core.validateProviderRanges(mk(64)).kind, 'ok')
+})
+
+test('CORE-7 canonicalization normalizes host bits, dedups, containment-collapses', () => {
+  const r = core.validateProviderRanges(['140.82.112.5/20', '140.82.112.0/20', '140.82.113.0/24'])
+  assert.equal(r.kind, 'ok')
+  assert.deepEqual(r.ranges, ['140.82.112.0/20'])
+})
+
+test('CORE-8 each malformed CIDR yields one reason, in input order', () => {
+  const r = core.validateProviderRanges(['not-a-cidr', '1.2.3.4', '1.2.3.4/33', '01.2.3.4/24', '1.2.3.4/24/x'])
+  assert.equal(r.kind, 'invalid')
+  assert.deepEqual(r.reasons, [
+    '"not-a-cidr" is not a valid IPv4 CIDR',
+    '"1.2.3.4" is not a valid IPv4 CIDR',
+    '"1.2.3.4/33" is not a valid IPv4 CIDR',
+    '"01.2.3.4/24" is not a valid IPv4 CIDR',
+    '"1.2.3.4/24/x" is not a valid IPv4 CIDR',
+  ])
+})
+
+test('CORE-9 empty input is rejected', () => {
+  assert.deepEqual(core.validateProviderRanges([]), { kind: 'invalid', reasons: ['no ranges declared'] })
+})
+
+test('CORE-10 partitionIpsByProviderRanges splits covered vs uncovered', () => {
+  const { covered, uncovered } = core.partitionIpsByProviderRanges(
+    ['140.82.121.5', '20.26.156.210', '8.8.8.8'],
+    API_24
+  )
+  assert.deepEqual(covered, ['140.82.121.5', '20.26.156.210'])
+  assert.deepEqual(uncovered, ['8.8.8.8'])
+})
+
+test('CORE-11 partition edge cases (empty ranges, empty ips)', () => {
+  assert.deepEqual(core.partitionIpsByProviderRanges(['1.2.3.4', '5.6.7.8'], []), {
+    covered: [],
+    uncovered: ['1.2.3.4', '5.6.7.8'],
+  })
+  assert.deepEqual(core.partitionIpsByProviderRanges([], API_24), { covered: [], uncovered: [] })
+})
+
+test('CORE-12 (H5) partitionCidrsByFamily splits ipv4/ipv6/invalid', () => {
+  assert.deepEqual(
+    core.partitionCidrsByFamily(['140.82.112.0/20', '2a0a:a440::/29', '2606:50c0::/32', 'garbage']),
+    { ipv4: ['140.82.112.0/20'], ipv6: ['2a0a:a440::/29', '2606:50c0::/32'], invalid: ['garbage'] }
+  )
+})
+
+test('CORE-13 (H5) resolveProviderRanges family-filters a v6 line and still succeeds', () => {
+  const r = core.resolveProviderRanges({
+    fqdn: 'api.github.com',
+    declaredName: 'github',
+    declaredCategories: ['api'],
+    registryLookup: registry.lookupFqdnProvider('api.github.com'),
+    cmCategories: { 'github.api': [...API_24, '2a0a:a440::/29'] },
+    bounds: registry.providerBounds('github'),
+  })
+  assert.equal(r.kind, 'ok')
+  assert.equal(r.ranges.length, 24)
+  assert.deepEqual(r.categories, ['api'])
+})
+
+test('CORE-14 parseProviderNetblocks reads ipv4 keys, skips ipv6, parses _meta, reports bad keys', () => {
+  const out = core.parseProviderNetblocks({
+    'github.api.ipv4': 'a\nb',
+    'github.api.ipv6': 'x',
+    _meta: '{"k":1}',
+    'bad key': 'v',
+  })
+  assert.deepEqual({ ...out.categories }, { 'github.api': ['a', 'b'] })
+  assert.deepEqual(out.meta, { k: 1 })
+  assert.deepEqual(out.errors, ['unrecognized data key "bad key"'])
+  assert.deepEqual(core.parseProviderNetblocks(undefined).errors, ['configmap has no data'])
+})
+
+test('CORE-15 resolveProviderRanges reason matrix (one per exact A.9 string)', () => {
+  const R = core.resolveProviderRanges
+  // 1. unknown mapping: no registry row + no declared categories
+  assert.deepEqual(
+    R({ fqdn: 'unknown.example.com', declaredName: 'someco', registryLookup: undefined, cmCategories: {}, bounds: registry.providerBounds('someco') }),
+    { kind: 'invalid', reasons: ['provider mapping for "unknown.example.com" is unknown — declare provider.categories explicitly or add a registry row'] }
+  )
+  // 2. unmapped row
+  const lk = registry.lookupFqdnProvider('pipelines.actions.githubusercontent.com')
+  assert.deepEqual(
+    R({ fqdn: 'pipelines.actions.githubusercontent.com', declaredName: 'github', registryLookup: lk, cmCategories: {}, bounds: registry.providerBounds('github') }),
+    { kind: 'invalid', reasons: [`"pipelines.actions.githubusercontent.com" is registry-unmapped for provider mode (${lk.note})`] }
+  )
+  // 3. provider mismatch: declared github for an aws-mapped host (with declared categories)
+  assert.deepEqual(
+    R({ fqdn: 'github-cloud.s3.amazonaws.com', declaredName: 'github', declaredCategories: ['api'], registryLookup: registry.lookupFqdnProvider('github-cloud.s3.amazonaws.com'), cmCategories: {}, bounds: registry.providerBounds('github') }),
+    { kind: 'invalid', reasons: ['registry maps "github-cloud.s3.amazonaws.com" to provider "aws", not "github"'] }
+  )
+  // 4. category missing from catalog
+  assert.deepEqual(
+    R({ fqdn: 'api.github.com', declaredName: 'github', declaredCategories: ['api'], registryLookup: registry.lookupFqdnProvider('api.github.com'), cmCategories: {}, bounds: registry.providerBounds('github') }),
+    { kind: 'invalid', reasons: ['category "github.api" is not present in the netblocks catalog'] }
+  )
+  // 5. zero IPv4 (category present but only v6)
+  assert.deepEqual(
+    R({ fqdn: 'api.github.com', declaredName: 'github', declaredCategories: ['api'], registryLookup: registry.lookupFqdnProvider('api.github.com'), cmCategories: { 'github.api': ['2a0a:a440::/29'] }, bounds: registry.providerBounds('github') }),
+    { kind: 'invalid', reasons: ['provider "github" resolved to zero IPv4 ranges'] }
+  )
+})
+
+test('CORE-16 (G2) promoted predicate equals the old HCC one on well-formed inputs; stricter on malformed', () => {
+  // The OLD HCC implementation, verbatim (networkPolicyReconciler.ts:74-111).
+  const OLD_BLOCKED = [
+    '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+    '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.31.196.0/24', '192.52.193.0/24',
+    '192.88.99.0/24', '192.168.0.0/16', '192.175.48.0/24', '198.18.0.0/15', '198.51.100.0/24',
+    '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
+  ]
+  const oldIpv4ToNumber = ip => {
+    const parts = ip.split('.')
+    if (parts.length !== 4) return undefined
+    let value = 0
+    for (const part of parts) {
+      if (!/^\d+$/.test(part)) return undefined
+      const octet = Number(part)
+      if (!Number.isInteger(octet) || octet < 0 || octet > 255) return undefined
+      value = (value << 8) + octet
+    }
+    return value >>> 0
+  }
+  const oldCidrRange = cidr => {
+    const [ip, prefixText] = cidr.split('/')
+    if (!ip || prefixText === undefined) return undefined
+    const prefix = Number(prefixText)
+    const ipNumber = oldIpv4ToNumber(ip)
+    if (ipNumber === undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return undefined
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+    const start = (ipNumber & mask) >>> 0
+    const size = 2 ** (32 - prefix)
+    return { start, end: (start + size - 1) >>> 0 }
+  }
+  const oldCidrOverlaps = (l, r) => {
+    const a = oldCidrRange(l)
+    const b = oldCidrRange(r)
+    if (!a || !b) return false
+    return a.start <= b.end && b.start <= a.end
+  }
+  const oldIsAllowed = cidr => {
+    if (!oldCidrRange(cidr)) return false
+    return !OLD_BLOCKED.some(b => oldCidrOverlaps(cidr, b))
+  }
+  const wellFormed = [
+    ...OLD_BLOCKED,
+    '8.8.8.0/24', '140.82.112.0/20', '1.2.3.4/32', '0.0.0.0/0',
+    '9.255.255.255/32', '11.0.0.0/8', '172.15.255.0/24', '172.32.0.0/12',
+    '192.167.255.0/24', '223.255.255.0/24',
+  ]
+  for (const cidr of wellFormed) {
+    assert.equal(core.isAllowedExternalEgressCidr(cidr), oldIsAllowed(cidr), `well-formed disagreement on ${cidr}`)
+  }
+  // Enumerated intentional-strictening deltas: old accepts, promoted rejects.
+  for (const cidr of ['01.2.3.4/24', '1.2.3.04/32', '1.2.3.4/24/x', '8.8.8.0/024']) {
+    assert.equal(oldIsAllowed(cidr), true, `precondition: old accepts ${cidr}`)
+    assert.equal(core.isAllowedExternalEgressCidr(cidr), false, `promoted must reject ${cidr}`)
+  }
+})
+
+test('CORE-17 (H8 precheck) empty-ips ok observation drains then stops writing', () => {
+  const cfg = { overlapMs: 300_000, maxEntries: 128 }
+  const prev = {
+    entries: [
+      { ip: '1.1.1.1', port: 443, protocol: 'TCP', fqdn: 'h', expiresAt: 1000, lastObservedAt: 0 },
+      { ip: '2.2.2.2', port: 443, protocol: 'TCP', fqdn: 'h', expiresAt: 2000, lastObservedAt: 0 },
+    ],
+  }
+  const empty = obsOk('h', [], TTL, 443)
+  const r1 = core.reconcileEgressState(prev, [empty], 1500, cfg) // 1.1.1.1 expires
+  assert.equal(r1.changed, true)
+  const r2 = core.reconcileEgressState(r1.state, [empty], 2500, cfg) // 2.2.2.2 expires
+  assert.equal(r2.changed, true)
+  const r3 = core.reconcileEgressState(r2.state, [empty], 3000, cfg) // empty; nothing to do
+  assert.equal(r3.changed, false)
+  assert.equal(r3.renewalDue, false)
+  assert.equal(r3.entries.length, 0)
+})
+
+test('CORE-18 (security): declared categories do NOT override an EXPLICIT unmapped registry row', () => {
+  // pipelines.actions.githubusercontent.com is an enforced counterexample (Azure
+  // Front Door). Declaring categories must NOT smuggle the GitHub pool onto it.
+  const lookup = registry.lookupFqdnProvider('pipelines.actions.githubusercontent.com')
+  const r = core.resolveProviderRanges({
+    fqdn: 'pipelines.actions.githubusercontent.com',
+    declaredName: 'github',
+    declaredCategories: ['api'],
+    registryLookup: lookup,
+    cmCategories: { 'github.api': API_24 },
+    bounds: registry.providerBounds('github'),
+  })
+  assert.equal(r.kind, 'invalid')
+  assert.ok(r.reasons[0].includes('registry-unmapped'), `expected registry-unmapped, got ${r.reasons[0]}`)
+})

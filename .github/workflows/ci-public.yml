@@ -35,6 +35,17 @@ jobs:
             echo "$bad"
             exit 1
           fi
+      - name: Provider-blind generality gate (issue #299 Phase 2)
+        # No provider name may appear in the provider-blind layers (core,
+        # adapters, reconcilers, render/write path, admission validators). The
+        # forbidden set is DERIVED from packages/network-policy-core/
+        # providerRegistry.cjs, so adding a provider is a registry data row and
+        # this gate covers the new name automatically — no edit here.
+        run: ./scripts/ci/check-provider-generality.sh
+      - name: Provider-netblocks seed integrity (issue #299 Phase 2)
+        # The vendored seed ConfigMap must parse and pass the same pure-core
+        # bounds the runtime enforces (fail-loud on an empty or invalid seed).
+        run: node scripts/ci/validate-provider-netblocks-seed.mjs
 
   test:
     name: Build / test / typecheck (${{ matrix.service }})

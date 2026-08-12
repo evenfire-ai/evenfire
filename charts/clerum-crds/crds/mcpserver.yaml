@@ -335,11 +335,13 @@ spec:
                         enum:
                           - exact-host
                           - public-web
+                          - provider
                         default: exact-host
                         description: >-
                           exact-host allows a single dns or cidr destination plus port.
                           public-web allows public TCP 80/443 and must not declare dns,
-                          cidr, port, or protocol.
+                          cidr, port, or protocol. provider renders published provider
+                          netblocks for a large rotating pool behind dns (issue #299).
                       dns:
                         type: string
                         minLength: 1
@@ -360,9 +362,36 @@ spec:
                           - TCP
                           - UDP
                         description: Network protocol.
+                      provider:
+                        type: object
+                        description: >-
+                          Provider-netblock intent for a large rotating pool behind dns
+                          (issue #299 Phase 2). name and categories are open strings
+                          validated against the clerum-provider-netblocks catalog at
+                          reconcile — intentionally NOT an enum, so adding a provider
+                          needs no CRD change.
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            minLength: 1
+                            maxLength: 63
+                            pattern: "^[a-z0-9-]+$"
+                          categories:
+                            type: array
+                            maxItems: 10
+                            items:
+                              type: string
+                              minLength: 1
+                              maxLength: 63
                     x-kubernetes-validations:
-                      - rule: "((has(self.egressClass) && self.egressClass == 'public-web') && !has(self.dns) && !has(self.cidr) && !has(self.port) && !has(self.protocol)) || ((!has(self.egressClass) || self.egressClass == 'exact-host') && has(self.port) && has(self.dns) != has(self.cidr))"
-                        message: "exact-host requires port and exactly one of dns or cidr; public-web must not declare dns, cidr, port, or protocol"
+                      - rule: "((has(self.egressClass) && self.egressClass == 'public-web') && !has(self.dns) && !has(self.cidr) && !has(self.port) && !has(self.protocol)) || ((has(self.egressClass) && self.egressClass == 'provider') && has(self.dns) && has(self.port) && !has(self.cidr)) || ((!has(self.egressClass) || self.egressClass == 'exact-host') && has(self.port) && has(self.dns) != has(self.cidr))"
+                        message: "exact-host requires port and exactly one of dns or cidr; provider requires dns and port (no cidr); public-web must not declare dns, cidr, port, or protocol"
+                      - rule: "!has(self.provider) || (has(self.egressClass) && self.egressClass == 'provider')"
+                        message: "provider declarations require egressClass 'provider'"
+                      - rule: "!has(self.egressClass) || self.egressClass != 'provider' || has(self.provider)"
+                        message: "egressClass 'provider' requires the provider object"
                       - rule: "!has(self.dns) || !self.dns.contains('/')"
                         message: "dns must not use CIDR notation"
                       - rule: "!has(self.dns) || !self.dns.contains(':')"
@@ -388,6 +417,8 @@ spec:
                   message: "spec.managed is immutable; delete and recreate the McpServer to change runtime ownership"
                 - rule: "!has(self.remote) || (has(self.egressBindings) && size(self.egressBindings) > 0)"
                   message: "Remote servers must declare at least one egressBinding for egress NetworkPolicy"
+                - rule: "!has(self.egressBindings) || self.egressBindings.all(b, !has(b.dns) || !has(b.port) || self.egressBindings.exists_one(o, has(o.dns) && has(o.port) && o.dns == b.dns && o.port == b.port))"
+                  message: "egressBindings must not declare the same (dns, port) twice — NetworkPolicy names would collide"
             status:
               type: object
               properties:
