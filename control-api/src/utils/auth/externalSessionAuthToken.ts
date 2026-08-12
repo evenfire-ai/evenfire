@@ -13,14 +13,18 @@ export function signExternalSessionToken(
   claims: Omit<AuthClaims, 'exp'>,
   ttlSeconds = 60 * 60 * 12
 ): string {
+  const authGeneration = claims.authGeneration
+  if (
+    typeof authGeneration !== 'number' ||
+    !Number.isSafeInteger(authGeneration) ||
+    authGeneration < 1
+  ) {
+    throw new Error('auth_generation_required')
+  }
   return jwt.sign(
     {
       ...claims,
-      // A zero generation is an explicit legacy marker. The lifecycle gate
-      // rejects it after verification, so old sessions cannot survive a
-      // retirement even while isolated legacy issuers remain structurally
-      // compatible during rollout.
-      authGeneration: typeof claims.authGeneration === 'number' ? claims.authGeneration : 0,
+      authGeneration,
     },
     config.sessionJwtPrivateKey,
     {

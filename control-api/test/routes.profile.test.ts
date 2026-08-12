@@ -81,6 +81,17 @@ vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 
 describe('routes/profile', () => {
+  it('refuses to mint a session without a current lifecycle generation', () => {
+    expect(() =>
+      signExternalSessionToken({
+        userId: 'u1',
+        email: 'u@example.com',
+        teamId: 't1',
+        role: 'member',
+      })
+    ).toThrow('auth_generation_required')
+  })
+
   const token = 'dev-external-rest-api-token'
   const service = 'external-rest-api'
   const userSessionToken = signExternalSessionToken({
@@ -933,8 +944,10 @@ describe('routes/profile', () => {
         email: 'user@example.com',
         name: 'User',
         picture: 'https://example.com/avatar.png',
+        authGeneration: 1,
       },
       membership: { team_id: 't1', team_name: 'team', role: 'member' },
+      authGeneration: 1,
     })
 
     const app = express()

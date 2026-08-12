@@ -36,6 +36,17 @@ const CONTROL_API_ERROR_HEADERS = [
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
 
+function retryAfterSecondsFromHeader(value: unknown): number {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) return raw
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  const seconds = Number(text)
+  if (Number.isSafeInteger(seconds) && seconds > 0) return seconds
+  const retryAt = Date.parse(text)
+  if (Number.isFinite(retryAt)) return Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))
+  return 1
+}
+
 export type ExternalGfsEdgeLimits = {
   aggregatePerMin: number
   authenticatedIpPerMin: number
@@ -143,9 +154,7 @@ export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }
       identifier: `gfs-edge-${bucket}`,
       ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
       handler: (_req, res) => {
-        const retryAfterHeader = Number(res.getHeader('Retry-After'))
-        const retryAfterSeconds =
-          Number.isSafeInteger(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 1
+        const retryAfterSeconds = retryAfterSecondsFromHeader(res.getHeader('Retry-After'))
         res.status(429).json({
           error: 'Too Many Requests',
           rateLimitLayer: 'external-rest-edge',
