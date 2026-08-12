@@ -555,6 +555,25 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
 
   it('cancels a real indexer relist without staging or promoting late results', async () => {
     const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const cancellationHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'catalog-host',
+      uid: 'catalog-host-uid-cancellation',
+      spec: {
+        contextRef: 'catalog-context',
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    }).object
+    const cancellationHostWithVersion = {
+      ...cancellationHost,
+      metadata: {
+        ...(cancellationHost.metadata as Record<string, unknown>),
+        resourceVersion: '4',
+      },
+    }
+    kubernetesApi.put(source.plural, source.namespace, cancellationHostWithVersion)
+    await expect(indexer.reconcileSource(source)).resolves.toBe('4')
     const before = await databasePool.query(
       `SELECT generation, staging_generation, resource_version, status
          FROM operational_catalog_source_state
@@ -564,7 +583,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     expect(before.rows[0]).toEqual(
       expect.objectContaining({
         staging_generation: null,
-        resource_version: '3',
+        resource_version: '4',
         status: 'current',
       })
     )
@@ -586,7 +605,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       expect(afterAbort.rows[0]).toEqual(
         expect.objectContaining({
           generation: String(Number(before.rows[0].generation) + 1),
-          resource_version: '3',
+          resource_version: '4',
           status: 'relisting',
         })
       )
@@ -609,12 +628,12 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       )
       expect(live.rows).toEqual([
         {
-          provider_uid: 'catalog-host-uid-recreated',
-          provider_resource_version: '3',
+          provider_uid: 'catalog-host-uid-cancellation',
+          provider_resource_version: '4',
         },
       ])
 
-      await expect(indexer.reconcileSource(source)).resolves.toBe('3')
+      await expect(indexer.reconcileSource(source)).resolves.toBe('4')
       const recovered = await databasePool.query(
         `SELECT staging_generation, resource_version, status
            FROM operational_catalog_source_state
@@ -623,7 +642,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       )
       expect(recovered.rows[0]).toEqual({
         staging_generation: null,
-        resource_version: '3',
+        resource_version: '4',
         status: 'current',
       })
     } finally {
