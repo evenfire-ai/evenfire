@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
@@ -9,6 +9,9 @@ import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
 
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
+
 function signHccInternalControl(): string {
   return jwt.sign(
     { iss: 'hcc', aud: 'control-api', sub: 'hcc-provisioner' },
@@ -18,6 +21,16 @@ function signHccInternalControl(): string {
 }
 
 describe('app router wiring', () => {
+  beforeEach(() => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
   })
