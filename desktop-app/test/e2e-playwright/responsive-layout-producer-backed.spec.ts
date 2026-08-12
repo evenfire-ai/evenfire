@@ -4,12 +4,14 @@ import {
   applySdkLayoutRecipe,
   cleanupSdkWorkloadRecipe,
   createSdkWorkloadGrants,
-  profilesSql,
   purgeStaleSdkNotifications,
-  sqlLiteral,
   waitForSdkSandboxUiNotification,
 } from './sdk-client-notification/sdkWorkloadFixture'
 import { HOST_REF } from './third-party-authn-first-party-mcphost/telegramE2eClient'
+import {
+  profilesSql,
+  sqlLiteral,
+} from './third-party-authn-first-party-mcphost/workflowApprovalJourney'
 import { createApproval, issueRuntimeTokens } from './workflow-approval-quadrants/approvalApi'
 import { WORKFLOW_RECIPE_NS } from './workflow-approval-quadrants/constants'
 import {
