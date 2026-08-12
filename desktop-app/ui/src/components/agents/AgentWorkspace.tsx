@@ -25,6 +25,8 @@ import { FallbackBadge } from './FallbackBadge'
 import { SessionTokensIndicator } from './SessionTokensIndicator'
 import { AGENT_ROUTE_LABELS, AGENT_ROUTE_OPTIONS } from './agentRoutes'
 
+const CHAT_SCROLL_TO_BOTTOM_SHOW_DELAY_MS = 250
+
 type AgentWorkspaceMode = 'agents' | 'chat'
 
 type AgentWorkspaceProps = {
@@ -81,10 +83,28 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  const [showDelayedScrollToBottom, setShowDelayedScrollToBottom] = useState(false)
   const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
   const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
   const mcpHealthNow = undefined
+
+  useEffect(() => {
+    setShowScrollToBottom(false)
+  }, [activeChatId])
+
+  useEffect(() => {
+    if (!showScrollToBottom) {
+      setShowDelayedScrollToBottom(false)
+      return
+    }
+
+    const timeoutId = window.setTimeout(
+      () => setShowDelayedScrollToBottom(true),
+      CHAT_SCROLL_TO_BOTTOM_SHOW_DELAY_MS
+    )
+    return () => window.clearTimeout(timeoutId)
+  }, [showScrollToBottom])
 
   useClickOutside(chatAgentRouteMenuRef, chatAgentRouteMenuOpen, () =>
     setChatAgentRouteMenuOpen(false)
@@ -503,7 +523,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           {isChatMode && (
             <div className="chat-thread-container">
               <ChatThread onScrollPositionChange={setShowScrollToBottom} />
-              {activeChatId && showScrollToBottom && (
+              {activeChatId && showDelayedScrollToBottom && (
                 <div className="chat-scroll-to-bottom">
                   <IconButton
                     className="chat-scroll-to-bottom-button"
