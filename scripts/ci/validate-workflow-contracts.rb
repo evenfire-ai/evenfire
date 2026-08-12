@@ -212,6 +212,201 @@ class GithubExpression
   end
 end
 
+class TerminalGate
+  Token = Struct.new(:type, :value)
+
+  def self.parse(script)
+    new(script).parse
+  end
+
+  def self.evaluate(program, environment)
+    case program.fetch(:type)
+    when :expression
+      evaluate_expression(program.fetch(:expression), environment)
+    when :case
+      selected = environment.fetch(program.fetch(:selector), '')
+      expression = program.fetch(:arms)[selected] || program.fetch(:default)
+      expression && evaluate_expression(expression, environment)
+    else
+      raise ArgumentError, "unsupported terminal program #{program.fetch(:type).inspect}"
+    end
+  end
+
+  def self.evaluate_expression(expression, environment)
+    type, *operands = expression
+    case type
+    when :and
+      evaluate_expression(operands.fetch(0), environment) &&
+        evaluate_expression(operands.fetch(1), environment)
+    when :or
+      evaluate_expression(operands.fetch(0), environment) ||
+        evaluate_expression(operands.fetch(1), environment)
+    when :equal
+      value(operands.fetch(0), environment) == value(operands.fetch(1), environment)
+    when :not_equal
+      value(operands.fetch(0), environment) != value(operands.fetch(1), environment)
+    else
+      raise ArgumentError, "unsupported terminal expression #{type.inspect}"
+    end
+  end
+
+  def self.value(operand, environment)
+    type, value = operand
+    type == :variable ? environment.fetch(value, '') : value
+  end
+
+  def initialize(script)
+    @script = script.to_s.gsub(/\\\n/, ' ')
+  end
+
+  def parse
+    lines = @script.lines.map(&:strip).reject(&:empty?)
+    lines.shift if lines.first == 'set -euo pipefail'
+    raise ArgumentError, 'terminal gate has no predicate' if lines.empty?
+
+    source = lines.join(' ')
+    program = source.start_with?('case ') ? parse_case(source) : expression_program(source)
+    program.merge(variables: variables(program).uniq.sort)
+  end
+
+  private
+
+  def parse_case(source)
+    match = source.match(/\Acase\s+"\$([A-Z_][A-Z0-9_]*)"\s+in\s+(.*)\s+esac\z/m)
+    raise ArgumentError, 'case gate must select one quoted variable and end with esac' unless match
+
+    scanner = StringScanner.new(match[2])
+    arms = {}
+    default = nil
+    default_seen = false
+    until scanner.eos?
+      scanner.skip(/\s+/)
+      break if scanner.eos?
+
+      label = scanner.scan(/\*|[A-Za-z0-9_.:\/-]+/)
+      raise ArgumentError, "unsupported case label near #{scanner.rest.inspect}" unless label
+      raise ArgumentError, "case label #{label.inspect} must end with )" unless scanner.scan(/\)/)
+
+      body = scanner.scan_until(/;;/)
+      raise ArgumentError, "case arm #{label.inspect} must end with ;;" unless body
+      body = body.delete_suffix(';;').strip
+      if label == '*'
+        raise ArgumentError, 'case gate must contain one wildcard arm' if default_seen
+        raise ArgumentError, 'default case arm must be exactly exit 1' unless body == 'exit 1'
+        default = false
+        default_seen = true
+      else
+        raise ArgumentError, 'wildcard case arm must be last' if default_seen
+        raise ArgumentError, "duplicate case arm #{label.inspect}" if arms.key?(label)
+        arms[label] = expression_program(body).fetch(:expression)
+      end
+    end
+    raise ArgumentError, 'case gate must contain an exact exit 1 default arm' unless default == false
+
+    { type: :case, selector: match[1], arms: arms, default: default }
+  end
+
+  def expression_program(source)
+    @tokens = tokenize(source)
+    @position = 0
+    expression = parse_boolean_expression
+    raise ArgumentError, "unexpected terminal token #{peek.value.inspect}" if peek
+
+    { type: :expression, expression: expression }
+  end
+
+  def tokenize(source)
+    scanner = StringScanner.new(source)
+    tokens = []
+    until scanner.eos?
+      if scanner.skip(/\s+/)
+        next
+      elsif (operator = scanner.scan(/&&|\|\||!=|=|\[|\]/))
+        tokens << Token.new(operator, operator)
+      elsif scanner.scan(/test\b/)
+        tokens << Token.new(:test, 'test')
+      elsif (variable = scanner.scan(/"\$[A-Z_][A-Z0-9_]*"/))
+        tokens << Token.new(:variable, variable[2...-1])
+      elsif (literal = scanner.scan(/[A-Za-z0-9_.:\/-]+/))
+        tokens << Token.new(:literal, literal)
+      else
+        raise ArgumentError, "unsupported terminal shell near #{scanner.rest.inspect}"
+      end
+    end
+    tokens
+  end
+
+  def parse_boolean_expression
+    expression = parse_predicate
+    while %w[&& ||].include?(peek&.type)
+      operator = take.type == '&&' ? :and : :or
+      expression = [operator, expression, parse_predicate]
+    end
+    expression
+  end
+
+  def parse_predicate
+    bracketed = accept('[')
+    test_command = accept(:test) unless bracketed
+    raise ArgumentError, 'terminal predicate must use [ ... ] or test' unless bracketed || test_command
+    left = parse_operand
+    operator = take
+    unless operator && %w[= !=].include?(operator.type)
+      raise ArgumentError, 'terminal predicate must use = or !='
+    end
+    right = parse_operand
+    raise ArgumentError, 'bracketed terminal predicate must end with ]' if bracketed && !accept(']')
+
+    [operator.type == '=' ? :equal : :not_equal, left, right]
+  end
+
+  def parse_operand
+    token = take
+    unless token && %i[variable literal].include?(token.type)
+      raise ArgumentError, 'terminal predicate operands must be variables or literals'
+    end
+
+    [token.type, token.value]
+  end
+
+  def accept(type)
+    return false unless peek&.type == type
+
+    @position += 1
+    true
+  end
+
+  def take
+    token = peek
+    @position += 1 if token
+    token
+  end
+
+  def peek
+    @tokens[@position]
+  end
+
+  def variables(program)
+    found = program.fetch(:type) == :case ? [program.fetch(:selector)] : []
+    expressions = if program.fetch(:type) == :case
+                    program.fetch(:arms).values
+                  else
+                    [program.fetch(:expression)]
+                  end
+    expressions.each { |expression| collect_variables(expression, found) }
+    found
+  end
+
+  def collect_variables(expression, found)
+    type, *operands = expression
+    if %i[and or].include?(type)
+      operands.each { |operand| collect_variables(operand, found) }
+    else
+      operands.each { |operand| found << operand.fetch(1) if operand.fetch(0) == :variable }
+    end
+  end
+end
+
 def load_workflow(path)
   YAML.safe_load(path.read, permitted_classes: [], aliases: true) || {}
 rescue Psych::SyntaxError => e
@@ -259,10 +454,6 @@ def literal_type_matches?(value, declared_type)
   when 'string' then value.is_a?(String)
   else false
   end
-end
-
-def combined_run(job)
-  Array(job['steps']).map { |step| step['run'] }.compact.join("\n")
 end
 
 def checkout_ref(job)
@@ -673,15 +864,58 @@ def two_result_cases(first_name, second_name)
   end
 end
 
-def validate_shell_truth_table(errors, label, script, cases)
-  if script.empty?
-    errors << "#{label} terminal gate has no executable shell logic"
+def validate_shell_truth_table(
+  errors, label, workflow, job, cases, expected_environment,
+  expected_type:, case_labels: [], expected_workflow_environment: {}
+)
+  steps = Array(job['steps'])
+  unless steps.length == 1 && steps.first['run'].is_a?(String)
+    errors << "#{label} terminal gate must contain exactly one run step"
+    return
+  end
+  errors << "#{label} terminal job must run on ubuntu-latest" unless job['runs-on'] == 'ubuntu-latest'
+
+  errors << "#{label} workflow must not set defaults" if workflow.key?('defaults')
+  workflow_environment = workflow['env'] || {}
+  unless workflow_environment == expected_workflow_environment
+    errors << "#{label} workflow environment must match its exact safe bindings"
+  end
+  %w[continue-on-error env defaults container services].each do |control|
+    errors << "#{label} terminal job must not set #{control}" if job.key?(control)
+  end
+  step = steps.first
+  %w[if continue-on-error shell working-directory].each do |control|
+    errors << "#{label} terminal step must not set #{control}" if step.key?(control)
+  end
+  step_environment = step['env'] || {}
+  unless step_environment == expected_environment
+    errors << "#{label} terminal environment must use the exact result and event bindings"
+  end
+
+  begin
+    program = TerminalGate.parse(step.fetch('run'))
+  rescue ArgumentError => e
+    errors << "#{label} terminal gate syntax is unsupported: #{e.message}"
+    return
+  end
+  allowed_variables = expected_environment.keys
+  unexpected_variables = program.fetch(:variables) - allowed_variables
+  unless unexpected_variables.empty?
+    errors << "#{label} terminal gate uses unsupported variables: #{unexpected_variables.join(', ')}"
+    return
+  end
+  unless program.fetch(:type) == expected_type
+    errors << "#{label} terminal gate must use a #{expected_type} program"
+    return
+  end
+  if expected_type == :case && program.fetch(:arms).keys.sort != case_labels.sort
+    errors << "#{label} terminal case modes must be exactly #{case_labels.sort.join(', ')}"
     return
   end
 
   cases.each do |entry|
-    _stdout, _stderr, status = Open3.capture3(entry.fetch(:env), 'bash', '-c', script)
-    next if status.success? == entry.fetch(:success)
+    result = TerminalGate.evaluate(program, entry.fetch(:env))
+    next if result == entry.fetch(:success)
 
     expected = entry.fetch(:success) ? 'success' : 'failure'
     errors << "#{label} terminal truth table expected #{expected} for #{entry.fetch(:description)}"
@@ -861,8 +1095,15 @@ if formatter
   validate_shell_truth_table(
     errors,
     'prettier-source-preflight',
-    combined_run(formatter_conclude),
-    two_result_cases('VALIDATE_RESULT', 'PRETTIER_RESULT')
+    formatter,
+    formatter_conclude,
+    two_result_cases('VALIDATE_RESULT', 'PRETTIER_RESULT'),
+    {
+      'PRETTIER_RESULT' => '${{ needs.prettier.result }}',
+      'VALIDATE_RESULT' => '${{ needs.validate-inputs.result }}',
+    },
+    expected_type: :expression,
+    expected_workflow_environment: {}
   )
 end
 
@@ -890,8 +1131,15 @@ if provenance
   validate_shell_truth_table(
     errors,
     'exact-ci-provenance',
-    combined_run(provenance_conclude),
-    two_result_cases('VALIDATE_RESULT', 'PROVENANCE_RESULT')
+    provenance,
+    provenance_conclude,
+    two_result_cases('VALIDATE_RESULT', 'PROVENANCE_RESULT'),
+    {
+      'PROVENANCE_RESULT' => '${{ needs.provenance.result }}',
+      'VALIDATE_RESULT' => '${{ needs.validate-inputs.result }}',
+    },
+    expected_type: :expression,
+    expected_workflow_environment: {}
   )
   (provenance['jobs'] || {}).each do |job_id, job|
     Array(job['steps']).each do |step|
@@ -952,8 +1200,23 @@ if build
   validate_shell_truth_table(
     errors,
     'build-publish',
-    combined_run(terminal),
-    publication_cases
+    build,
+    terminal,
+    publication_cases,
+    {
+      'DIFF_RESULT' => '${{ needs.incoming-diff-preflight.result }}',
+      'EVENT' => '${{ github.event_name }}',
+      'PROVENANCE_RESULT' => '${{ needs.exact-ci-preflight.result }}',
+      'RUN_REF' => '${{ github.ref }}',
+      'RUN_SHA' => '${{ github.sha }}',
+      'WORKFLOW_SHA' => '${{ github.workflow_sha }}',
+    },
+    expected_type: :case,
+    case_labels: %w[push workflow_dispatch],
+    expected_workflow_environment: {
+      'NAMESPACE' => 'evenfire-ai',
+      'REGISTRY' => 'ghcr.io',
+    }
   )
   errors << 'image detection must depend on terminal publication preflight' unless needs(jobs['detect'] || {}).include?('preflight')
 end

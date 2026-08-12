@@ -28,11 +28,36 @@ assert_terminal_mutation_rejected() {
   if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$root" \
       >"$TEST_ROOT/terminal.out" 2>&1; then
     fail "$label"
-  elif grep -q 'terminal truth table expected' "$TEST_ROOT/terminal.out"; then
+  elif grep -Eq 'terminal (gate syntax is unsupported|truth table expected)' \
+      "$TEST_ROOT/terminal.out"; then
     pass "$label"
   else
     sed -n '1,120p' "$TEST_ROOT/terminal.out" >&2
     fail "$label reports the terminal truth-table violation"
+  fi
+}
+
+assert_terminal_side_effect_rejected() {
+  local label=$1 workflow=$2 step_name=$3 command=$4 marker=$5
+  local root="$TEST_ROOT/$label"
+  copy_workflows "$root"
+  STEP_NAME="$step_name" INSERT_COMMAND="$command" perl -0pi -e '
+    my $step = quotemeta($ENV{STEP_NAME});
+    my $insert = $ENV{INSERT_COMMAND};
+    my $matched = s/(name: $step.*?          set -euo pipefail\n)/$1          $insert\n/s;
+    die "terminal step not found\n" unless $matched;
+  ' "$root/.github/workflows/$workflow"
+
+  if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$root" \
+      >"$TEST_ROOT/$label.out" 2>&1; then
+    fail "$label mutation is rejected"
+  elif ! grep -Fq 'terminal gate syntax is unsupported' "$TEST_ROOT/$label.out"; then
+    sed -n '1,120p' "$TEST_ROOT/$label.out" >&2
+    fail "$label reports unsupported terminal syntax"
+  elif [ -e "$marker" ]; then
+    fail "$label is rejected before creating its side effect"
+  else
+    pass "$label is rejected before creating its side effect"
   fi
 }
 
@@ -417,6 +442,151 @@ assert_contract_mutation_rejected \
   "$release_trigger_root" \
   'release workflow must trigger only on v* tags' \
   "$TEST_ROOT/release-trigger.out"
+
+fake_network="$TEST_ROOT/fake-network"
+printf '#!/bin/sh\n/usr/bin/touch "$1"\n' >"$fake_network"
+chmod 700 "$fake_network"
+
+terminal_gate_specs=(
+  'formatter:prettier-source-preflight.yml:Require the incoming-diff gate to pass'
+  'provenance:exact-ci-provenance.yml:Require exact CI provenance to pass'
+  'publication:build-publish.yml:Require the event-specific source gate'
+)
+for spec in "${terminal_gate_specs[@]}"; do
+  IFS=: read -r gate workflow step_name <<<"$spec"
+
+  marker="$TEST_ROOT/$gate-touch-marker"
+  assert_terminal_side_effect_rejected \
+    "$gate-touch" "$workflow" "$step_name" "/usr/bin/touch $marker" "$marker"
+
+  marker="$TEST_ROOT/$gate-environment-output"
+  assert_terminal_side_effect_rejected \
+    "$gate-environment" "$workflow" "$step_name" "/usr/bin/env > $marker" "$marker"
+
+  marker="$TEST_ROOT/$gate-network-marker"
+  assert_terminal_side_effect_rejected \
+    "$gate-network" "$workflow" "$step_name" "$fake_network $marker" "$marker"
+done
+
+wildcard_order_root="$TEST_ROOT/publication-wildcard-order"
+copy_workflows "$wildcard_order_root"
+perl -0pi -e 's#(          case "\$EVENT" in\n)(.*?)(            \*\)\n              exit 1\n              ;;\n)(          esac)#$1$3$2$4#s' \
+  "$wildcard_order_root/.github/workflows/build-publish.yml"
+assert_contract_mutation_rejected \
+  'publication wildcard-first case mutation is rejected' \
+  "$wildcard_order_root" \
+  'wildcard case arm must be last' \
+  "$TEST_ROOT/publication-wildcard-order.out"
+
+terminal_job_env_root="$TEST_ROOT/publication-job-environment"
+copy_workflows "$terminal_job_env_root"
+perl -0pi -e 's/(  preflight:.*?    runs-on: ubuntu-latest)/$1\n    env:\n      BASH_ENV: candidate-source\/env.sh/s' \
+  "$terminal_job_env_root/.github/workflows/build-publish.yml"
+assert_contract_mutation_rejected \
+  'publication terminal job environment mutation is rejected' \
+  "$terminal_job_env_root" \
+  'terminal job must not set env' \
+  "$TEST_ROOT/publication-job-environment.out"
+
+terminal_workflow_env_root="$TEST_ROOT/formatter-workflow-environment"
+copy_workflows "$terminal_workflow_env_root"
+perl -0pi -e 's/\njobs:/\nenv:\n  BASH_ENV: candidate-source\/env.sh\n\njobs:/' \
+  "$terminal_workflow_env_root/.github/workflows/prettier-source-preflight.yml"
+assert_contract_mutation_rejected \
+  'formatter workflow environment mutation is rejected' \
+  "$terminal_workflow_env_root" \
+  'workflow environment must match its exact safe bindings' \
+  "$TEST_ROOT/formatter-workflow-environment.out"
+
+terminal_function_env_root="$TEST_ROOT/formatter-workflow-function-environment"
+copy_workflows "$terminal_function_env_root"
+perl -0pi -e 's/\njobs:/\nenv:\n  "BASH_FUNC_test%%": "() { return 0; }"\n\njobs:/' \
+  "$terminal_function_env_root/.github/workflows/prettier-source-preflight.yml"
+assert_contract_mutation_rejected \
+  'formatter workflow imported-function mutation is rejected' \
+  "$terminal_function_env_root" \
+  'workflow environment must match its exact safe bindings' \
+  "$TEST_ROOT/formatter-workflow-function-environment.out"
+
+terminal_shellopts_root="$TEST_ROOT/publication-workflow-shell-options"
+shellopts_marker="$TEST_ROOT/publication-shell-options-marker"
+copy_workflows "$terminal_shellopts_root"
+SHELLOPTS_MARKER="$shellopts_marker" perl -0pi -e 's/(env:\n  REGISTRY: ghcr\.io\n  NAMESPACE: evenfire-ai)/$1\n  SHELLOPTS: xtrace\n  PS4: "$(touch $ENV{SHELLOPTS_MARKER})"/' \
+  "$terminal_shellopts_root/.github/workflows/build-publish.yml"
+assert_contract_mutation_rejected \
+  'publication shell-control environment mutation is rejected' \
+  "$terminal_shellopts_root" \
+  'workflow environment must match its exact safe bindings' \
+  "$TEST_ROOT/publication-shell-options.out"
+if [ -e "$shellopts_marker" ]; then
+  fail 'publication shell-control environment is rejected without execution'
+else
+  pass 'publication shell-control environment is rejected without execution'
+fi
+
+terminal_binding_root="$TEST_ROOT/formatter-result-binding"
+copy_workflows "$terminal_binding_root"
+perl -0pi -e 's/PRETTIER_RESULT: \$\{\{ needs\.prettier\.result \}\}/PRETTIER_RESULT: success/' \
+  "$terminal_binding_root/.github/workflows/prettier-source-preflight.yml"
+assert_contract_mutation_rejected \
+  'formatter terminal result-binding mutation is rejected' \
+  "$terminal_binding_root" \
+  'terminal environment must use the exact result and event bindings' \
+  "$TEST_ROOT/formatter-result-binding.out"
+
+terminal_workflow_defaults_root="$TEST_ROOT/publication-workflow-defaults"
+copy_workflows "$terminal_workflow_defaults_root"
+perl -0pi -e 's/\njobs:/\ndefaults:\n  run:\n    shell: sh\n\njobs:/' \
+  "$terminal_workflow_defaults_root/.github/workflows/build-publish.yml"
+assert_contract_mutation_rejected \
+  'publication workflow defaults mutation is rejected' \
+  "$terminal_workflow_defaults_root" \
+  'workflow must not set defaults' \
+  "$TEST_ROOT/publication-workflow-defaults.out"
+
+terminal_runner_root="$TEST_ROOT/publication-terminal-runner"
+copy_workflows "$terminal_runner_root"
+perl -0pi -e 's/(  preflight:.*?    runs-on:) ubuntu-latest/$1 self-hosted/s' \
+  "$terminal_runner_root/.github/workflows/build-publish.yml"
+assert_contract_mutation_rejected \
+  'publication terminal runner mutation is rejected' \
+  "$terminal_runner_root" \
+  'terminal job must run on ubuntu-latest' \
+  "$TEST_ROOT/publication-terminal-runner.out"
+
+test_equivalent_root="$TEST_ROOT/test-command-equivalent"
+copy_workflows "$test_equivalent_root"
+perl -0pi -e 's/\[ "\$VALIDATE_RESULT" = success \]/test "\$VALIDATE_RESULT" = success/g; s/\[ "\$PRETTIER_RESULT" = success \]/test "\$PRETTIER_RESULT" = success/g' \
+  "$test_equivalent_root/.github/workflows/prettier-source-preflight.yml"
+perl -0pi -e 's/\[ "\$VALIDATE_RESULT" = success \]/test "\$VALIDATE_RESULT" = success/g; s/\[ "\$PROVENANCE_RESULT" = success \]/test "\$PROVENANCE_RESULT" = success/g' \
+  "$test_equivalent_root/.github/workflows/exact-ci-provenance.yml"
+perl -0pi -e 's/\[ "\$([A-Z_]+)" = ([^] ]+) \]/test "\$$1" = $2/g; s/\[ "\$([A-Z_]+)" = "\$([A-Z_]+)" \]/test "\$$1" = "\$$2"/g' \
+  "$test_equivalent_root/.github/workflows/build-publish.yml"
+if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$test_equivalent_root"; then
+  pass 'supported test-command terminal predicates preserve all truth tables'
+else
+  fail 'supported test-command terminal predicates preserve all truth tables'
+fi
+
+operator_equivalent_root="$TEST_ROOT/operator-equivalent"
+copy_workflows "$operator_equivalent_root"
+perl -0pi -e 's#\[ "\$VALIDATE_RESULT" = success \] && \[ "\$PRETTIER_RESULT" = success \]#[ "\$VALIDATE_RESULT" = success ] \&\& [ "\$PRETTIER_RESULT" = success ] || [ "\$VALIDATE_RESULT" = success ] \&\& [ "\$PRETTIER_RESULT" = success ]#' \
+  "$operator_equivalent_root/.github/workflows/prettier-source-preflight.yml"
+perl -0pi -e 's#\[ "\$VALIDATE_RESULT" = success \] && \[ "\$PROVENANCE_RESULT" = success \]#[ "\$VALIDATE_RESULT" != failure ] \&\& [ "\$VALIDATE_RESULT" != skipped ] \&\& [ "\$VALIDATE_RESULT" != cancelled ] \&\& [ "\$PROVENANCE_RESULT" != failure ] \&\& [ "\$PROVENANCE_RESULT" != skipped ] \&\& [ "\$PROVENANCE_RESULT" != cancelled ]#' \
+  "$operator_equivalent_root/.github/workflows/exact-ci-provenance.yml"
+if ruby "$REPO_ROOT/scripts/ci/validate-workflow-contracts.rb" --root "$operator_equivalent_root"; then
+  pass 'supported boolean and inequality operators preserve terminal truth tables'
+else
+  fail 'supported boolean and inequality operators preserve terminal truth tables'
+fi
+
+precedence_root="$TEST_ROOT/bash-and-or-precedence"
+copy_workflows "$precedence_root"
+perl -0pi -e 's#\[ "\$VALIDATE_RESULT" = success \] && \[ "\$PRETTIER_RESULT" = success \]#[ "\$VALIDATE_RESULT" = success ] \&\& [ "\$PRETTIER_RESULT" = success ] || [ "\$VALIDATE_RESULT" != "\$VALIDATE_RESULT" ] \&\& [ "\$VALIDATE_RESULT" != "\$VALIDATE_RESULT" ]#' \
+  "$precedence_root/.github/workflows/prettier-source-preflight.yml"
+assert_terminal_mutation_rejected \
+  'Bash equal-precedence AND-OR mutation is rejected' \
+  "$precedence_root"
 
 formatter_root="$TEST_ROOT/formatter-terminal"
 copy_workflows "$formatter_root"
