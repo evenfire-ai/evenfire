@@ -107,6 +107,7 @@ export async function compareAccessCatalogShadow(
   options: {
     enabled?: boolean
     buildCatalog?: typeof buildAccessCatalog
+    budget?: AccessExecutionBudget
   } = {}
 ): Promise<CatalogShadowOutcome> {
   if (!input.legacyComplete) return record(input.family, 'skipped_legacy_incomplete')
@@ -123,17 +124,19 @@ export async function compareAccessCatalogShadow(
     return 'skipped_unavailable'
   }
 
-  const parent = AccessExecutionBudget.create('catalog')
-  const child = parent.child({
-    producerCalls: 8,
-    objects: 200,
-    decodedBytes: 2 * 1024 * 1024,
-    accessPaths: 512,
-    relationships: 1_024,
-    dbRowsReturned: 1_024,
-    responseBytes: 2 * 1024 * 1024,
-  })
+  const parent = options.budget ?? AccessExecutionBudget.create('catalog')
+  let child: AccessExecutionBudget | undefined
   try {
+    child = parent.child({
+      producerCalls: 8,
+      databaseStatements: 8,
+      objects: 200,
+      decodedBytes: 2 * 1024 * 1024,
+      accessPaths: 512,
+      relationships: 1_024,
+      dbRowsReturned: 1_024,
+      responseBytes: 2 * 1024 * 1024,
+    })
     const catalog = await (options.buildCatalog ?? buildAccessCatalog)(
       { session: input.session, families: [input.family], limit: SHADOW_MAX_IDENTITIES },
       { budget: child }
@@ -162,8 +165,8 @@ export async function compareAccessCatalogShadow(
     }
     return record(input.family, 'skipped_unavailable')
   } finally {
-    child.close()
-    parent.close()
+    child?.close()
+    if (!options.budget) parent.close()
   }
 }
 
