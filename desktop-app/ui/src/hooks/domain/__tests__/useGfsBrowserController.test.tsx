@@ -186,6 +186,18 @@ function Harness({ children, queryClient }: { children: ReactNode; queryClient?:
   )
 }
 
+function MountingProbe() {
+  const [mounted, setMounted] = useState(true)
+  return (
+    <>
+      {mounted ? <Probe /> : null}
+      <button type="button" onClick={() => setMounted(value => !value)}>
+        toggle files
+      </button>
+    </>
+  )
+}
+
 describe('useGfsBrowserController', () => {
   afterEach(() => {
     cleanup()
@@ -685,6 +697,62 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('team-folder'))
+  })
+
+  it('refetches permission-derived resources when Files remounts', async () => {
+    const resource = {
+      resourceId: 'revoked-folder',
+      rid: 'revokedfolder',
+      gfsUri: 'gfs://main/revokedfolder',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Revoked folder',
+      kind: 'directory' as const,
+      path: '/revoked-folder',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: false,
+    }
+    let resources = [resource]
+    const listAccessible = vi.fn(async () => ({ items: resources, nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<MountingProbe />, {
+      wrapper: ({ children }) => <Harness queryClient={queryClient}>{children}</Harness>,
+    })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    resources = []
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'toggle files' }).click()
+    })
+    expect(screen.queryByTestId('accessible-count')).toBeNull()
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'toggle files' }).click()
+    })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('0'))
+    expect(listAccessible).toHaveBeenCalledTimes(2)
   })
 
   it('hydrates readable parent folders for a directly opened file', async () => {

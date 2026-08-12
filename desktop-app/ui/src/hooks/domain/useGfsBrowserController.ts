@@ -235,6 +235,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       return listAccessible(DRIVE, pageParam)
     },
     enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
+    // Accessible resources are permission-derived state. The operator can
+    // revoke a grant/share from another Desktop session while this user is
+    // away from Files, so an Infinity-cached list must not survive a Files
+    // remount without a server check.
+    refetchOnMount: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
