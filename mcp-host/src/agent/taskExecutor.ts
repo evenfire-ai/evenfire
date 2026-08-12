@@ -9,6 +9,7 @@ import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
+import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import { compactConversation } from '../core/conversation/compaction'
@@ -1101,6 +1102,10 @@ export class TaskExecutor {
     // usage sink + a per-pair token counter) so `usage_events` records the pair
     // really served. No policy → returns `llmPort` unchanged (byte-identical).
     const effectiveLlmPort = this.wrapFailoverPort(llmPort, conversation)
+    // LLM-lane guardrails (spec §7): wrap ABOVE failover so built-in request
+    // shaping fires once per logical request, not per fallback attempt. Inert
+    // (returns the port unchanged) when no built-ins are configured (§5).
+    const hookedLlmPort = maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig)
 
     const metadata: Record<string, unknown> = {}
     if (this.task.sourceMessage) {
@@ -1120,7 +1125,7 @@ export class TaskExecutor {
     // out-of-band through `ReasoningPort`. Otherwise fall back to the legacy
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
-      effectiveLlmPort,
+      hookedLlmPort,
       undefined,
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
@@ -1138,7 +1143,7 @@ export class TaskExecutor {
     const contextManager = new PressureContextManager(
       this.contextMaxTokens(),
       this.deps.workspaceService,
-      effectiveLlmPort,
+      hookedLlmPort,
       tokenCounter,
       {
         dryRun: appConfig.tokenizerDryrun,

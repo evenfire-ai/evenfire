@@ -23,4 +23,8 @@ export { resolveToolIdentity, resolveToolIdentityFromRegistry } from './tool/pro
 export type { ToolIdentity } from './tool/provenance'
 export { recordAndCheck } from './tool/doomLoop'
 export type { DoomLoopState } from './tool/doomLoop'
+export { buildLlmBuiltinChain } from './llm/builtinChain'
+export type { BuiltinItem, RequestShaper } from './llm/builtinChain'
+export { applyPromptShaping } from './llm/builtins/promptShaping'
+export type { PromptShapingConfig } from './llm/builtins/promptShaping'
 export { guardrailDecisionsTotal, guardrailBoundaryDurationMs } from './metrics'
