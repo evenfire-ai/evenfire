@@ -1,8 +1,36 @@
+import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
+import { recordDecision, resolveToolIdentityFromRegistry } from '../guardrails'
 import type { ChatMessage, PendingApproval, TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool, reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
 import { isWorkflowTriggerNotFoundToolResult } from './toolUseLoopWorkflowTriggerFallbacks'
+
+/**
+ * Build a guardrail-originated approval suspension (spec §6.3), shaped like the
+ * existing approval gate so the batch loop's suspend path handles it unchanged.
+ */
+function buildGuardrailSuspension(
+  call: ToolCall,
+  config: LoopConfig,
+  reasonCode: string
+): { type: 'suspend'; approval: PendingApproval } {
+  const descriptor = config.toolRegistry.get(call.name)?.traceDescriptor?.(call.arguments) ?? {
+    kind: 'internal_tool' as const,
+    sourceRef: 'mcp-host',
+  }
+  const approval: PendingApproval = {
+    request_id: randomUUID(),
+    tool_name: call.name,
+    tool_kind: descriptor.kind,
+    tool_source_ref: descriptor.sourceRef,
+    parameters: call.arguments,
+    description: `Guardrail requires approval (${reasonCode})`,
+    tool_call_id: '', // filled below from call.id
+    context_snapshot: [],
+  }
+  return { type: 'suspend', approval }
+}
 
 /** The 3 dynamic-tool-loading bridge tools. They are native and must never be
  * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion). */
@@ -204,7 +232,67 @@ export async function executeToolCalls(
       continue
     }
 
-    const gate = loopController.beforeTool(call.name, call.arguments)
+    // Guardrail gate (spec §6) — behind config.guardrails; absent = today.
+    let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+    if (config.guardrails) {
+      const identity = resolveToolIdentityFromRegistry(
+        call.name,
+        config.toolRegistry,
+        call.arguments
+      )
+      const gd = await config.guardrails.decide(identity, call.arguments)
+      events.emit({
+        type: 'guardrail:decision',
+        data: {
+          toolName: call.name,
+          decision: gd.decision,
+          reasonCode: gd.reasonCode,
+          source: gd.source,
+          iteration,
+        },
+        timestamp: new Date(),
+      })
+
+      if (gd.decision === 'deny') {
+        recordDecision('tool', 'deny', gd.source, 'denied', gd.reasonCode)
+        toolResults.push({
+          tool_call_id: call.id,
+          name: call.name,
+          content: `Blocked by guardrail policy (${gd.reasonCode}).`,
+          is_error: true,
+        })
+        continue
+      }
+
+      // Apply any honored rewrite (Phase 1 rules never rewrite; forward-compatible).
+      if (gd.effectiveInput !== call.arguments) {
+        call = { ...call, arguments: gd.effectiveInput }
+      }
+
+      if (gd.decision === 'ask') {
+        // Resume-safe one-shot: an exact approve-once grant satisfies the ask
+        // (spec §6.3). Broad `auto_approved_tools` do NOT — an explicit guardrail
+        // ask needs an exact approval, so we only consume the pending_approval.
+        const pending = config.conversation.pending_approval
+        if (pending && pending.tool_name === call.name) {
+          config.conversation.pending_approval = undefined
+          recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode)
+          gate = 'proceed'
+        } else {
+          recordDecision('tool', 'ask', gd.source, 'ask', gd.reasonCode)
+          gate = buildGuardrailSuspension(call, config, gd.reasonCode)
+        }
+      } else {
+        // allow / no_decision → the existing approval path. Phase 1: guardrail
+        // `allow` does NOT bypass existing approvals (separating containment from
+        // approval is deferred — the safe direction).
+        recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode)
+        gate = loopController.beforeTool(call.name, call.arguments)
+      }
+    } else {
+      gate = loopController.beforeTool(call.name, call.arguments)
+    }
+
     if (gate === 'skip') {
       toolResults.push({
         tool_call_id: call.id,

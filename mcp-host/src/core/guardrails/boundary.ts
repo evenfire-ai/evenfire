@@ -3,14 +3,19 @@
  *
  * Intake → Contributors → Aggregate → (Approve) → Execute at-most-once → Post → Evidence.
  *
+ * `evaluateBoundary` runs the decision-only part (pre chain + aggregate) so a
+ * lane that owns its own execution/suspension (the tool loop) can act on the
+ * decision itself. `createGuardrailBoundary().guard()` is the wrap-around form
+ * (execute at-most-once inside) — used by the LLM lane (Phase 2).
+ *
  * Rewrite re-aggregation (spec §4.1 / F8): on any honored `pre` rewrite, apply
  * it and RESTART the pre chain so every rule sees the final input; each source's
  * rewrite is honored at most once (≤N restarts) — guaranteeing termination.
  *
  * At-most-once (spec §4.2): `execute` is invoked exactly once, only when the
- * aggregate permits it. Resume (F10) is the CALLER re-invoking `guard`, which
- * re-runs the declarative pre contributors (rules) and re-aggregates — not a
- * digest comparison. Response-capability enforcement (spec §8.1) and post
+ * aggregate permits it. Resume (F10) is the CALLER re-invoking the boundary,
+ * which re-runs the declarative pre contributors (rules) and re-aggregates — not
+ * a digest comparison. Response-capability enforcement (spec §8.1) and post
  * transforms/substitute belong to the hook adapter (Phase 3), not this core.
  */
 import { aggregateDecision, pickPresentationReason, unmatchedDefault } from './decision'
@@ -18,6 +23,7 @@ import { guardrailBoundaryDurationMs, guardrailDecisionsTotal } from './metrics'
 import type {
   BoundaryOutcome,
   Contributor,
+  ContributorSource,
   Contributors,
   Decision,
   GuardrailBoundary,
@@ -31,6 +37,49 @@ export interface CoreBoundaryDeps<Input, Result, Identity> {
   contributors: Contributors<Input, Result, Identity>
   /** Whether a non-empty rule set exists (drives the unmatched default, spec §3). */
   hasRules: boolean
+}
+
+/** Decision-only result (spec §3) — no execution. */
+export interface BoundaryEvaluation<Input> {
+  decision: Decision
+  reasonCode: string
+  /** The input after any honored rewrites (spec §4.1). */
+  effectiveInput: Input
+  /** The winning contribution's source (for evidence). */
+  source: ContributorSource
+}
+
+/**
+ * Run the pre chain (with F8 rewrite re-aggregation) and aggregate to a decision.
+ * No execution, no metrics — the caller records the final outcome.
+ */
+export async function evaluateBoundary<Input, Result, Identity>(
+  deps: CoreBoundaryDeps<Input, Result, Identity>,
+  identity: Identity,
+  input: Input
+): Promise<BoundaryEvaluation<Input>> {
+  let effectiveInput = input
+  const appliedRewrites = new Set<string>()
+  let contributions: Array<Contributor<Input, Result>> = []
+  for (let round = 0; round < MAX_REWRITE_ROUNDS; round++) {
+    contributions = await deps.contributors.pre(effectiveInput, identity)
+    const pending = contributions.find(
+      c => c.rewrite !== undefined && !appliedRewrites.has(c.sourceId)
+    )
+    if (!pending || pending.rewrite === undefined) break
+    appliedRewrites.add(pending.sourceId)
+    effectiveInput = pending.rewrite // restart: every rule/hook re-evaluates the rewritten input.
+  }
+
+  const decision: Decision =
+    contributions.length === 0 ? unmatchedDefault(deps.hasRules) : aggregateDecision(contributions)
+  const reasonCode =
+    pickPresentationReason(contributions, decision) ??
+    (decision === 'ask' ? 'unmatched_ask' : decision === 'no_decision' ? 'no_decision' : decision)
+  const source: ContributorSource =
+    contributions.find(c => c.decision === decision)?.source ?? 'current'
+
+  return { decision, reasonCode, effectiveInput, source }
 }
 
 function record(
@@ -51,6 +100,17 @@ function record(
   })
 }
 
+/** Record a guardrail decision + its outcome (spec §9). Exposed so lane adapters that own execution can emit it. */
+export function recordDecision(
+  lane: 'tool' | 'llm',
+  decision: Decision,
+  source: string,
+  outcome: 'executed' | 'denied' | 'ask',
+  reasonCode: string
+): void {
+  record(lane, decision, source, outcome, reasonCode)
+}
+
 export function createGuardrailBoundary<Input, Result, Identity>(
   deps: CoreBoundaryDeps<Input, Result, Identity>
 ): GuardrailBoundary<Input, Result, Identity> {
@@ -58,42 +118,18 @@ export function createGuardrailBoundary<Input, Result, Identity>(
     async guard({ identity, input, execute }): Promise<BoundaryOutcome<Result>> {
       const stopTimer = guardrailBoundaryDurationMs.startTimer({ lane: deps.lane })
       try {
-        // --- Pre chain with rewrite re-aggregation (F8, spec §4.1) ---
-        let effectiveInput = input
-        const appliedRewrites = new Set<string>()
-        let contributions: Array<Contributor<Input, Result>> = []
-        for (let round = 0; round < MAX_REWRITE_ROUNDS; round++) {
-          contributions = await deps.contributors.pre(effectiveInput, identity)
-          const pending = contributions.find(
-            c => c.rewrite !== undefined && !appliedRewrites.has(c.sourceId)
-          )
-          if (!pending || pending.rewrite === undefined) break
-          appliedRewrites.add(pending.sourceId)
-          effectiveInput = pending.rewrite
-          // restart: every rule/hook re-evaluates the rewritten input.
-        }
+        const { decision, reasonCode, effectiveInput, source } = await evaluateBoundary(
+          deps,
+          identity,
+          input
+        )
 
-        // --- Aggregate (spec §3) ---
-        const decision: Decision =
-          contributions.length === 0
-            ? unmatchedDefault(deps.hasRules)
-            : aggregateDecision(contributions)
-        const reasonCode =
-          pickPresentationReason(contributions, decision) ??
-          (decision === 'ask'
-            ? 'unmatched_ask'
-            : decision === 'no_decision'
-              ? 'no_decision'
-              : decision)
-        const winningSource = contributions.find(c => c.decision === decision)?.source ?? 'current'
-
-        // --- Act ---
         if (decision === 'deny') {
-          record(deps.lane, decision, winningSource, 'denied', reasonCode)
+          record(deps.lane, decision, source, 'denied', reasonCode)
           return { kind: 'denied', reasonCode }
         }
         if (decision === 'ask') {
-          record(deps.lane, decision, winningSource, 'ask', reasonCode)
+          record(deps.lane, decision, source, 'ask', reasonCode)
           return { kind: 'ask', reasonCode }
         }
 
@@ -102,7 +138,7 @@ export function createGuardrailBoundary<Input, Result, Identity>(
         // TODO(phase3): apply post-contributor transforms/substitute (PostToolUse
         // redaction, spec §6.2). Phase 1 tool-lane post is a no-op.
         await deps.contributors.post(result, identity)
-        record(deps.lane, decision, winningSource, 'executed', reasonCode)
+        record(deps.lane, decision, source, 'executed', reasonCode)
         return { kind: 'executed', result }
       } finally {
         stopTimer()

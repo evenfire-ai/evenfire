@@ -1,35 +1,38 @@
 /**
- * Tool-lane adapter (spec §6) — specializes the GuardrailBoundary over tool
+ * Tool-lane adapter (spec §6) — specializes the guardrail engine over tool
  * execution.
  *
- * `Input` = resolved-tool arguments; `Result` = the tool result; `Identity` =
- * the real tool after dynamic-bridge resolution (spec §6). This is the entry
- * point the tool-use loop calls before executing a tool.
- *
- * INTEGRATION SEAM (spec §6, map: toolUseLoopToolBatch.ts:207): the live gate is
- * NOT wired into the loop in the Phase 1 scaffold. When wired, `no_decision`
- * falls through to the existing approval path (`beforeTool`), and `ask` returns
- * a suspension shaped like `mcpApprovalGateController.createSuspension`.
- *
- * TODO(phase1): build the boundary from the rules engine + doom-loop, then wire
- * the gate in `executeToolCalls` behind `config.guardrails` (absent = today).
+ * `Input` = resolved-tool arguments; `Identity` = the real tool after
+ * dynamic-bridge resolution (spec §6). Unlike the LLM lane (which uses the
+ * wrap-around `guard(execute)`), the tool-use loop owns execution + suspension,
+ * so this exposes a decision-only `decide()`; the loop acts on the decision
+ * (deny → bounded error, ask → suspension, allow/no_decision → existing path).
  */
-import { createGuardrailBoundary } from '../boundary'
+import { type CoreBoundaryDeps, evaluateBoundary } from '../boundary'
 import type { GuardrailsConfig } from '../config'
-import type { GuardrailBoundary } from '../types'
+import type { Decision } from '../types'
 import type { ToolIdentity } from './provenance'
 import { compileRules, evaluateRules } from './rules'
 
-/** The tool-lane input the boundary aggregates over. */
 export type ToolLaneInput = Record<string, unknown>
-/** The tool-lane result (kept string-shaped; the loop maps to `ToolResult`). */
 export type ToolLaneResult = string
 
-export type ToolLaneBoundary = GuardrailBoundary<ToolLaneInput, ToolLaneResult, ToolIdentity>
+export interface ToolGuardrailDecision {
+  decision: Decision
+  reasonCode: string
+  /** Arguments after any honored rewrites (spec §4.1). Phase 1 rules never rewrite. */
+  effectiveInput: ToolLaneInput
+  source: string
+}
+
+/** The tool-lane guardrail the loop consults before executing a tool. */
+export interface ToolLaneGuardrail {
+  decide(identity: ToolIdentity, input: ToolLaneInput): Promise<ToolGuardrailDecision>
+}
 
 /**
- * Build the tool-lane boundary from the Host guardrails config. Returns
- * `undefined` when no rules are configured — the caller then behaves exactly as
+ * Build the tool-lane guardrail from the Host guardrails config. Returns
+ * `undefined` when no rules are configured — the loop then behaves exactly as
  * today (no-config compatibility, spec §5).
  *
  * Compilation throws on a malformed rule set (spec §3/§5); the caller must
@@ -38,13 +41,13 @@ export type ToolLaneBoundary = GuardrailBoundary<ToolLaneInput, ToolLaneResult, 
  * TODO(phase1): add the doom-loop guard (§6.4) as a `pre` contributor once the
  * gate is wired with per-task state.
  */
-export function buildToolLaneBoundary(
+export function buildToolLaneGuardrail(
   config: GuardrailsConfig | undefined
-): ToolLaneBoundary | undefined {
+): ToolLaneGuardrail | undefined {
   const compiled = compileRules(config?.rules, config?.limits?.maxRules)
   if (!compiled.hasRules) return undefined
 
-  return createGuardrailBoundary<ToolLaneInput, ToolLaneResult, ToolIdentity>({
+  const deps: CoreBoundaryDeps<ToolLaneInput, ToolLaneResult, ToolIdentity> = {
     lane: 'tool',
     hasRules: compiled.hasRules,
     contributors: {
@@ -52,9 +55,20 @@ export function buildToolLaneBoundary(
         return evaluateRules(compiled, identity, input)
       },
       async post() {
-        // Phase 1: no post transforms on the tool lane (PostToolUse = Phase 3).
-        return []
+        return [] // Phase 1: no tool-lane post transforms (PostToolUse = Phase 3).
       },
     },
-  })
+  }
+
+  return {
+    async decide(identity, input) {
+      const e = await evaluateBoundary(deps, identity, input)
+      return {
+        decision: e.decision,
+        reasonCode: e.reasonCode,
+        effectiveInput: e.effectiveInput,
+        source: e.source,
+      }
+    },
+  }
 }
