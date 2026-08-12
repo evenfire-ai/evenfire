@@ -8,6 +8,7 @@
  *
  * TODO(phase1): parse + validate (limits, predicate admission) — see spec §5/§6.1.
  */
+import type { HookDescriptor } from './hooks/types'
 import type { Capability } from './types'
 
 /** A single permission rule item (spec §6.1). Predicate shapes: spec §6.1. */
@@ -42,6 +43,13 @@ export interface GuardrailsConfig {
   rules?: GuardrailRule[]
   hooks?: Record<string, unknown>
   builtins?: unknown[]
+  /**
+   * Resolved installed-hook descriptors (spec §8). In prod these come from the
+   * LlmHook CR watcher (by `hooks` id, §8.2); for dev/E2E an operator can supply
+   * them inline via `CLERUM_GUARDRAILS_CONFIG` to point at a hook server without
+   * the reconciler. Each descriptor's `lifecyclePoints` decides which lanes it runs on.
+   */
+  hookDescriptors?: HookDescriptor[]
   minInstalledHookTrustLevel?: 'low' | 'mid' | 'high'
   approvalPolicies?: string[]
   capabilityCeiling?: Capability[]

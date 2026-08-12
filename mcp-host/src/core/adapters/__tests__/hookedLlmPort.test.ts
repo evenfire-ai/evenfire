@@ -3,6 +3,7 @@
  * passthrough on complete, and inert wrapping when no built-ins are configured.
  */
 import { describe, expect, it, vi } from 'vitest'
+import { type FetchLike, type HookDescriptor, buildLlmLaneHooks } from '../../guardrails'
 import type { LlmPort } from '../../interfaces'
 import type { ToolCompletionRequest } from '../../types'
 import { HookedLlmPort, maybeWrapHookedLlmPort } from '../hookedLlmPort'
@@ -42,6 +43,57 @@ describe('HookedLlmPort', () => {
   it('delegates modelName', () => {
     const hooked = new HookedLlmPort(fakePort(), r => r)
     expect(hooked.modelName()).toBe('m')
+  })
+})
+
+describe('installed hooks (end-to-end via HookedLlmPort)', () => {
+  const dscr = (over: Partial<HookDescriptor>): HookDescriptor => ({
+    id: 'h',
+    endpoint: 'http://svc',
+    path: '/',
+    lifecyclePoints: [],
+    capabilities: [],
+    failMode: 'closed',
+    order: 100,
+    ...over,
+  })
+
+  it('a moderate deny returns a filtered response WITHOUT calling the model', async () => {
+    const inner = fakePort()
+    const moderateDeny: FetchLike = async url => ({
+      status: url.endsWith('/v1/moderate') ? 422 : 200,
+      text: async () => '{"code":"blocked"}',
+    })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['moderate'], capabilities: ['may_deny'] })],
+      {
+        getAuthToken: () => '',
+        fetchImpl: moderateDeny,
+      }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const res = await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(res.finish_reason).toBe('content_filter')
+    expect(vi.mocked(inner.completeWithTools)).not.toHaveBeenCalled()
+  })
+
+  it('a pre_call rewrite reaches the inner port', async () => {
+    const inner = fakePort()
+    const preCallRewrite: FetchLike = async () => ({
+      status: 200,
+      text: async () =>
+        JSON.stringify({ action: 'continue', patch: { params: { temperature: 0.1 } } }),
+    })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['pre_call'], capabilities: ['may_rewrite'], failMode: 'open' })],
+      {
+        getAuthToken: () => '',
+        fetchImpl: preCallRewrite,
+      }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(inner.lastToolReq?.temperature).toBe(0.1)
   })
 })
 
