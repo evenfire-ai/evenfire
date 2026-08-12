@@ -133,6 +133,82 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(result.current.activeChatId).toBe('chat-2')
     })
 
+    it('opens a remote chat at the bottom after its empty cache hydrates', async () => {
+      vi.useFakeTimers()
+      const hydration = deferred<{
+        agent: string
+        chatId: string
+        state: 'idle'
+        turns: Array<{
+          number: number
+          user_input: string
+          response: string
+          started_at: string
+          completed_at: string
+        }>
+      }>()
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockReturnValue(hydration.promise)
+
+      const { result } = renderController()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      const scrollContainer = document.createElement('div')
+      const anchor = document.createElement('div')
+      let scrollTop = 0
+      Object.defineProperties(scrollContainer, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: 800 },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => {
+            scrollTop = value
+          },
+        },
+      })
+      Object.defineProperty(anchor, 'scrollIntoView', { configurable: true, value: vi.fn() })
+      scrollContainer.append(anchor)
+      document.body.append(scrollContainer)
+      result.current.chatEndRef.current = anchor
+
+      let switching!: Promise<void>
+      await act(async () => {
+        switching = result.current.switchToChat('agent-x', 'chat-remote')
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+
+      // The initial cache scroll ran while the cache was empty. Model a reader
+      // at the top when the remote transcript subsequently renders.
+      scrollTop = 0
+      await act(async () => {
+        hydration.resolve({
+          agent: 'agent-x',
+          chatId: 'chat-remote',
+          state: 'idle',
+          turns: [
+            {
+              number: 1,
+              user_input: 'remote question',
+              response: 'remote answer',
+              started_at: '2026-05-28T10:00:00Z',
+              completed_at: '2026-05-28T10:00:05Z',
+            },
+          ],
+        })
+        await switching
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+
+      expect(scrollTop).toBe(800)
+      scrollContainer.remove()
+    })
+
     it('stops delta pagination when the active chat changes during the first page', async () => {
       clerum.chat.loadMessages.mockImplementation(async (_agentRef: string, chatId: string) =>
         chatId === 'chat-a'
@@ -345,8 +421,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       expect(spies.pushToast).toHaveBeenCalledWith('Message to agent-x failed: LLM down', 'error')
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        | Array<{ isError?: boolean; errorCode?: string }>
-        | undefined
+        Array<{ isError?: boolean; errorCode?: string }> | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('provider_error')
     })
@@ -484,8 +559,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await sendPromise
 
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        | Array<{ isError?: boolean; content?: string }>
-        | undefined
+        Array<{ isError?: boolean; content?: string }> | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.content).toContain('Failed to retrieve task result')
       expect(spies.pushToast).toHaveBeenCalledWith(
@@ -863,13 +937,11 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // once its message is the error bubble.
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
-          | { isError?: boolean }
-          | undefined
+          { isError?: boolean } | undefined
         expect(last?.isError).toBe(true)
       })
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        | Array<{ isError?: boolean; errorCode?: string; content?: string }>
-        | undefined
+        Array<{ isError?: boolean; errorCode?: string; content?: string }> | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('BUDGET_EXCEEDED')
       expect(appended?.[0]?.content).toContain('Token budget exceeded')
@@ -925,13 +997,11 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // first; the recovery's reply lands after the `getTaskResult` await).
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
-          | { role?: string }
-          | undefined
+          { role?: string } | undefined
         expect(last?.role).toBe('assistant')
       })
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        | Array<{ role?: string; content?: string; isError?: boolean }>
-        | undefined
+        Array<{ role?: string; content?: string; isError?: boolean }> | undefined
       expect(appended?.[0]?.role).toBe('assistant')
       expect(appended?.[0]?.content).toBe('here is your report')
       expect(appended?.[0]?.isError).toBeUndefined()
