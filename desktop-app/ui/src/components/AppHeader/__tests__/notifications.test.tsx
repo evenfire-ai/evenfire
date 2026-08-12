@@ -228,4 +228,18 @@ describe('AppHeader notification tray presentation', () => {
       'Search teams, contexts, members, agents or connectors...'
     )
   })
+
+  it('uses the full search label above the constrained-width breakpoint', () => {
+    vi.stubGlobal('innerWidth', 1400)
+
+    render(<AppHeader />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(search.getAttribute('placeholder')).toBe(
+      'Search teams, contexts, members, agents or connectors...'
+    )
+    expect(search.getAttribute('title')).toBe(
+      'Search teams, contexts, members, agents or connectors...'
+    )
+  })
 })
