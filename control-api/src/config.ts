@@ -9,6 +9,7 @@ type Config = {
   contextsNamespace: string
   communicationChannelsNamespace: string
   mcpServersNamespace: string
+  llmHooksNamespace: string
   sandboxNamespace: string
   sandboxUiNamespace: string
   secretsNamespace: string
@@ -315,6 +316,7 @@ function intervalMsFromEnv(name: string, defaultValue: number, minValue: number)
 // services/llmAllowedModelsConfigMap.ts.
 const HOSTS_NAMESPACE = process.env.CONTROL_API_HOSTS_NAMESPACE || 'mcp-host'
 const MCP_SERVERS_NAMESPACE = process.env.CONTROL_API_MCP_SERVERS_NAMESPACE || 'mcp-server'
+const LLM_HOOKS_NAMESPACE = process.env.CONTROL_API_LLM_HOOKS_NAMESPACE || 'llm-hooks'
 const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-recipes'
 const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sandbox-ui'
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
@@ -491,6 +493,7 @@ export const config: Config = {
   communicationChannelsNamespace:
     process.env.CONTROL_API_COMMUNICATION_CHANNELS_NAMESPACE || 'channels',
   mcpServersNamespace: MCP_SERVERS_NAMESPACE,
+  llmHooksNamespace: LLM_HOOKS_NAMESPACE,
   sandboxNamespace: SANDBOX_NAMESPACE,
   sandboxUiNamespace: SANDBOX_UI_NAMESPACE,
   secretsNamespace: process.env.CONTROL_API_SECRETS_NAMESPACE || 'mcp-host',
@@ -842,6 +845,7 @@ const NAMESPACE_KEYS: (keyof Config)[] = [
   'contextsNamespace',
   'communicationChannelsNamespace',
   'mcpServersNamespace',
+  'llmHooksNamespace',
   'sandboxNamespace',
   'sandboxUiNamespace',
   'secretsNamespace',

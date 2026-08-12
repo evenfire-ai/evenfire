@@ -228,6 +228,8 @@ const RESOURCE_MAP: Record<string, AdminResourceType> = {
   'communication-channels': 'communicationchannels',
   mcpservers: 'mcpservers',
   'mcp-servers': 'mcpservers',
+  llmhooks: 'llmhooks',
+  'llm-hooks': 'llmhooks',
 }
 
 function resourceNamespace(plural: AdminResourceType): string {
@@ -240,6 +242,8 @@ function resourceNamespace(plural: AdminResourceType): string {
       return config.communicationChannelsNamespace
     case 'mcpservers':
       return config.mcpServersNamespace
+    case 'llmhooks':
+      return config.llmHooksNamespace
   }
 }
 
@@ -260,6 +264,14 @@ function communicationChannelMatchesConfirmedUser(item: unknown, userId: string)
 
 const RESOURCE_PATTERN =
   '/admin/:resource(hosts|contexts|communication-channels|communicationchannels|mcp-servers|mcpservers)'
+
+// LlmHook guardrail CRs get READ + DELETE only through the generic router.
+// Creation/update goes through the org-scoped registry `install-hook` saga
+// (registry.ts) so the install-time trust_level + image-allowlist preflight
+// cannot be bypassed by a raw POST/PUT — the same reason recipes are not in the
+// generic CRUD pattern. This lane powers the control-ui cluster-wide list, the
+// per-hook status detail, and uninstall.
+const LLMHOOK_PATTERN = '/admin/:resource(llmhooks|llm-hooks)'
 
 /** Resolve the plural type and canonical namespace for a resource route param. */
 function resolveResource(param: string): { plural: AdminResourceType; ns: string } | null {
@@ -642,6 +654,49 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   )
 
   registerCommunicationChannelCredentialsRoutes(router, gateway)
+
+  // ── LlmHook guardrail CRs: read + delete only (see LLMHOOK_PATTERN) ──────────
+  router.use(LLMHOOK_PATTERN, (req: Request, _res: Response, next: NextFunction) => {
+    const resolved = resolveResource(req.params.resource)
+    if (resolved) {
+      enforceNamespace(resolved.ns)(req, _res, next)
+    } else {
+      next()
+    }
+  })
+
+  // Cluster-wide list (control-ui hooks dashboard).
+  router.get(
+    LLMHOOK_PATTERN,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const items = await gateway.listResource(plural, ns)
+      res.status(200).json({ items })
+    })
+  )
+
+  // Single hook (status detail / digest drift).
+  router.get(
+    `${LLMHOOK_PATTERN}/:name`,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const resource = await gateway.getResource(plural, req.params.name, ns)
+      res.status(200).json(resource)
+    })
+  )
+
+  // Uninstall. Deletes the LlmHook CR; host-context-controller garbage-collects
+  // the shared pod once the last referencing hook is gone. Removing the {id}
+  // reference from any Host.spec.guardrails.hooks is owned by the install/uninstall
+  // saga (registry.ts) alongside the credential-Secret lifecycle.
+  router.delete(
+    `${LLMHOOK_PATTERN}/:name`,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const deleted = await gateway.deleteResource(plural, req.params.name, ns)
+      res.status(200).json(deleted)
+    })
+  )
 
   return router
 }

@@ -183,6 +183,9 @@ export class K8sGateway {
       contexts: config.contextsNamespace,
       communicationchannels: config.communicationChannelsNamespace,
       mcpservers: config.mcpServersNamespace,
+      // Installed guardrail LlmHook CRs live in the llm-hooks namespace (§12.1);
+      // control-api reads/deletes them, host-context-controller reconciles pods.
+      llmhooks: config.llmHooksNamespace,
       // Design invariant: WorkflowRecipe CRDs always live in sandbox-recipes,
       // co-located with the workflow coordinator and recipe mcp-host pods.
       // The mcp-server namespace is reserved for McpServer transport children
