@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
-import { checkAndIncrement } from '../services/rateLimiterService.js'
+import { rateLimitMiddleware } from './rateLimitMiddleware.js'
 
 type AuthenticatedRequest = Request & { externalAuth?: { userId?: string } }
 
@@ -44,15 +44,12 @@ function keyFor(
 ): string {
   const policy = POLICIES[operation]
   if (stage === 'pre_auth') return `${policy.bucketType}:ip:${boundedIp(req)}`
-  const userId = req.externalAuth?.userId
-  // This middleware is composed after successful authentication. A bounded
-  // sentinel preserves the limiter's accounting contract if a route is wired
-  // incorrectly instead of silently failing open.
-  return `${policy.bucketType}:user:${userId || 'missing'}`
+  // Post-auth routes are composed after live authentication. The sentinel is
+  // deliberately counted if wiring is wrong rather than silently failing open.
+  return `${policy.bucketType}:user:${req.externalAuth?.userId || 'missing'}`
 }
 
 function sendLimited(req: Request, res: Response, retryAfterSeconds: number): void {
-  res.setHeader('Retry-After', String(retryAfterSeconds))
   sendPublicApiError(
     req,
     res,
@@ -64,51 +61,33 @@ function sendLimited(req: Request, res: Response, retryAfterSeconds: number): vo
   )
 }
 
-async function enforce(
-  operation: ExternalUserRateLimitOperation,
-  stage: RateLimitStage,
-  req: AuthenticatedRequest,
-  res: Response
-): Promise<boolean> {
+function policyMiddleware(operation: ExternalUserRateLimitOperation, stage: RateLimitStage) {
   const policy = POLICIES[operation]
-  const result = await checkAndIncrement(keyFor(operation, stage, req), policy.maxPerMinute)
-  res.setHeader('X-RateLimit-Limit', String(policy.maxPerMinute))
-  res.setHeader('X-RateLimit-Remaining', String(result.remaining))
-  res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
-  if (result.allowed) return true
-  sendLimited(req, res, Math.max(1, Math.ceil((result.resetMs - Date.now()) / 1000)))
-  return false
+  return rateLimitMiddleware({
+    bucketType: policy.bucketType,
+    maxPerMinute: policy.maxPerMinute,
+    getBucketKey: req => keyFor(operation, stage, req as AuthenticatedRequest),
+    onLimited: sendLimited,
+  })
 }
 
+/** Typed policy selection only; rateLimitMiddleware performs every bucket operation. */
 export function preAuthExternalUserRateLimit(operation: ExternalUserRateLimitOperation) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    void enforce(operation, 'pre_auth', req as AuthenticatedRequest, res)
-      .then(allowed => {
-        if (allowed) next()
-      })
-      .catch(next)
-  }
+  return policyMiddleware(operation, 'pre_auth')
 }
 
+/** Compose this only after trusted live authentication has populated externalAuth. */
 export function authenticatedExternalUserRateLimit(operation: ExternalUserRateLimitOperation) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    void enforce(operation, 'authenticated', req as AuthenticatedRequest, res)
-      .then(allowed => {
-        if (allowed) next()
-      })
-      .catch(next)
-  }
-}
-
-export async function enforceAuthenticatedExternalUserRateLimit(
-  operation: ExternalUserRateLimitOperation,
-  req: Request,
-  res: Response,
-  principal: Readonly<{ userId: string }>
-): Promise<boolean> {
-  const authenticated = req as AuthenticatedRequest
-  authenticated.externalAuth = principal
-  return enforce(operation, 'authenticated', authenticated, res)
+  return [
+    (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+      if (!req.externalAuth?.userId) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
+      next()
+    },
+    policyMiddleware(operation, 'authenticated'),
+  ] as const
 }
 
 export const externalUserRateLimitPolicy = Object.freeze({ keyFor })

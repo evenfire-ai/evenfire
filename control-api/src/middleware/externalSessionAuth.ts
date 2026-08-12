@@ -4,11 +4,20 @@ import { AuthClaims, TeamRole } from '../profileTypes.js'
 import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
-import type { ExternalSessionAuthorityContext } from '../services/auth/externalSessionAuthentication.js'
+import type {
+  ExternalSessionAuthentication,
+  ExternalSessionAuthorityContext,
+  ExternalSessionClient,
+  ExternalSessionPurpose,
+} from '../services/auth/externalSessionAuthentication.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
   externalSessionAuthority?: ExternalSessionAuthorityContext
+  externalSessionAuthentication?: Extract<
+    ExternalSessionAuthentication,
+    { status: 'authenticated' }
+  >
   accessExecutionBudget?: AccessExecutionBudget
   externalTeamAuth?: {
     teamId: string
@@ -18,6 +27,78 @@ export type ExternalAuthedRequest = Request & {
 
 function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
+}
+
+function extractRouteSessionToken(req: Request): string {
+  const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
+  return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+}
+
+function sendSessionAuthenticationError(
+  req: Request,
+  res: Response,
+  status: 'invalid' | 'upgrade_required'
+): void {
+  if (status === 'upgrade_required') {
+    sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+    return
+  }
+  sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+}
+
+/**
+ * Establishes trusted, live external-session context without performing a
+ * protected operation. It is intended to precede post-auth rate limiting.
+ */
+export function requireExternalSessionRateLimitContext(options: {
+  purpose: ExternalSessionPurpose
+  client?: (req: Request) => ExternalSessionClient
+  requireV2?: boolean
+}) {
+  return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
+    const token = extractRouteSessionToken(req)
+    if (!token || token.length > 4096) {
+      sendSessionAuthenticationError(req, res, 'invalid')
+      return
+    }
+    try {
+      const authentication = await authenticateExternalUserSession(token, {
+        purpose: options.purpose,
+        ...(options.client ? { client: options.client(req) } : {}),
+      })
+      if (authentication.status === 'upgrade_required') {
+        sendSessionAuthenticationError(req, res, 'upgrade_required')
+        return
+      }
+      if (authentication.status !== 'authenticated') {
+        sendSessionAuthenticationError(req, res, 'invalid')
+        return
+      }
+      if (options.requireV2 && authentication.contract !== 'v2') {
+        sendPublicApiError(
+          req,
+          res,
+          409,
+          'conflict',
+          'A user-session v2 login is required for session management.'
+        )
+        return
+      }
+      req.externalAuth = authentication.claims
+      req.externalSessionAuthority = authentication.authorityContext
+      req.externalSessionAuthentication = authentication
+      next()
+    } catch {
+      sendPublicApiError(
+        req,
+        res,
+        503,
+        'authority_unavailable',
+        'Session authority is temporarily unavailable.',
+        true
+      )
+    }
+  }
 }
 
 async function validateExternalSessionToken(

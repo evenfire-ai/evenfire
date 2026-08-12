@@ -3,7 +3,11 @@ import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
 import {
-  enforceAuthenticatedExternalUserRateLimit,
+  type ExternalAuthedRequest,
+  requireExternalSessionRateLimitContext,
+} from '../../middleware/externalSessionAuth.js'
+import {
+  authenticatedExternalUserRateLimit,
   preAuthExternalUserRateLimit,
 } from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -224,7 +228,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/session-token',
     preAuthExternalUserRateLimit('session_lifecycle'),
-    async (req, res, next) => {
+    requireExternalSessionRateLimitContext({ purpose: 'switch', client: externalSessionClient }),
+    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
         const email = String(req.body?.email || '')
@@ -235,30 +241,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         if (!userId || !email || !teamId || !currentToken || currentToken.length > 4096) {
           return res.status(400).json({ error: 'invalid payload' })
         }
-        const authentication = await authenticateExternalUserSession(currentToken, {
-          purpose: 'switch',
-          client: externalSessionClient(req),
-        })
-        if (authentication.status === 'upgrade_required') {
-          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-          return
-        }
+        const authentication = req.externalSessionAuthentication!
         if (
-          authentication.status !== 'authenticated' ||
           authentication.claims.userId !== userId ||
           authentication.claims.email.toLowerCase() !== email
         ) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        if (
-          !(await enforceAuthenticatedExternalUserRateLimit(
-            'session_lifecycle',
-            req,
-            res,
-            authentication.claims
-          ))
-        ) {
           return
         }
         const membership = await pool.query(
@@ -317,35 +305,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/session/renew',
     preAuthExternalUserRateLimit('session_lifecycle'),
-    async (req, res) => {
+    requireExternalSessionRateLimitContext({ purpose: 'renew', client: externalSessionClient }),
+    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
-        const authentication = await authenticateExternalUserSession(token, {
-          purpose: 'renew',
-          client: externalSessionClient(req),
-        })
-        if (authentication.status === 'upgrade_required') {
-          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-          return
-        }
-        if (authentication.status !== 'authenticated') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        if (
-          !(await enforceAuthenticatedExternalUserRateLimit(
-            'session_lifecycle',
-            req,
-            res,
-            authentication.claims
-          ))
-        ) {
-          return
-        }
+        const authentication = req.externalSessionAuthentication!
         const renewal = await renewExternalUserSession(token, {
           client: externalSessionClient(req),
           policy: authentication.policy,
@@ -380,31 +349,19 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/session/logout',
     preAuthExternalUserRateLimit('session_lifecycle'),
-    async (req, res) => {
+    requireExternalSessionRateLimitContext({
+      purpose: 'revoke_cleanup',
+      client: externalSessionClient,
+    }),
+    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
-        const authentication = await authenticateExternalUserSession(token, {
-          purpose: 'revoke_cleanup',
-          client: externalSessionClient(req),
-        })
-        if (authentication.status !== 'authenticated') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        if (
-          !(await enforceAuthenticatedExternalUserRateLimit(
-            'session_lifecycle',
-            req,
-            res,
-            authentication.claims
-          ))
-        ) {
-          return
-        }
+        const authentication = req.externalSessionAuthentication!
         const revoked =
           authentication.contract === 'v2' && authentication.claims.sid
             ? await revokeUserSession(
@@ -430,35 +387,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/sessions/revoke-all',
     preAuthExternalUserRateLimit('session_lifecycle'),
-    async (req, res) => {
+    requireExternalSessionRateLimitContext({ purpose: 'protected', client: externalSessionClient }),
+    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
-        const authentication = await authenticateExternalUserSession(token, {
-          purpose: 'protected',
-          client: externalSessionClient(req),
-        })
-        if (authentication.status === 'upgrade_required') {
-          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-          return
-        }
-        if (authentication.status !== 'authenticated') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        if (
-          !(await enforceAuthenticatedExternalUserRateLimit(
-            'session_lifecycle',
-            req,
-            res,
-            authentication.claims
-          ))
-        ) {
-          return
-        }
+        const authentication = req.externalSessionAuthentication!
         const revoked = await revokeAllUserSessions(
           authentication.claims.userId,
           'user_revoked_all'
@@ -480,39 +418,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/auth/sessions/:sid/revoke',
     preAuthExternalUserRateLimit('session_lifecycle'),
-    async (req, res) => {
+    requireExternalSessionRateLimitContext({
+      purpose: 'protected',
+      client: externalSessionClient,
+      requireV2: true,
+    }),
+    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
-        const authentication = token
-          ? await authenticateExternalUserSession(token, {
-              purpose: 'protected',
-              client: externalSessionClient(req),
-            })
-          : null
-        if (!authentication || authentication.status !== 'authenticated') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        if (authentication.contract !== 'v2') {
-          sendPublicApiError(
-            req,
-            res,
-            409,
-            'conflict',
-            'A user-session v2 login is required for session management.'
-          )
-          return
-        }
-        if (
-          !(await enforceAuthenticatedExternalUserRateLimit(
-            'session_lifecycle',
-            req,
-            res,
-            authentication.claims
-          ))
-        ) {
-          return
-        }
+        const authentication = req.externalSessionAuthentication!
         const revoked = await revokeUserSession(
           authentication.claims.userId,
           String(req.params.sid || '').trim(),

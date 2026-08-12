@@ -137,7 +137,7 @@ export function createExternalInvitationsRouter(): Router {
     '/external/invitations/password',
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
-    authenticatedExternalUserRateLimit('invitation_mutation'),
+    ...authenticatedExternalUserRateLimit('invitation_mutation'),
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -180,7 +180,7 @@ export function createExternalInvitationsRouter(): Router {
     '/external/invitations/desktop-authorization',
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
-    authenticatedExternalUserRateLimit('invitation_sensitive_action'),
+    ...authenticatedExternalUserRateLimit('invitation_sensitive_action'),
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -221,7 +221,7 @@ export function createExternalInvitationsRouter(): Router {
   router.get(
     '/external/invitations/pending',
     requireValidExternalSessionToken,
-    authenticatedExternalUserRateLimit('invitation_read'),
+    ...authenticatedExternalUserRateLimit('invitation_read'),
     async (req, res, next) => {
       try {
         const email = String((req as ExternalAuthedRequest).externalAuth?.email || '')
