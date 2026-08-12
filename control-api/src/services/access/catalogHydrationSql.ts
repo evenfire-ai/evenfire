@@ -1,3 +1,8 @@
+import { workflowTriggerGrantIdentitySql } from './workflowTriggerGrantIdentity.js'
+
+const directWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('direct', 'access_grant')
+const teamWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('team', 'access_grant')
+
 export const USER_HYDRATION_SQL = `
   WITH requested AS (SELECT UNNEST($2::text[]) AS logical_id)
   SELECT u.id::text AS logical_id,
@@ -103,8 +108,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
          AND membership.status = 'active'
       UNION ALL
       SELECT resource.logical_id, 'direct',
-             'user_workflow_triggers:' || access_grant.user_id || ':' ||
-               access_grant.recipe_namespace || '/' || access_grant.recipe_name,
+             ${directWorkflowTriggerGrantId},
              NULL, NULL
         FROM resources resource
         JOIN user_workflow_triggers access_grant
@@ -113,8 +117,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
        WHERE access_grant.user_id = $1
       UNION ALL
       SELECT resource.logical_id, 'team',
-             'team_workflow_triggers:' || access_grant.team_id || ':' ||
-               access_grant.recipe_namespace || '/' || access_grant.recipe_name,
+             ${teamWorkflowTriggerGrantId},
              access_grant.team_id, membership.role
         FROM resources resource
         JOIN team_workflow_triggers access_grant
@@ -125,9 +128,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
          AND membership.status = 'active'
       UNION ALL
       SELECT resource.logical_id, 'direct',
-             'sandbox_app:' || exposure.relationship_instance_id || ':' ||
-               access_grant.user_id || ':' || access_grant.recipe_namespace || '/' ||
-               access_grant.recipe_name,
+             ${directWorkflowTriggerGrantId},
              NULL, NULL
         FROM resources resource
         JOIN operational_resource_relationships exposure
@@ -142,9 +143,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
        WHERE access_grant.user_id = $1
       UNION ALL
       SELECT resource.logical_id, 'team',
-             'sandbox_app:' || exposure.relationship_instance_id || ':' ||
-               access_grant.team_id || ':' || access_grant.recipe_namespace || '/' ||
-               access_grant.recipe_name,
+             ${teamWorkflowTriggerGrantId},
              access_grant.team_id, membership.role
         FROM resources resource
         JOIN operational_resource_relationships exposure

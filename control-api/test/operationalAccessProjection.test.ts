@@ -130,6 +130,16 @@ describe('operational access projection', () => {
       ['workflow_recipe', 'sandbox-recipes/recipe-a'],
       ['sandbox_app', 'sandbox-recipes/recipe-a'],
     ])
+    const sandboxExposures = projection.relationships.filter(
+      relationship => relationship.relationshipType === 'exposes_sandbox_app'
+    )
+    expect(sandboxExposures).toHaveLength(1)
+    expect(sandboxExposures[0]).toEqual(
+      expect.objectContaining({
+        sourceId: 'sandbox-recipes/recipe-a',
+        targetId: 'sandbox-recipes/recipe-a',
+      })
+    )
     const encoded = JSON.stringify(projection.relationships)
     expect(encoded).not.toContain('private-service')
     expect(encoded).not.toContain('oauth-secret')
