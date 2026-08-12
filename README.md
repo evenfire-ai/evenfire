@@ -37,7 +37,7 @@
 
 ## Quick start
 
-> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. 
+> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation.
 
 Stand up every service on minikube with one command, including a seeded agent
 named `chatllm`:
