@@ -26,9 +26,10 @@ export async function catalogQuery(
   db: Pick<DbClient, 'query'>,
   budget: AccessExecutionBudget,
   text: string,
-  values: unknown[]
+  values: unknown[],
+  options: { chargeProducer?: boolean } = {}
 ) {
-  return runAccessDatabaseQuery(db, budget, text, values)
+  return runAccessDatabaseQuery(db, budget, text, values, options)
 }
 
 export type BoundedKeyArm = Readonly<{

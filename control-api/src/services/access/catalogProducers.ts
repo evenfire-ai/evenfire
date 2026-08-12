@@ -40,6 +40,7 @@ import {
 } from './catalogProducerSupport.js'
 import type { OperationalSourceFamily } from './operationalAccessProjection.js'
 import { canonicalResourceIdentity } from './resourceIdentity.js'
+import { listGfsProducerKeys } from './teamGfsTopK.js'
 
 const REQUIRED_SOURCES: Readonly<Record<CatalogFamily, readonly OperationalSourceFamily[]>> =
   Object.freeze({
@@ -530,6 +531,9 @@ class SqlCatalogProducer implements CatalogProducer {
     continuation: ProducerContinuation,
     take: number
   ): Promise<CatalogProducerPage> {
+    if (this.family === 'gfs_resource') {
+      return listGfsProducerKeys({ context, continuation, take })
+    }
     const after = continuation.afterKey?.[2] ?? ''
     const prefix = `${this.family === 'host' ? config.hostsNamespace : config.contextsNamespace}/`
     const scopedAfter = after.startsWith(prefix) ? after.slice(prefix.length) : ''
