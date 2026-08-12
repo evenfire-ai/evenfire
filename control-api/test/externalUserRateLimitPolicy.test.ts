@@ -71,4 +71,42 @@ describe('external user rate-limit policy', () => {
     )
     expect(limiter.checkAndIncrement.mock.calls.at(-1)?.[0]).not.toContain('never-used-as-a-key')
   })
+
+  it('uses the client IP forwarded only by the authenticated external REST service', async () => {
+    limiter.checkAndIncrement.mockResolvedValueOnce(allowedResult())
+    const app = express()
+    app.use((req, _res, next) => {
+      req.internalService = { name: 'external-rest-api' }
+      next()
+    })
+    app.get('/pre-auth', preAuthExternalUserRateLimit('session_lifecycle'), (_req, res) => {
+      res.status(204).end()
+    })
+
+    await request(app).get('/pre-auth').set('x-evenfire-client-ip', '198.51.100.52').expect(204)
+
+    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
+      'external_session_lifecycle:ip:198.51.100.52',
+      10
+    )
+  })
+
+  it('does not trust a forwarded client IP from another internal service', async () => {
+    limiter.checkAndIncrement.mockResolvedValueOnce(allowedResult())
+    const app = express()
+    app.use((req, _res, next) => {
+      req.internalService = { name: 'rpc-proxy' }
+      next()
+    })
+    app.get('/pre-auth', preAuthExternalUserRateLimit('session_lifecycle'), (_req, res) => {
+      res.status(204).end()
+    })
+
+    await request(app).get('/pre-auth').set('x-evenfire-client-ip', '198.51.100.52').expect(204)
+
+    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
+      expect.not.stringContaining('198.51.100.52'),
+      10
+    )
+  })
 })

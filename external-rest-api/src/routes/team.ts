@@ -41,7 +41,7 @@ export function createTeamRouter(): Router {
         res.status(400).json({ error: 'Team name is required' })
         return
       }
-      const result = await createTeamForUser({ ...auth, sessionToken }, name)
+      const result = await createTeamForUser({ ...auth, sessionToken }, name, req.ip)
       const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
       if (browserRequest) setProfileSessionCookie(req, res, result.token)
       res.status(201).json(browserRequest ? { team: result.team } : result)

@@ -36,7 +36,8 @@ export async function getCurrentTeam(auth: AuthContext) {
 
 export async function createTeamForUser(
   auth: Pick<AuthContext, 'userId' | 'email' | 'sessionToken'>,
-  name: string
+  name: string,
+  clientIp?: string
 ) {
   const team = await controlApiRequest<{ id: string; name: string }>('POST', '/external/teams', {
     body: {
@@ -57,6 +58,7 @@ export async function createTeamForUser(
         role: 'admin',
       },
       userSessionToken: auth.sessionToken,
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
 
