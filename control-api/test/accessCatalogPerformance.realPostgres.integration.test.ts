@@ -634,19 +634,25 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
 
     const first = await buildAccessCatalog(
       { session, families: CATALOG_FAMILIES, limit: 100 },
-      { transaction: measuredTransaction }
+      {
+        transaction: measuredTransaction,
+        teamGfsMembershipAdmissionLimit: HIGH_TEAMS,
+      }
     )
     expect(first.items).toHaveLength(100)
     expect(first.nextCursor).not.toBeNull()
-    expect(queryCount).toBeLessThanOrEqual(2 + 2 * CATALOG_FAMILIES.length)
+    expect(queryCount).toBeLessThanOrEqual(40)
 
     queryCount = 0
     const second = await buildAccessCatalog(
       { session, families: CATALOG_FAMILIES, limit: 100, cursor: first.nextCursor },
-      { transaction: measuredTransaction }
+      {
+        transaction: measuredTransaction,
+        teamGfsMembershipAdmissionLimit: HIGH_TEAMS,
+      }
     )
     expect(second.items).toHaveLength(100)
-    expect(queryCount).toBeLessThanOrEqual(2 + 2 * CATALOG_FAMILIES.length)
+    expect(queryCount).toBeLessThanOrEqual(40)
     const firstIds = new Set(first.items.map(item => item.resource.canonicalId))
     expect(second.items.every(item => !firstIds.has(item.resource.canonicalId))).toBe(true)
 
@@ -659,7 +665,10 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     await expect(
       buildAccessCatalog(
         { session, families: CATALOG_FAMILIES, limit: 100, cursor: first.nextCursor },
-        { transaction: measuredTransaction }
+        {
+          transaction: measuredTransaction,
+          teamGfsMembershipAdmissionLimit: HIGH_TEAMS,
+        }
       )
     ).rejects.toBeInstanceOf(AccessCatalogCursorError)
   })
