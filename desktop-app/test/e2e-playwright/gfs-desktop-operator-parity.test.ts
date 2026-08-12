@@ -486,6 +486,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       operatorJourney.ordinaryName
     )
     await closeManageDialog(page)
+    // Opening Manage resolves the selected resource in the visible browser,
+    // so closing the dialog leaves the operator inside grantFolder. Return to
+    // the root through the user-visible breadcrumb before selecting the next
+    // ACL target; otherwise shareFolder is not present in the current listing.
+    await ensureOperatorRoot(page)
 
     dialog = await openResourceManage(page, shareFolder)
     await selectOrdinarySubject(page, operatorJourney.ordinaryEmail)
@@ -510,12 +515,14 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       await expect(resourceRow(ordinary.page, grantFolder)).toBeVisible()
       await expect(resourceRow(ordinary.page, shareFolder)).toBeVisible()
 
+      await ensureOperatorRoot(page)
       await openResourceManage(page, grantFolder)
       await page.getByTestId(`gfs-revoke-grant-${grant.id}`).click()
       await expectToast(page, `Access revoked for ${operatorJourney.ordinaryName}`)
       await expect.poll(() => operatorJourney.findGrant(grantFolder.resourceId)).toBeNull()
       await closeManageDialog(page)
 
+      await ensureOperatorRoot(page)
       await openResourceManage(page, shareFolder)
       await page.getByTestId(`gfs-revoke-share-${share.id}`).click()
       await expectToast(page, `Shared access revoked for ${operatorJourney.ordinaryName}`)
