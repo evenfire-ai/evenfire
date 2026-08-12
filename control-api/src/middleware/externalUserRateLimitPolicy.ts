@@ -1,6 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
-import { rateLimitMiddleware } from './rateLimitMiddleware.js'
 
 type AuthenticatedRequest = Request & { externalAuth?: { userId?: string } }
 
@@ -11,7 +10,7 @@ export type ExternalUserRateLimitOperation =
   | 'invitation_read'
   | 'access_capabilities'
 
-type RateLimitStage = 'pre_auth' | 'authenticated'
+export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
 type Policy = Readonly<{ bucketType: string; maxPerMinute: number }>
 
@@ -39,7 +38,7 @@ function boundedIp(req: Request): string {
 
 function keyFor(
   operation: ExternalUserRateLimitOperation,
-  stage: RateLimitStage,
+  stage: ExternalUserRateLimitStage,
   req: AuthenticatedRequest
 ): string {
   const policy = POLICIES[operation]
@@ -61,33 +60,34 @@ function sendLimited(req: Request, res: Response, retryAfterSeconds: number): vo
   )
 }
 
-function policyMiddleware(operation: ExternalUserRateLimitOperation, stage: RateLimitStage) {
+/**
+ * Typed policy selection for explicit route composition. The route passes
+ * these options to the one canonical rateLimitMiddleware enforcement path.
+ */
+export function externalUserRateLimitOptions(
+  operation: ExternalUserRateLimitOperation,
+  stage: ExternalUserRateLimitStage
+) {
   const policy = POLICIES[operation]
-  return rateLimitMiddleware({
+  return {
     bucketType: policy.bucketType,
     maxPerMinute: policy.maxPerMinute,
     getBucketKey: req => keyFor(operation, stage, req as AuthenticatedRequest),
     onLimited: sendLimited,
-  })
+  }
 }
 
-/** Typed policy selection only; rateLimitMiddleware performs every bucket operation. */
-export function preAuthExternalUserRateLimit(operation: ExternalUserRateLimitOperation) {
-  return policyMiddleware(operation, 'pre_auth')
-}
-
-/** Compose this only after trusted live authentication has populated externalAuth. */
-export function authenticatedExternalUserRateLimit(operation: ExternalUserRateLimitOperation) {
-  return [
-    (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
-      if (!req.externalAuth?.userId) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      next()
-    },
-    policyMiddleware(operation, 'authenticated'),
-  ] as const
+/** Compose before an authenticated-stage limiter to fail closed on bad wiring. */
+export function requireAuthenticatedExternalUserRateLimitContext(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.externalAuth?.userId) {
+    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+    return
+  }
+  next()
 }
 
 export const externalUserRateLimitPolicy = Object.freeze({ keyFor })

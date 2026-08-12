@@ -6,7 +6,10 @@ import {
   rejectBodyUserTeamMismatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
-import { authenticatedExternalUserRateLimit } from '../../middleware/externalUserRateLimitPolicy.js'
+import {
+  externalUserRateLimitOptions,
+  requireAuthenticatedExternalUserRateLimitContext,
+} from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import {
@@ -137,7 +140,8 @@ export function createExternalInvitationsRouter(): Router {
     '/external/invitations/password',
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
-    ...authenticatedExternalUserRateLimit('invitation_mutation'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('invitation_mutation', 'authenticated')),
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -180,7 +184,10 @@ export function createExternalInvitationsRouter(): Router {
     '/external/invitations/desktop-authorization',
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
-    ...authenticatedExternalUserRateLimit('invitation_sensitive_action'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('invitation_sensitive_action', 'authenticated')
+    ),
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -221,7 +228,8 @@ export function createExternalInvitationsRouter(): Router {
   router.get(
     '/external/invitations/pending',
     requireValidExternalSessionToken,
-    ...authenticatedExternalUserRateLimit('invitation_read'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('invitation_read', 'authenticated')),
     async (req, res, next) => {
       try {
         const email = String((req as ExternalAuthedRequest).externalAuth?.email || '')

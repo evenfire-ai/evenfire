@@ -7,8 +7,8 @@ import {
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
 import {
-  authenticatedExternalUserRateLimit,
-  preAuthExternalUserRateLimit,
+  externalUserRateLimitOptions,
+  requireAuthenticatedExternalUserRateLimitContext,
 } from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
@@ -240,10 +240,11 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/session-token',
-    preAuthExternalUserRateLimit('session_lifecycle'),
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireLegacySessionTokenPayload,
     requireExternalSessionRateLimitContext({ purpose: 'switch', client: externalSessionClient }),
-    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -318,9 +319,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/session/renew',
-    preAuthExternalUserRateLimit('session_lifecycle'),
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({ purpose: 'renew', client: externalSessionClient }),
-    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -362,12 +364,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/session/logout',
-    preAuthExternalUserRateLimit('session_lifecycle'),
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({
       purpose: 'revoke_cleanup',
       client: externalSessionClient,
     }),
-    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -400,9 +403,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/sessions/revoke-all',
-    preAuthExternalUserRateLimit('session_lifecycle'),
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({ purpose: 'protected', client: externalSessionClient }),
-    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -431,13 +435,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/sessions/:sid/revoke',
-    preAuthExternalUserRateLimit('session_lifecycle'),
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({
       purpose: 'protected',
       client: externalSessionClient,
       requireV2: true,
     }),
-    ...authenticatedExternalUserRateLimit('session_lifecycle'),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
