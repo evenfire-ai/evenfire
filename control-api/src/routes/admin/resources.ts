@@ -269,8 +269,13 @@ async function providerTransitionError(
       // Trimmed, because this reads the RAW envelope while the Secret is written
       // from the CLEANED values: `validateCommunicationChannelCredentials` drops
       // whitespace-only entries, so a truthy "   " here would satisfy the guard
-      // and then never reach the Secret.
-      if (!credentials?.[key]?.trim() && !existingKeys.includes(key)) {
+      // and then never reach the Secret. A present-but-non-string value (e.g. a
+      // number) is NOT "missing" though: it's `validateCommunicationChannelCredentials`
+      // below that owns rejecting the wrong type with its own 400, so this only
+      // calls `.trim()` once `typeof` has confirmed there's a string to trim.
+      const rawValue = credentials?.[key]
+      const isMissing = rawValue === undefined || (typeof rawValue === 'string' && !rawValue.trim())
+      if (isMissing && !existingKeys.includes(key)) {
         return `credentials["${key}"] is required to enable the ${provider} provider on this CommunicationChannel`
       }
     }

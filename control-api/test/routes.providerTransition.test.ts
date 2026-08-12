@@ -126,6 +126,25 @@ describe('admin communicationchannels — provider transition validation (#312)'
     expect(gatewayMock.createSecret).not.toHaveBeenCalled()
   })
 
+  it('POST declaring email with a numeric (non-string) credential value → 400 from validation, not a 500', async () => {
+    // providerTransitionError runs before validateCommunicationChannelCredentials
+    // and reads the raw, untrusted body. A bare `credentials?.[key]?.trim()` call
+    // throws on a non-string value ("... .trim is not a function"), turning this
+    // into an unhandled 500 instead of the ordinary validation 400.
+    const res = await request(makeApp())
+      .post('/admin/communicationchannels')
+      .send({
+        metadata: { name: 'jose-email' },
+        spec: { hostRef: 'h1', email: [{ emails: ['ops@example.com'] }] },
+        credentials: { 'email-username': 123, 'email-password': 'pw' },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('credentials["email-username"] must be a string')
+    expect(gatewayMock.createResource).not.toHaveBeenCalled()
+    expect(gatewayMock.createSecret).not.toHaveBeenCalled()
+  })
+
   // ── ALLOWING ─────────────────────────────────────────────────────────────
   // Without these, a validator that reads nothing at all still passes every
   // blocking case above.
