@@ -10747,9 +10747,7 @@ pre {
   }
 
   .page-header,
-  .page-breadcrumb,
-  .apps-page-header,
-  .sandbox-ui-mounted-header {
+  .page-breadcrumb {
     padding-right: 0;
   }
 
@@ -12431,6 +12429,13 @@ pre {
   }
 
   .apps-page-header {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .apps-page-header,
+  .sandbox-ui-mounted-header {
     padding-right: 0;
   }
 }
