@@ -108,7 +108,7 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
              NULL, NULL
         FROM resources resource
         JOIN user_workflow_triggers access_grant
-          ON $4::text IN ('workflow_recipe', 'sandbox_app')
+          ON $4::text = 'workflow_recipe'
          AND resource.logical_id = access_grant.recipe_namespace || '/' || access_grant.recipe_name
        WHERE access_grant.user_id = $1
       UNION ALL
@@ -118,8 +118,44 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
              access_grant.team_id, membership.role
         FROM resources resource
         JOIN team_workflow_triggers access_grant
-          ON $4::text IN ('workflow_recipe', 'sandbox_app')
+          ON $4::text = 'workflow_recipe'
          AND resource.logical_id = access_grant.recipe_namespace || '/' || access_grant.recipe_name
+        JOIN team_members membership
+         ON membership.team_id = access_grant.team_id AND membership.user_id = $1
+         AND membership.status = 'active'
+      UNION ALL
+      SELECT resource.logical_id, 'direct',
+             'sandbox_app:' || exposure.relationship_instance_id || ':' ||
+               access_grant.user_id || ':' || access_grant.recipe_namespace || '/' ||
+               access_grant.recipe_name,
+             NULL, NULL
+        FROM resources resource
+        JOIN operational_resource_relationships exposure
+          ON $4::text = 'sandbox_app'
+         AND exposure.environment_id = $3
+         AND exposure.target_type = 'sandbox_app'
+         AND exposure.target_id = resource.logical_id
+         AND exposure.source_type = 'workflow_recipe'
+         AND exposure.relationship_type = 'exposes_sandbox_app'
+        JOIN user_workflow_triggers access_grant
+          ON exposure.source_id = access_grant.recipe_namespace || '/' || access_grant.recipe_name
+       WHERE access_grant.user_id = $1
+      UNION ALL
+      SELECT resource.logical_id, 'team',
+             'sandbox_app:' || exposure.relationship_instance_id || ':' ||
+               access_grant.team_id || ':' || access_grant.recipe_namespace || '/' ||
+               access_grant.recipe_name,
+             access_grant.team_id, membership.role
+        FROM resources resource
+        JOIN operational_resource_relationships exposure
+          ON $4::text = 'sandbox_app'
+         AND exposure.environment_id = $3
+         AND exposure.target_type = 'sandbox_app'
+         AND exposure.target_id = resource.logical_id
+         AND exposure.source_type = 'workflow_recipe'
+         AND exposure.relationship_type = 'exposes_sandbox_app'
+        JOIN team_workflow_triggers access_grant
+          ON exposure.source_id = access_grant.recipe_namespace || '/' || access_grant.recipe_name
         JOIN team_members membership
           ON membership.team_id = access_grant.team_id AND membership.user_id = $1
          AND membership.status = 'active'
