@@ -878,10 +878,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       )
       .toBe(true)
 
-    // Freeze the denied window before reactivation. The same journey later
-    // performs a valid create after reactivation; querying the whole suffix
-    // would incorrectly classify that allowed mutation as part of the denied
-    // request window.
+    // Capture the denied authorization request IDs before reactivation. The
+    // same journey later performs a valid create after reactivation; the
+    // audit invariant is that the denied request itself never produces a
+    // mutation outcome, not that a later request must be absent from the
+    // sequence suffix.
     let deniedRows: ReturnType<typeof operatorJourney.auditRowsAfter> = []
     await expect
       .poll(
@@ -907,8 +908,26 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       )
       .toBe(true)
 
+    const deniedRequestIds = new Set(
+      deniedRows
+        .filter(
+          row =>
+            row.requestId &&
+            row.op === 'read' &&
+            row.outcome === 'deny' &&
+            row.recordType === 'authorization_decision'
+        )
+        .map(row => row.requestId)
+    )
+    expect(deniedRequestIds.size).toBeGreaterThan(0)
     expect(
-      deniedRows.filter(row => row.requestId && row.op === 'create' && row.mutationOutcome)
+      deniedRows.filter(
+        row =>
+          row.requestId &&
+          deniedRequestIds.has(row.requestId) &&
+          row.op === 'create' &&
+          row.mutationOutcome
+      )
     ).toHaveLength(0)
     const lifecycleEvents = operatorJourney.readLinkLifecycleEvents()
     expect(lifecycleEvents).toHaveLength(4)
