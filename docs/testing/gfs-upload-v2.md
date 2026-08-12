@@ -35,7 +35,9 @@ T0 must execute real tests and fail loudly if zero tests run. It covers:
   part PUT, pause/resume, complete, and DELETE;
 - no v2 whole-file `Buffer`/`ArrayBuffer`/base64/JSON/IPC value;
 - retry classification, response-loss reconciliation, contiguous-vs-committed
-  progress, four-to-two fallback, and Desktop IPC byte isolation;
+  progress, four-to-two fallback using the advertised instability threshold,
+  the identical finite retry-status allowlist (including terminal `507`), and
+  Desktop IPC byte isolation;
 - proxy invariants: exact v2 prefix bypasses the broad JSON parser, declared
   and observed 16 MiB caps are enforced, `Expect` is stripped, upload headers
   survive, and disconnect aborts upstream.
@@ -48,6 +50,9 @@ T0 must execute real tests and fail loudly if zero tests run. It covers:
 - Desktop state-v2 migration and legacy quarantine, exact owner/team/env/base/
   drive resume matching, A → logout → B isolation, epoch-stale dispatch
   rejection, and `suspended_auth` requiring explicit same-scope resume;
+- active-part recovery after an unknown commit must decrement
+  `active_part_count` exactly once, including when the reconciliation read also
+  fails; the durable row state, not the transport outcome, is authoritative;
 - legacy fallback symlink/path-swap rejection and proof that logout aborts and
   awaits a pending fallback before clearing the captured credential.
 
@@ -77,6 +82,10 @@ T1 uses real Postgres for migration and role checks. It proves:
   canceled response with a published resource;
 - same name/size/mtime with different bytes cannot adopt a committed part or
   complete a resumed session.
+
+The dedicated real-Postgres lane is fail-loud: it must report at least one
+executed test file and one passed test. A successful job with zero executed or
+zero passed tests is a failure, not a skipped/green result.
 
 The 512 MiB/1 GiB arithmetic ceiling is tested only under an explicit protocol
 test configuration. It must not become an enabled 200 MiB product capability.

@@ -2,6 +2,19 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+external_rest_manifest="$(cat deploy/base/profiles/external-rest-api.yaml)"
+profiles_network_policy="$(cat deploy/base/profiles/networkpolicies.yaml)"
+ingress_network_policy="$(cat deploy/base/ingress/networkpolicies.yaml)"
+[[ "$external_rest_manifest" == *'type: ClusterIP'* ]] \
+  || fail 'external-rest-api must remain an internal ClusterIP, not a directly exposed service'
+[[ "$profiles_network_policy" == *'name: allow-ingress-profiles'* && \
+   "$profiles_network_policy" == *'app: cloudflared'* && \
+   "$profiles_network_policy" == *'values: [external-rest-api, profile-ui]'* && \
+   "$profiles_network_policy" == *'name: external-rest-api-from-profile-ui'* ]] \
+  || fail 'profiles ingress policy does not document the trusted Cloudflare/profile-ui paths'
+[[ "$ingress_network_policy" == *'app: external-rest-api'* && \
+   "$ingress_network_policy" == *'kubernetes.io/metadata.name: profiles'* ]] \
+  || fail 'ingress namespace policy does not restrict cloudflared egress to profiles services'
 # Scope: OSS-resident GFS deploy invariants only. The GCP deploy invariants
 # (deploy-dev/deploy-prod workflow ordering, gcp-* Makefile targets, gcp-prod
 # overlay render, and the HCC rollback contract) live in evenfire-infra after

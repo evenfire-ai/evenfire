@@ -3,7 +3,13 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DesktopGfsUploadJob, uploadLocalFile } from './upload.js'
+import {
+  DesktopGfsUploadJob,
+  isAmbiguousUploadStatus,
+  isRetryableUploadStatus,
+  normalizeInstabilityFailureThreshold,
+  uploadLocalFile,
+} from './upload.js'
 
 function requestPath(url: string): string {
   return new URL(url).pathname
@@ -18,6 +24,23 @@ function enabledCapabilities(overrides: Record<string, unknown> = {}) {
 }
 
 describe('desktop GFS indexed uploader', () => {
+  it('uses the writer threshold and rejects invalid capability values', () => {
+    expect(normalizeInstabilityFailureThreshold(undefined)).toBe(3)
+    expect(normalizeInstabilityFailureThreshold(1)).toBe(1)
+    expect(normalizeInstabilityFailureThreshold(5)).toBe(5)
+    expect(() => normalizeInstabilityFailureThreshold(0)).toThrow(/invalid instability threshold/)
+    expect(() => normalizeInstabilityFailureThreshold(101)).toThrow(/invalid instability threshold/)
+  })
+
+  it('uses the same transient status allowlist as Control UI', () => {
+    expect(isRetryableUploadStatus(503)).toBe(true)
+    expect(isRetryableUploadStatus(507)).toBe(false)
+    expect(isRetryableUploadStatus(501)).toBe(false)
+    expect(isAmbiguousUploadStatus(500)).toBe(true)
+    expect(isAmbiguousUploadStatus(429)).toBe(false)
+    expect(isAmbiguousUploadStatus(507)).toBe(false)
+  })
+
   it('streams independent binary parts with base64 checksums and completes the session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-'))
     try {

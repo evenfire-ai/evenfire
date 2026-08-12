@@ -4,6 +4,9 @@ import {
   GfsUploadJob,
   type GfsUploadStatus,
   assertGfsFileUploadSize,
+  isAmbiguousUploadStatus,
+  isRetryableUploadStatus,
+  normalizeInstabilityFailureThreshold,
   parseRetryAfter,
 } from '@lib/gfsFileUpload'
 
@@ -24,6 +27,35 @@ describe('parseRetryAfter', () => {
     expect(parseRetryAfter('2')).toBe(2_000)
     expect(parseRetryAfter('60')).toBe(5_000)
     expect(parseRetryAfter('not-a-date')).toBeUndefined()
+  })
+})
+
+describe('normalizeInstabilityFailureThreshold', () => {
+  it('uses the protocol default when older writers omit the field', () => {
+    expect(normalizeInstabilityFailureThreshold(undefined)).toBe(3)
+  })
+
+  it('accepts bounded writer-configured thresholds and rejects invalid values', () => {
+    expect(normalizeInstabilityFailureThreshold(1)).toBe(1)
+    expect(normalizeInstabilityFailureThreshold(5)).toBe(5)
+    expect(() => normalizeInstabilityFailureThreshold(0)).toThrow(/invalid instability threshold/)
+    expect(() => normalizeInstabilityFailureThreshold(101)).toThrow(/invalid instability threshold/)
+    expect(() => normalizeInstabilityFailureThreshold(1.5)).toThrow(/invalid instability threshold/)
+  })
+})
+
+describe('isRetryableUploadStatus', () => {
+  it('uses the same transient allowlist as Desktop and does not retry storage exhaustion', () => {
+    expect(isRetryableUploadStatus(503)).toBe(true)
+    expect(isRetryableUploadStatus(507)).toBe(false)
+    expect(isRetryableUploadStatus(501)).toBe(false)
+  })
+
+  it('only reconciles statuses whose response may follow a committed write', () => {
+    expect(isAmbiguousUploadStatus(500)).toBe(true)
+    expect(isAmbiguousUploadStatus(429)).toBe(false)
+    expect(isAmbiguousUploadStatus(507)).toBe(false)
+    expect(isAmbiguousUploadStatus(501)).toBe(false)
   })
 })
 

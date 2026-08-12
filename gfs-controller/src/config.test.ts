@@ -12,11 +12,14 @@ describe('GFS_STORAGE_ROLE', () => {
     expect(loadConfig().storageRole).toBe(role)
   })
 
-  it.each([undefined, ''])('rejects absent or empty role %s instead of granting writer authority', role => {
-    vi.stubEnv('GFS_DEV_MODE', 'true')
-    vi.stubEnv('GFS_STORAGE_ROLE', role)
-    expect(() => loadConfig()).toThrow(/GFS_STORAGE_ROLE must be explicitly set/)
-  })
+  it.each([undefined, ''])(
+    'rejects absent or empty role %s instead of granting writer authority',
+    role => {
+      vi.stubEnv('GFS_DEV_MODE', 'true')
+      vi.stubEnv('GFS_STORAGE_ROLE', role)
+      expect(() => loadConfig()).toThrow(/GFS_STORAGE_ROLE must be explicitly set/)
+    }
+  )
 
   it.each(['Writer', 'read', 'writer ', 'unknown'])('rejects unknown value %s', role => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
@@ -73,17 +76,7 @@ describe('GFS_SYNC_COPY_*', () => {
     'GFS_SYNC_RENAME_MAX_OBJECTS',
     'GFS_SYNC_RENAME_TIMEOUT_MS',
   ])('rejects invalid explicitly configured values for %s', name => {
-    for (const raw of [
-      '',
-      ' ',
-      '0',
-      '-1',
-      '1.5',
-      'NaN',
-      'Infinity',
-      '1e3',
-      '9007199254740992',
-    ]) {
+    for (const raw of ['', ' ', '0', '-1', '1.5', 'NaN', 'Infinity', '1e3', '9007199254740992']) {
       expect(() => configWith(name, raw), `${name}=${JSON.stringify(raw)}`).toThrow(
         new RegExp(`${name} must be a positive safe integer`)
       )
@@ -164,5 +157,17 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
     vi.stubEnv('GFS_UPLOAD_FALLBACK_CONCURRENCY', '4')
     expect(() => loadConfig()).toThrow(/FALLBACK_CONCURRENCY must be lower/)
+  })
+
+  it('accepts the bounded instability threshold and rejects values outside the capability contract', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD', '7')
+    expect(loadConfig().uploadV2.instabilityFailureThreshold).toBe(7)
+    for (const raw of ['0', '101', '1.5', 'NaN', 'Infinity']) {
+      vi.stubEnv('GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD', raw)
+      expect(() => loadConfig(), `threshold=${raw}`).toThrow(
+        /GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD must be an integer from 1 through 100/
+      )
+    }
   })
 })

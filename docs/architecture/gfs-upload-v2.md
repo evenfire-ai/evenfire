@@ -14,22 +14,31 @@ finalization.
 This is deliberately not a one-request 200 MiB upload and is not a claim of
 tus 1.0 compatibility. It does not raise the legacy JSON/base64 body limit.
 
-| Contract                    |                                              Frozen value |
-| --------------------------- | --------------------------------------------------------: |
-| Product maximum             |                        `209715200` bytes (200 MiB binary) |
-| Oversize boundary           | `209715201` is rejected before session/payload allocation |
-| Preferred part              |                                   `8388608` bytes (8 MiB) |
-| Hard part/request maximum   |                                 `16777216` bytes (16 MiB) |
-| Default session concurrency |                                                   4 parts |
-| Instability fallback        |   2 parts after 3 consecutive retryable failures/timeouts |
-| Legacy raw-file limit       |       `16777216` bytes (16 MiB), unchanged during rollout |
-| Legacy GFSC body cap        |       `25165824` bytes (24 MiB), unchanged during rollout |
-| Protocol arithmetic ceiling |  `1073741824` bytes (1 GiB); not an enabled product value |
+| Contract                    |                                                                                  Frozen value |
+| --------------------------- | --------------------------------------------------------------------------------------------: |
+| Product maximum             |                                                            `209715200` bytes (200 MiB binary) |
+| Oversize boundary           |                                     `209715201` is rejected before session/payload allocation |
+| Preferred part              |                                                                       `8388608` bytes (8 MiB) |
+| Hard part/request maximum   |                                                                     `16777216` bytes (16 MiB) |
+| Default session concurrency |                                                                                       4 parts |
+| Instability fallback        | 2 parts after the advertised threshold (default 3) of consecutive retryable failures/timeouts |
+| Legacy raw-file limit       |                                           `16777216` bytes (16 MiB), unchanged during rollout |
+| Legacy GFSC body cap        |                                           `25165824` bytes (24 MiB), unchanged during rollout |
+| Protocol arithmetic ceiling |                                      `1073741824` bytes (1 GiB); not an enabled product value |
 
 Cloudflare evaluates the body of each HTTP request. The aggregate file limit
 is therefore independent of the request limit: every v2 data-bearing request
 is at most 16 MiB, and the verified zone setting can force a lower negotiated
 `maxChunkBytes`. No client may send a single 100 MB or 200 MiB body.
+
+The capability response owns the instability threshold. It is an integer from
+1 through 100; omitted legacy responses mean `3`. Both clients use the
+advertised value when deciding when to reduce concurrency and reject a malformed
+value rather than guessing. The retryable HTTP status allowlist is deliberately
+finite and identical in Desktop and Control UI: `408`, `425`, `429`, `500`,
+`502`, `503`, and `504`. `507 Insufficient Storage` and every other `5xx` are
+terminal until an explicit server-side recovery/retry is requested. A server
+may return `Retry-After`; clients honor it within their bounded retry budget.
 
 ## Edge admission limits
 

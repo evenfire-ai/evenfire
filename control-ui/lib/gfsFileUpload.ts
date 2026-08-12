@@ -9,13 +9,24 @@ import { apiSend } from './api'
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const GFS_UPLOAD_DRIVE = 'main'
-const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+export const GFS_UPLOAD_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
+export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
+const GFS_UPLOAD_MAX_INSTABILITY_FAILURE_THRESHOLD = 100
 export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+
+export function isRetryableUploadStatus(status: number): boolean {
+  return GFS_UPLOAD_RETRYABLE_STATUS.has(status)
+}
+
+export function isAmbiguousUploadStatus(status: number): boolean {
+  return GFS_UPLOAD_AMBIGUOUS_STATUS.has(status)
+}
 
 export interface GfsUploadTarget {
   operation: 'create' | 'replace'
@@ -127,6 +138,20 @@ export class GfsUploadCapabilityError extends Error {
     super(message, options)
     this.name = 'GfsUploadCapabilityError'
   }
+}
+
+export function normalizeInstabilityFailureThreshold(value: unknown): number {
+  if (value === undefined) return GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > GFS_UPLOAD_MAX_INSTABILITY_FAILURE_THRESHOLD
+  ) {
+    throw new GfsUploadCapabilityError(
+      'Resumable GFS upload capabilities advertised an invalid instability threshold.'
+    )
+  }
+  return value as number
 }
 
 export const GFS_LEGACY_UPLOAD_MAX_BYTES = 16 * 1024 * 1024
@@ -263,7 +288,7 @@ function assertRetryable(error: unknown): boolean {
     return false
   const status =
     typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
-  return typeof status === 'number' ? RETRYABLE_STATUS.has(status) : true
+  return typeof status === 'number' ? isRetryableUploadStatus(status) : true
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -306,7 +331,7 @@ function ambiguousLifecycleError(error: unknown): boolean {
   // Transport failures have no HTTP status; keep them ambiguous so completion
   // reconciles durable state instead of assuming that the request was lost.
   if (typeof status !== 'number') return true
-  return status === 408 || status >= 500
+  return isAmbiguousUploadStatus(status)
 }
 
 function terminalReconciliationError(error: unknown): boolean {
@@ -489,7 +514,7 @@ async function loadUploadStatus(
 }
 
 function ambiguousPartResponse(status: number | undefined): boolean {
-  return status === undefined || status === 408 || status >= 500
+  return status === undefined || isAmbiguousUploadStatus(status)
 }
 
 function partOutcomeUnknown(partNumber: number, cause?: unknown): Error {
@@ -683,7 +708,8 @@ async function runParts(
   onProgress?: (progress: GfsUploadProgress) => void,
   onByteProgress?: (progress: GfsUploadProgress) => void,
   onPartFailure?: (partNumber: number) => void,
-  fallbackConcurrency = GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY
+  fallbackConcurrency = GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY,
+  instabilityFailureThreshold = GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD
 ): Promise<{ failed: typeof parts; retryableFailures: number; paused: boolean }> {
   const initialConcurrency = Math.max(1, Math.min(concurrency, parts.length || 1))
   const effectiveFallback = Math.max(
@@ -703,7 +729,11 @@ async function runParts(
   const registerRetryableFailure = (): void => {
     retryableFailures += 1
     consecutiveRetryableFailures += 1
-    if (!downgraded && consecutiveRetryableFailures >= 3 && initialConcurrency > effectiveFallback)
+    if (
+      !downgraded &&
+      consecutiveRetryableFailures >= instabilityFailureThreshold &&
+      initialConcurrency > effectiveFallback
+    )
       downgraded = true
   }
   const registerPartSuccess = (): void => {
@@ -1225,6 +1255,9 @@ export class GfsUploadJob {
           : GFS_FILE_UPLOAD_DEFAULT_CONCURRENCY
       const fallbackConcurrency =
         Number(prepared.resumable.fallbackConcurrency) || GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY
+      const instabilityFailureThreshold = normalizeInstabilityFailureThreshold(
+        prepared.resumable.instabilityFailureThreshold
+      )
       const result = await runParts(
         prepared.session,
         this.input.file,
@@ -1238,7 +1271,8 @@ export class GfsUploadJob {
           inFlightLoaded.delete(partNumber)
           this.uploadedBytes = calculateUploadedBytes()
         },
-        fallbackConcurrency
+        fallbackConcurrency,
+        instabilityFailureThreshold
       )
       if (result.paused || this.pauseRequested) {
         this.state = 'paused'

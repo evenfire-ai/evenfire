@@ -11,6 +11,8 @@ const GFS_UPLOAD_V2_FALLBACK_CONCURRENCY = 2
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 5 * 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+export const GFS_UPLOAD_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
 export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
@@ -85,6 +87,7 @@ interface UploadCapabilities {
       preferredChunkBytes?: number
       maxChunkBytes?: number
       maxConcurrentPartsPerSession?: number
+      instabilityFailureThreshold?: number
       fallbackConcurrency?: number
     }
   }
@@ -113,6 +116,23 @@ export class DesktopUploadCapabilityError extends Error {
     super(message, options)
     this.name = 'DesktopUploadCapabilityError'
   }
+}
+
+export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
+const GFS_UPLOAD_MAX_INSTABILITY_FAILURE_THRESHOLD = 100
+
+export function normalizeInstabilityFailureThreshold(value: unknown): number {
+  if (value === undefined) return GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > GFS_UPLOAD_MAX_INSTABILITY_FAILURE_THRESHOLD
+  ) {
+    throw new DesktopUploadCapabilityError(
+      'Resumable GFS upload capabilities advertised an invalid instability threshold.'
+    )
+  }
+  return value as number
 }
 
 export interface DesktopUploadTransport {
@@ -169,6 +189,7 @@ export interface DesktopUploadInput {
   /** Main-process-only source fence; never crosses the renderer boundary. */
   sourceIdentity?: DesktopUploadSourceIdentity
   advertisedConcurrency?: number
+  instabilityFailureThreshold?: number
   fallbackConcurrency?: number
 }
 
@@ -212,8 +233,16 @@ function unwrap<T>(value: unknown): T {
   return envelope.data
 }
 
+export function isRetryableUploadStatus(status: number): boolean {
+  return GFS_UPLOAD_RETRYABLE_STATUS.has(status)
+}
+
+export function isAmbiguousUploadStatus(status: number): boolean {
+  return GFS_UPLOAD_AMBIGUOUS_STATUS.has(status)
+}
+
 function retryable(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status >= 500
+  return isRetryableUploadStatus(status)
 }
 
 function retryableError(error: unknown): boolean {
@@ -296,7 +325,7 @@ function ambiguousLifecycleError(error: unknown): boolean {
   // Transport failures have no HTTP status; keep them ambiguous so completion
   // reconciles durable state instead of assuming that the request was lost.
   if (typeof status !== 'number') return true
-  return status === 408 || status >= 500
+  return isAmbiguousUploadStatus(status)
 }
 
 function terminalReconciliationError(error: unknown): boolean {
@@ -569,7 +598,7 @@ function ambiguousPartResponse(status: number | undefined): boolean {
   // A missing response, edge timeout, or proxy/server 5xx may occur after GFSC
   // committed the part.  425/429 are explicit admission outcomes and can retry
   // without an extra status round-trip.
-  return status === undefined || status === 408 || status >= 500
+  return status === undefined || isAmbiguousUploadStatus(status)
 }
 
 function partOutcomeUnknown(partNumber: number, cause?: unknown): Error {
@@ -800,7 +829,12 @@ async function runParts(
   const registerRetryableFailure = (): void => {
     retryableFailures += 1
     consecutiveRetryableFailures += 1
-    if (!downgraded && consecutiveRetryableFailures >= 3 && concurrency > fallbackConcurrency)
+    if (
+      !downgraded &&
+      consecutiveRetryableFailures >=
+        normalizeInstabilityFailureThreshold(input.instabilityFailureThreshold) &&
+      concurrency > fallbackConcurrency
+    )
       downgraded = true
   }
   const registerPartSuccess = (): void => {
@@ -1286,6 +1320,9 @@ export class DesktopGfsUploadJob {
         throw new Error(`GFS files are limited to ${resumable.maxFileBytes} bytes by the writer`)
     }
     this.input.advertisedConcurrency = resumable.maxConcurrentPartsPerSession
+    this.input.instabilityFailureThreshold = normalizeInstabilityFailureThreshold(
+      resumable.instabilityFailureThreshold
+    )
     this.input.fallbackConcurrency = resumable.fallbackConcurrency
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
