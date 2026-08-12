@@ -40,6 +40,13 @@ async function closeManageDialog(page: Page): Promise<void> {
   if ((await close.count()) > 0) await close.click()
 }
 
+async function ensureOperatorRoot(page: Page): Promise<void> {
+  const root = page.getByTestId('gfs-root-operator')
+  await expect(root).toBeVisible({ timeout: 30_000 })
+  if (!(await root.isDisabled())) await root.click()
+  await expect(root).toBeDisabled({ timeout: 30_000 })
+}
+
 async function uploadVisibleFile(
   page: Page,
   trigger: Locator,
@@ -215,6 +222,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
 
     const desktopPage = await operatorJourney.launchOperatorDesktop()
     await operatorJourney.openFiles(desktopPage)
+    await ensureOperatorRoot(desktopPage)
     await expect(desktopPage.getByTestId('gfs-view-operator')).toBeVisible()
     const root = desktopPage.getByTestId('gfs-root-operator')
     await expect(root).toHaveText('Global File System')
@@ -227,6 +235,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
   }, testInfo) => {
     const page = await operatorJourney.launchOperatorDesktop()
     await operatorJourney.openFiles(page)
+    await ensureOperatorRoot(page)
     const rootId = operatorJourney.rootResourceId!
     expect(operatorJourney.operatorSubjectGrantCount()).toBe(0)
     await expect(page.getByTestId('gfs-view-operator')).toBeVisible()
@@ -457,6 +466,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
   }, testInfo) => {
     const page = await operatorJourney.launchOperatorDesktop()
     await operatorJourney.openFiles(page)
+    await ensureOperatorRoot(page)
     const grantFolder = operatorJourney.resources.get('grantFolder')!
     const shareFolder = operatorJourney.resources.get('shareFolder')!
     const auditFloor = operatorJourney.auditFloor()
@@ -549,6 +559,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await operatorJourney.openControlAdmins()
     const page = await operatorJourney.launchOperatorDesktop()
     await operatorJourney.openFiles(page)
+    await ensureOperatorRoot(page)
     const link = operatorJourney.operatorLink!
     await expect(controlPage).toHaveURL(/\/users-and-teams\/admins(?:\?|$)/)
     const revoke = controlPage.getByRole('button', {
