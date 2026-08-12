@@ -18,12 +18,15 @@ type StreamHead = Readonly<{
   kind: StreamKind
   subjectId: string
   logicalId: string
+  batchLast: boolean
 }>
 
+const TEAM_GFS_ADVANCE_CHUNK = 8
+
 const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
-  SELECT stream.kind, stream.subject_id, stream.after_id
+  SELECT stream.kind, stream.subject_id, stream.after_id, stream.take
     FROM jsonb_to_recordset($1::jsonb)
-      AS stream(kind text, subject_id text, after_id uuid)
+      AS stream(kind text, subject_id text, after_id uuid, take integer)
 ), heads AS (
   SELECT requested.kind, requested.subject_id, candidate.resource_id
     FROM requested
@@ -37,7 +40,7 @@ const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
         AND grant_row.subject_type = 'team' AND grant_row.subject_id = requested.subject_id
         AND grant_row.resource_id > requested.after_id
       ORDER BY grant_row.resource_id
-      LIMIT 1
+      LIMIT requested.take
    ) candidate
   UNION ALL
   SELECT requested.kind, requested.subject_id, candidate.resource_id
@@ -52,7 +55,7 @@ const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
         AND share.subject_type = 'team' AND share.subject_id = requested.subject_id
         AND share.resource_id > requested.after_id
       ORDER BY share.resource_id
-      LIMIT 1
+      LIMIT requested.take
    ) candidate
 )
 SELECT kind, subject_id, resource_id::text AS logical_id
@@ -113,7 +116,7 @@ class HeadHeap {
 }
 
 function parseHeads(rows: readonly Record<string, unknown>[]): StreamHead[] {
-  return rows.map(row => {
+  const parsed = rows.map(row => {
     const kind = row.kind
     const subjectId = row.subject_id
     const logicalId = row.logical_id
@@ -126,13 +129,26 @@ function parseHeads(rows: readonly Record<string, unknown>[]): StreamHead[] {
     ) {
       throw new CatalogProducerContractError('team_gfs_stream_head_invalid')
     }
-    return Object.freeze({ kind, subjectId, logicalId })
+    return { kind, subjectId, logicalId }
   })
+  const lastByStream = new Map<string, string>()
+  for (const head of parsed) lastByStream.set(`${head.kind}:${head.subjectId}`, head.logicalId)
+  return parsed.map(head =>
+    Object.freeze({
+      ...head,
+      batchLast: lastByStream.get(`${head.kind}:${head.subjectId}`) === head.logicalId,
+    })
+  )
 }
 
 async function readHeads(
   context: CatalogRequestContext,
-  streams: readonly Readonly<{ kind: StreamKind; subjectId: string; afterId: string }>[]
+  streams: readonly Readonly<{
+    kind: StreamKind
+    subjectId: string
+    afterId: string
+    take: number
+  }>[]
 ): Promise<StreamHead[]> {
   if (streams.length === 0) return []
   const result = await catalogQuery(
@@ -145,6 +161,7 @@ async function readHeads(
           kind: stream.kind,
           subject_id: stream.subjectId,
           after_id: stream.afterId,
+          take: stream.take,
         }))
       ),
     ],
@@ -164,11 +181,17 @@ async function teamCandidates(input: {
   if (admission === null || memberships.length > admission) {
     throw new AccessBudgetExceededError('teamGfsMembershipAdmission', true)
   }
+  const streamCount = memberships.length * 2
+  const initialTake = Math.max(
+    1,
+    Math.min(TEAM_GFS_ADVANCE_CHUNK, Math.ceil((input.take + 1) / streamCount) + 1)
+  )
   const initialStreams = memberships.flatMap(membership =>
     (['grant', 'share'] as const).map(kind => ({
       kind,
       subjectId: membership.teamId,
       afterId: input.after || '00000000-0000-0000-0000-000000000000',
+      take: initialTake,
     }))
   )
   const heap = new HeadHeap()
@@ -185,11 +208,20 @@ async function teamCandidates(input: {
         validUntil: null,
       })
     )
-    const advanced = await readHeads(
-      input.context,
-      consumed.map(head => ({ kind: head.kind, subjectId: head.subjectId, afterId: logicalId }))
-    )
-    for (const head of advanced) heap.push(head)
+    if (candidates.length < input.take + 1) {
+      const advanced = await readHeads(
+        input.context,
+        consumed
+          .filter(head => head.batchLast)
+          .map(head => ({
+            kind: head.kind,
+            subjectId: head.subjectId,
+            afterId: logicalId,
+            take: TEAM_GFS_ADVANCE_CHUNK,
+          }))
+      )
+      for (const head of advanced) heap.push(head)
+    }
   }
   return Object.freeze({ candidates: Object.freeze(candidates), hasMore: heap.size > 0 })
 }
