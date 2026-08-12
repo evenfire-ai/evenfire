@@ -55,9 +55,11 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
           SELECT '${names[index]}'::text AS source_arm, bounded_arm.logical_id,
                  ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
                    AS valid_until
-            FROM (SELECT COALESCE(NULLIF($8::jsonb ->> '${names[index]}', ''), $2) AS after_key) ${after}
+            FROM (
+              SELECT COALESCE(NULLIF($8::jsonb ->> '${names[index]}', ''), $2) AS after_key
+               WHERE $9::jsonb IS NULL OR $9::jsonb ? '${names[index]}'
+            ) ${after}
             CROSS JOIN LATERAL (${sourceSql}) bounded_arm
-           WHERE $9::jsonb IS NULL OR $9::jsonb ? '${names[index]}'
           ORDER BY ${definition.orderBy ?? 'logical_id'}
           LIMIT $4
         )`
