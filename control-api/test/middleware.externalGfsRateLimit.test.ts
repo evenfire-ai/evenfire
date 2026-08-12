@@ -141,12 +141,12 @@ describe('external GFS rate boundary', () => {
       '/external/gfs/resources/:id/content',
     ],
     ['DELETE', `/resources/${RESOURCE_ID}`, 'resource-mutation', '/external/gfs/resources/:id'],
-    ['GET', '/grants', 'grants', '/external/gfs/grants'],
-    ['PUT', '/grants', 'grants', '/external/gfs/grants'],
-    ['DELETE', `/grants/${RESOURCE_ID}`, 'grants', '/external/gfs/grants/:id'],
-    ['GET', '/shares', 'shares', '/external/gfs/shares'],
-    ['POST', '/shares', 'shares', '/external/gfs/shares'],
-    ['DELETE', `/shares/${RESOURCE_ID}`, 'shares', '/external/gfs/shares/:id'],
+    ['GET', '/grants', 'grants-read', '/external/gfs/grants'],
+    ['PUT', '/grants', 'grants-mutation', '/external/gfs/grants'],
+    ['DELETE', `/grants/${RESOURCE_ID}`, 'grants-mutation', '/external/gfs/grants/:id'],
+    ['GET', '/shares', 'shares-read', '/external/gfs/shares'],
+    ['POST', '/shares', 'shares-mutation', '/external/gfs/shares'],
+    ['DELETE', `/shares/${RESOURCE_ID}`, 'shares-mutation', '/external/gfs/shares/:id'],
   ] as const)('classifies %s /external/gfs%s as %s', (method, path, operationClass, route) => {
     expect(
       externalGfsOperationFor({
@@ -330,6 +330,43 @@ describe('external GFS rate boundary', () => {
       30,
     ])
     expect(calls.filter(([, limit]) => limit === 1200)).toHaveLength(2)
+  })
+
+  it('assigns ACL listing to the read budget and ACL writes to the mutation budget', async () => {
+    const { app } = buildApp()
+
+    await request(app).get('/external/gfs/grants').set('x-user-session-token', 'session-acl-read')
+    await request(app).put('/external/gfs/grants').set('x-user-session-token', 'session-acl-write')
+    await request(app).get('/external/gfs/shares').set('x-user-session-token', 'session-acl-read')
+    await request(app).post('/external/gfs/shares').set('x-user-session-token', 'session-acl-write')
+
+    const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:grants-read:session:/), 120])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:resolved:grants-read:actor:/),
+      120,
+    ])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:pre:grants-mutation:session:/),
+      30,
+    ])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:resolved:grants-mutation:actor:/),
+      30,
+    ])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:shares-read:session:/), 120])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:resolved:shares-read:actor:/),
+      120,
+    ])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:pre:shares-mutation:session:/),
+      30,
+    ])
+    expect(calls).toContainEqual([
+      expect.stringMatching(/^gfs-ext:resolved:shares-mutation:actor:/),
+      30,
+    ])
   })
 
   it('enforces the 1200/min aggregate IP ceiling after the 120/min read buckets', async () => {

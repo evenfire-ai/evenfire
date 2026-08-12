@@ -301,20 +301,36 @@ export function createExternalGfsRouter(): Router {
     keyGenerator: externalGfsActorRateKey('resource-mutation'),
     message: { error: 'Too Many Requests' },
   })
-  const externalGfsGrantsRouteRateLimit = rateLimit({
+  const externalGfsGrantsReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: config.externalGfsReadRlPerMin,
     standardHeaders: false,
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('grants'),
+    keyGenerator: externalGfsActorRateKey('grants-read'),
     message: { error: 'Too Many Requests' },
   })
-  const externalGfsSharesRouteRateLimit = rateLimit({
+  const externalGfsGrantsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsOperationRlPerMin,
     standardHeaders: false,
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('shares'),
+    keyGenerator: externalGfsActorRateKey('grants-mutation'),
+    message: { error: 'Too Many Requests' },
+  })
+  const externalGfsSharesReadRouteRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.externalGfsReadRlPerMin,
+    standardHeaders: false,
+    legacyHeaders: false,
+    keyGenerator: externalGfsActorRateKey('shares-read'),
+    message: { error: 'Too Many Requests' },
+  })
+  const externalGfsSharesMutationRouteRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: config.externalGfsOperationRlPerMin,
+    standardHeaders: false,
+    legacyHeaders: false,
+    keyGenerator: externalGfsActorRateKey('shares-mutation'),
     message: { error: 'Too Many Requests' },
   })
 
@@ -334,18 +350,32 @@ export function createExternalGfsRouter(): Router {
   // session/IP and effective-actor operation-class matrix.
   router.use('/external/gfs', externalGfsPreResolutionRateLimit)
 
-  // Per-user token bucket on the DELEGATION plane only (grants + shares),
-  // mirroring the admin plane's grantsRateLimit but in a DISTINCT bucket so the
-  // two planes never share quota. requireValidExternalSessionToken runs at
-  // router level first, so externalAuth.userId is always present by the time the
-  // limiter keys; the no-user branch is therefore unreachable, but it returns a
-  // shared sentinel (never null) so the limiter fails CLOSED — per
-  // rateLimitMiddleware's guidance for strict enforcement — instead of the
-  // default fail-open, keeping this plane strictly metered under any future
-  // auth-ordering change.
-  const externalGrantsRateLimit = rateLimitMiddleware({
+  // ACL listing is still a privileged manage_acl operation, but it must not
+  // consume the smaller mutation budget: opening the Manage dialog performs
+  // several list/refetch reads before one visible grant/share action. Keep
+  // those reads in the existing bounded GFS read budget and in a distinct
+  // actor bucket from mutations.
+  const externalGrantsReadRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_grants_external_read',
+    maxPerMinute: config.externalGfsReadRlPerMin,
+    getBucketKey: req => {
+      const authority = (req as RequestWithExternalGfsAuthority).gfsAuthority
+      if (authority?.kind === 'linked-admin') {
+        return `gfsgrants-ext-read:linked-admin:${authority.controlAdminId}`
+      }
+      if (authority?.kind === 'user-session') {
+        return `gfsgrants-ext-read:user:${authority.desktopUserId}`
+      }
+      return 'gfsgrants-ext-read:__no_authority__'
+    },
+  })
+
+  // Keep the existing mutation bucket identity and 30/min budget for
+  // compatibility with telemetry and abuse controls; only read/list calls
+  // move to the separate read bucket above.
+  const externalGrantsMutationRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_external',
-    maxPerMinute: 30,
+    maxPerMinute: config.externalGfsOperationRlPerMin,
     getBucketKey: req => {
       const authority = (req as RequestWithExternalGfsAuthority).gfsAuthority
       if (authority?.kind === 'linked-admin') {
@@ -400,44 +430,44 @@ export function createExternalGfsRouter(): Router {
   // (view-ACL = manage-ACL); handleGrantListForCaller enforces that.
   router.get(
     '/external/gfs/grants',
-    externalGfsGrantsRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsGrantsReadRouteRateLimit,
+    externalGrantsReadRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleGrantListForCaller)
   )
   router.put(
     '/external/gfs/grants',
-    externalGfsGrantsRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsGrantsMutationRouteRateLimit,
+    externalGrantsMutationRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(assertHostTargetsWithinCallerAgents),
     asyncHandler(handleGrantWrite)
   )
   router.delete(
     '/external/gfs/grants/:id',
-    externalGfsGrantsRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsGrantsMutationRouteRateLimit,
+    externalGrantsMutationRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleGrantDelete)
   )
   router.post(
     '/external/gfs/shares',
-    externalGfsSharesRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsSharesMutationRouteRateLimit,
+    externalGrantsMutationRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareWrite)
   )
   router.get(
     '/external/gfs/shares',
-    externalGfsSharesRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsSharesReadRouteRateLimit,
+    externalGrantsReadRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareListForCaller)
   )
   router.delete(
     '/external/gfs/shares/:id',
-    externalGfsSharesRouteRateLimit,
-    externalGrantsRateLimit,
+    externalGfsSharesMutationRouteRateLimit,
+    externalGrantsMutationRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareDelete)
   )

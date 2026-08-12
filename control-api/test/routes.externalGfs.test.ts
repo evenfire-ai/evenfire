@@ -1777,7 +1777,7 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     expect(res.body.error).toBe('manage_acl_required')
   })
 
-  it('rate limits the grants operation class before authority resolution', async () => {
+  it('rate limits the grants mutation class before authority resolution', async () => {
     auth()
     authority(['manage_acl', 'read'], { rateLimitCount: 31 })
     const app = await buildApp()
@@ -1788,9 +1788,9 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     const bucketCall = mockQuery.mock.calls.find(
       call =>
         String(call[0]).includes('rate_limit_buckets') &&
-        String(call[1]?.[0]).startsWith('gfs-ext:pre:grants:session:')
+        String(call[1]?.[0]).startsWith('gfs-ext:pre:grants-mutation:session:')
     )
-    expect(bucketCall?.[1]?.[0]).toMatch(/^gfs-ext:pre:grants:session:[0-9a-f]{64}$/)
+    expect(bucketCall?.[1]?.[0]).toMatch(/^gfs-ext:pre:grants-mutation:session:[0-9a-f]{64}$/)
   })
 
   it('keys the external delegation plane in a bucket DISTINCT from the admin plane for the same subject', async () => {
@@ -1827,6 +1827,25 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     expect(String(externalKey).startsWith('gfsgrants-ext:')).toBe(true)
     expect(String(adminKey).startsWith('gfsgrants-ext:')).toBe(false)
     expect(String(adminKey).startsWith('gfsgrants:')).toBe(true)
+  })
+
+  it('keeps external ACL reads in a distinct read bucket from mutation delegation', async () => {
+    auth()
+    authority(['manage_acl', 'read'])
+    const app = await buildApp()
+    await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R })
+      .set('x-user-session-token', 'sess')
+
+    const readKey = mockQuery.mock.calls.find(
+      call =>
+        String(call[0]).includes('rate_limit_buckets') &&
+        String(call[1]?.[0]).startsWith('gfsgrants-ext-read:')
+    )?.[1]?.[0]
+
+    expect(readKey).toBe(`gfsgrants-ext-read:user:${U1}`)
+    expect(String(readKey).startsWith('gfsgrants-ext:')).toBe(false)
   })
 
   it('adjudicates only well-formed foreign hosts in foreignHostSubjectIndexes', async () => {

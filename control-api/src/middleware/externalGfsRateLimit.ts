@@ -21,8 +21,10 @@ export type ExternalGfsOperationClass =
   | 'resource'
   | 'proxy-read'
   | 'resource-mutation'
-  | 'grants'
-  | 'shares'
+  | 'grants-read'
+  | 'grants-mutation'
+  | 'shares-read'
+  | 'shares-mutation'
 
 export type ExternalGfsOperation = {
   operationClass: ExternalGfsOperationClass
@@ -92,17 +94,23 @@ export function externalGfsOperationFor(
   if (/^\/proxy\/[^/]+$/.test(path) && method === 'GET') {
     return { operationClass: 'proxy-read', route: `${GFS_PREFIX}/proxy/:rid` }
   }
-  if (path === '/grants' && (method === 'GET' || method === 'PUT')) {
-    return { operationClass: 'grants', route: `${GFS_PREFIX}/grants` }
+  if (path === '/grants' && method === 'GET') {
+    return { operationClass: 'grants-read', route: `${GFS_PREFIX}/grants` }
+  }
+  if (path === '/grants' && method === 'PUT') {
+    return { operationClass: 'grants-mutation', route: `${GFS_PREFIX}/grants` }
   }
   if (/^\/grants\/[^/]+$/.test(path) && method === 'DELETE') {
-    return { operationClass: 'grants', route: `${GFS_PREFIX}/grants/:id` }
+    return { operationClass: 'grants-mutation', route: `${GFS_PREFIX}/grants/:id` }
   }
-  if (path === '/shares' && (method === 'GET' || method === 'POST')) {
-    return { operationClass: 'shares', route: `${GFS_PREFIX}/shares` }
+  if (path === '/shares' && method === 'GET') {
+    return { operationClass: 'shares-read', route: `${GFS_PREFIX}/shares` }
+  }
+  if (path === '/shares' && method === 'POST') {
+    return { operationClass: 'shares-mutation', route: `${GFS_PREFIX}/shares` }
   }
   if (/^\/shares\/[^/]+$/.test(path) && method === 'DELETE') {
-    return { operationClass: 'shares', route: `${GFS_PREFIX}/shares/:id` }
+    return { operationClass: 'shares-mutation', route: `${GFS_PREFIX}/shares/:id` }
   }
   return null
 }
@@ -145,7 +153,10 @@ function sourceIpDigest(req: Request): string {
 }
 
 function operationLimit(operationClass: ExternalGfsOperationClass): number {
-  return operationClass === 'resource' || operationClass === 'proxy-read'
+  return operationClass === 'resource' ||
+    operationClass === 'proxy-read' ||
+    operationClass === 'grants-read' ||
+    operationClass === 'shares-read'
     ? config.externalGfsReadRlPerMin
     : config.externalGfsOperationRlPerMin
 }
