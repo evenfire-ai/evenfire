@@ -72,7 +72,7 @@ export function externalUserRateLimitOptions(
   return {
     bucketType: policy.bucketType,
     maxPerMinute: policy.maxPerMinute,
-    getBucketKey: req => keyFor(operation, stage, req as AuthenticatedRequest),
+    getBucketKey: (req: Request) => keyFor(operation, stage, req as AuthenticatedRequest),
     onLimited: sendLimited,
   }
 }
