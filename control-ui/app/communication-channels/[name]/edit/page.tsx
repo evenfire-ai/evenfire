@@ -70,6 +70,18 @@ function extractChannel(response: unknown, name: string): CommunicationChannelIt
   return list.items?.find(item => item.metadata?.name === name) ?? null
 }
 
+/**
+ * Key names from `GET .../credentials`, or `undefined` when the answer is not
+ * usable. Undefined keeps the credentials panel in its pending state: a read
+ * that failed or came back malformed is "unknown", never "nothing stored".
+ */
+function extractCredentialKeys(response: unknown): string[] | undefined {
+  if (!response || typeof response !== 'object') return undefined
+  const keys = (response as { keys?: unknown }).keys
+  if (!Array.isArray(keys)) return undefined
+  return keys.filter((key): key is string => typeof key === 'string')
+}
+
 function conversationsForProvider(
   provider: ChannelProvider,
   draft: DraftState
@@ -93,6 +105,9 @@ export default function EditCommunicationChannelPage() {
   const [draft, setDraft] = useState<DraftState | null>(null)
   const [activeTab, setActiveTab] = useState<ChannelProvider>('telegram')
   const [hosts, setHosts] = useState<HostItem[]>([])
+  // Which credential keys the channel's Secret actually holds. Undefined until
+  // the read lands, so the panel renders pending instead of "nothing stored".
+  const [storedCredentialKeys, setStoredCredentialKeys] = useState<string[] | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -108,7 +123,7 @@ export default function EditCommunicationChannelPage() {
       setLoading(true)
       setLoadError('')
       try {
-        const [channelResponse, hostsResponse] = await Promise.all([
+        const [channelResponse, hostsResponse, credentialsResponse] = await Promise.all([
           apiGet(`/api/v1/admin/communication-channels/${encodeURIComponent(name)}`).catch(
             async error => {
               if (isSilentApiError(error)) return null
@@ -116,6 +131,12 @@ export default function EditCommunicationChannelPage() {
             }
           ),
           apiGet('/api/v1/admin/hosts') as Promise<HostsResponse | HostItem[]>,
+          // Key names only — the API never returns values. A failure here must
+          // not take the whole page down, and must not be read as "no
+          // credentials": null leaves the panel's stored state unknown.
+          apiGet(
+            `/api/v1/admin/communication-channels/${encodeURIComponent(name)}/credentials`
+          ).catch(() => null),
         ])
         if (cancelled || channelResponse === null) return
         const nextItem = extractChannel(channelResponse, name)
@@ -130,6 +151,7 @@ export default function EditCommunicationChannelPage() {
         setDraft(createCommunicationChannelDraft(nextItem))
         setActiveTab(communicationChannelInitialTab(nextItem))
         setHosts(nextHosts)
+        setStoredCredentialKeys(extractCredentialKeys(credentialsResponse))
       } catch (error) {
         if (isSilentApiError(error)) return
         if (!cancelled) {
@@ -626,7 +648,7 @@ export default function EditCommunicationChannelPage() {
                 <ChannelCredentialsPanel
                   ccName={item.metadata?.name || name}
                   visibleChannelTypes={visibleChannelTypes}
-                  hasStoredCredentials={!!draft.credentialsSecretRef?.name}
+                  storedKeys={storedCredentialKeys}
                 />
               </section>
 

@@ -14,6 +14,12 @@ function emptyDraft(): CredentialDraft {
 
 type SaveStatus = 'idle' | 'saved' | 'error'
 
+/** Stand-in for a stored value. The API never returns values, only key names. */
+const MASKED_VALUE = '**********'
+/** Shown while `storedKeys` is unknown. Distinct from the per-field placeholder
+ *  so a page load cannot flash "nothing stored" before the answer arrives. */
+const PENDING_PLACEHOLDER = 'Checking stored credentials…'
+
 /**
  * Per-CommunicationChannel provider credential form.
  *
@@ -26,12 +32,17 @@ type SaveStatus = 'idle' | 'saved' | 'error'
  * Empty fields are NOT sent on rotation: a partial update of just the
  * Telegram token must not clobber the stored Slack token. Only non-empty
  * trimmed values make it into the request body.
+ *
+ * Stored state is per key (`storedKeys`), never per channel: a field renders
+ * masked only when the Secret holds that field's own key. The panel used to
+ * take one boolean for the whole channel, so a Telegram-only Secret made every
+ * Slack field look populated.
  */
 export function ChannelCredentialsPanel({
   ccName,
   pending,
   onPendingChange,
-  hasStoredCredentials = false,
+  storedKeys,
   presentation = 'panel',
   readOnly = false,
   visibleChannelTypes,
@@ -47,6 +58,10 @@ export function ChannelCredentialsPanel({
   const [deletedKeys, setDeletedKeys] = useState<Partial<Record<keyof CredentialDraft, boolean>>>(
     {}
   )
+  // Keys this panel stored itself since the parent last read the Secret. Without
+  // it a freshly saved credential would render empty until the page reloaded,
+  // which is the same lie in the other direction.
+  const [savedKeys, setSavedKeys] = useState<Partial<Record<keyof CredentialDraft, boolean>>>({})
 
   // Monotonic id to drop stale async responses when `ccName` changes mid-flight.
   const requestId = useRef(0)
@@ -63,16 +78,35 @@ export function ChannelCredentialsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleSignature])
 
+  // Stable signature of the stored key list. `null` means "not known yet".
+  // Effects key on this string, never on the array: parents hand over a fresh
+  // array on most renders, and keying on identity would reset the panel
+  // mid-typing and silently discard what the operator entered.
+  const storedSignature = storedKeys ? [...storedKeys].sort().join('|') : null
+  const storedKeySet = useMemo(
+    () => new Set<string>(storedKeys ?? []),
+    // storedSignature stands in for storedKeys — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [storedSignature]
+  )
+  // Nothing is known about the Secret yet. Create flows have no Secret to read,
+  // so they are never pending.
+  const keysPending = !pending && storedSignature === null
+
   // Reset local state when the target CC changes so values typed for CC A
   // are not saved against CC B if the parent swaps `ccName` without unmounting.
+  // Also on a re-read of the Secret: the stored keys are the source of truth the
+  // fields render, so local edit/delete marks made against the previous answer
+  // no longer describe anything.
   useEffect(() => {
     setDraft(emptyDraft())
     setError('')
     setStatus('idle')
     setEditingKeys({})
     setDeletedKeys({})
+    setSavedKeys({})
     requestId.current += 1
-  }, [ccName, hasStoredCredentials])
+  }, [ccName, storedSignature])
 
   // Prune draft values for channel types that are no longer visible. Prevents
   // a stale token (e.g., user typed Slack creds then removed the Slack row)
@@ -146,6 +180,7 @@ export function ChannelCredentialsPanel({
       setDraft(prev => ({ ...prev, [key]: '' }))
       setEditingKeys(prev => ({ ...prev, [key]: false }))
       setDeletedKeys(prev => ({ ...prev, [key]: false }))
+      setSavedKeys(prev => ({ ...prev, [key]: true }))
       setStatus('saved')
       showToast('Channel credential saved.', { tone: 'success' })
     } catch (e) {
@@ -177,6 +212,7 @@ export function ChannelCredentialsPanel({
       setDraft(prev => ({ ...prev, [key]: '' }))
       setEditingKeys(prev => ({ ...prev, [key]: false }))
       setDeletedKeys(prev => ({ ...prev, [key]: true }))
+      setSavedKeys(prev => ({ ...prev, [key]: false }))
       setStatus('saved')
       showToast('Channel credential deleted.', { tone: 'success' })
     } catch (e) {
@@ -192,6 +228,16 @@ export function ChannelCredentialsPanel({
   const fieldsDisabled = disabled || (!pending && !ccName)
   const isInline = presentation === 'inline'
 
+  /** True when the Secret holds this exact key, as far as the panel knows.
+   *  A key deleted here is gone even if the parent's list still lists it; a key
+   *  saved here exists even if the parent's list predates the save. */
+  function isKeyStored(key: keyof CredentialDraft): boolean {
+    if (pending || keysPending) return false
+    if (deletedKeys[key]) return false
+    if (savedKeys[key]) return true
+    return storedKeySet.has(key)
+  }
+
   return (
     <div className={cn('cu-channel-credentials', isInline && 'cu-channel-credentials--inline')}>
       {!isInline && (
@@ -204,9 +250,10 @@ export function ChannelCredentialsPanel({
             Provider credentials for this channel&apos;s channel-reader. Stored as a Kubernetes
             Secret
             <code> cc-{ccName || '<channel>'}-credentials </code>
-            in the <code>channels</code> namespace. Values are write-only — fields render blank and
-            existing secrets are never returned. The Secret is created on first save and follows the
-            CC if you change <code>hostRef</code>.
+            in the <code>channels</code> namespace. Values are write-only — a key the Secret holds
+            renders masked, every other field renders blank, and stored values are never returned.
+            The Secret is created on first save and follows the CC if you change{' '}
+            <code>hostRef</code>.
           </p>
         </>
       )}
@@ -225,71 +272,73 @@ export function ChannelCredentialsPanel({
             </div>
           ) : (
             <div className="cu-form-stack">
-              {fields.map(field => (
-                <div key={field.key} className="cu-field cu-field--compact">
-                  <label htmlFor={`channel-cred-${field.key}`}>{field.label}</label>
-                  <div className="cu-credential-field">
-                    <input
-                      id={`channel-cred-${field.key}`}
-                      type="password"
-                      autoComplete="off"
-                      value={
-                        !pending &&
-                        hasStoredCredentials &&
-                        !deletedKeys[field.key] &&
-                        !editingKeys[field.key]
-                          ? '**********'
-                          : draft[field.key] || ''
-                      }
-                      onChange={e => updateField(field.key, e.target.value)}
-                      placeholder={
-                        !pending && hasStoredCredentials && !deletedKeys[field.key]
-                          ? undefined
-                          : field.placeholder
-                      }
-                      disabled={fieldsDisabled || readOnly || (!pending && !editingKeys[field.key])}
-                    />
-                    {!pending && !readOnly ? (
-                      <div className="cu-credential-field__actions">
-                        {editingKeys[field.key] ? (
+              {fields.map(field => {
+                const stored = isKeyStored(field.key)
+                return (
+                  <div key={field.key} className="cu-field cu-field--compact">
+                    <label htmlFor={`channel-cred-${field.key}`}>{field.label}</label>
+                    <div className="cu-credential-field">
+                      <input
+                        id={`channel-cred-${field.key}`}
+                        type="password"
+                        autoComplete="off"
+                        value={
+                          stored && !editingKeys[field.key] ? MASKED_VALUE : draft[field.key] || ''
+                        }
+                        onChange={e => updateField(field.key, e.target.value)}
+                        placeholder={
+                          keysPending ? PENDING_PLACEHOLDER : stored ? undefined : field.placeholder
+                        }
+                        aria-busy={keysPending || undefined}
+                        disabled={
+                          fieldsDisabled ||
+                          readOnly ||
+                          keysPending ||
+                          (!pending && !editingKeys[field.key])
+                        }
+                      />
+                      {!pending && !readOnly ? (
+                        <div className="cu-credential-field__actions">
+                          {editingKeys[field.key] ? (
+                            <button
+                              type="button"
+                              className="cu-btn cu-btn--icon cu-btn--sm"
+                              onClick={() => void saveField(field.key)}
+                              disabled={saving || !(draft[field.key] || '').trim()}
+                              aria-label={`Save ${field.label}`}
+                              title={`Save ${field.label}`}
+                            >
+                              <IconCheck width={16} height={16} />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="cu-btn cu-btn--icon cu-btn--sm"
+                              onClick={() => editField(field.key)}
+                              disabled={saving || keysPending}
+                              aria-label={`Edit ${field.label}`}
+                              title={`Edit ${field.label}`}
+                            >
+                              <IconPencil width={16} height={16} />
+                            </button>
+                          )}
                           <button
                             type="button"
-                            className="cu-btn cu-btn--icon cu-btn--sm"
-                            onClick={() => void saveField(field.key)}
-                            disabled={saving || !(draft[field.key] || '').trim()}
-                            aria-label={`Save ${field.label}`}
-                            title={`Save ${field.label}`}
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon cu-btn--sm"
+                            onClick={() => void deleteField(field.key)}
+                            disabled={saving || keysPending || !stored}
+                            aria-label={`Delete ${field.label}`}
+                            title={`Delete ${field.label}`}
                           >
-                            <IconCheck width={16} height={16} />
+                            <IconTrash width={16} height={16} />
                           </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--sm"
-                            onClick={() => editField(field.key)}
-                            disabled={saving}
-                            aria-label={`Edit ${field.label}`}
-                            title={`Edit ${field.label}`}
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon cu-btn--sm"
-                          onClick={() => void deleteField(field.key)}
-                          disabled={saving || !hasStoredCredentials || !!deletedKeys[field.key]}
-                          aria-label={`Delete ${field.label}`}
-                          title={`Delete ${field.label}`}
-                        >
-                          <IconTrash width={16} height={16} />
-                        </button>
-                      </div>
-                    ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                    {field.helpText ? <div className="cu-field__hint">{field.helpText}</div> : null}
                   </div>
-                  {field.helpText ? <div className="cu-field__hint">{field.helpText}</div> : null}
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </>

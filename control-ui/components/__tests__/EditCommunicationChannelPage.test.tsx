@@ -144,6 +144,102 @@ describe('EditCommunicationChannelPage', () => {
   })
 })
 
+describe('EditCommunicationChannelPage channel credentials', () => {
+  const TELEGRAM_ONLY_CHANNEL = 'jose-tg'
+  const TELEGRAM_ONLY_SPEC: ChannelSpec = {
+    credentialsSecretRef: { name: 'cc-jose-tg-credentials' },
+    telegramSettings: { botHandle: '@ops_bot' },
+  }
+
+  /** Like mockChannel, but also answers the per-channel credentials read.
+   *  Pass an Error to make that read fail. */
+  function mockChannelCredentials(name: string, spec: ChannelSpec, credentials: unknown) {
+    navigation.params = { name }
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${name}/credentials`) {
+        if (credentials instanceof Error) throw credentials
+        return credentials
+      }
+      if (path === `/api/v1/admin/communication-channels/${name}`) {
+        return {
+          item: {
+            metadata: { name, namespace: 'channels' },
+            spec: { access: { users: [], teams: [] }, hostRef: 'agent-a', ...spec },
+          },
+        }
+      }
+      return { items: [] }
+    })
+  }
+
+  it('masks only the keys the channel Secret holds, not every field', async () => {
+    // The channel has a Secret, but it holds a Telegram token only. Inferring
+    // per-field state from the Secret's existence rendered both Slack fields as
+    // populated, so a half-configured channel read as configured.
+    mockChannelCredentials(TELEGRAM_ONLY_CHANNEL, TELEGRAM_ONLY_SPEC, {
+      name: TELEGRAM_ONLY_CHANNEL,
+      secretName: 'cc-jose-tg-credentials',
+      namespace: 'channels',
+      keys: ['telegram-bot-token'],
+    })
+    await renderLoadedPage()
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+    })
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    const signingSecret = screen.getByLabelText('Slack Signing Secret') as HTMLInputElement
+    expect(signingSecret.value).not.toBe('**********')
+    expect(signingSecret.value).toBe('')
+    expect(signingSecret.placeholder).toBe('signing secret')
+    const botToken = screen.getByLabelText('Slack Bot User OAuth Token') as HTMLInputElement
+    expect(botToken.value).toBe('')
+    expect(botToken.placeholder).toBe('xoxb-…')
+  })
+
+  it('renders no credentials as empty when the Secret holds nothing', async () => {
+    mockChannelCredentials(TELEGRAM_ONLY_CHANNEL, TELEGRAM_ONLY_SPEC, {
+      name: TELEGRAM_ONLY_CHANNEL,
+      secretName: 'cc-jose-tg-credentials',
+      namespace: 'channels',
+      keys: [],
+    })
+    await renderLoadedPage()
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
+    })
+    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    expect(telegramToken.value).toBe('')
+    expect(telegramToken.placeholder).toBe('123456789:ABCDEF…')
+  })
+
+  it('leaves the fields unknown, not empty, when the credentials read fails', async () => {
+    // A denied or failed read says nothing about what is stored. Rendering the
+    // empty state here would report "no credentials" on a channel that has them.
+    mockChannelCredentials(
+      TELEGRAM_ONLY_CHANNEL,
+      TELEGRAM_ONLY_SPEC,
+      new Error('secrets is forbidden')
+    )
+    await renderLoadedPage()
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
+    })
+    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    expect(telegramToken.getAttribute('aria-busy')).toBe('true')
+    expect(telegramToken.value).toBe('')
+    expect(telegramToken.placeholder).toBe('Checking stored credentials…')
+    // The page itself still loaded: the read failure is scoped to the panel.
+    expect(screen.getByLabelText(/Telegram bot handle/)).toHaveValue('@ops_bot')
+  })
+})
+
 describe('EditCommunicationChannelPage Slack app manifest', () => {
   it('renders the manifest with both request URLs when the webhook is publicly reachable', async () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
