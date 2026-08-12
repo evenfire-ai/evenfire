@@ -4014,6 +4014,11 @@ h3 {
   transform: rotate(90deg);
 }
 
+.agent-workspace-shell .chat-thread-container {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .agent-workspace-shell .chat-thread {
   flex: 1 1 auto;
   min-height: 0;
@@ -6042,7 +6047,13 @@ h3 {
   color: var(--warning);
 }
 
+.chat-thread-container {
+  position: relative;
+  min-height: 0;
+}
+
 .chat-thread {
+  height: 100%;
   min-height: 280px;
   max-height: none;
   overflow: auto;
@@ -6055,6 +6066,36 @@ h3 {
   min-height: 0;
   align-content: start;
   gap: var(--space-2-5);
+}
+
+.chat-scroll-to-bottom {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: var(--space-3);
+  z-index: var(--layer-chat-overlay);
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button {
+  border-color: rgba(var(--edge-rgb), 0.58);
+  box-shadow: var(--shadow-soft);
+  pointer-events: auto;
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button.ui-icon-button--solid.ui-icon-button--neutral:hover:enabled {
+  background: var(--bg-elev-2);
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .chat-history-page-control {
