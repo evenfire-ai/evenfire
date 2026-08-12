@@ -81,4 +81,35 @@ describe('buildToolLaneGuardrail', () => {
     const d = await g.decide({ provenance: 'mcp', server: 'github', name: 'get_issue' }, {})
     expect(d.decision).toBe('allow')
   })
+
+  it('transformResult is absent when no post_tool_use hooks are configured', () => {
+    const g = buildToolLaneGuardrail(config)!
+    expect(g.transformResult).toBeUndefined()
+  })
+
+  it('a PostToolUse hook redacts the result content (is_error preserved)', async () => {
+    const fetchImpl = async (url: string) => ({
+      status: 200,
+      text: async () =>
+        url.endsWith('/v1/post_tool_use') ? '{"updatedResult":{"content":"[redacted]"}}' : '{}',
+    })
+    const g = buildToolLaneGuardrail(
+      {
+        hookDescriptors: [
+          {
+            id: 'th',
+            endpoint: 'http://svc',
+            path: '/',
+            lifecyclePoints: ['post_tool_use'],
+            capabilities: ['may_rewrite'],
+            failMode: 'closed',
+            order: 100,
+          },
+        ],
+      },
+      { getAuthToken: () => '', fetchImpl }
+    )!
+    const v = await g.transformResult!(fileWrite, {}, { content: 'secret', isError: true })
+    expect(v).toEqual({ content: '[redacted]', isError: true })
+  })
 })

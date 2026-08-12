@@ -80,3 +80,70 @@ describe('RemoteToolHook.preToolUse', () => {
     expect(await h.preToolUse(id, {})).toBeNull()
   })
 })
+
+describe('RemoteToolHook.postToolUse', () => {
+  const result = { content: 'secret=abc123', isError: false }
+
+  it('updatedResult + may_rewrite → redacted content (is_error preserved)', async () => {
+    const h = new RemoteToolHook(
+      desc({ lifecyclePoints: ['post_tool_use'], capabilities: ['may_rewrite'] }),
+      fetcher({
+        status: 200,
+        body: { updatedResult: { content: 'secret=[redacted]' } },
+        unavailable: false,
+      })
+    )
+    const v = await h.postToolUse(id, {}, result)
+    expect(v).toEqual({ content: 'secret=[redacted]', isError: false })
+  })
+
+  it('is_error is authoritative — a hook cannot flip it', async () => {
+    const h = new RemoteToolHook(
+      desc({ lifecyclePoints: ['post_tool_use'], capabilities: ['may_rewrite'] }),
+      fetcher({
+        status: 200,
+        body: { updatedResult: { content: 'x', is_error: true } },
+        unavailable: false,
+      })
+    )
+    const v = await h.postToolUse(id, {}, { content: 'ok', isError: false })
+    expect(v?.isError).toBe(false)
+  })
+
+  it('WITHOUT may_rewrite → no redaction (F4)', async () => {
+    const h = new RemoteToolHook(
+      desc({ lifecyclePoints: ['post_tool_use'], capabilities: [] }),
+      fetcher({ status: 200, body: { updatedResult: { content: 'x' } }, unavailable: false })
+    )
+    expect(await h.postToolUse(id, {}, result)).toBeNull()
+  })
+
+  it('fail-closed + unavailable + may_rewrite → withhold content (§8.6)', async () => {
+    const h = new RemoteToolHook(
+      desc({
+        lifecyclePoints: ['post_tool_use'],
+        capabilities: ['may_rewrite'],
+        failMode: 'closed',
+      }),
+      fetcher({ status: 0, body: undefined, unavailable: true })
+    )
+    const v = await h.postToolUse(id, {}, result)
+    expect(v?.content).not.toContain('abc123')
+  })
+
+  it('fail-open + unavailable → no redaction (original passes through)', async () => {
+    const h = new RemoteToolHook(
+      desc({ lifecyclePoints: ['post_tool_use'], capabilities: ['may_rewrite'], failMode: 'open' }),
+      fetcher({ status: 0, body: undefined, unavailable: true })
+    )
+    expect(await h.postToolUse(id, {}, result)).toBeNull()
+  })
+
+  it('not subscribed to post_tool_use → null', async () => {
+    const h = new RemoteToolHook(
+      desc({ lifecyclePoints: ['pre_tool_use'], capabilities: ['may_rewrite'] }),
+      fetcher({ status: 200, body: { updatedResult: { content: 'x' } }, unavailable: false })
+    )
+    expect(await h.postToolUse(id, {}, result)).toBeNull()
+  })
+})

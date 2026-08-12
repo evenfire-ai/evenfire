@@ -178,6 +178,22 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(r3.toolResults[0].is_error).toBe(false) // counter was reset
   })
 
+  it('PostToolUse transformResult redacts the executed result content (§6.2)', async () => {
+    const tool = new StubTool('do_thing')
+    const guardrail: ToolLaneGuardrail = {
+      async decide(_id, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
+      },
+      async transformResult(_id, _input, result) {
+        return { content: `[redacted:${result.content}]`, isError: result.isError }
+      },
+    }
+    const { toolResults } = await executeToolCalls([call], makeConfig(tool, guardrail), 0)
+    expect(tool.calls).toHaveLength(1) // executed
+    expect(toolResults[0].content).toBe('[redacted:ok]') // model-visible content redacted
+    expect(toolResults[0].is_error).toBe(false)
+  })
+
   it('ask + matching one-shot approval → proceeds and clears pending', async () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {

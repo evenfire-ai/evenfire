@@ -11,7 +11,7 @@
 import { type CoreBoundaryDeps, evaluateBoundary } from '../boundary'
 import type { GuardrailsConfig } from '../config'
 import { type FetchLike, createHookFetcher } from '../hooks/hookFetcher'
-import { RemoteToolHook } from '../hooks/remoteToolHook'
+import { RemoteToolHook, type ToolResultView } from '../hooks/remoteToolHook'
 import type { HookDescriptor } from '../hooks/types'
 import type { Contributor, Decision } from '../types'
 import type { ToolIdentity } from './provenance'
@@ -22,25 +22,30 @@ export interface ToolLaneGuardrailDeps {
   fetchImpl?: FetchLike
 }
 
-/** Build the tool-lane installed `PreToolUse` hooks (spec §6.2), ordered by `order`. */
+/**
+ * Build the tool-lane installed hooks (spec §6.2), ordered by `order`, split by
+ * lifecycle point: `pre` (`PreToolUse` gate) and `post` (`PostToolUse` redaction).
+ * A hook may subscribe to both.
+ */
 function buildToolLaneHooks(
   descriptors: HookDescriptor[] | undefined,
   deps: ToolLaneGuardrailDeps
-): RemoteToolHook[] {
-  return (descriptors ?? [])
-    .slice()
-    .sort((a, b) => a.order - b.order)
-    .filter(d => d.lifecyclePoints.includes('pre_tool_use'))
-    .map(
-      d =>
-        new RemoteToolHook(
-          d,
-          createHookFetcher({
-            getAuthToken: deps.getAuthToken ?? (() => ''),
-            fetchImpl: deps.fetchImpl,
-          })
-        )
+): { pre: RemoteToolHook[]; post: RemoteToolHook[] } {
+  const ordered = (descriptors ?? []).slice().sort((a, b) => a.order - b.order)
+  const pre: RemoteToolHook[] = []
+  const post: RemoteToolHook[] = []
+  for (const d of ordered) {
+    const hook = new RemoteToolHook(
+      d,
+      createHookFetcher({
+        getAuthToken: deps.getAuthToken ?? (() => ''),
+        fetchImpl: deps.fetchImpl,
+      })
     )
+    if (d.lifecyclePoints.includes('pre_tool_use')) pre.push(hook)
+    if (d.lifecyclePoints.includes('post_tool_use')) post.push(hook)
+  }
+  return { pre, post }
 }
 
 export type ToolLaneInput = Record<string, unknown>
@@ -57,6 +62,18 @@ export interface ToolGuardrailDecision {
 /** The tool-lane guardrail the loop consults before executing a tool. */
 export interface ToolLaneGuardrail {
   decide(identity: ToolIdentity, input: ToolLaneInput): Promise<ToolGuardrailDecision>
+  /**
+   * PostToolUse redaction (spec §6.2 / §10 #3): transform the model-visible tool
+   * result through the installed `post_tool_use` hooks, in order. Optional — a
+   * guardrail with no post hooks omits it (the loop then leaves the result
+   * untouched). Never denies/asks; a fail-closed redactor that's unavailable
+   * withholds the content (§8.6).
+   */
+  transformResult?(
+    identity: ToolIdentity,
+    input: ToolLaneInput,
+    result: ToolResultView
+  ): Promise<ToolResultView>
 }
 
 /**
@@ -76,7 +93,7 @@ export function buildToolLaneGuardrail(
 ): ToolLaneGuardrail | undefined {
   const compiled = compileRules(config?.rules, config?.limits?.maxRules)
   const hooks = buildToolLaneHooks(config?.hookDescriptors, hookDeps)
-  if (!compiled.hasRules && hooks.length === 0) return undefined
+  if (!compiled.hasRules && hooks.pre.length === 0 && hooks.post.length === 0) return undefined
 
   const deps: CoreBoundaryDeps<ToolLaneInput, ToolLaneResult, ToolIdentity> = {
     lane: 'tool',
@@ -85,17 +102,17 @@ export function buildToolLaneGuardrail(
       async pre(input, identity) {
         const ruleContribs = evaluateRules(compiled, identity, input)
         const hookContribs = (
-          await Promise.all(hooks.map(h => h.preToolUse(identity, input)))
+          await Promise.all(hooks.pre.map(h => h.preToolUse(identity, input)))
         ).filter((c): c is Contributor<ToolLaneInput, ToolLaneResult> => c !== null)
         return [...ruleContribs, ...hookContribs]
       },
       async post() {
-        return [] // PostToolUse (post-execution result transform) is a later increment.
+        return [] // PostToolUse redaction is applied via `transformResult`, not the decision boundary.
       },
     },
   }
 
-  return {
+  const guardrail: ToolLaneGuardrail = {
     async decide(identity, input) {
       const e = await evaluateBoundary(deps, identity, input)
       return {
@@ -106,4 +123,18 @@ export function buildToolLaneGuardrail(
       }
     },
   }
+
+  // Only expose `transformResult` when there are post hooks — a guardrail with none
+  // leaves the loop's post-execution path byte-identical to today.
+  if (hooks.post.length > 0) {
+    guardrail.transformResult = async (identity, input, result) => {
+      let current = result
+      for (const hook of hooks.post) {
+        const redacted = await hook.postToolUse(identity, input, current)
+        if (redacted) current = redacted
+      }
+      return current
+    }
+  }
+  return guardrail
 }

@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
-import { recordAndCheck, recordDecision, resolveToolIdentityFromRegistry } from '../guardrails'
+import {
+  type ToolIdentity,
+  recordAndCheck,
+  recordDecision,
+  resolveToolIdentityFromRegistry,
+} from '../guardrails'
 import type { ChatMessage, PendingApproval, TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool, reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
@@ -234,12 +239,15 @@ export async function executeToolCalls(
 
     // Guardrail gate (spec §6) — behind config.guardrails; absent = today.
     let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+    // Resolved once when the guardrail runs; reused for PostToolUse redaction below.
+    let toolIdentity: ToolIdentity | undefined
     if (config.guardrails) {
       const identity = resolveToolIdentityFromRegistry(
         call.name,
         config.toolRegistry,
         call.arguments
       )
+      toolIdentity = identity
 
       // Doom-loop guard (spec §6.4): deny 3 consecutive identical (tool, input)
       // calls within a task. Best-effort runaway/cost guard, not a security
@@ -383,7 +391,20 @@ export async function executeToolCalls(
     }
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
-    const toolResult = await executeSingleTool(call, config, iteration)
+    let toolResult = await executeSingleTool(call, config, iteration)
+
+    // PostToolUse redaction (spec §6.2 / §10 #3): installed `post_tool_use` hooks
+    // may redact the model-visible result `content` (never `is_error`). Only the
+    // LLM-message `content` is touched — `rawContent` (UI preview) is left intact.
+    if (config.guardrails?.transformResult && toolIdentity) {
+      const view = await config.guardrails.transformResult(toolIdentity, call.arguments, {
+        content: toolResult.content,
+        isError: toolResult.is_error,
+      })
+      if (view.content !== toolResult.content) {
+        toolResult = { ...toolResult, content: view.content }
+      }
+    }
     toolResults.push(toolResult)
 
     if (config.abortSignal?.aborted) {
