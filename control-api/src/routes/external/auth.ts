@@ -324,14 +324,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
-        const renewal = await renewExternalUserSession(token, {
+        const authentication = await authenticateExternalUserSession(token, {
+          purpose: 'renew',
           client: externalSessionClient(req),
         })
-        if (renewal.status === 'upgrade_required') {
+        if (authentication.status === 'upgrade_required') {
           sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
           return
         }
-        if (renewal.status !== 'renewed') {
+        if (authentication.status !== 'authenticated') {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
@@ -340,9 +341,21 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             'session_lifecycle',
             req,
             res,
-            renewal.session.identity
+            authentication.claims
           ))
         ) {
+          return
+        }
+        const renewal = await renewExternalUserSession(token, {
+          client: externalSessionClient(req),
+          policy: authentication.policy,
+        })
+        if (renewal.status === 'upgrade_required') {
+          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+          return
+        }
+        if (renewal.status !== 'renewed') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
         return res.status(200).json({
