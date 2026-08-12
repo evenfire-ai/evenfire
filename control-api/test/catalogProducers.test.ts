@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import type { DbClient } from '../src/db.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import {
@@ -189,6 +190,65 @@ describe('catalog producer protocol', () => {
     expect(query).toHaveBeenCalledTimes(2)
     expect(query.mock.calls[1]?.[1]?.[4]).toBe(JSON.stringify({ source_0: '', source_1: 'a' }))
     expect(query.mock.calls[1]?.[1]?.[5]).toBe(JSON.stringify({ source_1: true }))
+  })
+
+  it('is invariant to arm order, raw batch boundaries, and duplicate cluster size', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 0, max: 20 }), { minLength: 1, maxLength: 24 }),
+        fc.array(fc.integer({ min: 0, max: 20 }), { minLength: 1, maxLength: 24 }),
+        fc.integer({ min: 1, max: 4 }),
+        fc.boolean(),
+        async (leftValues, rightValues, take, reverseArms) => {
+          const streams = [
+            [...leftValues].sort((left, right) => left - right),
+            [...rightValues].sort((left, right) => left - right),
+          ].map(values => values.map(value => `id-${String(value).padStart(3, '0')}`))
+          const query = vi.fn(async (_text: string, values: unknown[]) => {
+            const afterByArm = JSON.parse(String(values[4])) as Record<string, string>
+            const active =
+              values[5] === null ? null : (JSON.parse(String(values[5])) as Record<string, true>)
+            const rows = streams.flatMap((stream, index) => {
+              const arm = `source_${index}`
+              if (active !== null && !active[arm]) return []
+              const batch = stream
+                .filter(logicalId => logicalId > (afterByArm[arm] ?? ''))
+                .slice(0, take + 1)
+              return [
+                {
+                  source_arm: arm,
+                  source_rows: batch.map(logical_id => ({ logical_id, valid_until: null })),
+                  source_saturated: batch.length >= take + 1,
+                },
+              ]
+            })
+            return { rows: reverseArms ? rows.reverse() : rows, rowCount: rows.length }
+          })
+          const budget = AccessExecutionBudget.create('catalog')
+          try {
+            const result = await listBoundedProducerKeys({
+              context: {
+                ...context(query),
+                budget,
+              },
+              family: 'host',
+              requiredOperationalSources: [],
+              continuation: { afterKey: null, exhausted: false },
+              take,
+              sql: 'SELECT 1',
+            })
+            const expected = [...new Set(streams.flat())].sort().slice(0, take + 1)
+            expect(result.candidates.map(candidate => candidate.key[2])).toEqual(expected)
+            expect(new Set(result.candidates.map(candidate => candidate.key[2])).size).toBe(
+              result.candidates.length
+            )
+          } finally {
+            budget.close()
+          }
+        }
+      ),
+      { numRuns: 100 }
+    )
   })
 
   it('reports an operational source gap as partial without querying authority', async () => {
