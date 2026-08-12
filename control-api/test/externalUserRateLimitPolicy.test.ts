@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
-  authenticatedExternalUserRateLimit,
-  preAuthExternalUserRateLimit,
+  externalUserRateLimitOptions,
+  requireAuthenticatedExternalUserRateLimitContext,
 } from '../src/middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../src/middleware/rateLimitMiddleware.js'
 
 const limiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 vi.mock('../src/services/rateLimiterService.js', () => limiter)
@@ -41,9 +42,14 @@ describe('external user rate-limit policy', () => {
         }
         next()
       })
-      app.get('/protected', ...authenticatedExternalUserRateLimit(operation), (_req, res) => {
-        res.status(204).end()
-      })
+      app.get(
+        '/protected',
+        requireAuthenticatedExternalUserRateLimitContext,
+        rateLimitMiddleware(externalUserRateLimitOptions(operation, 'authenticated')),
+        (_req, res) => {
+          res.status(204).end()
+        }
+      )
 
       await request(app)
         .get('/protected')
@@ -57,9 +63,13 @@ describe('external user rate-limit policy', () => {
   it('uses a bounded IP fallback before authentication without reading the session token', async () => {
     limiter.checkAndIncrement.mockResolvedValueOnce(allowedResult())
     const app = express()
-    app.get('/pre-auth', preAuthExternalUserRateLimit('session_lifecycle'), (_req, res) => {
-      res.status(204).end()
-    })
+    app.get(
+      '/pre-auth',
+      rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
+      (_req, res) => {
+        res.status(204).end()
+      }
+    )
 
     await request(app)
       .get('/pre-auth')
@@ -81,9 +91,13 @@ describe('external user rate-limit policy', () => {
       req.internalService = { name: 'external-rest-api' }
       next()
     })
-    app.get('/pre-auth', preAuthExternalUserRateLimit('session_lifecycle'), (_req, res) => {
-      res.status(204).end()
-    })
+    app.get(
+      '/pre-auth',
+      rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
+      (_req, res) => {
+        res.status(204).end()
+      }
+    )
 
     await request(app).get('/pre-auth').set('x-evenfire-client-ip', '198.51.100.52').expect(204)
 
@@ -100,9 +114,13 @@ describe('external user rate-limit policy', () => {
       req.internalService = { name: 'rpc-proxy' }
       next()
     })
-    app.get('/pre-auth', preAuthExternalUserRateLimit('session_lifecycle'), (_req, res) => {
-      res.status(204).end()
-    })
+    app.get(
+      '/pre-auth',
+      rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
+      (_req, res) => {
+        res.status(204).end()
+      }
+    )
 
     await request(app).get('/pre-auth').set('x-evenfire-client-ip', '198.51.100.52').expect(204)
 
@@ -128,7 +146,12 @@ describe('external user rate-limit policy', () => {
       }
       next()
     })
-    app.get('/protected', ...authenticatedExternalUserRateLimit('session_lifecycle'), handler)
+    app.get(
+      '/protected',
+      requireAuthenticatedExternalUserRateLimitContext,
+      rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
+      handler
+    )
 
     const response = await request(app).get('/protected').expect(429)
 
@@ -141,7 +164,12 @@ describe('external user rate-limit policy', () => {
   it('fails closed before the authenticated limiter when trusted context is absent', async () => {
     const handler = vi.fn((_req, res) => res.status(204).end())
     const app = express()
-    app.get('/protected', ...authenticatedExternalUserRateLimit('session_lifecycle'), handler)
+    app.get(
+      '/protected',
+      requireAuthenticatedExternalUserRateLimitContext,
+      rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
+      handler
+    )
 
     await request(app).get('/protected').expect(401)
 
