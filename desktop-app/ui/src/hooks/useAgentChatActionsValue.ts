@@ -14,6 +14,7 @@ type AppVm = ReturnType<typeof useAppController>
  */
 export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValue {
   const chatEndRef = vm.chatEndRef
+  const scrollChatToBottom = useStableCallback(vm.scrollChatToBottom)
   const handleCreateChat = useStableCallback(vm.handleCreateChat)
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
@@ -40,6 +41,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   return useMemo(
     () => ({
       chatEndRef,
+      scrollChatToBottom,
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,
@@ -57,6 +59,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
     }),
     [
       chatEndRef,
+      scrollChatToBottom,
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,

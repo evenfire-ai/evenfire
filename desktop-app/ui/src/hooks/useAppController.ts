@@ -1221,6 +1221,7 @@ export function useAppController() {
     agentError: chat.agentError,
     failedAgentSend: chat.failedAgentSend,
     chatEndRef: chat.chatEndRef,
+    scrollChatToBottom: chat.scrollChatToBottom,
     activeMessages: chat.chatMessages,
     activityByMessageId: chat.activityByMessageId,
     progressByMessageId: chat.progressByMessageId,
