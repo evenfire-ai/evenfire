@@ -16,6 +16,8 @@ import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { IconCopy } from '@components/icons'
+import { Button } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
@@ -25,6 +27,7 @@ import {
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
+  hasSlackConfigForRequestUrl,
 } from '@lib/communicationChannelEdit'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
@@ -34,12 +37,15 @@ import {
 } from '@lib/communicationChannelProviders'
 import {
   type CommunicationChannelItem,
-  slackWebhookUrlForChannel,
+  slackWebhookUrlForChannelName,
   teamsWebhookUrlForChannel,
 } from '@lib/communicationChannels'
+import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 
 type ChannelProvider = CommunicationChannelProvider
 type DraftState = CommunicationChannelDraftState
+
+const DEFAULT_SLACK_APP_NAME = 'Evenfire'
 
 type HostItem = {
   metadata?: { name?: string; namespace?: string }
@@ -143,8 +149,31 @@ export default function EditCommunicationChannelPage() {
 
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeTab], [activeTab])
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
-  const slackRequestUrl = item ? slackWebhookUrlForChannel(item) : null
+  // Gated on the DRAFT, not the persisted item. Slack's own order is manifest
+  // first, credentials second: the bot token only exists after the app has been
+  // created and installed, so a manifest that needed a saved Slack spec could
+  // only ever appear after the operator had already done the step it describes.
+  // The URL depends only on namespace/name, both fixed at create time, and the
+  // reader resolves that id regardless of slackSettings, so a draft-derived URL
+  // is already server-truthful. The guard against a copyable dead end on a
+  // non-Slack channel is kept: no Slack config in the draft, no URL. A bot
+  // handle the draft only inherited from the clerum.io/slack-bot-label
+  // annotation is not Slack config, which is why this is not hasSlackConfig.
+  const slackRequestUrl =
+    draft && hasSlackConfigForRequestUrl(draft)
+      ? slackWebhookUrlForChannelName(
+          item?.metadata?.name?.trim() || name,
+          item?.metadata?.namespace
+        )
+      : null
   const teamsRequestUrl = item ? teamsWebhookUrlForChannel(item) : null
+  // A relative request_url is invalid to Slack, so warn instead of handing over a manifest that
+  // cannot work. slackWebhookUrlForChannelName falls back to a bare path when the deployment has
+  // no public webhook address.
+  const slackManifest =
+    slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
+      ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
+      : null
 
   async function persistDraft(nextDraft: DraftState, successMessage: string) {
     setSaving(true)
@@ -203,6 +232,17 @@ export default function EditCommunicationChannelPage() {
       copied
         ? 'Slack Request URL copied.'
         : 'Could not copy to clipboard. Select the URL and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copySlackAppManifest() {
+    if (!slackManifest) return
+    const copied = await copyTextToClipboard(slackManifest)
+    showToast(
+      copied
+        ? 'Slack app manifest copied.'
+        : 'Could not copy to clipboard. Select the manifest and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
   }
@@ -416,7 +456,14 @@ export default function EditCommunicationChannelPage() {
                         value={draft.slackBotHandle}
                         onChange={event =>
                           setDraft(current =>
-                            current ? { ...current, slackBotHandle: event.target.value } : current
+                            current
+                              ? {
+                                  ...current,
+                                  slackBotHandle: event.target.value,
+                                  // Typed, so no longer just an inherited label.
+                                  slackBotHandleFromAnnotation: false,
+                                }
+                              : current
                           )
                         }
                         placeholder="Your Slack App"
@@ -431,7 +478,7 @@ export default function EditCommunicationChannelPage() {
                       <span className="cu-field__label">Slack Request URL</span>
                       <div className="cu-copy-field">
                         <div className="cu-readonly-field cu-copy-field__value">
-                          {slackRequestUrl || 'Unavailable'}
+                          {slackRequestUrl || 'Available once this channel has a Slack App Name'}
                         </div>
                         <button
                           type="button"
@@ -443,9 +490,52 @@ export default function EditCommunicationChannelPage() {
                         </button>
                       </div>
                       <span className="cu-field__hint">
-                        Use this URL for Slack Event Subscriptions and Interactivity.
+                        {slackRequestUrl
+                          ? 'Use this URL for Slack Event Subscriptions and Interactivity.'
+                          : 'Enter the Slack App Name above and this channel gets its Request URL and app manifest.'}
                       </span>
                     </div>
+                    {slackRequestUrl ? (
+                      slackManifest ? (
+                        <div className="cu-field">
+                          <span className="cu-field__label">Slack App Manifest</span>
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>YAML</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copySlackAppManifest}
+                                disabled={saving}
+                                aria-label="Copy Slack app manifest"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre cu-slack-manifest__pre">
+                              <code>{slackManifest}</code>
+                            </pre>
+                          </div>
+                          <span className="cu-field__hint">
+                            Paste this into Slack, either at Create New App → From an app manifest
+                            for a new app, or in an existing app under Settings → App Manifest. It
+                            fills in both Request URLs, on Event Subscriptions and on Interactivity
+                            &amp; Shortcuts. Setting only Event Subscriptions leaves approval
+                            buttons dead with nothing in the logs.
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="cu-banner cu-banner--warning">
+                          No app manifest: this deployment has no public webhook address, so the
+                          Request URL above is a path and Slack cannot reach it. Expose the webhook
+                          proxy publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to
+                          that address, or prefix the path with it by hand in Slack.
+                        </div>
+                      )
+                    ) : null}
                   </>
                 ) : (
                   <>

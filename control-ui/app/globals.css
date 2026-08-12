@@ -9778,6 +9778,13 @@ textarea.cu-input {
   white-space: pre;
 }
 
+/* The Slack app manifest runs ~25 lines. Cap it so the credentials panel below
+   stays reachable instead of being pushed off the form. */
+.cu-slack-manifest__pre {
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
 .cu-channel-conversations-table__name {
   font-weight: 600;
 }

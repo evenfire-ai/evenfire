@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
 import EditCommunicationChannelPage from '../../app/communication-channels/[name]/edit/page'
 import * as api from '../../lib/api'
@@ -37,7 +37,60 @@ vi.mock('../../lib/api', async () => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.unstubAllEnvs()
+  navigation.params = { name: 'teams-channel' }
 })
+
+type ChannelSpec = Record<string, unknown>
+
+function mockChannel(name: string, spec: ChannelSpec, annotations?: Record<string, string>) {
+  navigation.params = { name }
+  vi.mocked(api.apiGet).mockImplementation(async path => {
+    if (path === '/api/v1/admin/hosts') {
+      return { items: [{ metadata: { name: 'agent-a' } }] }
+    }
+    if (path === `/api/v1/admin/communication-channels/${name}`) {
+      return {
+        item: {
+          metadata: { name, namespace: 'channels', ...(annotations ? { annotations } : {}) },
+          spec: { access: { users: [], teams: [] }, hostRef: 'agent-a', ...spec },
+        },
+      }
+    }
+    return { items: [] }
+  })
+}
+
+async function renderLoadedPage() {
+  render(
+    <ToastProvider>
+      <EditCommunicationChannelPage />
+    </ToastProvider>
+  )
+  await waitFor(() => {
+    expect(screen.queryByText('Loading communication channel...')).not.toBeInTheDocument()
+  })
+}
+
+const SLACK_CHANNEL_SPEC: ChannelSpec = {
+  credentialsSecretRef: { name: 'cc-slack-channel-credentials' },
+  slackSettings: { botHandle: 'Evenfire', replyOnlyWhenMentioned: true },
+}
+
+/** A Telegram-only channel that still carries a leftover Slack label annotation. */
+const LABELLED_TELEGRAM_CHANNEL = 'telegram-labelled'
+const LABELLED_TELEGRAM_SPEC: ChannelSpec = {
+  telegramSettings: { botHandle: '@ops_bot', replyOnlyWhenMentioned: false },
+}
+const STALE_SLACK_LABEL = { 'clerum.io/slack-bot-label': 'Evenfire' }
+/**
+ * The Request URL that channel would get if the gate let an annotation through:
+ * base64url of {"namespace":"channels","name":"telegram-labelled"}, which is what
+ * the reader decodes. Written out rather than derived so a change to either the
+ * gate or the encoding has to be looked at.
+ */
+const LABELLED_TELEGRAM_REQUEST_URL =
+  'https://webhook.example.com/webhooks/slack/slack%3AeyJuYW1lc3BhY2UiOiJjaGFubmVscyIsIm5hbWUiOiJ0ZWxlZ3JhbS1sYWJlbGxlZCJ9'
 
 describe('EditCommunicationChannelPage', () => {
   it('renders Teams setup details and confirmed conversation metadata', async () => {
@@ -88,5 +141,153 @@ describe('EditCommunicationChannelPage', () => {
     expect(screen.getByText(/\/webhooks\/teams\//)).toBeInTheDocument()
     expect(screen.getByText('General')).toBeInTheDocument()
     expect(screen.getByText('Channel')).toBeInTheDocument()
+  })
+})
+
+describe('EditCommunicationChannelPage Slack app manifest', () => {
+  it('renders the manifest with both request URLs when the webhook is publicly reachable', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.getByText('Slack App Manifest')).toBeInTheDocument()
+
+    const manifest = screen.getByText(/display_information:/).textContent ?? ''
+    const requestUrlLines = manifest
+      .split('\n')
+      .filter(line => line.trim().startsWith('request_url:'))
+    expect(requestUrlLines).toHaveLength(2)
+    expect(new Set(requestUrlLines).size).toBe(1)
+    expect(requestUrlLines[0]).toContain('https://webhook.example.com/webhooks/slack/')
+    expect(manifest.split('\n').filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Evenfire"',
+      '    display_name: "Evenfire"',
+    ])
+  })
+
+  it('warns instead of emitting a manifest when the Request URL is only a path', async () => {
+    // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and a non-app.* hostname, which is the
+    // minikube case. Slack rejects a relative request_url, so a manifest here would be a broken
+    // artifact and would send the operator to debug Slack's generic error.
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.getByText(/^\/webhooks\/slack\//)).toBeInTheDocument()
+    expect(screen.getByText(/no public webhook address/)).toBeInTheDocument()
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+  })
+
+  it('renders no manifest and no warning on a channel with no Slack provider', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.getByText('Slack Request URL')).toBeInTheDocument()
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no public webhook address/)).not.toBeInTheDocument()
+  })
+
+  it('names the cause and the next step instead of a bare Unavailable', async () => {
+    // With the URL guard in place this is the DEFAULT state of the Slack tab, so
+    // "Unavailable" with no cause, under a hint telling the operator to use a URL
+    // that is not there, is the copy most operators will actually see.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(screen.getByText('Available once this channel has a Slack App Name')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Enter the Slack App Name above and this channel gets its Request URL and app manifest.'
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Use this URL for Slack Event Subscriptions and Interactivity.')
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the Request URL and manifest as soon as an App Name is typed, before any save', async () => {
+    // Slack's order is manifest first, credentials second: the xoxb token only
+    // exists once the app the manifest creates has been installed. Deriving the
+    // manifest from the PERSISTED spec made it appear only after the operator had
+    // already done, by hand, the step the manifest is for.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/Slack App Name/), { target: { value: 'Ops Bot' } })
+
+    expect(screen.getByText('Slack App Manifest')).toBeInTheDocument()
+    const manifest = screen.getByText(/display_information:/).textContent ?? ''
+    const lines = manifest.split('\n')
+    expect(lines.filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Ops Bot"',
+      '    display_name: "Ops Bot"',
+    ])
+    const requestUrlLines = lines.filter(line => line.trim().startsWith('request_url:'))
+    expect(requestUrlLines).toHaveLength(2)
+    expect(new Set(requestUrlLines).size).toBe(1)
+    expect(requestUrlLines[0]).toBe(
+      `    request_url: ${screen.getByText(/^https:\/\/webhook\.example\.com\/webhooks\/slack\//).textContent}`
+    )
+    // Nothing was persisted to get here: no PUT, and the manifest is on screen.
+    expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
+  })
+
+  it('gives a Telegram-only channel with a stale Slack label no Request URL and no manifest', async () => {
+    // clerum.io/slack-bot-label is a leftover display label, not a Slack provider.
+    // Seeding the draft from it made this channel render a full, copyable Request
+    // URL and manifest for a Slack app that does not exist, which is the paste-the-
+    // wrong-URL failure this whole page guard is for.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    // The annotation still fills the visible field. Only the URL and the manifest are gated.
+    expect(screen.getByLabelText(/Slack App Name/)).toHaveValue('Evenfire')
+    expect(screen.getByText('Available once this channel has a Slack App Name')).toBeInTheDocument()
+    expect(screen.queryByText(LABELLED_TELEGRAM_REQUEST_URL)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled()
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no public webhook address/)).not.toBeInTheDocument()
+  })
+
+  it('offers the Request URL and manifest once an App Name is typed over a stale Slack label', async () => {
+    // The draft gate exists so the manifest is reachable before anything is saved:
+    // Slack hands out the xoxb token only after the app the manifest creates has
+    // been installed. Excluding the annotation must not cost that.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+
+    expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/Slack App Name/), { target: { value: 'Ops Bot' } })
+
+    expect(screen.getByText(LABELLED_TELEGRAM_REQUEST_URL)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeEnabled()
+    expect(screen.getByText('Slack App Manifest')).toBeInTheDocument()
+    const lines = (screen.getByText(/display_information:/).textContent ?? '').split('\n')
+    expect(lines.filter(line => /^\s+(name|display_name):/.test(line))).toEqual([
+      '  name: "Ops Bot"',
+      '    display_name: "Ops Bot"',
+    ])
+    expect(lines.filter(line => line.trim().startsWith('request_url:'))).toEqual([
+      `    request_url: ${LABELLED_TELEGRAM_REQUEST_URL}`,
+      `    request_url: ${LABELLED_TELEGRAM_REQUEST_URL}`,
+    ])
+    // Nothing was persisted to get here: no PUT, and the manifest is on screen.
+    expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
   })
 })

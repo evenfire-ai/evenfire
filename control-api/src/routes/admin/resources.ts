@@ -6,6 +6,7 @@ import { validateCommunicationChannelSpec } from '../../http/validateCommunicati
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { K8sConflictError } from '../../services/resourceService.js'
+import { secretKeyNames } from '../../services/secretKeyNames.js'
 import { ClerumResourceType } from '../../types.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
@@ -211,6 +212,77 @@ function missingCreateCredentialKey(
   return null
 }
 
+const PROVIDER_REQUIRED_KEYS: Record<string, string[]> = {
+  telegram: ['telegram-bot-token'],
+  slack: ['slack-bot-token', 'slack-signing-secret'],
+  teams: ['teams-app-password'],
+  email: ['email-username', 'email-password'],
+}
+
+function providersEnabled(spec: Record<string, unknown> | null): Set<string> {
+  const enabled = new Set<string>()
+  if (!spec) return enabled
+  if (ccSpecHasTelegramProvider(spec)) enabled.add('telegram')
+  if (ccSpecHasSlackProvider(spec)) enabled.add('slack')
+  if (ccSpecHasTeamsProvider(spec)) enabled.add('teams')
+  if (Array.isArray(spec.email) && spec.email.length > 0) enabled.add('email')
+  return enabled
+}
+
+/**
+ * Validate providers that go absent -> present. Returns an error message, or null.
+ *
+ * Deliberately scoped to the transition: a channel already missing keys in a
+ * cluster stays editable, and enabling a NEW provider without its credentials is
+ * refused. Presence of `credentialsSecretRef` proves nothing, which is why the
+ * pre-existing POST guard missed this entirely — the channel that motivated this
+ * (#312) already had a ref, holding only its Telegram token, and still accepted a
+ * Slack App Name.
+ *
+ * Fails CLOSED: an unreadable Secret rejects the write. Refusing a write on a
+ * read failure is safe; assuming the keys are there is how a channel ends up
+ * advertising a provider it cannot serve.
+ */
+async function providerTransitionError(
+  gateway: K8sGateway,
+  nextSpec: Record<string, unknown>,
+  previousSpec: Record<string, unknown> | null,
+  credentials: Record<string, string> | undefined,
+  namespace: string
+): Promise<string | null> {
+  const previouslyEnabled = providersEnabled(previousSpec)
+  const added = [...providersEnabled(nextSpec)].filter(p => !previouslyEnabled.has(p))
+  if (added.length === 0) return null
+
+  const secretName = (nextSpec.credentialsSecretRef as { name?: string } | undefined)?.name?.trim()
+  let existingKeys: string[] = []
+  if (secretName) {
+    try {
+      existingKeys = await secretKeyNames(gateway, secretName, namespace)
+    } catch {
+      return `Cannot read the credentials Secret "${secretName}" to validate the new provider. Fix access to that Secret, or supply the credentials with this request.`
+    }
+  }
+
+  for (const provider of added) {
+    for (const key of PROVIDER_REQUIRED_KEYS[provider] || []) {
+      // Trimmed, because this reads the RAW envelope while the Secret is written
+      // from the CLEANED values: `validateCommunicationChannelCredentials` drops
+      // whitespace-only entries, so a truthy "   " here would satisfy the guard
+      // and then never reach the Secret. A present-but-non-string value (e.g. a
+      // number) is NOT "missing" though: it's `validateCommunicationChannelCredentials`
+      // below that owns rejecting the wrong type with its own 400, so this only
+      // calls `.trim()` once `typeof` has confirmed there's a string to trim.
+      const rawValue = credentials?.[key]
+      const isMissing = rawValue === undefined || (typeof rawValue === 'string' && !rawValue.trim())
+      if (isMissing && !existingKeys.includes(key)) {
+        return `credentials["${key}"] is required to enable the ${provider} provider on this CommunicationChannel`
+      }
+    }
+  }
+  return null
+}
+
 // workflowrecipes is handled by recipes.ts (canonical sandbox-recipes route).
 // workflowrecipepolicies is read inline by the recipes policy-invariant
 // helper and does not need generic admin CRUD routing.
@@ -327,6 +399,21 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               'credentials. Supply a "credentials" envelope on the request, or set ' +
               '"spec.credentialsSecretRef" to an existing Secret.',
           })
+          return
+        }
+
+        // Every declared provider is new on create, so the whole spec is the
+        // transition. A credentialsSecretRef satisfies the guard above without
+        // proving the Secret behind it holds this provider's keys.
+        const transitionError = await providerTransitionError(
+          gateway,
+          body.spec,
+          null,
+          body.credentials,
+          ns
+        )
+        if (transitionError) {
+          res.status(400).json({ error: transitionError })
           return
         }
       }
@@ -516,6 +603,28 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             ),
           }
         : body
+      // A null snapshot means the channel does not exist (loadCommunicationChannelSpecSnapshot
+      // returns null only on 404). Skipping the guard here is what makes the response
+      // honest: with no previous spec every provider reads as newly added, so the guard
+      // would answer a PUT to a missing channel with `credentials[...] is required`
+      // instead of the 404 updateResource is about to produce.
+      if (isCommunicationChannelUpdate && previousCommunicationChannelSpec) {
+        // updateBody.spec, not body.spec: the ref the write will actually carry
+        // is the preserved one, and that is the Secret whose keys decide whether
+        // a newly enabled provider can work. Reuses the snapshot already loaded
+        // above — no second fetch.
+        const transitionError = await providerTransitionError(
+          gateway,
+          updateBody.spec,
+          previousCommunicationChannelSpec?.spec ?? null,
+          undefined,
+          ns
+        )
+        if (transitionError) {
+          res.status(400).json({ error: transitionError })
+          return
+        }
+      }
       try {
         const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
         if (plural === 'communicationchannels' && body.spec) {
