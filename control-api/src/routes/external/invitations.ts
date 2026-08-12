@@ -40,14 +40,9 @@ export function createExternalInvitationsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
   })
-  const externalDesktopAuthorizationRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.approvalRlExternalPerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-  })
-
-  router.use('/external/invitations/desktop-authorization', externalDesktopAuthorizationRateLimit)
+  // Keep one edge limiter at the common prefix so every invitation endpoint,
+  // including Desktop authorization, is covered without double-counting.
+  router.use('/external/invitations', externalInvitationsEdgeRateLimit)
   router.get(
     '/external/invitations/token/:token',
     rateLimitMiddleware({
@@ -82,7 +77,6 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password-token',
-    externalInvitationsEdgeRateLimit,
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
@@ -171,7 +165,6 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password',
-    externalInvitationsEdgeRateLimit,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
