@@ -369,6 +369,24 @@ data:
           proxy_set_header x-service-token $http_x_service_token;
         }
 
+        # OAuth mcp-server broker (mcp-host → control-api), spec 06 §5.1/§10.6
+        # decision B: reach the broker by reusing THIS gateway instead of opening
+        # a direct mcp-host → control-api:8090 egress. L7-scoped to POST-only on
+        # this single path — the DENY-by-omission of every other control-api path
+        # (incl. direct :8090) is preserved. mcp-host forwards its control JWT
+        # (typ:service, scope oauth:user-token) in Authorization; no x-service-token.
+        location = /api/v1/mcp-oauth/user-token {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         location = /api/v1/workflow-approvals/request {
           limit_except POST {
             deny all;
