@@ -17,8 +17,17 @@
 import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
 import { VENDORED_MODELS_DEV_SNAPSHOT } from '../data/modelsDevSnapshot.js'
 
-/** The fixed, trusted catalog URL. Not operator-configurable by design. */
-export const MODELS_DEV_API_URL = 'https://models.dev/api.json'
+/**
+ * The catalog URL. Defaults to the fixed, trusted public endpoint. It is NOT
+ * an operator/tenant-input surface (no SSRF vector — see the module header), but
+ * `MODELS_DEV_API_URL` may override it via env so a non-prod plane (e.g. a test
+ * cluster with the periodic sync enabled) can be pointed at a local stub instead
+ * of hammering the real models.dev host. Trimmed; a blank env falls back to the
+ * default. The `fetchImpl`/`loadCatalog` DI seam remains the mechanism tests use.
+ */
+const DEFAULT_MODELS_DEV_API_URL = 'https://models.dev/api.json'
+export const MODELS_DEV_API_URL =
+  process.env.MODELS_DEV_API_URL?.trim() || DEFAULT_MODELS_DEV_API_URL
 
 /** Fetch guards (defense-in-depth; the URL is fixed/trusted). */
 const FETCH_TIMEOUT_MS = 10_000
@@ -188,15 +197,52 @@ function isRawCatalog(value: unknown): value is RawModelsDevCatalog {
 }
 
 /**
- * Fetch the LIVE catalog from the fixed URL with all guards, or fall back to the
- * vendored snapshot on ANY failure (network error, timeout, non-2xx, redirect,
- * over-cap body, parse/shape failure). Never throws — the sync must always run.
+ * Assert the resolved catalog URL is a safe egress target BEFORE any fetch. The
+ * module header promises an https-only guard; with the `MODELS_DEV_API_URL` env
+ * override in play, a misconfigured deploy could otherwise resolve to `http://`
+ * or an internal/link-local host (cloud metadata at 169.254.169.254, a cluster
+ * `.internal` Service). This is a deploy-time input, not operator/tenant-facing,
+ * but the boundary is real — so a bad URL is a hard error, not a silent
+ * vendored-fallback that would hide the misconfiguration forever.
+ */
+function assertSafeCatalogUrl(rawUrl: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error(`models.dev catalog URL is not a valid URL: ${rawUrl}`)
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`models.dev catalog URL must be https:// (got "${parsed.protocol}//")`)
+  }
+  const host = parsed.hostname.toLowerCase()
+  const linkLocalOrMetadata =
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '169.254.169.254' ||
+    host.startsWith('169.254.') || // IPv4 link-local range (incl. cloud metadata)
+    host === 'metadata.google.internal' ||
+    host.endsWith('.internal')
+  if (linkLocalOrMetadata) {
+    throw new Error(`models.dev catalog URL host is not an allowed egress target: ${host}`)
+  }
+}
+
+/**
+ * Fetch the LIVE catalog from the resolved URL with all guards, or fall back to
+ * the vendored snapshot on ANY fetch/parse failure (network error, timeout,
+ * non-2xx, redirect, over-cap body, parse/shape failure) — so the sync always
+ * has data. A misconfigured (non-https / disallowed-host) catalog URL is a
+ * DEPLOY error, not a transient failure: it throws BEFORE any fetch rather than
+ * degrading to vendored, so the misconfiguration surfaces instead of hiding.
  */
 export async function loadModelsDevCatalog(
   opts: { fetchImpl?: FetchLike; now?: () => Date } = {}
 ): Promise<ModelsDevCatalogResult> {
   const fetchImpl = opts.fetchImpl ?? fetch
   const now = opts.now ?? (() => new Date())
+  // Egress guard — throws before touching the network on a bad URL.
+  assertSafeCatalogUrl(MODELS_DEV_API_URL)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   try {

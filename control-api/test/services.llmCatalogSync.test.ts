@@ -122,7 +122,13 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
       claude: [{ id: 'gone', model: 'claude-legacy', source: 'discovery' }],
     })
     const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
-    const res = await syncDiscoveredModels({ loadCatalog: loadStub(catalog, 'live') }, connector)
+    // This test isolates the vanished→stale reconciliation, not the §4.5
+    // plausibility floor. The tiny 1-model catalog would otherwise trip the
+    // global floor (default 100), so lower it here to exercise stale-marking.
+    const res = await syncDiscoveredModels(
+      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1 },
+      connector
+    )
 
     const staleUpdates = CALL_FOR(calls, /SET stale = true/)
     // One stale UPDATE per provider is issued; assert none delete / disable.
