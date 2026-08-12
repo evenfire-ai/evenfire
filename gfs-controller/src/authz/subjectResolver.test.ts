@@ -9,12 +9,12 @@ import { SubjectsDb, resolveAuthzContext } from "./subjectResolver";
 function fakeDb(opts: {
   operators?: Set<string>;
   teamsByUser?: Record<string, string[]>;
-  users?: Record<string, { lifecycle_state?: string; lifecycle_version?: number }>;
+  users?: Record<string, { lifecycle_state?: string; lifecycle_version?: number | string }>;
   links?: Array<{
     user_id: string;
     control_admin_id: string;
     lineage_id: string;
-    generation: number;
+    generation: number | string;
   }>;
 }): SubjectsDb & {
   calls: string[];
@@ -186,6 +186,44 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
       desktopUserId,
       authoritySource: "linked-admin",
       requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+  });
+
+  it("accepts PostgreSQL text generations for users and active linked-admin rows", async () => {
+    const desktopUserId = "abababab-abab-4aba-8aba-abababababab";
+    const controlAdminId = "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc";
+    const db = fakeDb({
+      operators: new Set([controlAdminId]),
+      users: { [desktopUserId]: { lifecycle_state: "active", lifecycle_version: "1" } },
+      links: [
+        {
+          user_id: desktopUserId,
+          control_admin_id: controlAdminId,
+          lineage_id: "cdcdcdcd-cdcd-4cdc-8dcd-cdcdcdcdcdcd",
+          generation: "1",
+        },
+      ],
+    });
+
+    await expect(
+      resolveAuthzContext(db, {
+        sub: controlAdminId,
+        drive: "main",
+        authGeneration: 1,
+        principalType: "control-admin",
+        brokeredAuthority: {
+          desktopUserId,
+          controlAdminId,
+          authoritySource: "linked-admin",
+          linkLineageId: "cdcdcdcd-cdcd-4cdc-8dcd-cdcdcdcdcdcd",
+          linkGeneration: 1,
+          desktopUserGeneration: 1,
+        },
+      })
+    ).resolves.toMatchObject({
+      isOperator: true,
+      desktopUserId,
+      effectiveControlAdminId: controlAdminId,
     });
   });
 

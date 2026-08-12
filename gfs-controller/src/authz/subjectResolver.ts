@@ -86,8 +86,24 @@ async function readActiveUser(db: SubjectsDb, userId: string): Promise<UserSecur
   return row && row.lifecycle_state === "active" ? row : null;
 }
 
+function positiveGeneration(value: unknown): number | null {
+  // node-postgres returns BIGINT/INTEGER columns as strings by default. JWT
+  // claims arrive as numbers, so compare the validated numeric value rather
+  // than the JavaScript representation. Reject decimals, signs, whitespace,
+  // and unsafe magnitudes instead of coercing arbitrary input.
+  const normalized =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^[1-9][0-9]*$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : null;
+}
+
 function generationMatches(value: unknown, expected: unknown): boolean {
-  return Number.isSafeInteger(value) && Number(value) > 0 && Number(value) === Number(expected);
+  const actual = positiveGeneration(value);
+  const wanted = positiveGeneration(expected);
+  return actual !== null && wanted !== null && actual === wanted;
 }
 
 /**
