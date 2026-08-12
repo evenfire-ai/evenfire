@@ -2,6 +2,10 @@ import { Router } from 'express'
 import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
+import {
+  enforceAuthenticatedExternalUserRateLimit,
+  preAuthExternalUserRateLimit,
+} from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
@@ -217,35 +221,48 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     }
   })
 
-  router.post('/external/auth/session-token', async (req, res, next) => {
-    try {
-      const userId = String(req.body?.userId || '').trim()
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const teamId = String(req.body?.teamId || '').trim()
-      const currentToken = sessionTokenFromRequest(req)
-      if (!userId || !email || !teamId || !currentToken || currentToken.length > 4096) {
-        return res.status(400).json({ error: 'invalid payload' })
-      }
-      const authentication = await authenticateExternalUserSession(currentToken, {
-        purpose: 'switch',
-        client: externalSessionClient(req),
-      })
-      if (authentication.status === 'upgrade_required') {
-        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-        return
-      }
-      if (
-        authentication.status !== 'authenticated' ||
-        authentication.claims.userId !== userId ||
-        authentication.claims.email.toLowerCase() !== email
-      ) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const membership = await pool.query(
-        `SELECT tm.role
+  router.post(
+    '/external/auth/session-token',
+    preAuthExternalUserRateLimit('session_lifecycle'),
+    async (req, res, next) => {
+      try {
+        const userId = String(req.body?.userId || '').trim()
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const teamId = String(req.body?.teamId || '').trim()
+        const currentToken = sessionTokenFromRequest(req)
+        if (!userId || !email || !teamId || !currentToken || currentToken.length > 4096) {
+          return res.status(400).json({ error: 'invalid payload' })
+        }
+        const authentication = await authenticateExternalUserSession(currentToken, {
+          purpose: 'switch',
+          client: externalSessionClient(req),
+        })
+        if (authentication.status === 'upgrade_required') {
+          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+          return
+        }
+        if (
+          authentication.status !== 'authenticated' ||
+          authentication.claims.userId !== userId ||
+          authentication.claims.email.toLowerCase() !== email
+        ) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (
+          !(await enforceAuthenticatedExternalUserRateLimit(
+            'session_lifecycle',
+            req,
+            res,
+            authentication.claims
+          ))
+        ) {
+          return
+        }
+        const membership = await pool.query(
+          `SELECT tm.role
            FROM users u
            JOIN team_members tm ON tm.user_id = u.id
           WHERE u.id = $1
@@ -253,193 +270,254 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             AND tm.team_id = $3
             AND tm.status = 'active'
           LIMIT 1`,
-        [userId, email, teamId]
-      )
-      const liveRole = (membership.rows[0] as { role?: 'admin' | 'inviter' | 'member' } | undefined)
-        ?.role
-      if (!liveRole) {
-        return res.status(403).json({ error: 'membership_not_found' })
-      }
-      if (authentication.contract === 'v2') {
+          [userId, email, teamId]
+        )
+        const liveRole = (
+          membership.rows[0] as { role?: 'admin' | 'inviter' | 'member' } | undefined
+        )?.role
+        if (!liveRole) {
+          return res.status(403).json({ error: 'membership_not_found' })
+        }
+        if (authentication.contract === 'v2') {
+          return res.status(200).json({
+            token: currentToken,
+            sessionContract: 'v2',
+            deprecated: true,
+          })
+        }
+        const issued = await issueExternalUserSession(
+          {
+            contract: 'v1',
+            userId,
+            email,
+            teamId,
+            role: liveRole,
+            authenticationMethods: [],
+          },
+          { policy: authentication.policy }
+        )
         return res.status(200).json({
-          token: currentToken,
-          sessionContract: 'v2',
+          token: issued.token,
+          sessionContract: issued.contract,
           deprecated: true,
         })
-      }
-      const issued = await issueExternalUserSession(
-        {
-          contract: 'v1',
-          userId,
-          email,
-          teamId,
-          role: liveRole,
-          authenticationMethods: [],
-        },
-        { policy: authentication.policy }
-      )
-      return res.status(200).json({
-        token: issued.token,
-        sessionContract: issued.contract,
-        deprecated: true,
-      })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Authorization is temporarily unavailable.',
-        true
-      )
-    }
-  })
-
-  router.post('/external/auth/session/renew', async (req, res) => {
-    try {
-      const token = sessionTokenFromRequest(req)
-      if (!token || token.length > 4096) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const renewal = await renewExternalUserSession(token, {
-        client: externalSessionClient(req),
-      })
-      if (renewal.status === 'upgrade_required') {
-        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-        return
-      }
-      if (renewal.status !== 'renewed') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      return res.status(200).json({
-        token: renewal.session.token,
-        sessionContract: 'v2',
-        expiresInSeconds: renewal.session.expiresInSeconds,
-        absoluteExpiresAt: renewal.session.identity.absoluteExpiresAt.toISOString(),
-      })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Session authority is temporarily unavailable.',
-        true
-      )
-    }
-  })
-
-  router.post('/external/auth/session/logout', async (req, res) => {
-    try {
-      const token = sessionTokenFromRequest(req)
-      if (!token || token.length > 4096) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const authentication = await authenticateExternalUserSession(token, {
-        purpose: 'revoke_cleanup',
-        client: externalSessionClient(req),
-      })
-      if (authentication.status !== 'authenticated') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const revoked =
-        authentication.contract === 'v2' && authentication.claims.sid
-          ? await revokeUserSession(
-              authentication.claims.userId,
-              authentication.claims.sid,
-              'logout'
-            )
-          : await revokeLegacyUserSession(token, authentication.claims, 'logout')
-      return res.status(200).json({ revoked })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Session authority is temporarily unavailable.',
-        true
-      )
-    }
-  })
-
-  router.post('/external/auth/sessions/revoke-all', async (req, res) => {
-    try {
-      const token = sessionTokenFromRequest(req)
-      if (!token || token.length > 4096) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const authentication = await authenticateExternalUserSession(token, {
-        purpose: 'protected',
-        client: externalSessionClient(req),
-      })
-      if (authentication.status === 'upgrade_required') {
-        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-        return
-      }
-      if (authentication.status !== 'authenticated') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      const revoked = await revokeAllUserSessions(authentication.claims.userId, 'user_revoked_all')
-      return res.status(200).json({ revoked })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Session authority is temporarily unavailable.',
-        true
-      )
-    }
-  })
-
-  router.post('/external/auth/sessions/:sid/revoke', async (req, res) => {
-    try {
-      const token = sessionTokenFromRequest(req)
-      const authentication = token
-        ? await authenticateExternalUserSession(token, {
-            purpose: 'protected',
-            client: externalSessionClient(req),
-          })
-        : null
-      if (!authentication || authentication.status !== 'authenticated') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      if (authentication.contract !== 'v2') {
+      } catch {
         sendPublicApiError(
           req,
           res,
-          409,
-          'conflict',
-          'A user-session v2 login is required for session management.'
+          503,
+          'authority_unavailable',
+          'Authorization is temporarily unavailable.',
+          true
         )
-        return
       }
-      const revoked = await revokeUserSession(
-        authentication.claims.userId,
-        String(req.params.sid || '').trim(),
-        'user_revoked'
-      )
-      return res.status(200).json({ revoked })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Session authority is temporarily unavailable.',
-        true
-      )
     }
-  })
+  )
+
+  router.post(
+    '/external/auth/session/renew',
+    preAuthExternalUserRateLimit('session_lifecycle'),
+    async (req, res) => {
+      try {
+        const token = sessionTokenFromRequest(req)
+        if (!token || token.length > 4096) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        const renewal = await renewExternalUserSession(token, {
+          client: externalSessionClient(req),
+        })
+        if (renewal.status === 'upgrade_required') {
+          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+          return
+        }
+        if (renewal.status !== 'renewed') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (
+          !(await enforceAuthenticatedExternalUserRateLimit(
+            'session_lifecycle',
+            req,
+            res,
+            renewal.session.identity
+          ))
+        ) {
+          return
+        }
+        return res.status(200).json({
+          token: renewal.session.token,
+          sessionContract: 'v2',
+          expiresInSeconds: renewal.session.expiresInSeconds,
+          absoluteExpiresAt: renewal.session.identity.absoluteExpiresAt.toISOString(),
+        })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Session authority is temporarily unavailable.',
+          true
+        )
+      }
+    }
+  )
+
+  router.post(
+    '/external/auth/session/logout',
+    preAuthExternalUserRateLimit('session_lifecycle'),
+    async (req, res) => {
+      try {
+        const token = sessionTokenFromRequest(req)
+        if (!token || token.length > 4096) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        const authentication = await authenticateExternalUserSession(token, {
+          purpose: 'revoke_cleanup',
+          client: externalSessionClient(req),
+        })
+        if (authentication.status !== 'authenticated') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (
+          !(await enforceAuthenticatedExternalUserRateLimit(
+            'session_lifecycle',
+            req,
+            res,
+            authentication.claims
+          ))
+        ) {
+          return
+        }
+        const revoked =
+          authentication.contract === 'v2' && authentication.claims.sid
+            ? await revokeUserSession(
+                authentication.claims.userId,
+                authentication.claims.sid,
+                'logout'
+              )
+            : await revokeLegacyUserSession(token, authentication.claims, 'logout')
+        return res.status(200).json({ revoked })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Session authority is temporarily unavailable.',
+          true
+        )
+      }
+    }
+  )
+
+  router.post(
+    '/external/auth/sessions/revoke-all',
+    preAuthExternalUserRateLimit('session_lifecycle'),
+    async (req, res) => {
+      try {
+        const token = sessionTokenFromRequest(req)
+        if (!token || token.length > 4096) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        const authentication = await authenticateExternalUserSession(token, {
+          purpose: 'protected',
+          client: externalSessionClient(req),
+        })
+        if (authentication.status === 'upgrade_required') {
+          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+          return
+        }
+        if (authentication.status !== 'authenticated') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (
+          !(await enforceAuthenticatedExternalUserRateLimit(
+            'session_lifecycle',
+            req,
+            res,
+            authentication.claims
+          ))
+        ) {
+          return
+        }
+        const revoked = await revokeAllUserSessions(
+          authentication.claims.userId,
+          'user_revoked_all'
+        )
+        return res.status(200).json({ revoked })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Session authority is temporarily unavailable.',
+          true
+        )
+      }
+    }
+  )
+
+  router.post(
+    '/external/auth/sessions/:sid/revoke',
+    preAuthExternalUserRateLimit('session_lifecycle'),
+    async (req, res) => {
+      try {
+        const token = sessionTokenFromRequest(req)
+        const authentication = token
+          ? await authenticateExternalUserSession(token, {
+              purpose: 'protected',
+              client: externalSessionClient(req),
+            })
+          : null
+        if (!authentication || authentication.status !== 'authenticated') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (authentication.contract !== 'v2') {
+          sendPublicApiError(
+            req,
+            res,
+            409,
+            'conflict',
+            'A user-session v2 login is required for session management.'
+          )
+          return
+        }
+        if (
+          !(await enforceAuthenticatedExternalUserRateLimit(
+            'session_lifecycle',
+            req,
+            res,
+            authentication.claims
+          ))
+        ) {
+          return
+        }
+        const revoked = await revokeUserSession(
+          authentication.claims.userId,
+          String(req.params.sid || '').trim(),
+          'user_revoked'
+        )
+        return res.status(200).json({ revoked })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Session authority is temporarily unavailable.',
+          true
+        )
+      }
+    }
+  )
 
   router.post('/external/rpc/token', async (req, res, next) => {
     try {
