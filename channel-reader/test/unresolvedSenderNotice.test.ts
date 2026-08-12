@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ChannelReader, type ChannelReaderOptions } from '../src/main'
 import { RPCClient } from '../src/rpcClient'
+import type { ChannelAdapter, Message } from '../src/types'
 
 const mockCfg = vi.hoisted(() => ({
+  devMode: true,
   hostRef: 'test-host',
+  mcpHostUrl: 'http://mcp-host.test',
+  namespace: '',
+  pollIntervalSeconds: 1,
+  devChannelConfig: undefined,
 }))
 
 vi.mock('../src/config', () => ({
@@ -72,5 +79,173 @@ describe('authorizeProviderMessage response shape', () => {
     // whitelist check, since it treats an undefined-valued key as absent.
     // Assert the key itself is gone.
     expect('reason' in result).toBe(false)
+  })
+})
+
+interface BuildReaderOptions {
+  /** Omit the key entirely for the default; pass `undefined` for "no reason at all". */
+  reason?: 'unresolved' | 'error'
+  medium?: 'slack' | 'telegram'
+  ephemeralThrows?: boolean
+}
+
+/**
+ * Build a ChannelReader wired to a single stub adapter and a stub rpcClient that
+ * always refuses authorization, plus the seams the notice tests need:
+ * `deliver` pushes one message through `handleMessages`, and `runSweep` invokes
+ * the periodic cleanup that `pollCycle` runs.
+ */
+function buildReader(options: BuildReaderOptions = {}) {
+  const medium = options.medium ?? 'slack'
+  const ephemeralThrows = options.ephemeralThrows ?? false
+  // `{ reason: undefined }` has to survive as "no reason", so the default is
+  // applied only when the caller omits the key. A `?? 'unresolved'` default
+  // would silently turn the absent-reason case into the unresolved case.
+  const reason: 'unresolved' | 'error' | undefined =
+    'reason' in options ? options.reason : 'unresolved'
+
+  const sendEphemeral = vi.fn(async (_channelId: string, _userId: string, _content: string) => {
+    if (ephemeralThrows) throw new Error('user_not_in_channel')
+  })
+
+  const adapter: ChannelAdapter = {
+    channelType: medium,
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+    fetchMessages: vi.fn(async () => []),
+    sendMessage: vi.fn(async () => undefined),
+    editMessage: vi.fn(async () => undefined),
+    sendEphemeral,
+  }
+
+  const authorizeProviderMessage = vi.fn(async () =>
+    reason === undefined ? { authorized: false } : { authorized: false, reason }
+  )
+
+  const rpcClient = {
+    healthCheck: vi.fn(async () => true),
+    sendMessage: vi.fn(async () => ({
+      success: true,
+      status: 'pending' as const,
+      taskId: 'task-1',
+    })),
+    getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+    getTaskResult: vi.fn(),
+    sendApproval: vi.fn(),
+    sendDenial: vi.fn(),
+    sendWorkflowApprovalDecision: vi.fn(),
+    getCronResults: vi.fn(async () => []),
+    acknowledgeCronResult: vi.fn(),
+    authorizeProviderMessage,
+  }
+
+  const reader = new ChannelReader({
+    rpcClient: rpcClient as unknown as NonNullable<ChannelReaderOptions['rpcClient']>,
+    adapters: new Map([[medium, adapter]]),
+    sleep: async () => undefined,
+  })
+
+  let eventSeq = 0
+  const deliver = async (channelId: string, userId: string): Promise<void> => {
+    eventSeq += 1
+    const message: Message = {
+      channelType: medium,
+      channelId,
+      sender: userId,
+      content: 'hello',
+      timestamp: new Date(),
+      messageId: `msg-${eventSeq}`,
+      providerIdentity: {
+        medium,
+        providerUserId: userId,
+        providerWorkspaceId: 'T1',
+        providerChannelId: channelId,
+        // Unique per delivery on purpose. A repeated providerEventId is dropped by
+        // the provider-event dedupe *before* authorization runs, which would make
+        // every "sent only once" assertion below pass with no rate limiter at all.
+        providerEventId: `evt-${eventSeq}`,
+      },
+    }
+    // The real Slack adapter never throws (channels/slack.ts swallows Slack
+    // errors); the ephemeralThrows stub throws only to prove the limiter key is
+    // recorded before the send, so a rejection here is expected in that one case.
+    await reader.handleMessages([message]).catch(() => undefined)
+  }
+
+  const runSweep = (): void => {
+    ;(reader as unknown as { cleanupStaleApprovals(): void }).cleanupStaleApprovals()
+  }
+
+  return { deliver, runSweep, sendEphemeral, adapter, authorizeProviderMessage }
+}
+
+describe('unresolved sender notice', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends once, and not again for the same user and channel within 24h', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C1', 'U1')
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends again after the TTL expires and the sweep runs', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral, runSweep } = buildReader()
+    await deliver('C1', 'U1')
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60 * 1000)
+    runSweep()
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000)
+    runSweep()
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats a second channel as its own conversation', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C1', 'U1')
+    await deliver('C2', 'U1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats a second user in the same channel as its own recipient', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader()
+    await deliver('C1', 'U1')
+    await deliver('C1', 'U2')
+    expect(sendEphemeral).toHaveBeenCalledTimes(2)
+  })
+
+  it('records the key even when sendEphemeral throws, so one failure is not retried forever', async () => {
+    vi.useFakeTimers()
+    const { deliver, sendEphemeral } = buildReader({ ephemeralThrows: true })
+    await deliver('C1', 'U1')
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).toHaveBeenCalledTimes(1)
+  })
+
+  it('never sends on reason error', async () => {
+    const { deliver, sendEphemeral } = buildReader({ reason: 'error' })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).not.toHaveBeenCalled()
+  })
+
+  it('never sends when the reason is absent', async () => {
+    const { deliver, sendEphemeral } = buildReader({ reason: undefined })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).not.toHaveBeenCalled()
+  })
+
+  it('never sends for a non-Slack medium', async () => {
+    const { deliver, sendEphemeral } = buildReader({ medium: 'telegram' })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral).not.toHaveBeenCalled()
   })
 })
