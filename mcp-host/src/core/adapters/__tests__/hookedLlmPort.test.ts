@@ -58,7 +58,7 @@ describe('installed hooks (end-to-end via HookedLlmPort)', () => {
     ...over,
   })
 
-  it('a moderate deny returns a filtered response WITHOUT calling the model', async () => {
+  it('a moderate deny returns a filtered response and aborts the in-flight call (§7.1)', async () => {
     const inner = fakePort()
     const moderateDeny: FetchLike = async url => ({
       status: url.endsWith('/v1/moderate') ? 422 : 200,
@@ -74,7 +74,36 @@ describe('installed hooks (end-to-end via HookedLlmPort)', () => {
     const hooked = new HookedLlmPort(inner, r => r, hooks)
     const res = await hooked.completeWithTools({ messages: [], tools: [] })
     expect(res.finish_reason).toBe('content_filter')
-    expect(vi.mocked(inner.completeWithTools)).not.toHaveBeenCalled()
+    // Concurrent: the call is launched, then the moderation deny aborts it.
+    expect(vi.mocked(inner.completeWithTools)).toHaveBeenCalledTimes(1)
+    expect(inner.lastToolReq?.signal?.aborted).toBe(true)
+  })
+
+  it('moderation runs concurrently with the call; a pass proceeds to the result', async () => {
+    const inner = fakePort()
+    const moderatePass: FetchLike = async () => ({ status: 200, text: async () => '{}' })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['moderate'], capabilities: ['may_deny'] })],
+      { getAuthToken: () => '', fetchImpl: moderatePass }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const res = await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(res.content).toBe('main')
+    expect(inner.lastToolReq?.signal?.aborted).toBe(false) // not aborted on the happy path
+  })
+
+  it("the caller's abort signal still cancels the call under concurrent moderation", async () => {
+    const inner = fakePort()
+    const moderatePass: FetchLike = async () => ({ status: 200, text: async () => '{}' })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['moderate'], capabilities: ['may_deny'] })],
+      { getAuthToken: () => '', fetchImpl: moderatePass }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const outer = new AbortController()
+    outer.abort() // caller already cancelled
+    await hooked.completeWithTools({ messages: [], tools: [], signal: outer.signal })
+    expect(inner.lastToolReq?.signal?.aborted).toBe(true) // linked through to the call
   })
 
   it('a pre_call rewrite reaches the inner port', async () => {
