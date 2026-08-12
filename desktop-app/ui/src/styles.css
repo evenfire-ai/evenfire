@@ -6084,6 +6084,10 @@ h3 {
   pointer-events: auto;
 }
 
+.chat-scroll-to-bottom-button.ui-icon-button.ui-icon-button--solid.ui-icon-button--neutral:hover:enabled {
+  background: var(--bg-elev-2);
+}
+
 .chat-scroll-to-bottom-button.ui-icon-button svg {
   width: 18px;
   height: 18px;
