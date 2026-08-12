@@ -32,11 +32,6 @@ vi.mock('../src/db.js', () => ({ withTransaction: database.withTransaction }))
 const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
-vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware:
-    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-      next(),
-}))
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
   rejectBodyUserTeamMismatch: (
     _req: express.Request,
