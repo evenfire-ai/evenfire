@@ -324,7 +324,7 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
   })
 }
 
-function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
+export function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
   const family = row.capability_family
   if (!PLUGIN_WORKLOAD_SDK_FAMILIES.includes(family as PluginWorkloadSdkFamily)) {
     throw new Error(`unknown capability_family from db: ${String(family)}`)

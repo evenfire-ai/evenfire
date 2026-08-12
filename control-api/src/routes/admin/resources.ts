@@ -19,6 +19,10 @@ import {
 } from './communicationChannelSpecHelpers.js'
 import { validateHostSecretRef } from './hostSecrets.js'
 import { validateHostSpec } from './hostSpecValidation.js'
+import {
+  type HostSpecIncoherenceToleratedEvent,
+  emitHostSpecIncoherenceTolerated,
+} from './hostWriteGateAudit.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -482,7 +486,11 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // Early validation for Host specs — spec.approval.tools shape + R3 model
       // allowlist enforcement (fail-closed for a declared spec.model.name).
       if (plural === 'hosts' && body.spec) {
-        const issue = await validateHostSpec(body.spec)
+        // Create: no stored CR, so the no-worsening tolerance (Pieza D) can never
+        // apply — a fresh Host may not introduce a disabled model.
+        const issue = await validateHostSpec(body.spec, undefined, {
+          hostRef: { namespace: ns, name: body.metadata.name },
+        })
         if (issue) {
           res.status(422).json(issue)
           return
@@ -546,6 +554,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
         spec: Record<string, unknown>
       }
+      // Pieza D tolerations granted during Host validation, emitted only after
+      // the CR persists (below). Empty for every non-host / non-tolerated write.
+      const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
 
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
@@ -568,7 +579,28 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       }
 
       if (plural === 'hosts' && body.spec) {
-        const issue = await validateHostSpec(body.spec)
+        // Update: read the stored CR so the write gate can tolerate a pre-existing
+        // model_not_allowed incoherence this write does not worsen (Pieza D — the
+        // editability trap). If the stored CR cannot be read, tolerance is skipped
+        // (fail-closed: the gate behaves exactly as before this feature).
+        let storedHostSpec: Record<string, unknown> | undefined
+        try {
+          const existing = (await gateway.getResource(plural, req.params.name, ns)) as {
+            spec?: Record<string, unknown>
+          } | null
+          storedHostSpec =
+            existing?.spec && typeof existing.spec === 'object' ? existing.spec : undefined
+        } catch {
+          storedHostSpec = undefined
+        }
+        const issue = await validateHostSpec(body.spec, undefined, {
+          stored: storedHostSpec,
+          hostRef: { namespace: ns, name: req.params.name },
+          // Sink for tolerations granted by validation; emitted below ONLY after
+          // the CR persists (mini-spec 01), so a secretRef 422 or a K8s conflict
+          // leaves no audit record.
+          tolerations: hostTolerations,
+        })
         if (issue) {
           res.status(422).json(issue)
           return
@@ -627,6 +659,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       }
       try {
         const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Host CR persisted: NOW emit any Pieza D tolerations (never before the
+        // write lands, so a K8s conflict/error leaves no audit record).
+        for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
         if (plural === 'communicationchannels' && body.spec) {
           const missingField = missingPersistedProviderSetting(updateBody.spec, updated)
           if (missingField) {

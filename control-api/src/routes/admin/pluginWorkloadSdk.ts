@@ -28,6 +28,16 @@ import {
   upsertGrant,
 } from '../../services/pluginWorkloadSdkDb.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
+import {
+  type EmitHostSpecIncoherenceTolerated,
+  type HostSpecIncoherenceToleratedEvent,
+  emitHostSpecIncoherenceTolerated as emitHostSpecIncoherenceToleratedDefault,
+} from './hostWriteGateAudit.js'
+import {
+  type CoverageSet,
+  isNonWorseningToleration,
+  offeredKey,
+} from './modelAllowlistTolerance.js'
 
 // ─── Plugin Workload SDK — admin routes (plan §2.6) ──────────────────────
 // Admin auth is enforced upstream by the control-ui auth gate in app.ts
@@ -251,7 +261,20 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
   return targets
 }
 
-export function createAdminPluginWorkloadSdkRouter(): Router {
+export interface AdminPluginWorkloadSdkRouterDeps {
+  /**
+   * Emit the audit signal for a tolerated pre-existing model_not_allowed
+   * incoherence on a grant write (Pieza D). Injected so the "never silent"
+   * guarantee is testable through the seam; defaults to the shared emitter.
+   */
+  emitIncoherenceTolerated?: EmitHostSpecIncoherenceTolerated
+}
+
+export function createAdminPluginWorkloadSdkRouter(
+  deps: AdminPluginWorkloadSdkRouterDeps = {}
+): Router {
+  const emitIncoherenceTolerated =
+    deps.emitIncoherenceTolerated ?? emitHostSpecIncoherenceToleratedDefault
   const router = Router()
   router.use('/admin/plugin-workload-sdk', createPluginWorkloadSdkAdminRateLimit())
 
@@ -371,6 +394,10 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
       // provider is resolved, every allowedModels entry must exist enabled under
       // that provider in the `llm_allowed_models` allowlist (checked below).
       let provider: string | undefined
+      // Pieza D — queued grant tolerations, flushed only once the write is
+      // ACCEPTED (right before upsert). A grant rejected by a later 400 leaves no
+      // audit record.
+      const pendingGrantTolerations: HostSpecIncoherenceToleratedEvent[] = []
       if (capabilityFamily === 'promptBridge') {
         const rawProvider = typeof body.provider === 'string' ? body.provider.trim() : ''
         if (!rawProvider) {
@@ -400,9 +427,73 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
             target.model,
           ])
         }
+        // Pieza D — role-scoped no-worsening tolerance (editability trap, mini-spec
+        // 01). A grant that references a model later disabled globally would
+        // otherwise be uneditable (every save 400s `model_not_allowed`). Tolerate a
+        // disabled `(provider, model)` iff (b) the incoming `allowed_models` does
+        // NOT shrink the stored coverage AND it kept its ROLE: the incoming DEFAULT
+        // target (`promptTargets[0]`) is tolerated only if it was the stored default
+        // target; a NON-default target only if it was any stored target (demotion is
+        // not worsening). Promoting a disabled non-default target to the default slot
+        // is NOT tolerated. A brand-new disabled model is never tolerated. The stored
+        // grant is read lazily — only when a candidate rejection appears — so the
+        // all-enabled happy path keeps its single-query cost.
+        const incomingDefaultKey = offeredKey(promptTargets[0]!.provider, promptTargets[0]!.model)
+        let storedLoaded = false
+        let storedDefaultTarget = new Set<string>()
+        let storedAnyTarget = new Set<string>()
+        // Grant `allowed_models` is a flat model-name list; treat it as a literal
+        // finite coverage set (NOT the Host UNIVERSAL-on-empty semantics) so an
+        // emptied list is a strict reduction, not a widening.
+        const incomingCoverage: CoverageSet = new Set(allowedModels)
+        let storedCoverage: CoverageSet = new Set<string>()
+        const loadStoredGrant = async (): Promise<void> => {
+          if (storedLoaded) return
+          storedLoaded = true
+          const storedGrant = (await listGrants({ recipeNamespace, recipeName }))?.find(
+            existing => existing.capabilityFamily === capabilityFamily
+          )
+          const storedTargets = storedGrant?.promptTargets ?? []
+          storedDefaultTarget = new Set(
+            storedTargets[0] ? [offeredKey(storedTargets[0].provider, storedTargets[0].model)] : []
+          )
+          storedAnyTarget = new Set(storedTargets.map(t => offeredKey(t.provider, t.model)))
+          storedCoverage = new Set(storedGrant?.allowedModels ?? [])
+        }
         for (const [targetProvider, targetModels] of modelsByProvider) {
           const enabled = new Set(await listEnabledModelNamesForProvider(targetProvider))
-          const offenders = targetModels.filter(model => !enabled.has(model))
+          const rawOffenders = targetModels.filter(model => !enabled.has(model))
+          if (rawOffenders.length === 0) continue
+          await loadStoredGrant()
+          const offenders: string[] = []
+          for (const model of rawOffenders) {
+            const pairKey = offeredKey(targetProvider, model)
+            // Role of the offending pair in the INCOMING grant: the default slot
+            // (`promptTargets[0]`) must have been the stored default; any other
+            // target may have been any stored target.
+            const storedRoleSet =
+              pairKey === incomingDefaultKey ? storedDefaultTarget : storedAnyTarget
+            const tolerated = isNonWorseningToleration({
+              pairKey,
+              storedReferencedPairKeys: storedRoleSet,
+              incomingCoverage,
+              storedCoverage,
+            })
+            if (tolerated) {
+              pendingGrantTolerations.push({
+                resourceKind: 'grant',
+                namespace: recipeNamespace,
+                name: recipeName,
+                provider: targetProvider,
+                model,
+                gate: 'grant',
+                offeredBefore: storedCoverage,
+                offeredAfter: incomingCoverage,
+              })
+            } else {
+              offenders.push(model)
+            }
+          }
           if (offenders.length > 0) {
             res.status(400).json({
               error: 'model_not_allowed',
@@ -451,6 +542,9 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
         },
         (req as UiAuthedRequest).adminAuth!.sub
       )
+      // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
+      // lands, so a failed upsert leaves no audit record — mini-spec 01).
+      for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
       res.status(200).json({ grant })
     })
   )
