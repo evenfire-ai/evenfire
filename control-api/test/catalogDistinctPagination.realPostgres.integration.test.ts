@@ -362,6 +362,12 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       expect(page.hasMore).toBe(true)
       expect(page.continuation.exhausted).toBe(false)
       expect(hostKeyStatements).toBe(2)
+      await consumeFamily({
+        family: 'host',
+        userId,
+        expected: ['a', 'b', 'c', 'x', 'y', 'z'].map(name => `${config.hostsNamespace}/${name}`),
+        minimumPathsForFirst: 3,
+      })
     } finally {
       budget.close()
     }
