@@ -97,6 +97,11 @@ const RESULT_POLL_FALLBACK_INTERVAL_MS = 2 * 1000
 const RESULT_POLL_FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
 /** Telegram and Slack can redeliver the same provider event while poll offsets settle. */
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+/** One "you are not linked" notice per Slack user per conversation per day. */
+const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+const UNRESOLVED_NOTICE_COPY =
+  "I can't accept messages from this Slack account. If you haven't linked it yet, " +
+  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
 const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
@@ -281,6 +286,8 @@ export class ChannelReader {
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
+  /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
+  private unresolvedNoticesSent: Map<string, { seenAt: number }> = new Map()
   /** Adapter route key by provider + CommunicationChannel ref. */
   private adapterKeysByCommunicationChannel: Map<string, string> = new Map()
   /** Adapter route key by provider + runtime channel id. */
@@ -1379,18 +1386,20 @@ export class ChannelReader {
         console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
         continue
       }
-      if (
-        msg.providerIdentity &&
-        this.rpcClient.authorizeProviderMessage &&
-        !(await this.rpcClient.authorizeProviderMessage(msg.providerIdentity))
-      ) {
-        if (providerEventKey) {
-          this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+      if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
+        const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+        if (!authorization.authorized) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          console.warn(
+            `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
+          )
+          if (authorization.reason === 'unresolved') {
+            await this.sendUnresolvedSenderNotice(msg)
+          }
+          continue
         }
-        console.warn(
-          `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
-        )
-        continue
       }
 
       const traceContext = mintChannelTraceContext(msg)
@@ -1538,6 +1547,47 @@ export class ChannelReader {
     }
 
     return ['message', msg.channelType, msg.channelId, msg.sender, messageId].join(':')
+  }
+
+  /**
+   * Tell an unresolved Slack sender why the agent is ignoring them, at most once
+   * per user per conversation per UNRESOLVED_NOTICE_TTL_MS.
+   */
+  private async sendUnresolvedSenderNotice(msg: Message): Promise<void> {
+    if (msg.channelType !== 'slack') return
+    const identity = msg.providerIdentity
+    const userId = identity?.providerUserId?.trim()
+    const workspaceId = identity?.providerWorkspaceId?.trim()
+    const channelId = msg.channelId?.trim()
+    if (!userId || !workspaceId || !channelId) return
+
+    // Scope the limiter by provider identity, the same way pendingApprovalChannelScope
+    // does. The SEND still targets msg.channelId, which is what replyChannelId hands
+    // every other outbound Slack call; only the dedupe identity is provider-scoped.
+    const conversationId = identity?.providerChannelId?.trim() || channelId
+    const key = `${workspaceId}:${userId}:${conversationId}`
+    if (this.unresolvedNoticesSent.has(key)) return
+    // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
+    // must not produce one outbound call per inbound message.
+    this.unresolvedNoticesSent.set(key, { seenAt: Date.now() })
+
+    const adapter = this.adapterForMessage(msg)
+    if (!adapter?.sendEphemeral) return
+    const profileUrl = config.profileUiUrl?.trim()
+    const content = profileUrl ? `${UNRESOLVED_NOTICE_COPY} ${profileUrl}` : UNRESOLVED_NOTICE_COPY
+    try {
+      await adapter.sendEphemeral(channelId, userId, content)
+    } catch (error) {
+      // Contain the failure HERE. SlackAdapter swallows its own errors today, but
+      // the ChannelAdapter interface promises nothing, and this runs inside the
+      // per-message loop in handleMessages: an adapter that ever throws would
+      // abort the rest of the batch over a notice that is best-effort by design.
+      console.warn(
+        `[Main] Could not send unresolved-sender notice to ${userId} in ${channelId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    }
   }
 
   private pendingApprovalChannelScope(msg: Message): string {
@@ -2153,6 +2203,11 @@ export class ChannelReader {
     for (const [key, processed] of this.processedProviderEvents) {
       if (now - processed.seenAt > PROVIDER_EVENT_DEDUPE_TTL_MS) {
         this.processedProviderEvents.delete(key)
+      }
+    }
+    for (const [key, notice] of this.unresolvedNoticesSent) {
+      if (now - notice.seenAt > UNRESOLVED_NOTICE_TTL_MS) {
+        this.unresolvedNoticesSent.delete(key)
       }
     }
   }

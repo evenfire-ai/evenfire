@@ -4637,6 +4637,10 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+.cu-channel-credentials__note {
+  margin: 0;
+}
+
 .cu-channel-credentials__actions {
   display: flex;
   justify-content: flex-end;
@@ -9671,6 +9675,18 @@ textarea.cu-input {
   accent-color: var(--cu-accent);
 }
 
+/* A cu-toggle-row plus its note, kept together so the surrounding panel gap
+   does not separate the note from the control it explains. */
+.cu-toggle-field {
+  display: grid;
+  gap: var(--cu-space-1);
+}
+
+/* Indented past the checkbox so the note reads as that control's, not a new row. */
+.cu-toggle-row__hint {
+  margin: 0 0 0 calc(1rem + var(--cu-space-2));
+}
+
 .cu-credential-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -9776,6 +9792,13 @@ textarea.cu-input {
   font-size: 0.8125rem;
   line-height: 1.55;
   white-space: pre;
+}
+
+/* The Slack app manifest runs ~25 lines. Cap it so the credentials panel below
+   stays reachable instead of being pushed off the form. */
+.cu-slack-manifest__pre {
+  max-height: 18rem;
+  overflow-y: auto;
 }
 
 .cu-channel-conversations-table__name {
