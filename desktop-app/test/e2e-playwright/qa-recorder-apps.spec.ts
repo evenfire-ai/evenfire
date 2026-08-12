@@ -78,6 +78,37 @@ test('optional QA recorder: Desktop apps journey', async ({}, testInfo) => {
       const mounted = backButton.or(loadingApp).or(embedPreview).first()
       await expect(mounted).toBeVisible({ timeout: 20_000 })
 
+      // The app header and its notification drawer share a horizontal budget.
+      // Check their rendered rectangles at the constrained desktop width so a
+      // change cannot let the search overlap mounted-app controls again.
+      await app.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+        if (!window || window.isDestroyed()) throw new Error('Desktop BrowserWindow closed')
+        window.setContentSize(1200, 720)
+      })
+      const bell = page.getByTestId('notification-bell')
+      await expect(bell).toBeVisible({ timeout: 20_000 })
+      await bell.click()
+      const drawer = page.getByRole('dialog', { name: 'Notifications and approvals' })
+      const search = page.getByRole('textbox', { name: 'Search' })
+      const mountedHeader = page.locator('.sandbox-ui-mounted-header')
+      await expect(drawer).toBeVisible({ timeout: 20_000 })
+      await expect(search).toBeVisible({ timeout: 20_000 })
+      await expect(mountedHeader).toBeVisible({ timeout: 20_000 })
+      const [drawerBox, searchBox, headerMetrics] = await Promise.all([
+        drawer.boundingBox(),
+        search.boundingBox(),
+        mountedHeader.evaluate(element => ({
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+        })),
+      ])
+      expect(drawerBox).not.toBeNull()
+      expect(searchBox).not.toBeNull()
+      expect(searchBox!.width).toBeLessThanOrEqual(drawerBox!.width)
+      expect(headerMetrics.scrollWidth).toBeLessThanOrEqual(headerMetrics.clientWidth)
+      await bell.click()
+
       await screenshotAndLog(page, testInfo, 'desktop-apps-embedded')
 
       // (3) Back action returns to the catalog. The Back button is part of the
