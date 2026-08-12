@@ -10706,7 +10706,9 @@ pre {
   }
 
   .page-header,
-  .page-breadcrumb {
+  .page-breadcrumb,
+  .apps-page-header,
+  .sandbox-ui-mounted-header {
     padding-right: 0;
   }
 
