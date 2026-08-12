@@ -4440,6 +4440,68 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+/* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
+.cu-model-attention__lede {
+  margin: 0 0 var(--cu-space-2);
+}
+
+.cu-model-attention__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+}
+
+.cu-model-attention__head {
+  display: block;
+}
+
+.cu-model-attention__name {
+  font-weight: 600;
+}
+
+.cu-model-attention__meta {
+  color: var(--cu-text-soft);
+}
+
+/* Shared Host/grant reference list (attention banner + 409 impact confirm). */
+.cu-model-refs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+  margin-top: var(--cu-space-2);
+}
+
+.cu-model-refs__label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.cu-model-refs__list {
+  list-style: none;
+  margin: var(--cu-space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-1);
+}
+
+.cu-model-refs__item {
+  font-size: 0.8125rem;
+}
+
+.cu-model-refs__meta {
+  color: var(--cu-text-soft);
+}
+
+/* Rich detail block inside a confirm dialog (e.g. the impact reference list). */
+.cu-modal-copy--details {
+  margin-top: var(--cu-space-3);
+}
+
 .cu-toast-stack {
   position: fixed;
   right: 1rem;

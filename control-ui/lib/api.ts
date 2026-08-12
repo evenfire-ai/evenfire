@@ -1663,16 +1663,177 @@ export async function createLlmModel(input: CreateLlmModelInput) {
   return apiSend('POST', '/api/v1/admin/llm-models', input) as Promise<LlmAllowedModel>
 }
 
-export async function updateLlmModel(id: string, input: UpdateLlmModelInput) {
+// A disable (PUT enabled→false) or delete of a referenced model is gated by
+// control-api (Fase 3): without `?force` it answers 409 `model_in_use` with the
+// impact. Passing `{ force: true }` appends `?force=true`, which the operator
+// confirms only after seeing that impact — never automatically.
+export async function updateLlmModel(
+  id: string,
+  input: UpdateLlmModelInput,
+  opts: { force?: boolean } = {}
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
-    input
+    input,
+    opts.force ? { force: 'true' } : {}
   ) as Promise<LlmAllowedModel>
 }
 
-export async function deleteLlmModel(id: string) {
-  return apiSend('DELETE', `/api/v1/admin/llm-models/${encodeURIComponent(id)}`)
+export async function deleteLlmModel(id: string, opts: { force?: boolean } = {}) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
+    undefined,
+    opts.force ? { force: 'true' } : {}
+  )
+}
+
+// ── Model references, 409 impact + operator attention feed ─────────────────
+// See control-api/src/services/llmAttention.ts and llmModelImpact.ts. The 409
+// `model_in_use` impact body (Fase 3) and each attention item (Fase 5, Pieza C)
+// carry the SAME `hostsAffected`/`grantsAffected` shape, so both surfaces render
+// the references identically.
+
+/** A Host CR that references a (provider, model) pair, with the matched roles. */
+export type ModelHostReference = {
+  namespace: string
+  name: string
+  // 'primary' | 'allowedModels' | 'fallback' — kept as string[] so an unknown
+  // role from a newer backend renders rather than being dropped.
+  roles: string[]
+}
+
+/** A capability grant that references a (provider, model) pair. */
+export type ModelGrantReference = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  capabilityFamily: string
+}
+
+/** Live references to a (provider, model) pair, shared by both surfaces. */
+export type ModelReferences = {
+  hostsAffected: ModelHostReference[]
+  grantsAffected: ModelGrantReference[]
+}
+
+/**
+ * One actionable operator-attention item. `kind` is an OPEN string union — today
+ * only `'stale_model_referenced'`; the banner switches on it and ignores kinds
+ * it does not recognize. `displayName` is optional (omitted, not null).
+ */
+export type AdminAttentionItem = ModelReferences & {
+  kind: string
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/** The `GET /admin/attention` response contract consumed by the banner. */
+export type AdminAttentionReport = {
+  items: AdminAttentionItem[]
+  generatedAt: string
+}
+
+/** The 409 `model_in_use` impact body (Fase 3): the model plus its references. */
+export type ModelInUseImpact = ModelReferences & {
+  provider: string
+  model: string
+}
+
+function coerceModelHostReferences(raw: unknown): ModelHostReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (typeof rec.namespace !== 'string' || typeof rec.name !== 'string') return []
+    const roles = Array.isArray(rec.roles)
+      ? rec.roles.filter((r): r is string => typeof r === 'string')
+      : []
+    return [{ namespace: rec.namespace, name: rec.name, roles }]
+  })
+}
+
+function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (
+      typeof rec.id !== 'string' ||
+      typeof rec.recipeNamespace !== 'string' ||
+      typeof rec.recipeName !== 'string' ||
+      typeof rec.capabilityFamily !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        id: rec.id,
+        recipeNamespace: rec.recipeNamespace,
+        recipeName: rec.recipeName,
+        capabilityFamily: rec.capabilityFamily,
+      },
+    ]
+  })
+}
+
+// Keep every item whose (kind, provider, model) are strings — including unknown
+// kinds, so the banner (not the fetch layer) decides what to render. Malformed
+// items are dropped rather than tumbling the whole feed.
+function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
+  if (!raw || typeof raw !== 'object') return []
+  const rec = raw as Record<string, unknown>
+  if (
+    typeof rec.kind !== 'string' ||
+    typeof rec.provider !== 'string' ||
+    typeof rec.model !== 'string'
+  ) {
+    return []
+  }
+  const item: AdminAttentionItem = {
+    kind: rec.kind,
+    provider: rec.provider,
+    model: rec.model,
+    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+  }
+  if (typeof rec.displayName === 'string') item.displayName = rec.displayName
+  return [item]
+}
+
+export async function getAdminAttention(): Promise<AdminAttentionReport> {
+  const raw = (await apiGet('/api/v1/admin/attention')) as {
+    items?: unknown
+    generatedAt?: unknown
+  }
+  return {
+    items: Array.isArray(raw.items) ? raw.items.flatMap(coerceAttentionItem) : [],
+    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
+  }
+}
+
+/**
+ * When a disable (PUT enabled→false) or delete is rejected with 409
+ * `model_in_use` — the model is still referenced and `?force` was not sent —
+ * returns the impact so the caller can show it and offer a forced retry. Returns
+ * null for any other error. Mirrors `getBudgetsUsingPrice`: reads the structured
+ * `.body` `formatApiError` preserves.
+ */
+export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
+  if ((err as { status?: number })?.status !== 409) return null
+  const body = apiErrorBody(err)
+  if (!body || body.error !== 'model_in_use') return null
+  const impact = body.impact
+  if (!impact || typeof impact !== 'object') return null
+  const rec = impact as Record<string, unknown>
+  return {
+    provider: typeof rec.provider === 'string' ? rec.provider : '',
+    model: typeof rec.model === 'string' ? rec.model : '',
+    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+  }
 }
 
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────

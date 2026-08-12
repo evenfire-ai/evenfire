@@ -30,6 +30,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
   const {
     cancelLabel = 'Cancel',
     confirmLabel = 'OK',
+    details,
     message,
     title = 'Confirm action',
     tone = 'default',
@@ -60,6 +61,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
         <p id={messageId} className="cu-modal-copy">
           {message}
         </p>
+        {details ? <div className="cu-modal-copy cu-modal-copy--details">{details}</div> : null}
         <div className="cu-modal-panel__foot">
           <button
             ref={cancelButtonRef}
