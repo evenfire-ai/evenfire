@@ -382,7 +382,7 @@ describe('RPCClient - provider message authorization', () => {
     }
     const client = new RPCClient('http://mcp-host:8080')
 
-    await expect(client.authorizeProviderMessage(identity)).resolves.toBe(true)
+    await expect(client.authorizeProviderMessage(identity)).resolves.toEqual({ authorized: true })
 
     const [url, options] = mockFetch.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('http://mcp-host:8080/v1/runtime/provider-messages/authorize')

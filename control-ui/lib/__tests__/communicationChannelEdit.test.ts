@@ -3,6 +3,7 @@ import {
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
+  hasSlackConfigForRequestUrl,
 } from '../communicationChannelEdit'
 import type { CommunicationChannelItem } from '../communicationChannels'
 
@@ -67,6 +68,53 @@ describe('communication channel edit helpers', () => {
     )
 
     expect(draft.telegramBotHandle).toBe('legacy_bot')
+  })
+
+  it('keeps the Slack label annotation out of the Request URL gate and nowhere else', () => {
+    // Only the Request URL and the app manifest ignore an annotation-only bot
+    // handle. The field it fills, the tab the page opens on, and the saved spec
+    // all still honour it, so this pins the split rather than the exclusion alone.
+    const item = channel({
+      metadata: {
+        name: 'label-only',
+        namespace: 'channels',
+        annotations: { 'clerum.io/slack-bot-label': 'Evenfire' },
+      },
+      spec: { hostRef: 'chatllm', access: { users: [], teams: [] } },
+    })
+    const draft = createCommunicationChannelDraft(item)
+
+    expect(draft.slackBotHandle).toBe('Evenfire')
+    expect(draft.slackBotHandleFromAnnotation).toBe(true)
+    expect(hasSlackConfigForRequestUrl(draft)).toBe(false)
+    expect(communicationChannelInitialTab(item)).toBe('slack')
+    expect(buildCommunicationChannelSpec(draft)).toEqual({
+      hostRef: 'chatllm',
+      access: { users: [], teams: [] },
+      slack: [],
+      slackSettings: {
+        botHandle: 'Evenfire',
+        replyOnlyWhenMentioned: false,
+        replyInThreads: false,
+      },
+    })
+  })
+
+  it('counts a Slack bot handle that came from the spec, not the annotation', () => {
+    const draft = createCommunicationChannelDraft(
+      channel({
+        metadata: {
+          name: 'slack-channel',
+          namespace: 'channels',
+          annotations: { 'clerum.io/slack-bot-label': 'Stale Label' },
+        },
+        spec: { hostRef: 'chatllm', slackSettings: { botHandle: 'Evenfire' } },
+      })
+    )
+
+    expect(draft.slackBotHandle).toBe('Evenfire')
+    expect(draft.slackBotHandleFromAnnotation).toBe(false)
+    expect(hasSlackConfigForRequestUrl(draft)).toBe(true)
   })
 
   it('omits inactive provider settings from the saved spec', () => {

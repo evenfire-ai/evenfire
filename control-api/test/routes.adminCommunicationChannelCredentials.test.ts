@@ -78,6 +78,9 @@ describe('admin communicationchannels — credentials cascade', () => {
 
   it('B4: POST provider CC (telegram) WITH credentialsSecretRef already in spec → ok (no 400)', async () => {
     // A user may pre-create the Secret and supply credentialsSecretRef directly.
+    // The Secret must actually hold the provider's key: since #312 a ref alone
+    // no longer proves the provider can work (routes.providerTransition.test.ts).
+    gatewayMock.getSecret.mockResolvedValue({ data: { 'telegram-bot-token': 'dGc=' } })
     gatewayMock.createResource.mockResolvedValue({
       metadata: { name: 'bot', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'my-existing-secret' } },
@@ -119,7 +122,13 @@ describe('admin communicationchannels — credentials cascade', () => {
     // BUT the conventional cc-<name>-credentials Secret EXISTS.
     const e404 = Object.assign(new Error('not found'), { statusCode: 404 })
     gatewayMock.getResource.mockRejectedValue(e404) // existing CC 404 → no existing ref
-    gatewayMock.getSecret.mockResolvedValue({ metadata: { name: 'cc-bot-credentials' } })
+    // Holds the Telegram key, so enabling telegram on a channel that had no
+    // provider before passes the #312 transition check and the assertion under
+    // test stays about ref re-injection.
+    gatewayMock.getSecret.mockResolvedValue({
+      metadata: { name: 'cc-bot-credentials' },
+      data: { 'telegram-bot-token': 'dGc=' },
+    })
     gatewayMock.updateResource.mockResolvedValue({
       metadata: { name: 'bot', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-bot-credentials' } },
