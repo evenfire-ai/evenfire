@@ -2158,9 +2158,7 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
-  --app-header-utilities-width: calc(
-    var(--app-notification-drawer-width) + var(--space-2) + 36px
-  );
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
 
   height: 100vh;
   min-height: 0;
@@ -12383,7 +12381,7 @@ pre {
   padding-left: var(--space-4);
 }
 
-@media (max-width: 1220px) {
+@media (min-width: 901px) and (max-width: 1220px) {
   .global-search {
     width: clamp(160px, 32vw, var(--app-notification-drawer-width));
     min-width: 160px;

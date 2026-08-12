@@ -111,3 +111,46 @@ test('optional QA recorder: Desktop inbox and search journey — global search',
     await finalizeRecording(app, page)
   }
 })
+
+test('optional QA recorder: Desktop search keeps the mobile header width', async ({}, testInfo) => {
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+
+  const credentials = desktopCredentials()
+  let app: ElectronApplication | undefined
+  let page: Page | undefined
+
+  try {
+    const launched = await launchDesktopApp(testInfo)
+    app = launched.app
+    page = launched.page
+    await login(page, credentials)
+
+    // This is the established mobile breakpoint. Measure the rendered controls
+    // instead of checking CSS so the assertion catches a later media rule that
+    // makes the input narrower than its available mobile header region.
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      if (!window || window.isDestroyed()) throw new Error('Desktop BrowserWindow closed')
+      window.setContentSize(900, 720)
+    })
+    const search = page.getByRole('textbox', { name: 'Search' })
+    const headerRegion = page.locator('.header-left')
+    await expect(search).toBeVisible({ timeout: 20_000 })
+    await expect(headerRegion).toBeVisible({ timeout: 20_000 })
+    await expect
+      .poll(async () => {
+        const [searchBox, regionBox] = await Promise.all([
+          search.boundingBox(),
+          headerRegion.boundingBox(),
+        ])
+        if (!searchBox || !regionBox) return 0
+        return Math.round(searchBox.width - regionBox.width)
+      })
+      .toBe(0)
+
+    await screenshotAndLog(page, testInfo, 'desktop-global-search-mobile-width')
+  } finally {
+    await finalizeRecording(app, page)
+  }
+})
