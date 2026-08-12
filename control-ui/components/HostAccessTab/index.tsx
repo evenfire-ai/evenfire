@@ -10,10 +10,11 @@ import { IconX } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   getAdminTeamAgents,
+  getAdminTeams,
   getAdminUserAgents,
+  getAdminUsers,
   getAgentTeams,
   getAgentUsers,
-  getHostDetailBundle,
   updateAdminTeamAgents,
   updateAdminUserAgents,
 } from '@lib/api'
@@ -63,12 +64,20 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setInitialLoading(true)
     setError('')
     try {
-      const detail = await getHostDetailBundle(hostName)
+      // Four lightweight endpoints instead of the full host detail bundle —
+      // page.tsx already loads the bundle on mount, so reusing it here would
+      // fetch the whole payload twice.
+      const [usersResult, teamsResult, agentUsersResult, agentTeamsResult] = await Promise.all([
+        getAdminUsers(),
+        getAdminTeams(),
+        getAgentUsers(hostName),
+        getAgentTeams(hostName),
+      ])
       if (!mountedRef.current || requestId !== loadRequestId.current) return
-      setAllUsers(Array.isArray(detail.users) ? detail.users : [])
-      setAllTeams(Array.isArray(detail.teams) ? detail.teams : [])
-      setUsersWithAccess(Array.isArray(detail.agentUsers) ? detail.agentUsers : [])
-      setTeamsWithAccess(Array.isArray(detail.agentTeams) ? detail.agentTeams : [])
+      setAllUsers(Array.isArray(usersResult.items) ? usersResult.items : [])
+      setAllTeams(Array.isArray(teamsResult.items) ? teamsResult.items : [])
+      setUsersWithAccess(Array.isArray(agentUsersResult.items) ? agentUsersResult.items : [])
+      setTeamsWithAccess(Array.isArray(agentTeamsResult.items) ? agentTeamsResult.items : [])
     } catch (e) {
       if (!mountedRef.current || requestId !== loadRequestId.current) return
       const message = e instanceof Error ? e.message : 'Failed to load access data'
