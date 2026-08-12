@@ -86,6 +86,16 @@ export function preAuthExternalUserRateLimit(operation: ExternalUserRateLimitOpe
   }
 }
 
+export function authenticatedExternalUserRateLimit(operation: ExternalUserRateLimitOperation) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    void enforce(operation, 'authenticated', req as AuthenticatedRequest, res)
+      .then(allowed => {
+        if (allowed) next()
+      })
+      .catch(next)
+  }
+}
+
 export async function enforceAuthenticatedExternalUserRateLimit(
   operation: ExternalUserRateLimitOperation,
   req: Request,
