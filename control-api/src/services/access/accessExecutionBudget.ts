@@ -58,7 +58,12 @@ export class AccessBudgetConfigurationError extends Error {
 
 export class AccessBudgetExceededError extends Error {
   constructor(
-    readonly limit: AccessBudgetCounterKind | 'deadline' | 'objectBytes' | 'relationshipDepth',
+    readonly limit:
+      | AccessBudgetCounterKind
+      | 'deadline'
+      | 'objectBytes'
+      | 'relationshipDepth'
+      | 'teamGfsMembershipAdmission',
     readonly authorityRequired: boolean
   ) {
     super(`Access execution budget exhausted: ${limit}`)
@@ -201,6 +206,7 @@ export class AccessExecutionBudget {
   readonly deadline: number
   readonly signal: AbortSignal
   readonly limits: AccessExecutionLimits
+  readonly teamGfsMembershipAdmissionLimit: number | null
   private closed = false
   private readonly localCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null
   private readonly reservedFromParent: AccessBudgetReservation
@@ -214,7 +220,8 @@ export class AccessExecutionBudget {
     limits: AccessExecutionLimits,
     localCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null,
     reservedFromParent: AccessBudgetReservation,
-    reservationParentCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null
+    reservationParentCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null,
+    teamGfsMembershipAdmissionLimit: number | null
   ) {
     this.deadline = shared.deadline
     this.signal = shared.controller.signal
@@ -222,17 +229,33 @@ export class AccessExecutionBudget {
     this.localCounters = localCounters
     this.reservedFromParent = reservedFromParent
     this.reservationParentCounters = reservationParentCounters
+    this.teamGfsMembershipAdmissionLimit = teamGfsMembershipAdmissionLimit
   }
 
   static create(
     kind: AccessExecutionKind,
     options: {
       limits?: Partial<AccessExecutionLimits>
+      teamGfsMembershipAdmissionLimit?: number
       now?: number
       parentSignal?: AbortSignal
     } = {}
   ): AccessExecutionBudget {
     const limits = resolveAccessExecutionLimits(options.limits)
+    const teamGfsMembershipAdmissionLimit =
+      options.teamGfsMembershipAdmissionLimit === undefined
+        ? null
+        : options.teamGfsMembershipAdmissionLimit
+    if (
+      teamGfsMembershipAdmissionLimit !== null &&
+      (!Number.isSafeInteger(teamGfsMembershipAdmissionLimit) ||
+        teamGfsMembershipAdmissionLimit < 0)
+    ) {
+      throw new AccessBudgetConfigurationError(
+        'objects',
+        'team GFS membership admission must be a non-negative safe integer'
+      )
+    }
     const controller = new AbortController()
     const now = options.now ?? Date.now()
     const deadlineMs = kind === 'catalog' ? limits.catalogDeadlineMs : limits.actionDeadlineMs
@@ -242,7 +265,14 @@ export class AccessExecutionBudget {
       controller,
       deadline: now + deadlineMs,
     }
-    const budget = new AccessExecutionBudget(shared, limits, null, {}, null)
+    const budget = new AccessExecutionBudget(
+      shared,
+      limits,
+      null,
+      {},
+      null,
+      teamGfsMembershipAdmissionLimit
+    )
     budget.timer = setTimeout(() => controller.abort('deadline'), deadlineMs)
     budget.timer.unref?.()
     if (options.parentSignal) {
@@ -359,7 +389,8 @@ export class AccessExecutionBudget {
       this.limits,
       local,
       reserved,
-      this.localCounters ?? this.shared.counters
+      this.localCounters ?? this.shared.counters,
+      this.teamGfsMembershipAdmissionLimit
     )
   }
 
