@@ -9,7 +9,9 @@ import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
  */
 interface UseChatScrollParams {
   selectedAgent: string | null
+  activeChatId: string | null
   chatMessages: AgentChatMessage[]
+  chatMessagesLoading: boolean
   agentSending: boolean
   /**
    * Progress slice for the ACTIVE view only (the selected agent's
@@ -34,13 +36,18 @@ interface UseChatScrollParams {
  */
 export function useChatScroll({
   selectedAgent,
+  activeChatId,
   chatMessages,
+  chatMessagesLoading,
   agentSending,
   activeChatProgress,
 }: UseChatScrollParams) {
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const scrollAnimationFrameIdsRef = useRef<number[]>([])
   const scrollTimeoutIdsRef = useRef<number[]>([])
+  const pendingEntryScrollChatKeyRef = useRef<string | null>(null)
+  const activeChatKey =
+    selectedAgent && activeChatId ? `${selectedAgent}\u0000${activeChatId}` : null
 
   const cancelScheduledScrolls = useCallback(() => {
     if (typeof window !== 'undefined') {
@@ -143,6 +150,28 @@ export function useChatScroll({
     isNearBottom,
     scrollChatToBottom,
   ])
+
+  // A newly selected chat must open at its latest message even when its local
+  // cache was empty and the remote transcript arrives after the first scroll.
+  // Keep the entry scroll pending until at least one message is rendered; later
+  // updates still follow the near-bottom guard above.
+  useEffect(() => {
+    pendingEntryScrollChatKeyRef.current = activeChatKey
+  }, [activeChatKey])
+
+  useEffect(() => {
+    if (
+      !activeChatKey ||
+      chatMessagesLoading ||
+      chatMessages.length === 0 ||
+      pendingEntryScrollChatKeyRef.current !== activeChatKey
+    ) {
+      return
+    }
+
+    scrollChatToBottom()
+    pendingEntryScrollChatKeyRef.current = null
+  }, [activeChatKey, chatMessages, chatMessagesLoading, scrollChatToBottom])
 
   useEffect(() => cancelScheduledScrolls, [cancelScheduledScrolls])
 

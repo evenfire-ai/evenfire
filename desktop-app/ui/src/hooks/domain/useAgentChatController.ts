@@ -581,7 +581,9 @@ export function useAgentChatController({
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
     selectedAgent,
+    activeChatId,
     chatMessages,
+    chatMessagesLoading,
     agentSending,
     activeChatProgress: progressByMessageId,
   })
