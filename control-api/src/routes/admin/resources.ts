@@ -603,7 +603,12 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             ),
           }
         : body
-      if (isCommunicationChannelUpdate) {
+      // A null snapshot means the channel does not exist (loadCommunicationChannelSpecSnapshot
+      // returns null only on 404). Skipping the guard here is what makes the response
+      // honest: with no previous spec every provider reads as newly added, so the guard
+      // would answer a PUT to a missing channel with `credentials[...] is required`
+      // instead of the 404 updateResource is about to produce.
+      if (isCommunicationChannelUpdate && previousCommunicationChannelSpec) {
         // updateBody.spec, not body.spec: the ref the write will actually carry
         // is the preserved one, and that is the Secret whose keys decide whether
         // a newly enabled provider can work. Reuses the snapshot already loaded

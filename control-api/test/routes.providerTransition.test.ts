@@ -242,4 +242,34 @@ describe('admin communicationchannels — provider transition validation (#312)'
     expect(res.body.error).toMatch(/Cannot read the credentials Secret/)
     expect(gatewayMock.updateResource).not.toHaveBeenCalled()
   })
+
+  it('PUT to a channel that does not exist does not answer with a credentials error', async () => {
+    // The guard is scoped to an absent->present TRANSITION, and a channel that was
+    // never there has no previous spec — so without the snapshot check every provider
+    // in the body reads as newly added and the operator is told their credentials are
+    // missing for a channel that does not exist. The snapshot is null only on 404, so
+    // it is the honest signal to stand down and let the write answer.
+    //
+    // What the caller then sees is this codebase's generic k8s error surface, NOT a
+    // 404: ApiException sets `.code` and the error handler forwards `.status`. That
+    // collapse is pre-existing and applies to every route, so it is deliberately out
+    // of scope here. This test pins the part that IS in scope — the operator is no
+    // longer told to fix credentials on a channel that does not exist.
+    gatewayMock.getResource.mockRejectedValue(
+      new ApiException(404, 'Not Found', { message: 'communicationchannels "ghost" not found' }, {})
+    )
+    gatewayMock.updateResource.mockRejectedValue(
+      new ApiException(404, 'Not Found', { message: 'communicationchannels "ghost" not found' }, {})
+    )
+
+    const res = await request(makeApp())
+      .put('/admin/communicationchannels/ghost')
+      .send({ spec: { hostRef: 'h1', slackSettings: { botHandle: 'Jose Bot' } } })
+
+    expect(res.status).not.toBe(400)
+    expect(res.body.error ?? '').not.toMatch(/slack-bot-token|slack-signing-secret/)
+    // The write must be ATTEMPTED — that is what proves the guard stood down rather
+    // than the route inferring an answer of its own.
+    expect(gatewayMock.updateResource).toHaveBeenCalled()
+  })
 })
