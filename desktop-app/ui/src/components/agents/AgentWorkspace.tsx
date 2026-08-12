@@ -533,7 +533,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           {isChatMode && (
             <div className="chat-thread-container">
               <ChatThread onScrollPositionChange={handleScrollPositionChange} />
-              {activeChatId && showDelayedScrollToBottom && (
+              {showDelayedScrollToBottom && (
                 <div className="chat-scroll-to-bottom">
                   <IconButton
                     className="chat-scroll-to-bottom-button"
