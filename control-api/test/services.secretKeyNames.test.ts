@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import { secretKeyNames } from '../src/services/secretKeyNames.js'
 
 function gatewayReturning(secret: unknown) {
@@ -24,6 +25,19 @@ describe('secretKeyNames', () => {
     const gateway = {
       getSecret: vi.fn(async () => {
         throw Object.assign(new Error('not found'), { statusCode: 404 })
+      }),
+    } as never
+    expect(await secretKeyNames(gateway, 'missing', 'channels')).toEqual([])
+  })
+
+  it('returns an empty array for a real @kubernetes/client-node 404 ApiException', async () => {
+    // The production error shape: gateway.getSecret propagates the client's
+    // ApiException, which sets `.code`, not `.statusCode`. A helper that only
+    // checked `.statusCode` would never treat a genuinely missing Secret as
+    // "no keys" and would rethrow instead.
+    const gateway = {
+      getSecret: vi.fn(async () => {
+        throw new ApiException(404, 'Not Found', { message: 'secrets "missing" not found' }, {})
       }),
     } as never
     expect(await secretKeyNames(gateway, 'missing', 'channels')).toEqual([])
