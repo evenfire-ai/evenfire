@@ -1583,6 +1583,9 @@ export class McpServerWatcher implements McpServerProvider {
       contextRef: server.spec.contextRef,
       transport,
       auth: server.spec.auth,
+      // Project the OAuth block (grantScope etc.) verbatim so mcp-host can
+      // dispatch the per-connection partition. Token is NEVER mounted (O4).
+      oauth: server.spec.oauth,
       enabled: server.spec.enabled !== false,
       status: this.reconciler.getStatus(server.name),
     }

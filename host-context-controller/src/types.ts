@@ -551,6 +551,10 @@ export interface McpServerInfo {
   contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config; present iff auth.type === 'oauth'. mcp-host reads
+  // `grantScope` to dispatch the per-connection partition. HCC does NOT mount
+  // the resolved token as env (O4 stays intact — this is discovery metadata).
+  oauth?: McpServerOAuth
   enabled: boolean
   status: McpServerStatus
 }
