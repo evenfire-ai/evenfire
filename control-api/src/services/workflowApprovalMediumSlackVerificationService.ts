@@ -1,6 +1,7 @@
 import type { K8sGateway } from '../k8s.js'
 import { decodeSlackTargetId, encodeSlackTargetId } from '../utils/slackTargetId.js'
 import { getTeamAgents, getUserAgents, listTeams } from './directory/index.js'
+import { secretKeyNames } from './secretKeyNames.js'
 import type { VerifiedMediumAccount } from './workflowApprovalMediumIdentityService.js'
 
 type CommunicationChannelResource = {
@@ -200,12 +201,44 @@ export async function listSlackApprovalTargets(params: {
     'communicationchannels',
     '*'
   )) as CommunicationChannelResource[]
-  const items = channels
-    .flatMap(channel => {
-      const target = projectTarget(channel)
-      if (!target || !userCanAccessChannel(channel, params.userId, access)) return []
-      return [target]
+  // Two phases, and the order is a security property rather than a style
+  // choice. This lists communicationchannels across ALL namespaces and the
+  // route is gated only by a valid external session, so reading Secrets before
+  // the access check would let any authenticated profile user drive one request
+  // into reading the credentials Secret of every channel in the cluster. Project
+  // and access-check first; read keys only for what survived, which bounds the
+  // reads to the caller's own channels.
+  const candidates = channels.flatMap(channel => {
+    const target = projectTarget(channel)
+    if (!target || !userCanAccessChannel(channel, params.userId, access)) return []
+    return [{ channel, target }]
+  })
+
+  const keysBySecret = new Map<string, Promise<string[]>>()
+  const readable = await Promise.all(
+    candidates.map(async ({ channel, target }) => {
+      const secretName = optionalString(channel.spec?.credentialsSecretRef?.name)
+      if (!secretName) return null
+      const cacheKey = `${target.channelNamespace}/${secretName}`
+      if (!keysBySecret.has(cacheKey)) {
+        // Fails OPEN, unlike the write-path validator, and deliberately so: this
+        // is a read-only listing, and one channel with a broken or unreadable
+        // Secret must not blank the user's entire verification picker.
+        keysBySecret.set(
+          cacheKey,
+          secretKeyNames(params.gateway, secretName, target.channelNamespace).catch(() => [])
+        )
+      }
+      const keys = await keysBySecret.get(cacheKey)!
+      // A channel can carry a Slack App Name while its Secret only ever held
+      // another provider's credentials. It projects as ready and then 409s on
+      // use, so it must not be offered as a target at all.
+      return keys.includes('slack-signing-secret') ? target : null
     })
+  )
+
+  const items = readable
+    .filter((target): target is SlackApprovalTarget => target !== null)
     .sort(
       (a, b) =>
         a.agentName.localeCompare(b.agentName) ||
