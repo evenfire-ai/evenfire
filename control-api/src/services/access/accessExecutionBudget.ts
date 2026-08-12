@@ -4,6 +4,7 @@ export const ACCESS_EXECUTION_LIMIT_CLAMPS = Object.freeze({
   actionDeadlineMs: 2_000,
   statementTimeoutMs: 2_500,
   producerCalls: 32,
+  databaseStatements: 128,
   producerConcurrency: 4,
   keyCandidatesPerCall: 101,
   objects: 1_000,
@@ -28,6 +29,7 @@ export type AccessExecutionLimits = Readonly<Record<AccessExecutionLimitName, nu
 
 export type AccessBudgetCounterKind =
   | 'producerCalls'
+  | 'databaseStatements'
   | 'objects'
   | 'decodedBytes'
   | 'accessPaths'
@@ -152,6 +154,7 @@ class AccessSemaphore {
 
 const COUNTER_KINDS: readonly AccessBudgetCounterKind[] = [
   'producerCalls',
+  'databaseStatements',
   'objects',
   'decodedBytes',
   'accessPaths',

@@ -11,10 +11,14 @@ describe('AccessExecutionBudget', () => {
   it('applies the accepted local clamps and rejects attempts to raise them', () => {
     expect(resolveAccessExecutionLimits().publicPageSize).toBe(100)
     expect(resolveAccessExecutionLimits({ producerCalls: 2 }).producerCalls).toBe(2)
+    expect(resolveAccessExecutionLimits({ databaseStatements: 2 }).databaseStatements).toBe(2)
     expect(() => resolveAccessExecutionLimits({ producerCalls: 33 })).toThrow(
       AccessBudgetConfigurationError
     )
     expect(() => resolveAccessExecutionLimits({ producerCalls: 0 })).toThrow(
+      AccessBudgetConfigurationError
+    )
+    expect(() => resolveAccessExecutionLimits({ databaseStatements: 129 })).toThrow(
       AccessBudgetConfigurationError
     )
   })
@@ -24,6 +28,7 @@ describe('AccessExecutionBudget', () => {
     expect(() => budget.assertPageSize(101)).toThrow(AccessBudgetConfigurationError)
     expect(() => budget.assertCursorBytes(16 * 1024 + 1)).toThrow(AccessBudgetConfigurationError)
     expect(budget.remaining('producerCalls')).toBe(32)
+    expect(budget.remaining('databaseStatements')).toBe(128)
     budget.close()
   })
 
@@ -36,6 +41,7 @@ describe('AccessExecutionBudget', () => {
         accessPaths: 1,
         relationships: 1,
         dbRowsReturned: 1,
+        databaseStatements: 1,
         memoEntries: 1,
         memoBytes: 8,
         responseBytes: 8,
@@ -45,6 +51,7 @@ describe('AccessExecutionBudget', () => {
     budget.charge({ kind: 'accessPaths' })
     budget.charge({ kind: 'relationships' })
     budget.charge({ kind: 'dbRowsReturned' })
+    budget.charge({ kind: 'databaseStatements' })
     budget.charge({ kind: 'memoEntries' })
     budget.charge({ kind: 'memoBytes', amount: 8 })
     budget.charge({ kind: 'responseBytes', amount: 8 })
