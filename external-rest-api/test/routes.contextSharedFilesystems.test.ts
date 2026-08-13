@@ -144,4 +144,32 @@ describe('Method gating', () => {
     expect(res.body).toEqual({ error: 'forbidden' })
     expect(res.headers['retry-after']).toBe('7')
   })
+
+  it('forwards HEAD without draining an upstream response body', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    const getReader = vi.fn(() => {
+      throw new Error('HEAD body must not be read')
+    })
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue({
+      status: 200,
+      headers: new Headers({
+        'content-type': 'application/octet-stream',
+        'content-length': '1234',
+      }),
+      body: { getReader },
+    } as unknown as Response)
+
+    const res = await request(buildApp())
+      .head('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1')
+      .set('authorization', 'Bearer good-token')
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-length']).toBe('1234')
+    expect(getReader).not.toHaveBeenCalled()
+    expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'HEAD',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
+      { userSessionToken: 'good-token', throwOnHttpError: false }
+    )
+  })
 })

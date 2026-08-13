@@ -215,7 +215,7 @@ export async function controlApiBinaryRequestWithStatus(
 }
 
 export async function controlApiStreamRequest(
-  method: 'GET',
+  method: 'GET' | 'HEAD',
   path: string,
   options?: {
     query?: Record<string, string | undefined>

@@ -86,7 +86,7 @@ export function createContextSharedFilesystemsRouter(): Router {
           return idx === -1 ? '' : req.originalUrl.slice(idx)
         })()
         const upstreamRes = await controlApiStreamRequest(
-          'GET',
+          req.method === 'HEAD' ? 'HEAD' : 'GET',
           `/external/contexts/${encodeURIComponent(req.params.contextId)}` +
             `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
           {
@@ -106,6 +106,14 @@ export function createContextSharedFilesystemsRouter(): Router {
         if (cd) res.setHeader('content-disposition', cd)
         const cl = upstreamRes.headers.get('content-length')
         if (cl) res.setHeader('content-length', cl)
+
+        // HEAD is metadata-only. Do not consume the upstream stream: a large
+        // shared filesystem object must never be downloaded just to suppress
+        // its body at the public Express boundary.
+        if (req.method === 'HEAD') {
+          res.end()
+          return
+        }
 
         if (!upstreamRes.body) {
           res.end()
