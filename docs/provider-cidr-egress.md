@@ -6,6 +6,16 @@ connection to an un-observed IP is denied (`fetch failed`). Phase 2 renders the
 **authoritative published provider CIDRs** for such hosts, keeping the `/32` window for
 small/stable hosts and for residual (out-of-range) IPs.
 
+## Architecture at a glance
+
+![Provider-CIDR egress architecture: control-api cron fetches provider netblocks and writes the clerum-provider-netblocks ConfigMap; HCC and WRC read it and render NetworkPolicy egress with the provider CIDR ipBlock; Calico enforces it.](assets/issue-299-phase2-architecture.svg)
+
+Flow: **fetch** (control-api cron → provider netblocks) → **write** the `clerum-provider-netblocks`
+ConfigMap → **read** by HCC and WRC → **render** a NetworkPolicy (ipBlock = provider CIDR,
+port-scoped) → **enforce** by Calico. Provider intent travels through the CRDs; concrete CIDRs
+travel only through the catalog. Provider names live only in the registry/fetchers/seed/tests
+(generality invariant, enforced by a CI grep-gate).
+
 ## How it works
 
 - **control-api** (the only component with external egress) fetches each provider's

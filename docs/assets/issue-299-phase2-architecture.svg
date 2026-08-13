@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 992" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+<defs>
+<marker id="arr" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 z" fill="#2563eb"/></marker>
+<marker id="arrG" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 z" fill="#059669"/></marker>
+<marker id="arrP" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 z" fill="#7c3aed"/></marker>
+<marker id="arrR" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 z" fill="#dc2626"/></marker>
+<filter id="sh" x="-8%" y="-8%" width="116%" height="128%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.6" flood-color="#0f172a" flood-opacity="0.13"/></filter>
+</defs>
+<rect x="0" y="0" width="1200" height="992" fill="#f8fafc"/>
+<text x="600" y="40" font-size="22" font-weight="800" fill="#0f172a" text-anchor="middle">Provider-CIDR Egress Rendering — Issue #299 Phase 2</text>
+<text x="600" y="63" font-size="12.5" font-weight="500" fill="#64748b" text-anchor="middle">Declarative provider intent  →  auto-refreshed CIDR catalog  →  NetworkPolicy render  →  Calico enforcement</text>
+<rect x="40" y="84" width="1120" height="70" rx="12" fill="#fff7ed" stroke="#f59e0b" stroke-width="1.4" filter="url(#sh)"/>
+<text x="58" y="106" font-size="11.5" font-weight="800" fill="#b45309" text-anchor="start">THE #299 DEFECT</text>
+<text x="58" y="124" font-size="10.6" fill="#92400e" text-anchor="start">api.github.com resolves to ONE rotating IP out of a large pool (140.82.112.0/20). Phase 1 rendered a /32 sliding</text>
+<text x="58" y="138" font-size="10.6" fill="#92400e" text-anchor="start">window (only a SAMPLE) → a fresh unobserved IP was denied by the NetworkPolicy → intermittent "fetch failed".</text>
+<text x="1142" y="108" font-size="10.5" font-weight="800" fill="#065f46" text-anchor="end">PHASE 2 FIX</text>
+<text x="1142" y="126" font-size="10.3" fill="#065f46" text-anchor="end">render the FULL published</text>
+<text x="1142" y="140" font-size="10.3" fill="#065f46" text-anchor="end">provider CIDR block</text>
+<rect x="40" y="176" width="1120" height="106" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="1.2" stroke-dasharray="7,5"/>
+<text x="56" y="198" font-size="12.5" font-weight="800" fill="#2563eb" letter-spacing="0.4">①  PRODUCER — control-api (off the hot path)</text>
+<rect x="140" y="206" width="440" height="64" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.7" filter="url(#sh)"/>
+<text x="360" y="230" font-size="12.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">control-api provider cron</text>
+<text x="360" y="248" font-size="10.5" fill="#475569" text-anchor="middle">background tick · fetcher plugins</text>
+<text x="360" y="262" font-size="10.5" fill="#475569" text-anchor="middle">fetch e.g. GitHub /meta netblocks</text>
+<rect x="660" y="206" width="440" height="64" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.7" filter="url(#sh)"/>
+<text x="880" y="228" font-size="12" font-weight="700" fill="#1e3a8a" text-anchor="middle">Producer safety guarantees</text>
+<text x="880" y="245" font-size="10.5" fill="#475569" text-anchor="middle">single-writer (advisory lock) · fail-static LKG</text>
+<text x="880" y="259" font-size="10.5" fill="#475569" text-anchor="middle">content-hash no-op · 900KB · kill-switch</text>
+<path d="M 360,270 L 360,318" stroke="#2563eb" stroke-width="2.4" fill="none" marker-end="url(#arr)"/>
+<rect x="325.65" y="285.0" width="68.69999999999999" height="18" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="0.8"/>
+<text x="360" y="297.5" font-size="10.5" font-weight="700" fill="#2563eb" text-anchor="middle">writes CM</text>
+<rect x="40" y="314" width="1120" height="132" rx="14" fill="#f0fdf4" stroke="#059669" stroke-width="1.2" stroke-dasharray="7,5"/>
+<text x="56" y="336" font-size="12.5" font-weight="800" fill="#059669" letter-spacing="0.4">②  SOURCES — shared catalog  +  declarative intent</text>
+<rect x="140" y="346" width="440" height="84" rx="10" fill="#ffffff" stroke="#059669" stroke-width="1.9" filter="url(#sh)"/>
+<text x="360" y="372" font-size="11.5" font-weight="700" fill="#065f46" text-anchor="middle">ConfigMap  clerum-provider-netblocks</text>
+<text x="360" y="390" font-size="10.3" fill="#475569" text-anchor="middle">ns control-plane · &lt;provider&gt;.&lt;category&gt;.ipv4</text>
+<text x="360" y="404" font-size="10.3" fill="#475569" text-anchor="middle">the ONLY source of CIDRs · committed seed</text>
+<rect x="660" y="346" width="440" height="84" rx="10" fill="#ffffff" stroke="#7c3aed" stroke-width="1.7" filter="url(#sh)"/>
+<text x="880" y="370" font-size="11.3" font-weight="700" fill="#5b21b6" text-anchor="middle">CRDs declare INTENT + 4-validator parity</text>
+<text x="880" y="388" font-size="10.2" fill="#475569" text-anchor="middle">egressClass: provider · provider:{name,categories}</text>
+<text x="880" y="402" font-size="10.2" fill="#475569" text-anchor="middle">NEVER raw CIDRs · structural field (H2/G3)</text>
+<text x="880" y="416" font-size="10.2" fill="#475569" text-anchor="middle">CRD CEL · validateMcpServerSpec · recipeValidator · WRC</text>
+<path d="M 360,430 L 360,486" stroke="#059669" stroke-width="2.4" fill="none" marker-end="url(#arrG)"/>
+<rect x="319.35" y="449.0" width="81.3" height="18" rx="4" fill="#ffffff" stroke="#059669" stroke-width="0.8"/>
+<text x="360" y="461.5" font-size="10.5" font-weight="700" fill="#059669" text-anchor="middle">CIDR ranges</text>
+<path d="M 880,430 L 880,486" stroke="#7c3aed" stroke-width="2.4" fill="none" marker-end="url(#arrP)"/>
+<rect x="826.75" y="449.0" width="106.5" height="18" rx="4" fill="#ffffff" stroke="#7c3aed" stroke-width="0.8"/>
+<text x="880" y="461.5" font-size="10.5" font-weight="700" fill="#7c3aed" text-anchor="middle">declared intent</text>
+<rect x="40" y="482" width="1120" height="132" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="7,5"/>
+<text x="56" y="504" font-size="12.5" font-weight="800" fill="#ea580c" letter-spacing="0.4">③  CONSUMERS — two reconcilers render NetworkPolicy</text>
+<rect x="140" y="514" width="440" height="86" rx="10" fill="#ffffff" stroke="#ea580c" stroke-width="1.7" filter="url(#sh)"/>
+<text x="360" y="538" font-size="12" font-weight="700" fill="#9a3412" text-anchor="middle">host-context-controller (HCC)</text>
+<text x="360" y="556" font-size="10.5" fill="#475569" text-anchor="middle">reconciles McpServer → reads catalog</text>
+<text x="360" y="570" font-size="10.5" fill="#475569" text-anchor="middle">resolve provider→ranges → render NP egress</text>
+<text x="360" y="584" font-size="10.5" fill="#475569" text-anchor="middle">ipBlock = provider CIDR, port-scoped</text>
+<rect x="660" y="514" width="440" height="86" rx="10" fill="#ffffff" stroke="#ea580c" stroke-width="1.7" filter="url(#sh)"/>
+<text x="880" y="538" font-size="12" font-weight="700" fill="#9a3412" text-anchor="middle">workflow-recipes (WRC)</text>
+<text x="880" y="556" font-size="10.5" fill="#475569" text-anchor="middle">reconciles WorkflowRecipe (ui + workloads)</text>
+<text x="880" y="570" font-size="10.5" fill="#475569" text-anchor="middle">render workload NP · binding-identity preserved</text>
+<text x="880" y="584" font-size="10.5" fill="#475569" text-anchor="middle">(index-aligned → sibling never inherits — WRC-002)</text>
+<path d="M 360,600 L 360,652" stroke="#dc2626" stroke-width="2.4" fill="none" marker-end="url(#arrR)"/>
+<rect x="325.65" y="617.0" width="68.69999999999999" height="18" rx="4" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text x="360" y="629.5" font-size="10.5" font-weight="700" fill="#dc2626" text-anchor="middle">render NP</text>
+<path d="M 880,600 L 880,652" stroke="#dc2626" stroke-width="2.4" fill="none" marker-end="url(#arrR)"/>
+<rect x="845.65" y="617.0" width="68.69999999999999" height="18" rx="4" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text x="880" y="629.5" font-size="10.5" font-weight="700" fill="#dc2626" text-anchor="middle">render NP</text>
+<rect x="40" y="648" width="1120" height="86" rx="14" fill="#fef2f2" stroke="#dc2626" stroke-width="1.2" stroke-dasharray="7,5"/>
+<text x="56" y="670" font-size="12.5" font-weight="800" fill="#dc2626" letter-spacing="0.4">④  RENDERED NETWORKPOLICY  →  ENFORCEMENT</text>
+<rect x="140" y="678" width="960" height="44" rx="9" fill="#ffffff" stroke="#dc2626" stroke-width="1.7" filter="url(#sh)"/>
+<text x="620" y="704" font-size="11.5" font-weight="700" fill="#991b1b" text-anchor="middle">NetworkPolicy egress (ipBlock = full provider CIDR block)  —  Calico CNI enforces allow/deny at the node</text>
+<rect x="40" y="752" width="1120" height="92" rx="14" fill="#eef2ff" stroke="#4338ca" stroke-width="1.2" stroke-dasharray="7,5"/>
+<text x="56" y="774" font-size="12.5" font-weight="800" fill="#4338ca" letter-spacing="0.4">⑤  CROSS-CUTTING FOUNDATION  (used by the producer and both consumers)</text>
+<text x="60" y="796" font-size="10.5" fill="#3730a3" text-anchor="start">@clerum/network-policy-core — pure, provider-blind functions (validateProviderRanges, resolveProviderRanges, partitionCidrsByFamily…).</text>
+<text x="60" y="810" font-size="10.5" fill="#3730a3" text-anchor="start">providerRegistry — data-only, the ONLY place with provider names.   CI grep-gate DERIVES the forbidden set from the registry →</text>
+<text x="60" y="824" font-size="10.5" fill="#3730a3" text-anchor="start">adding a provider is a DATA change, not code (generality invariant).</text>
+<rect x="40" y="856" width="1120" height="120" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" filter="url(#sh)"/>
+<text x="60" y="882" font-size="11.5" font-weight="800" fill="#334155" text-anchor="start">KEY INVARIANTS</text>
+<text x="60" y="904" font-size="10.5" fill="#334155" text-anchor="start">H3 — catalog failure retains the Last-Known-Good NetworkPolicy (never egress loss); marks ExternalEgressReady=False.</text>
+<text x="60" y="922" font-size="10.5" fill="#334155" text-anchor="start">H2 / G3 — the provider field is structural and survives apiserver apply (else pruned → #299 regression).</text>
+<text x="60" y="940" font-size="10.5" fill="#334155" text-anchor="start">WRC-002 — per-binding identity: provider CIDRs attach only to the opted-in binding; no sibling widening, order-independent.</text>
+<text x="60" y="958" font-size="10.5" fill="#334155" text-anchor="start">Generality — provider-agnostic (data, not code).      G1 — byte-identical /32 mode preserved for non-provider bindings.</text>
+</svg>
