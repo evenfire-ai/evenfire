@@ -142,7 +142,7 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
           request_fingerprint, parent_rid, resource_name, expected_bytes, part_bytes,
           part_count, whole_sha256, committed_bytes, contiguous_bytes,
           committed_part_count, active_part_count, session_epoch, state, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
       [
         upload.uploadId,
         upload.idempotencyKey,
