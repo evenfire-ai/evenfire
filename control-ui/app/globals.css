@@ -5490,6 +5490,10 @@ textarea.cu-input {
   font-size: 0.75rem;
 }
 
+.cu-muted-note--spaced {
+  margin-top: var(--cu-space-4);
+}
+
 .cu-muted-note--compact {
   margin: 0;
   font-size: 0.8125rem;
