@@ -7678,11 +7678,32 @@ textarea.cu-input {
     .cu-llm-cred-add,
     .cu-llm-model-group__toggle,
     .cu-filter-select__copy,
-    .cu-filter-select__icon
+    .cu-filter-select__icon,
+    .cu-chip
   )
   .cu-llm-provider-icon[data-provider='openai']
   img {
   filter: brightness(0);
+}
+
+.cu-chip:has(.cu-llm-provider-icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.cu-chip .cu-llm-provider-icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: 0 0 0.85rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.6rem;
+}
+
+.cu-chip .cu-llm-provider-icon img {
+  padding: 0;
 }
 
 .cu-llm-config__fallback-creds {
