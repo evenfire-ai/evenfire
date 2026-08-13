@@ -6,6 +6,8 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import {
@@ -221,6 +223,10 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
       res.setHeader('Allow', 'GET, HEAD')
       res.status(405).json({ error: 'Method Not Allowed' })
     }
+  )
+  router.use(
+    '/external/contexts/:contextId/shared-filesystems',
+    rateLimitMiddleware(externalUserRateLimitOptions('shared_filesystem_read', 'authenticated'))
   )
 
   router.get(

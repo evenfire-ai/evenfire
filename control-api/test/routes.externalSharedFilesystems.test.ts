@@ -9,6 +9,7 @@ const mockGetUserContexts = vi.fn()
 const mockGetTeamContexts = vi.fn()
 const mockGetLiveTeamMembership = vi.fn()
 const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
+const rateLimitMock = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
@@ -34,6 +35,7 @@ vi.mock('../src/utils/auth/wfcBrowsingToken.js', () => ({
   WFC_BROWSING_READ_SCOPE: 'files:read',
   signWfcBrowsingToken: (...args: unknown[]) => mockSignWfcBrowsingCredential(...args),
 }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 
 vi.mock('../src/config.js', () => ({
   config: {
@@ -85,6 +87,14 @@ beforeEach(() => {
   mockGetLiveTeamMembership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
   mockSignWfcBrowsingCredential.mockReset()
   mockSignWfcBrowsingCredential.mockReturnValue({ token: 'browsing-token', expiresInSeconds: 60 })
+  rateLimitMock.checkAndIncrement.mockReset()
+  rateLimitMock.checkAndIncrement.mockResolvedValue({
+    allowed: true,
+    count: 1,
+    remaining: 29,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+  })
 })
 
 afterEach(() => {
@@ -96,6 +106,28 @@ const validAuth = () => {
 }
 
 describe('GET /external/contexts/:contextId/shared-filesystems', () => {
+  it('rate limits filesystem reads before resolving accessible contexts', async () => {
+    validAuth()
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      count: 31,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+
+    const response = await request(buildApp({ getResource: vi.fn() }))
+      .get('/external/contexts/ctx-a/shared-filesystems')
+      .set('x-user-session-token', 'dummy')
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_shared_filesystem_read:user:user-1',
+      30
+    )
+    expect(mockGetUserContexts).not.toHaveBeenCalled()
+  })
+
   it('returns merged spec+status for an accessible context', async () => {
     validAuth()
     mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: ['ctx-a'] })
