@@ -68,6 +68,13 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null }),
 }))
 
+// dev added a required AgentChatActions provider to AgentWorkspace (scroll
+// control). AgentWorkspace only reads scrollChatToBottom from it; stub just that
+// so the display-name assertions below render without the full provider tree.
+vi.mock('@contexts/AgentChatActionsContext', () => ({
+  useAgentChatActionsContext: () => ({ scrollChatToBottom: vi.fn() }),
+}))
+
 vi.mock('@hooks/useClickOutside', () => ({ useClickOutside: vi.fn() }))
 
 // Chat-mode children pull in a web of chat/composer contexts that are irrelevant
