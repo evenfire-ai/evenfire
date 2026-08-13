@@ -17,6 +17,7 @@ import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { SLACK_NEW_APP_URL } from '@constants/slack'
 import { apiGet, apiSend } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
@@ -661,12 +662,35 @@ export default function CreateCommunicationChannelPage() {
                             </pre>
                           </div>
                           <span className="cu-field__hint">
-                            Create the Slack app from this first: in Slack, Create New App → From an
-                            app manifest → paste. It sets the scopes, the events, and both Request
-                            URLs, so the app is ready before you come back for the token below. The
-                            URLs point at <code>{normalizedChannelName}</code>, so create this
-                            channel under that name.
+                            Copy this, then{' '}
+                            <a
+                              className="cu-link"
+                              href={SLACK_NEW_APP_URL}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              create your Slack app
+                            </a>{' '}
+                            — choose <strong>From an app manifest</strong>, pick the workspace, and
+                            paste. It sets the scopes, the events, and both Request URLs, so the app
+                            is ready before you come back here for the token below. Opens in a new
+                            tab so this form keeps what you have typed.
                           </span>
+                          <span className="cu-field__hint">
+                            The Request URLs point at <code>{normalizedChannelName}</code>, so this
+                            channel has to be created under that name.
+                          </span>
+                        </div>
+                      ) : draft.slackBotHandle.trim() && normalizedChannelName ? (
+                        // Named and ready, but no absolute URL resolved: a manifest with a
+                        // relative request_url is invalid to Slack. Say so rather than render
+                        // nothing -- the operator is following a guide that promises a manifest
+                        // here, and silence gives them no cause to chase.
+                        <div className="cu-banner cu-banner--warning">
+                          No app manifest: this deployment has no public webhook address, so the
+                          Request URL would be a path Slack cannot reach. Expose the webhook proxy
+                          publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to that
+                          address, then reload this page.
                         </div>
                       ) : null}
                       <ChannelCredentialsPanel
