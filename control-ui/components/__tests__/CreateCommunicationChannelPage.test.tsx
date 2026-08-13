@@ -424,3 +424,114 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(body.spec.slackSettings?.botHandle).toBe('Evenfire Test App')
   })
 })
+
+/**
+ * The cold start: a Slack channel cannot be created without a bot token, and the
+ * bot token does not exist until a Slack app has been installed — but installing
+ * one needs the scopes, the five events, and both Request URLs, none of which the
+ * create page offered. The manifest carries all of it, and the Request URL is
+ * derivable from the channel name alone, so it can be handed over here rather
+ * than only after the channel exists.
+ */
+describe('CreateCommunicationChannelPage — Slack app manifest', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  function decodeSlackTarget(manifestYaml: string): unknown {
+    const match = manifestYaml.match(/\/webhooks\/slack\/slack%3A([A-Za-z0-9_-]+)/)
+    if (!match) throw new Error(`no slack target id in manifest:\n${manifestYaml}`)
+    const b64 = match[1].replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(Buffer.from(b64, 'base64').toString())
+  }
+
+  async function goToSlackProviderStep(rawName: string) {
+    await waitFor(() => {
+      expect(screen.queryByText('Loading agents...')).not.toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByPlaceholderText(/channel-name/i), {
+      target: { value: rawName },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /agent reference/i }))
+    fireEvent.click(screen.getByRole('option', { name: 'agent-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByRole('button', { name: 'Create channel' })
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+  }
+
+  it('offers a manifest on the create page, before any channel exists', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+
+    const manifest = await screen.findByText(/display_information:/)
+    // Both Request URLs, because setting only Event Subscriptions is what leaves
+    // approval buttons dead with nothing in the logs.
+    expect(manifest.textContent?.match(/request_url:/g) ?? []).toHaveLength(2)
+    expect(manifest.textContent).toContain('https://webhook.example.com/webhooks/slack/')
+  })
+
+  it('points the Request URL at the channel the create actually writes', async () => {
+    // The manifest is handed over BEFORE the channel exists, so the one thing that
+    // can silently go wrong is the URL naming a channel the save never creates —
+    // the wrong-Request-URL failure this whole manifest was written to remove.
+    // Pinning the manifest against the POST body is what makes them impossible to
+    // drift apart; asserting a hardcoded name would only restate the fixture.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('My Support Bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+
+    const manifest = await screen.findByText(/display_information:/)
+    const encoded = decodeSlackTarget(manifest.textContent ?? '') as {
+      namespace: string
+      name: string
+    }
+
+    fireEvent.change(screen.getByLabelText('Slack Signing Secret'), {
+      target: { value: 'signing-secret' },
+    })
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'xoxb-token' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalled()
+    })
+
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { metadata: { name: string } },
+    ]
+    expect(encoded.name).toBe(body.metadata.name)
+    expect(encoded.namespace).toBe('channels')
+  })
+
+  it('offers no manifest until the Slack App Name is set', async () => {
+    // The app name is the manifest's display_information.name. Emitting one with a
+    // placeholder would install an app under a name the operator never chose.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+  })
+})

@@ -2,11 +2,6 @@ import { useCallback, useEffect, useRef } from 'react'
 import { CHAT_NEAR_BOTTOM_THRESHOLD_PX } from '@constants/agents'
 import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
 
-/**
- * Distance (px) from the bottom of the scroll container within which we still
- * treat the user as "following" the conversation and auto-scroll on new content.
- * Beyond it, the user is reading history and we must NOT yank them down (B4-a).
- */
 interface UseChatScrollParams {
   selectedAgent: string | null
   activeChatId: string | null
