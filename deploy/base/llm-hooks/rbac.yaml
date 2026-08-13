@@ -56,3 +56,33 @@ subjects:
   - kind: ServiceAccount
     name: host-context-controller
     namespace: control-plane
+---
+# --- Role: control-api (llm-hooks namespace) ---
+# The install-hook saga (control-api) mints the hook's credential Secret in
+# llm-hooks and deletes it on rollback/uninstall. LlmHook CR create/delete is
+# granted cluster-wide (deploy/base/cluster-wide/clusterroles.yaml); Secret
+# access is namespace-scoped here, mirroring control-api's mcp-host/control-plane
+# secret Roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-secrets
+  namespace: llm-hooks
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-secrets
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-secrets
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane
