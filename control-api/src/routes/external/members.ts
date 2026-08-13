@@ -3,6 +3,8 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
@@ -31,6 +33,7 @@ export function createExternalMembersRouter(): Router {
 
   router.get(
     '/external/members/manageable-teams',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_read', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const userId = currentUserId(req)
@@ -42,87 +45,104 @@ export function createExternalMembersRouter(): Router {
     }
   )
 
-  router.get('/external/members', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const userId = currentUserId(req)
-      if (!userId) return res.status(403).json({ error: 'Forbidden' })
-      return res.status(200).json({ items: await listManagedMembersForUser(userId) })
-    } catch (error) {
-      return next(error)
-    }
-  })
-
-  router.get('/external/members/invitations', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const userId = currentUserId(req)
-      if (!userId) return res.status(403).json({ error: 'Forbidden' })
-      return res.status(200).json({ items: await listManagedPendingInvitationsForUser(userId) })
-    } catch (error) {
-      return next(error)
-    }
-  })
-
-  router.get('/external/members/:userId', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const managerUserId = currentUserId(req)
-      if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-      const items = await listManagedMembersForUser(managerUserId, req.params.userId)
-      const member = items[0] || null
-      if (!member) return res.status(404).json({ error: 'not_found' })
-      return res.status(200).json(member)
-    } catch (error) {
-      return next(error)
-    }
-  })
-
-  router.post('/external/members/invitations', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const managerUserId = currentUserId(req)
-      if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const name = String(req.body?.name || '').trim()
-      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-      if (!EMAIL_PATTERN.test(email)) {
-        return res.status(400).json({ error: 'invalid_email' })
+  router.get(
+    '/external/members',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_read', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
+      try {
+        const userId = currentUserId(req)
+        if (!userId) return res.status(403).json({ error: 'Forbidden' })
+        return res.status(200).json({ items: await listManagedMembersForUser(userId) })
+      } catch (error) {
+        return next(error)
       }
-      if (name.length > MAX_INVITEE_NAME_LENGTH) {
-        return res.status(400).json({ error: 'invalid_name' })
+    }
+  )
+
+  router.get(
+    '/external/members/invitations',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_read', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
+      try {
+        const userId = currentUserId(req)
+        if (!userId) return res.status(403).json({ error: 'Forbidden' })
+        return res.status(200).json({ items: await listManagedPendingInvitationsForUser(userId) })
+      } catch (error) {
+        return next(error)
       }
-      if (teams.length > MAX_INVITATION_TEAM_ASSIGNMENTS) {
-        return res.status(400).json({ error: 'too_many_teams' })
+    }
+  )
+
+  router.get(
+    '/external/members/:userId',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_read', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
+      try {
+        const managerUserId = currentUserId(req)
+        if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
+        const items = await listManagedMembersForUser(managerUserId, req.params.userId)
+        const member = items[0] || null
+        if (!member) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(member)
+      } catch (error) {
+        return next(error)
       }
-      const teamAssignments = teams
-        .map((item: unknown) => {
-          const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-          const teamId = String(row.teamId || row.id || '').trim()
-          const role = normalizeTeamRoleInput(row.role) || 'member'
-          return teamId ? { teamId, role } : null
-        })
-        .filter((item): item is { teamId: string; role: 'admin' | 'inviter' | 'member' } =>
-          Boolean(item)
+    }
+  )
+
+  router.post(
+    '/external/members/invitations',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
+      try {
+        const managerUserId = currentUserId(req)
+        if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const name = String(req.body?.name || '').trim()
+        const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
+        if (!EMAIL_PATTERN.test(email)) {
+          return res.status(400).json({ error: 'invalid_email' })
+        }
+        if (name.length > MAX_INVITEE_NAME_LENGTH) {
+          return res.status(400).json({ error: 'invalid_name' })
+        }
+        if (teams.length > MAX_INVITATION_TEAM_ASSIGNMENTS) {
+          return res.status(400).json({ error: 'too_many_teams' })
+        }
+        const teamAssignments = teams
+          .map((item: unknown) => {
+            const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+            const teamId = String(row.teamId || row.id || '').trim()
+            const role = normalizeTeamRoleInput(row.role) || 'member'
+            return teamId ? { teamId, role } : null
+          })
+          .filter((item): item is { teamId: string; role: 'admin' | 'inviter' | 'member' } =>
+            Boolean(item)
+          )
+        const result = await createManagedInvitationForUser(
+          managerUserId,
+          email,
+          teamAssignments,
+          name
         )
-      const result = await createManagedInvitationForUser(
-        managerUserId,
-        email,
-        teamAssignments,
-        name
-      )
-      if ('error' in result) {
-        if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-        return res.status(400).json({ error: 'invalid_payload' })
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          return res.status(400).json({ error: 'invalid_payload' })
+        }
+        return res
+          .status(201)
+          .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
+      } catch (error) {
+        return next(error)
       }
-      return res
-        .status(201)
-        .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
-    } catch (error) {
-      return next(error)
     }
-  })
+  )
 
   router.post(
     '/external/members/invitations/:invitationId/resend',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const managerUserId = currentUserId(req)
@@ -141,6 +161,7 @@ export function createExternalMembersRouter(): Router {
 
   router.delete(
     '/external/members/invitations/:invitationId',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const managerUserId = currentUserId(req)
@@ -159,6 +180,7 @@ export function createExternalMembersRouter(): Router {
 
   router.patch(
     '/external/members/:userId/teams/:teamId/role',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const managerUserId = currentUserId(req)
@@ -186,28 +208,33 @@ export function createExternalMembersRouter(): Router {
     }
   )
 
-  router.delete('/external/members/:userId', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const managerUserId = currentUserId(req)
-      if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-      const result = await deleteManagedUserForUser(managerUserId, req.params.userId)
-      if ('error' in result) {
-        if (result.error === 'forbidden_uncontrolled_teams') {
-          return res.status(403).json({ error: 'forbidden_uncontrolled_teams' })
+  router.delete(
+    '/external/members/:userId',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
+      try {
+        const managerUserId = currentUserId(req)
+        if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
+        const result = await deleteManagedUserForUser(managerUserId, req.params.userId)
+        if ('error' in result) {
+          if (result.error === 'forbidden_uncontrolled_teams') {
+            return res.status(403).json({ error: 'forbidden_uncontrolled_teams' })
+          }
+          if (result.error === 'invalid_target') {
+            return res.status(400).json({ error: 'invalid_target' })
+          }
+          return res.status(404).json({ error: 'not_found' })
         }
-        if (result.error === 'invalid_target') {
-          return res.status(400).json({ error: 'invalid_target' })
-        }
-        return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(result.deleted)
+      } catch (error) {
+        return next(error)
       }
-      return res.status(200).json(result.deleted)
-    } catch (error) {
-      return next(error)
     }
-  })
+  )
 
   router.delete(
     '/external/members/:userId/teams/:teamId',
+    rateLimitMiddleware(externalUserRateLimitOptions('member_mutation', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const managerUserId = currentUserId(req)
