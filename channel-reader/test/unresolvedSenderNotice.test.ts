@@ -94,7 +94,7 @@ describe('authorizeProviderMessage response shape', () => {
 interface BuildReaderOptions {
   /** Omit the key entirely for the default; pass `undefined` for "no reason at all". */
   reason?: 'unresolved' | 'error'
-  medium?: 'slack' | 'telegram'
+  medium?: 'slack' | 'telegram' | 'teams'
   ephemeralThrows?: boolean
   profileUiUrl?: string
 }
@@ -120,13 +120,14 @@ function buildReader(options: BuildReaderOptions = {}) {
   const sendEphemeral = vi.fn(async (_channelId: string, _userId: string, _content: string) => {
     if (ephemeralThrows) throw new Error('user_not_in_channel')
   })
+  const sendMessage = vi.fn(async () => undefined)
 
   const adapter: ChannelAdapter = {
     channelType: medium,
     connect: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
     fetchMessages: vi.fn(async () => []),
-    sendMessage: vi.fn(async () => undefined),
+    sendMessage,
     editMessage: vi.fn(async () => undefined),
     sendEphemeral,
   }
@@ -194,8 +195,8 @@ function buildReader(options: BuildReaderOptions = {}) {
   // contain a throwing adapter itself, so an escaped throw must surface here as a
   // rejected promise rather than being absorbed by the harness.
   const deliver = async (
-    channelId: string,
-    userId: string,
+    channelId = 'C1',
+    userId = 'U1',
     workspaceId = 'T1',
     providerChannelId = channelId
   ): Promise<void> =>
@@ -213,6 +214,7 @@ function buildReader(options: BuildReaderOptions = {}) {
     deliverBatch,
     runSweep,
     sendEphemeral,
+    sendMessage,
     adapter,
     authorizeProviderMessage,
   }
@@ -339,6 +341,42 @@ describe('unresolved sender notice', () => {
   it('never sends for a non-Slack medium', async () => {
     const { deliver, sendEphemeral } = buildReader({ medium: 'telegram' })
     await deliver('C1', 'U1')
+    expect(sendEphemeral).not.toHaveBeenCalled()
+  })
+})
+
+describe('unresolved sender notice on Teams', () => {
+  it('sends a threaded notice to an unresolved Teams sender', async () => {
+    const { deliver, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.test',
+    })
+
+    await deliver()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [channelId, content, replyToMessageId] = sendMessage.mock.calls[0]
+    expect(channelId).toBe('C1')
+    expect(content).toContain('https://profile.test')
+    // Threading is the whole mitigation for Teams having no ephemeral concept:
+    // a top-level post would announce the notice to the entire channel.
+    expect(replyToMessageId).toBeTruthy()
+  })
+
+  it('sends the Teams notice at most once per user per conversation', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'teams' })
+
+    await deliver()
+    await deliver()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not use sendEphemeral for Teams', async () => {
+    const { deliver, sendEphemeral } = buildReader({ medium: 'teams' })
+
+    await deliver()
+
     expect(sendEphemeral).not.toHaveBeenCalled()
   })
 })

@@ -102,6 +102,9 @@ const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
   "I can't accept messages from this Slack account. If you haven't linked it yet, " +
   'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+const UNRESOLVED_NOTICE_COPY_TEAMS =
+  "I can't accept messages from this Teams account. If you haven't linked it yet, " +
+  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
 const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
@@ -1550,11 +1553,11 @@ export class ChannelReader {
   }
 
   /**
-   * Tell an unresolved Slack sender why the agent is ignoring them, at most once
-   * per user per conversation per UNRESOLVED_NOTICE_TTL_MS.
+   * Tell an unresolved Slack or Teams sender why the agent is ignoring them, at
+   * most once per user per conversation per UNRESOLVED_NOTICE_TTL_MS.
    */
   private async sendUnresolvedSenderNotice(msg: Message): Promise<void> {
-    if (msg.channelType !== 'slack') return
+    if (msg.channelType !== 'slack' && msg.channelType !== 'teams') return
     const identity = msg.providerIdentity
     const userId = identity?.providerUserId?.trim()
     const workspaceId = identity?.providerWorkspaceId?.trim()
@@ -1572,11 +1575,21 @@ export class ChannelReader {
     this.unresolvedNoticesSent.set(key, { seenAt: Date.now() })
 
     const adapter = this.adapterForMessage(msg)
-    if (!adapter?.sendEphemeral) return
+    if (!adapter) return
     const profileUrl = config.profileUiUrl?.trim()
-    const content = profileUrl ? `${UNRESOLVED_NOTICE_COPY} ${profileUrl}` : UNRESOLVED_NOTICE_COPY
+    const baseCopy =
+      msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
+    const content = profileUrl ? `${baseCopy} ${profileUrl}` : baseCopy
     try {
-      await adapter.sendEphemeral(channelId, userId, content)
+      if (msg.channelType === 'teams') {
+        // TeamsAdapter has no ephemeral concept, so the notice is a normal message.
+        // Thread it under the triggering message so an unconnected user does not
+        // produce a top-level post in a shared channel.
+        await adapter.sendMessage(channelId, content, msg.messageId)
+      } else {
+        if (!adapter.sendEphemeral) return
+        await adapter.sendEphemeral(channelId, userId, content)
+      }
     } catch (error) {
       // Contain the failure HERE. SlackAdapter swallows its own errors today, but
       // the ChannelAdapter interface promises nothing, and this runs inside the
