@@ -100,6 +100,18 @@ describe('ClaudeProvider.classifyError', () => {
     expect(provider.classifyError(err).code).toBe(LlmErrorCode.ApiCallFailed)
   })
 
+  it('surfaces the inner modeled type as providerCode for an unmapped enveloped error (R1-L1)', () => {
+    // Derived from the real SDK constructor: `.error` is the FULL envelope, so a
+    // fallthrough that reads the outer level gets the constant 'error' instead of
+    // the real modeled type. invalid_request_error is not in the byType switch, so
+    // it falls through to the shared HTTP classifier.
+    const err = anthropicApiError(400, 'invalid_request_error', 'messages.0.role: Field required')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(c.providerCode).toBe('invalid_request_error')
+    expect(c.providerCode).not.toBe('error')
+  })
+
   it('falls back to unknown for plain Error', () => {
     const result = provider.classifyError(new Error('socket closed'))
     expect(result).toEqual({

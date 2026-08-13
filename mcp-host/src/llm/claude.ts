@@ -102,14 +102,24 @@ export class ClaudeProvider implements SingleTurnProvider {
 
     const httpClassification = classifyByHttpStatus(err)
     if (httpClassification) {
+      // The shared classifier recovers providerCode from the OUTER envelope,
+      // where Anthropic's modeled type is the constant 'error'. When the SDK gave
+      // us the inner modeled type, prefer it so an unmapped Anthropic error (e.g.
+      // invalid_request_error / authentication_error) surfaces its real code
+      // instead of 'error' (R1-L1). No-op on non-enveloped shapes, where bodyType
+      // already equals the shared classifier's providerCode.
+      const classified =
+        bodyType && httpClassification.providerCode !== bodyType
+          ? { ...httpClassification, providerCode: bodyType }
+          : httpClassification
       // Anthropic quirk: insufficient credit is reported as HTTP 400
       // (not 402), detectable only by message substring.
       if (
-        httpClassification.code === LlmErrorCode.ApiCallFailed &&
-        /credit balance is too low/i.test(httpClassification.message)
+        classified.code === LlmErrorCode.ApiCallFailed &&
+        /credit balance is too low/i.test(classified.message)
       ) {
         return {
-          ...httpClassification,
+          ...classified,
           code: LlmErrorCode.InsufficientQuota,
           retryable: false,
           // Prefer the inner-level message: on a real Anthropic envelope the
@@ -117,7 +127,7 @@ export class ClaudeProvider implements SingleTurnProvider {
           message: rawMsg,
         }
       }
-      return httpClassification
+      return classified
     }
     return classifyUnknown(err)
   }
