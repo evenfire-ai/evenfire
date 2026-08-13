@@ -11,6 +11,8 @@ export type ExternalUserRateLimitOperation =
   | 'access_capabilities'
   | 'oauth_grant_read'
   | 'oauth_grant_mutation'
+  | 'member_read'
+  | 'member_mutation'
 
 export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
@@ -29,6 +31,8 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
   access_capabilities: { bucketType: 'external_access_capabilities', maxPerMinute: 10 },
   oauth_grant_read: { bucketType: 'external_oauth_grant_read', maxPerMinute: 30 },
   oauth_grant_mutation: { bucketType: 'external_oauth_grant_mutation', maxPerMinute: 10 },
+  member_read: { bucketType: 'external_member_read', maxPerMinute: 30 },
+  member_mutation: { bucketType: 'external_member_mutation', maxPerMinute: 10 },
 }
 
 function boundedIp(req: Request): string {
