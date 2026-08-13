@@ -86,6 +86,18 @@ evade the per-IP budget.
 
 ## End-to-end shape
 
+The PR-level architecture complement is available as an editable source plus
+SVG/PNG exports. It separates the client, edge/authority, writer/persistence,
+storage, and recovery paths so the Cloudflare per-request boundary and the
+`outcome_unknown` reconciliation rule are visible without implying a single
+200 MiB request:
+
+![GFS Upload v2 PR #311 architecture](diagrams/gfs-upload-v2-pr311.png)
+
+- [Editable diagram source](diagrams/gfs-upload-v2-pr311.json)
+- [SVG export](diagrams/gfs-upload-v2-pr311.svg)
+- [PNG export](diagrams/gfs-upload-v2-pr311.png)
+
 ```text
 Control UI / Desktop
   -> authenticated capabilities + small JSON session create
