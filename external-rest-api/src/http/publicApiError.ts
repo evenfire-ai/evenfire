@@ -53,6 +53,11 @@ const ALLOWED_CODES_BY_STATUS: Readonly<Record<number, ReadonlySet<string>>> = {
 }
 
 type PublicPathDescriptor = { id: string; kind: 'direct' | 'team'; teamId?: string }
+export type SanitizedControlApiPublicError = {
+  status: number
+  body: Record<string, unknown>
+  headers: Record<string, string>
+}
 
 const SAFE_DOMAIN_REASONS = new Set([
   'agent_manager_forbidden',
@@ -62,6 +67,26 @@ const SAFE_DOMAIN_REASONS = new Set([
   'escalation_rejected',
   'manage_acl_required',
 ])
+
+const PUBLIC_RATE_LIMIT_HEADERS = [
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+] as const
+
+function safePublicRateLimitHeaders(headers: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const name of PUBLIC_RATE_LIMIT_HEADERS) {
+    const raw = headers[name]
+    if (!raw || !/^\d{1,10}$/.test(raw)) continue
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value < 0) continue
+    if (name === 'retry-after' && (value < 1 || value > 86_400)) continue
+    result[name] = String(value)
+  }
+  return result
+}
 
 function safeInvalidIndexes(value: unknown): number[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) return undefined
@@ -90,7 +115,7 @@ function safePathDescriptors(value: unknown): PublicPathDescriptor[] | undefined
 export function sanitizeControlApiPublicError(
   error: unknown,
   propagatedStatuses: ReadonlySet<number>
-): { status: number; body: Record<string, unknown> } | null {
+): SanitizedControlApiPublicError | null {
   if (!(error instanceof ControlApiError) || !propagatedStatuses.has(error.status)) return null
   const rawBody =
     error.body && typeof error.body === 'object'
@@ -131,7 +156,11 @@ export function sanitizeControlApiPublicError(
     reason === 'subjects_invalid'
       ? safeInvalidIndexes(rawDetails?.invalidIndexes ?? rawBody?.invalidIndexes)
       : undefined
-  const rawRetryAfterSeconds = rawDetails?.retryAfterSeconds ?? rawBody?.retryAfterSeconds
+  const headerRetryAfterSeconds = Number(error.responseHeaders['retry-after'])
+  const rawRetryAfterSeconds =
+    rawDetails?.retryAfterSeconds ??
+    rawBody?.retryAfterSeconds ??
+    (Number.isSafeInteger(headerRetryAfterSeconds) ? headerRetryAfterSeconds : undefined)
   const retryAfterSeconds =
     code === 'rate_limited' &&
     typeof rawRetryAfterSeconds === 'number' &&
@@ -152,6 +181,7 @@ export function sanitizeControlApiPublicError(
 
   return {
     status: error.status,
+    headers: code === 'rate_limited' ? safePublicRateLimitHeaders(error.responseHeaders) : {},
     body: {
       error: {
         code,
@@ -162,6 +192,16 @@ export function sanitizeControlApiPublicError(
       },
     },
   }
+}
+
+export function sendSanitizedControlApiPublicError(
+  res: Response,
+  sanitized: SanitizedControlApiPublicError
+): void {
+  for (const [name, value] of Object.entries(sanitized.headers)) {
+    res.setHeader(name, value)
+  }
+  res.status(sanitized.status).json(sanitized.body)
 }
 
 export function publicCorrelationId(req: Request): string {
