@@ -1,6 +1,11 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  CONTROL_CHAR_RE,
+  DISPLAY_FIELD_MAX_LENGTH,
+  validateDisplayField,
+} from '@clerum/display-field'
 import { ChannelCredentialsPanel } from '@/components/ChannelCredentialsPanel'
 import type { CredentialDraft } from '@/components/ChannelCredentialsPanel/types'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
@@ -236,6 +241,31 @@ function secretSlugConstraintMessage(rawName: string): string | null {
   return null
 }
 
+// The free-text display value the server stores as spec.host — the operator's
+// trimmed name, or the derived slug when the trimmed name is empty. This is the
+// exact value submitAll writes (`hostName.trim() || toKebabCase(hostName)`), so
+// the gate validates precisely what the server will validate.
+function displayHostValue(rawHostName: string): string {
+  return rawHostName.trim() || toKebabCase(rawHostName)
+}
+
+// Human-readable reason the free-text spec.host display value is rejected, or
+// null when it is acceptable. The RULE of validity is owned by the shared
+// @clerum/display-field package (the SAME rule the server applies, D4); this
+// function only maps the machine issue to a user-facing message. The "empty"
+// case is intentionally NOT surfaced here — a hostName that derives a non-empty
+// slug is never display-empty, and the empty case is already covered by the
+// slug "Agent name must contain letters or numbers." message.
+function displayHostPreflightMessage(rawHostName: string): string | null {
+  const value = displayHostValue(rawHostName)
+  if (!validateDisplayField(value, 'spec.host')) return null
+  if (CONTROL_CHAR_RE.test(value))
+    return "Agent name can't contain control or formatting characters."
+  if (value.trim().length > DISPLAY_FIELD_MAX_LENGTH)
+    return `Agent name is too long (max ${DISPLAY_FIELD_MAX_LENGTH} characters).`
+  return null
+}
+
 function isStepValid(
   stepIndex: number,
   state: {
@@ -276,6 +306,11 @@ function isStepValid(
     // overwrite that agent's entire spec and still report "created". Gating here
     // stops the collision BEFORE any sibling (secret/context/channel) is created.
     if (state.existingHostNames.includes(toKebabCase(state.hostName))) return false
+    // Gate the free-text display value (spec.host) too: toKebabCase strips
+    // control/bidi chars, so a name like "agent‮name" derives a clean slug
+    // yet its display value carries a character the server rejects (422) AFTER
+    // the secret/context are created — orphaning them. Mirror that rule here.
+    if (validateDisplayField(displayHostValue(state.hostName), 'spec.host')) return false
     return true
   }
   if (stepIndex === 1) {
@@ -710,6 +745,8 @@ export function HostWizard({
     if (step === 0 && slugConstraintMessage(hostName)) return slugConstraintMessage(hostName)!
     if (step === 0 && existingHostNames.includes(toKebabCase(hostName)))
       return 'Identifier already in use — choose another name.'
+    if (step === 0 && displayHostPreflightMessage(hostName))
+      return displayHostPreflightMessage(hostName)!
     if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
       return 'Select an existing context.'
     if (step === 1 && contextMode === 'new' && !toKebabCase(contextName))
@@ -872,6 +909,27 @@ export function HostWizard({
       // any sibling (secret/context/channel) so a collision never orphans them.
       if (existingHostNames.includes(normalizedHostName)) {
         throw new Error('Identifier already in use — choose another name.')
+      }
+      // Hard preflight — defense in depth for the step gates (R5-H1). Everything
+      // the server validates is checked HERE, before the first apiSend, so a
+      // value the server would reject can never leave an orphaned sibling
+      // (secret/context/channel) ahead of the failing host create. This is
+      // purely additive: no write ordering or upsert behavior changes.
+      const displayHostIssue = validateDisplayField(displayHostValue(hostName), 'spec.host')
+      if (displayHostIssue) {
+        throw new Error(displayHostPreflightMessage(hostName) || 'Agent name is not valid.')
+      }
+      if (!isValidResourceSlug(hostName)) {
+        throw new Error('Agent name is not a valid identifier.')
+      }
+      if (contextMode === 'new' && !isValidResourceSlug(contextName)) {
+        throw new Error('Context name is not a valid identifier.')
+      }
+      if (!shouldSkipChannels && channelMode === 'new' && !isValidResourceSlug(channelName)) {
+        throw new Error('Channel name is not a valid identifier.')
+      }
+      if (secretMode === 'new' && !isValidDNSSubdomain(toKebabCase(newSecretName))) {
+        throw new Error('Secret name is not a valid identifier.')
       }
       const normalizedContextName = toKebabCase(contextName)
       const resolvedContextName =
