@@ -1105,6 +1105,68 @@ describe('routes/profile', () => {
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
 
+  it('keeps legacy RPC issuance bound to the documented body session token', async () => {
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'unexpected-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).post('/external/rpc/token')
+    ).send({ scopes: ['host:message:invoke'], hostRefs: ['agent-a'] })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('uses the body session when legacy RPC header and body credentials conflict', async () => {
+    const bodySessionToken = signExternalSessionToken({
+      userId: 'body-user',
+      email: 'body@example.com',
+      teamId: null,
+      role: 'member',
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'body-user', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'body-user-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).post('/external/rpc/token')
+    ).send({
+      sessionToken: bodySessionToken,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+    })
+
+    expect(response.status).toBe(200)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'body-user', teamId: null, role: 'member' },
+      ['host:message:invoke'],
+      ['agent-a'],
+      []
+    )
+  })
+
   it('rate limits user-directory reads before listing teams', async () => {
     rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
       allowed: false,

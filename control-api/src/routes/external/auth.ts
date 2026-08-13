@@ -81,6 +81,38 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
   next()
 }
 
+async function requireLegacyRpcSessionRateLimitContext(
+  req: ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const sessionToken = String(req.body?.sessionToken || '').trim()
+  if (!sessionToken || sessionToken.length > 4096) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  try {
+    const authentication = await authenticateExternalUserSession(sessionToken, {
+      purpose: 'rpc_legacy',
+      client: externalSessionClient(req),
+    })
+    if (authentication.status === 'upgrade_required') {
+      res.status(426).json({ error: 'upgrade_required' })
+      return
+    }
+    if (authentication.status !== 'authenticated') {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    req.externalAuth = authentication.claims
+    req.externalSessionAuthority = authentication.authorityContext
+    req.externalSessionAuthentication = authentication
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
 
@@ -480,10 +512,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/rpc/token',
     rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'pre_auth')),
-    requireExternalSessionRateLimitContext({
-      purpose: 'rpc_legacy',
-      client: externalSessionClient,
-    }),
+    requireLegacyRpcSessionRateLimitContext,
     requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
