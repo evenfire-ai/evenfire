@@ -11,7 +11,12 @@ import {
   getRecipeSecrets,
   getRecipes,
 } from '../lib/api'
-import { createEmptyLlmKeyDraft, validateLlmSecretData } from '../lib/llm'
+import {
+  createEmptyLlmKeyDraft,
+  getProviderLabel,
+  getProvidersWithCompleteCredentials,
+  validateLlmSecretData,
+} from '../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmCredentialFields } from './LlmCredentialFields'
@@ -35,6 +40,7 @@ type McpSecretRow = {
   name: string
   servers: string[]
   registryEntries: string[]
+  registrySources: Array<{ name: string; version: string }>
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
@@ -137,8 +143,13 @@ export function SecretsTable({
   const normalizedLlmSearch = llmSearchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
     if (!normalizedLlmSearch) return rows
-    return rows.filter(name => name.toLowerCase().includes(normalizedLlmSearch))
-  }, [normalizedLlmSearch, rows])
+    return rows.filter(name => {
+      const providerNames = getProvidersWithCompleteCredentials(keysByName.get(name) ?? []).map(
+        getProviderLabel
+      )
+      return [name, ...providerNames].join(' ').toLowerCase().includes(normalizedLlmSearch)
+    })
+  }, [keysByName, normalizedLlmSearch, rows])
 
   const normalizedMcpSearch = mcpSearchQuery.trim().toLowerCase()
   const filteredMcpRows = useMemo(() => {
@@ -263,10 +274,13 @@ export function SecretsTable({
     setMcpError('')
     try {
       const result = await getMcpServers()
-      const usage = new Map<string, { servers: Set<string>; registryEntries: Set<string> }>()
+      const usage = new Map<
+        string,
+        { servers: Set<string>; registrySources: Map<string, { name: string; version: string }> }
+      >()
       const addSecret = (secretName: string) => {
         if (!usage.has(secretName)) {
-          usage.set(secretName, { servers: new Set<string>(), registryEntries: new Set<string>() })
+          usage.set(secretName, { servers: new Set<string>(), registrySources: new Map() })
         }
         return usage.get(secretName)!
       }
@@ -290,16 +304,25 @@ export function SecretsTable({
         const catalogVersion =
           annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version']
         if (catalogId && catalogVersion) {
-          row.registryEntries.add(`${catalogId}@${catalogVersion}`)
+          row.registrySources.set(`${catalogId}@${catalogVersion}`, {
+            name: catalogId,
+            version: catalogVersion,
+          })
         }
       }
 
       const nextRows = Array.from(usage.entries())
-        .map(([name, details]) => ({
-          name,
-          servers: Array.from(details.servers).sort((a, b) => a.localeCompare(b)),
-          registryEntries: Array.from(details.registryEntries).sort((a, b) => a.localeCompare(b)),
-        }))
+        .map(([name, details]) => {
+          const registrySources = Array.from(details.registrySources.values()).sort((a, b) =>
+            `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`)
+          )
+          return {
+            name,
+            servers: Array.from(details.servers).sort((a, b) => a.localeCompare(b)),
+            registryEntries: registrySources.map(source => `${source.name}@${source.version}`),
+            registrySources,
+          }
+        })
         .sort((a, b) => a.name.localeCompare(b.name))
 
       setMcpRows(nextRows)
@@ -583,6 +606,7 @@ export function SecretsTable({
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Providers</th>
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
@@ -594,6 +618,9 @@ export function SecretsTable({
                         className="cu-skeleton cu-skeleton--cell"
                         style={{ width: `${55 + ((idx * 13) % 25)}%` }}
                       />
+                    </td>
+                    <td>
+                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '8rem' }} />
                     </td>
                     <td>
                       <div
@@ -616,38 +643,55 @@ export function SecretsTable({
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Providers</th>
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map(name => (
-                  <tr key={name}>
-                    <td>{name}</td>
-                    <td style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={() => openUpdate(name)}
-                          aria-label={`Update LLM secret ${name}`}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </button>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void deleteSecret(name)}
-                          disabled={deletingName === name}
-                          aria-label={
-                            deletingName === name ? 'Deleting…' : `Delete LLM secret ${name}`
-                          }
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filteredRows.map(name => {
+                  const providers = getProvidersWithCompleteCredentials(keysByName.get(name) ?? [])
+                  return (
+                    <tr key={name}>
+                      <td>{name}</td>
+                      <td>
+                        {providers.length > 0 ? (
+                          <div className="cu-chip-row" aria-label={`Providers for ${name}`}>
+                            {providers.map(provider => (
+                              <span key={provider} className="cu-chip">
+                                {getProviderLabel(provider)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--cu-text-soft)' }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--toolbar"
+                            onClick={() => openUpdate(name)}
+                            aria-label={`Update LLM secret ${name}`}
+                          >
+                            <IconPencil width={16} height={16} />
+                          </button>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                            onClick={() => void deleteSecret(name)}
+                            disabled={deletingName === name}
+                            aria-label={
+                              deletingName === name ? 'Deleting…' : `Delete LLM secret ${name}`
+                            }
+                          >
+                            <IconX width={16} height={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -717,9 +761,18 @@ export function SecretsTable({
                       <button
                         type="button"
                         className="cu-btn cu-btn--primary cu-btn--sm"
-                        onClick={() =>
-                          router.push(CONTROL_ROUTES.secrets.new({ scope: 'mcp', name: row.name }))
-                        }
+                        onClick={() => {
+                          const source =
+                            row.registrySources.length === 1 ? row.registrySources[0] : undefined
+                          router.push(
+                            CONTROL_ROUTES.secrets.new({
+                              scope: 'mcp',
+                              name: row.name,
+                              registryEntry: source?.name,
+                              registryVersion: source?.version,
+                            })
+                          )
+                        }}
                         aria-label={`Add connector secret ${row.name}`}
                       >
                         Add

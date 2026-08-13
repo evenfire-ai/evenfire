@@ -7,6 +7,7 @@ import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 
 const confirmDialogHarness = vi.hoisted(() => ({
+  rendered: vi.fn(),
   props: null as null | {
     title: string
     onCancel: () => void
@@ -44,6 +45,7 @@ vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
+    confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
     return null
   },
@@ -214,6 +216,14 @@ describe('App deep-link orchestration', () => {
     })
   }
 
+  async function confirmPendingAppLink(): Promise<void> {
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+  }
+
   it('keeps logged-out app links pending until the user confirms after login', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
@@ -240,6 +250,13 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
 
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(confirmDialogHarness.props).toBeNull()
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
     currentController = makeController({ initialExperienceLoading: false })
     rerender(<App />)
 
@@ -256,13 +273,95 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
-  it('purges user A links synchronously before user B can process them', async () => {
+  it('requires confirmation before navigating an authenticated app link', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+  })
+
+  it('acknowledges an authenticated app link when confirmation is cancelled', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+  })
+
+  it('does not duplicate an authenticated confirmation for the same link id', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
+    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it('never presents a user A link after user B becomes authenticated', async () => {
     const { rerender } = render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
-      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-a' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/user-a-app', teamId: 'team-a' })
     })
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    confirmDialogHarness.rendered.mockClear()
 
     currentController = makeController({
       initialExperienceLoading: false,
@@ -280,8 +379,17 @@ describe('App deep-link orchestration', () => {
     })
     rerender(<App />)
 
+    expect(confirmDialogHarness.rendered).not.toHaveBeenCalled()
     await waitFor(() => expect(clearPendingDeepLinks).toHaveBeenCalledOnce())
     expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    act(() => {
+      emitDeepLink?.({ id: 2, appRef: 'ns/user-b-app', teamId: 'team-b' })
+    })
+    await waitFor(() => expect(confirmDialogHarness.rendered).toHaveBeenCalledOnce())
+    expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+    expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 
@@ -329,6 +437,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
@@ -367,6 +476,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(closeSandboxUi).toHaveBeenCalledOnce()
@@ -399,6 +509,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
 
     await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
@@ -407,7 +518,7 @@ describe('App deep-link orchestration', () => {
       announce: true,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
-      expect.stringContaining("don't have access to the linked team"),
+      "Could not open app link: You don't have access to this app in the linked team",
       'error'
     )
   })
@@ -437,6 +548,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
+    await confirmPendingAppLink()
     await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
     liveTeamId = 'team-c'
     await act(async () => {
@@ -471,12 +583,17 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('bridge unavailable'),
       'error'
+    )
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[Desktop] Could not acknowledge app deep link:',
+      expect.objectContaining({ message: 'bridge unavailable' })
     )
     consoleWarn.mockRestore()
   })
@@ -500,6 +617,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
@@ -532,6 +650,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith(
@@ -549,6 +668,314 @@ describe('App deep-link orchestration', () => {
     await reportShortcutOpenResult()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+  })
+
+  it('keeps the target team during cross-team starting app retries', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    let ready = false
+    listApps.mockImplementation(async () => ({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready,
+          phase: ready ? 'active' : 'deploying',
+        },
+      ],
+    }))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+    ready = true
+    await act(async () => {
+      vi.advanceTimersByTime(2_000)
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('you switched teams'),
+      'error'
+    )
+  })
+
+  it('does not override a manual team switch during a failed cross-team native-mount retry', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+    liveTeamId = 'team-c'
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
+    const nativeMountFailures = vi
+      .mocked(currentController.pushToast)
+      .mock.calls.filter(([message, tone]) => message === 'native mount failed' && tone === 'error')
+    expect(nativeMountFailures).toHaveLength(1)
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('you switched teams'),
+      'error'
+    )
+    expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    expect(liveTeamId).toBe('team-c')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000)
+      await Promise.resolve()
+    })
+    expect(liveTeamId).toBe('team-c')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('retries a transient team-context failure and opens without duplicate mounts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const transientError = Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    const ensureTeamContext = vi
+      .fn()
+      .mockRejectedValueOnce(transientError)
+      .mockImplementation(async ({ teamId }: { teamId?: string }) => {
+        if (!teamId || teamId === liveTeamId) return false
+        liveTeamId = teamId
+        return true
+      })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Could not switch to the linked team yet: fetch failed. This link will retry shortly.',
+        'info'
+      )
+    })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await reportShortcutOpenResult()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
+    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-b')
+  })
+
+  it('keeps a transient team-context failure pending when retry budget is exhausted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const ensureTeamContext = vi.fn(async () => {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Could not switch to the linked team yet: fetch failed. This link will retry shortly.',
+        'info'
+      )
+    })
+
+    for (const [index, delay] of [1_000, 2_000, 4_000, 8_000, 15_000].entries()) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay)
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(index + 2))
+    }
+
+    await waitFor(() => {
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    })
+    expect(ensureTeamContext).toHaveBeenCalledTimes(6)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('does not retry permanent team access failures', async () => {
+    const ensureTeamContext = vi.fn(async () => {
+      throw new Error('403 forbidden: not a member of team-b')
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(confirmDialogHarness.props?.title).not.toBe('App link could not be opened')
   })
 
   it('keeps a failed native mount unacked and continues with later links', async () => {
@@ -577,6 +1004,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    await confirmPendingAppLink()
     await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
 
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
@@ -584,6 +1012,7 @@ describe('App deep-link orchestration', () => {
     act(() => {
       emitDeepLink?.({ id: 2, appRef: 'ns/next' })
     })
+    await confirmPendingAppLink()
     await waitFor(() => {
       expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(1)
     })

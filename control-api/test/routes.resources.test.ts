@@ -119,6 +119,74 @@ describe('routes/resources', () => {
     expect(listRes.body.items[0].spec.contextRef).toBe('ctx-a')
   })
 
+  it('produces the Context list shape consumed by the control UI, including resourceVersion', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const context = {
+      metadata: {
+        name: 'research',
+        namespace: 'mcp-server',
+        resourceVersion: 'rv-context-read',
+      },
+      spec: {
+        contextId: 'research',
+        description: 'Research tools',
+        mcpServers: ['search'],
+        sharedFileSystems: [{ name: 'docs', mountPath: '/docs' }],
+      },
+      status: { sharedFileSystems: [] },
+    }
+    vi.spyOn(gateway, 'listResource').mockResolvedValueOnce([context] as never)
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+
+    const response = await request(app).get('/admin/contexts').expect(200)
+
+    expect(response.body).toEqual({ items: [context] })
+  })
+
+  it('rejects a stale Context membership replacement without changing the winning spec', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    await gateway.createResource(
+      'contexts',
+      {
+        metadata: { name: 'research' },
+        spec: { contextId: 'research', mcpServers: ['winner-connector'] },
+      },
+      config.contextsNamespace
+    )
+
+    const realUpdate = gateway.updateResource.bind(gateway)
+    vi.spyOn(gateway, 'updateResource').mockImplementation(
+      async (plural, name, body, namespace) => {
+        const resourceVersion = (body.metadata as { resourceVersion?: string } | undefined)
+          ?.resourceVersion
+        if (plural === 'contexts' && resourceVersion === 'rv-stale') {
+          throw new K8sConflictError('contexts/research changed since it was read')
+        }
+        return realUpdate(plural, name, body, namespace)
+      }
+    )
+
+    await request(app)
+      .put('/admin/contexts/research')
+      .send({
+        metadata: { resourceVersion: 'rv-stale' },
+        spec: { contextId: 'research', mcpServers: ['stale-connector'] },
+      })
+      .expect(409, { error: 'conflict', reason: 'resource_changed' })
+
+    const stored = (await gateway.getResource(
+      'contexts',
+      'research',
+      config.contextsNamespace
+    )) as { spec: { mcpServers: string[] } }
+    expect(stored.spec.mcpServers).toEqual(['winner-connector'])
+  })
+
   it('filters communication channels by confirmed user id when requested', async () => {
     const gateway = new MockGateway('channels')
     const app = express()

@@ -133,6 +133,82 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(result.current.activeChatId).toBe('chat-2')
     })
 
+    it('opens a remote chat at the bottom after its empty cache hydrates', async () => {
+      vi.useFakeTimers()
+      const hydration = deferred<{
+        agent: string
+        chatId: string
+        state: 'idle'
+        turns: Array<{
+          number: number
+          user_input: string
+          response: string
+          started_at: string
+          completed_at: string
+        }>
+      }>()
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockReturnValue(hydration.promise)
+
+      const { result } = renderController()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      const scrollContainer = document.createElement('div')
+      const anchor = document.createElement('div')
+      let scrollTop = 0
+      Object.defineProperties(scrollContainer, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: 800 },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => {
+            scrollTop = value
+          },
+        },
+      })
+      Object.defineProperty(anchor, 'scrollIntoView', { configurable: true, value: vi.fn() })
+      scrollContainer.append(anchor)
+      document.body.append(scrollContainer)
+      result.current.chatEndRef.current = anchor
+
+      let switching!: Promise<void>
+      await act(async () => {
+        switching = result.current.switchToChat('agent-x', 'chat-remote')
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+
+      // The initial cache scroll ran while the cache was empty. Model a reader
+      // at the top when the remote transcript subsequently renders.
+      scrollTop = 0
+      await act(async () => {
+        hydration.resolve({
+          agent: 'agent-x',
+          chatId: 'chat-remote',
+          state: 'idle',
+          turns: [
+            {
+              number: 1,
+              user_input: 'remote question',
+              response: 'remote answer',
+              started_at: '2026-05-28T10:00:00Z',
+              completed_at: '2026-05-28T10:00:05Z',
+            },
+          ],
+        })
+        await switching
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+
+      expect(scrollTop).toBe(800)
+      scrollContainer.remove()
+    })
+
     it('stops delta pagination when the active chat changes during the first page', async () => {
       clerum.chat.loadMessages.mockImplementation(async (_agentRef: string, chatId: string) =>
         chatId === 'chat-a'

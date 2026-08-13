@@ -236,7 +236,9 @@ export class RPCClient {
     }
   }
 
-  async authorizeProviderMessage(identity: ProviderIdentity): Promise<boolean> {
+  async authorizeProviderMessage(
+    identity: ProviderIdentity
+  ): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/provider-messages/authorize`, {
         method: 'POST',
@@ -248,15 +250,18 @@ export class RPCClient {
         }),
         body: JSON.stringify({ providerIdentity: identity }),
       })
-      if (!response.ok) return false
-      const body = (await response.json()) as { authorized?: unknown }
-      return body.authorized === true
+      if (!response.ok) return { authorized: false }
+      const body = (await response.json()) as { authorized?: unknown; reason?: unknown }
+      if (body.authorized === true) return { authorized: true }
+      return body.reason === 'unresolved' || body.reason === 'error'
+        ? { authorized: false, reason: body.reason }
+        : { authorized: false }
     } catch (error) {
       console.warn(
         '[RPC] Provider message authorization failed closed:',
         error instanceof Error ? error.message : error
       )
-      return false
+      return { authorized: false }
     }
   }
 

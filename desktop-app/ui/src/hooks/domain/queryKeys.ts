@@ -22,4 +22,7 @@ export const desktopQueryKeys = {
     ['desktop-app', 'gfs', sessionScope, 'children', drive, resourceId] as const,
   gfsAffordances: (sessionScope: string, resourceId: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'affordances', drive, resourceId] as const,
+  pluginGrants: ['desktop-app', 'plugin-sdk', 'grants'] as const,
+  pluginActivity: (limit: number) =>
+    ['desktop-app', 'plugin-sdk', 'activity', String(limit)] as const,
 }
