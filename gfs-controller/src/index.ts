@@ -12,6 +12,7 @@ import { InvalidationListener, ListenClient } from "./authz/invalidation";
 import { DbAuditSink, PermissionClient } from "./authz/permissionClient";
 import { createPermissionStoreProbe } from "./authz/storeProbe";
 import { resolveAuthzContext } from "./authz/subjectResolver";
+import { createWriterCleanupRunner } from "./cleanup";
 import { loadConfig } from "./config";
 import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
@@ -178,35 +179,21 @@ async function main(): Promise<void> {
         : undefined;
 
     if (config.storageRole === "writer") {
-      let cleanupRunning = false;
-      const cleanup = async (): Promise<void> => {
-        if (cleanupRunning) return;
-        cleanupRunning = true;
-        try {
-          if (uploadServiceForCleanup) {
-            try {
-              await uploadServiceForCleanup.reconcile();
-            } catch (err) {
-              console.error(`[gfsc] upload reconciliation failed: ${errMsg(err)}`);
-            }
-          }
-          try {
-            await reconcileExpiredBlobs(blobManifests!, blobs, metrics, {
-              olderThanMs: config.blobCleanupSafetyWindowMs,
-              limit: config.blobCleanupBatchSize,
-            });
-          } catch (err) {
-            metrics.recordBlobCleanupFailure();
-            console.error(`[gfsc] blob reconciliation failed: ${errMsg(err)}`);
-          }
-        } finally {
-          cleanupRunning = false;
-        }
-      };
-      runCleanup = cleanup;
-      cleanupTimer = setInterval(() => void cleanup(), config.blobCleanupIntervalMs);
+      runCleanup = createWriterCleanupRunner({
+        reconcileUploads: async () => {
+          await uploadServiceForCleanup?.reconcile();
+        },
+        reconcileBlobs: async () => {
+          await reconcileExpiredBlobs(blobManifests!, blobs, metrics, {
+            olderThanMs: config.blobCleanupSafetyWindowMs,
+            limit: config.blobCleanupBatchSize,
+          });
+        },
+        onBlobFailure: () => metrics.recordBlobCleanupFailure(),
+        log: (message) => console.error(message),
+      });
+      cleanupTimer = setInterval(() => void runCleanup?.(), config.blobCleanupIntervalMs);
       cleanupTimer.unref();
-      void cleanup();
     }
 
     serving = new GfsServingHandler({

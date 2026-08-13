@@ -26,6 +26,12 @@ const GFS_UPLOAD_PART_PATH = new RegExp(`^/api/v1/me/gfs/uploads/${UUID_PATH}/pa
 
 export function createApp() {
   const app = express()
+  // The deployment admits traffic only from the cloudflared ingress namespace
+  // (see deploy/base/profiles/networkpolicies.yaml). That single trusted hop
+  // overwrites the client address before this process, so req.ip is the stable
+  // limiter identity. Direct service exposure would invalidate this contract
+  // and must be rejected by deployment policy rather than by accepting a
+  // caller-controlled X-Forwarded-For chain here.
   app.set('trust proxy', 1)
   app.use(
     cors({

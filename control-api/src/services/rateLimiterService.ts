@@ -183,6 +183,10 @@ type AdvisoryLockKey = {
 
 function advisoryKey(value: string): AdvisoryLockKey {
   const digest = createHash('sha256').update(value).digest()
+  // PostgreSQL's two-int advisory-lock form is one 64-bit lock identity. Keep
+  // both digest halves; only the bounded slot number is folded into the low
+  // half, so the collision domain remains the full 64-bit key (not a single
+  // 32-bit hash).
   return { high: digest.readInt32BE(0), low: digest.readInt32BE(4) }
 }
 
@@ -287,8 +291,8 @@ export async function acquireRateLimitConcurrencyLease(
         for (let slot = 0; slot < requirement.maxConcurrent; slot += 1) {
           // Keep both halves of the SHA-256-derived key in the PostgreSQL
           // advisory lock identity. The slot is folded into the low half so
-          // distinct buckets do not collide merely because their first 32
-          // digest bits match.
+          // distinct slots remain independent without reducing the bucket to
+          // a 32-bit advisory key.
           const key = { high: bucketKey.high, low: bucketKey.low ^ slot }
           const identity = `${key.high}:${key.low}`
           if (heldSlotsFor(client).has(identity)) continue

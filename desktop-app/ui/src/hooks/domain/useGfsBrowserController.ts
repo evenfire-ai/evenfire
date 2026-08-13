@@ -111,6 +111,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadSnapshot | null>(null)
   const uploadIdRef = useRef<string | null>(null)
   const previousSessionScopeRef = useRef<string | null>(null)
+  const uploadRehydrateGenerationRef = useRef(0)
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentIsDirectory = current?.kind === 'directory'
@@ -284,6 +285,47 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       await new Promise(resolve => window.setTimeout(resolve, 500))
     }
   }, [])
+
+  // Persisted Desktop sessions are the source of truth after an app restart.
+  // Rehydrate one scoped session on mount/scope change so FilesPage can render
+  // the same progress and pause/resume/cancel controls it renders for a live
+  // upload. The IPC list is already owner/team/environment/drive scoped; the
+  // second snapshot read supplies the durable byte counters and state.
+  useEffect(() => {
+    const generation = uploadRehydrateGenerationRef.current + 1
+    uploadRehydrateGenerationRef.current = generation
+    if (!sessionScope) {
+      uploadIdRef.current = null
+      setUploadSnapshot(null)
+      return
+    }
+    const listUploadSessions = window.clerum?.gfs?.listUploadSessions
+    if (typeof listUploadSessions !== 'function') return
+    let disposed = false
+    void (async () => {
+      try {
+        const sessions = await listUploadSessions(DRIVE)
+        if (disposed || uploadRehydrateGenerationRef.current !== generation) return
+        const persisted = sessions.find(
+          session =>
+            session.drive === DRIVE &&
+            (session.status === 'active' ||
+              session.status === 'paused' ||
+              session.status === 'suspended_auth')
+        )
+        if (!persisted) return
+        uploadIdRef.current = persisted.uploadId
+        await waitForUpload(persisted.uploadId)
+      } catch (error) {
+        if (!disposed && uploadRehydrateGenerationRef.current === generation) {
+          setOpenError(toMessage(error))
+        }
+      }
+    })()
+    return () => {
+      disposed = true
+    }
+  }, [sessionScope, waitForUpload])
 
   const startFileUpload = useCallback(
     async (input: {

@@ -257,6 +257,65 @@ describe('useGfsBrowserController', () => {
     expect(getUploadSnapshot).not.toHaveBeenCalled()
   })
 
+  it('rehydrates a scoped persisted upload after the renderer mounts', async () => {
+    const listUploadSessions = vi.fn(async () => [
+      {
+        uploadId: 'terminal-upload',
+        fileName: 'done.bin',
+        fileSize: 12,
+        name: 'done.bin',
+        drive: 'main',
+        status: 'failed' as const,
+        target: { operation: 'create' as const, parentRid: 'parent-rid' },
+      },
+      {
+        uploadId: 'persisted-upload',
+        fileName: 'resume.bin',
+        fileSize: 12,
+        name: 'resume.bin',
+        drive: 'main',
+        status: 'suspended_auth' as const,
+        target: { operation: 'create' as const, parentRid: 'parent-rid' },
+      },
+    ])
+    const getUploadSnapshot = vi.fn(async () => ({
+      state: 'suspended_auth' as const,
+      session: {
+        uploadId: 'persisted-upload',
+        state: 'paused',
+        expectedBytes: 12,
+        committedBytes: 8,
+      },
+      uploadedBytes: 8,
+      totalBytes: 12,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listUploadSessions,
+          getUploadSnapshot,
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<UploadProbe />, { wrapper: Harness })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('upload-state').textContent).toBe('suspended_auth')
+    )
+    expect(listUploadSessions).toHaveBeenCalledWith('main')
+    expect(getUploadSnapshot).toHaveBeenCalledWith('persisted-upload', 'main')
+  })
+
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
     let held = ['read']
     const affordances = vi.fn(async () => ({

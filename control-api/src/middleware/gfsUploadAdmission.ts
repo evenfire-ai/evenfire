@@ -122,9 +122,12 @@ function sendRateLimited(res: Response, limit: string, retryAfter: number, max: 
 
 /**
  * Replica-safe upload-v2 admission. Fixed-window request/weighted-byte
- * counters and active-request slots all live in PostgreSQL; the incoming part
+ * counters and active stream slots all live in PostgreSQL; the incoming part
  * stream is not consumed here. `proxyUploadToGfsc` separately counts observed
  * bytes while forwarding so a false Content-Length cannot bypass this charge.
+ * The active slot is intentionally acquired only for a part PUT: lifecycle
+ * reads/actions must remain available to pause, reconcile, or cancel a stream
+ * that is already consuming a slot.
  */
 export function gfsUploadAdmission(
   req: GfsUploadAdmissionRequest,
@@ -207,6 +210,12 @@ export function gfsUploadAdmission(
           return
         }
       }
+    }
+
+    if (!isPart) {
+      gfsUploadAdmissionRequestsTotal.inc({ limit: 'all', result: 'allowed' }, 1)
+      next()
+      return
     }
 
     const lease = await acquireRateLimitConcurrencyLease([

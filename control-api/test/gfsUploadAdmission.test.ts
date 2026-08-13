@@ -260,20 +260,17 @@ describe('GFS upload admission', () => {
     expect(checkMock.mock.calls[1][0]).toBe('gfs-upload:req:ip:203.0.113.7')
   })
 
-  it('returns the same 429 contract when the active-request budget is exhausted', async () => {
+  it('does not consume an active stream slot for lifecycle requests', async () => {
     acquireMock.mockResolvedValueOnce({
       allowed: false,
       backendAvailable: true,
       release: releaseMock,
     })
     const response = await request(buildLifecycleApp()).get('/external/gfs/capabilities')
-    expect(response.status).toBe(429)
-    expect(response.headers['retry-after']).toBe('1')
-    expect(response.body).toEqual({
-      error: 'gfs_upload_rate_limited',
-      limit: 'active_requests',
-      retryAfterSeconds: 1,
-    })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ ok: true })
+    expect(acquireMock).not.toHaveBeenCalled()
+    expect(metricActiveInc).not.toHaveBeenCalled()
   })
 
   it('fails closed when PostgreSQL admission is unavailable', async () => {

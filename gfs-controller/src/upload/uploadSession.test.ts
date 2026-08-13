@@ -207,6 +207,15 @@ class MemoryDb {
       )
       return { rows }
     }
+    if (sql.startsWith('SELECT state, lease_epoch FROM gfs_upload_parts')) {
+      const [uploadId, partNumber] = values
+      return {
+        rows: this.parts.filter(
+          part =>
+            part.upload_id === String(uploadId) && Number(part.part_number) === Number(partNumber)
+        ),
+      }
+    }
     if (sql.startsWith('INSERT INTO gfs_upload_parts')) {
       const [uploadId, partNumber, offset, length, sha, staging, epoch] = values
       const row: Row = {
@@ -409,6 +418,22 @@ class ThrowAfterCommitTransactor implements Transactor {
   }
 }
 
+class ThrowBeforePartCommitTransactor implements Transactor {
+  private transactionCount = 0
+
+  constructor(private readonly delegate: Transactor) {}
+
+  async transaction<T>(
+    fn: (client: TxClient) => Promise<T>,
+    options?: TransactionOptions
+  ): Promise<T> {
+    this.transactionCount += 1
+    if (this.transactionCount === 2)
+      throw new CommitOutcomeUnknownError(new Error('synthetic pre-commit failure'))
+    return this.delegate.transaction(fn, options)
+  }
+}
+
 async function settleWithin<T>(
   promise: Promise<T>,
   timeoutMs = 500
@@ -542,6 +567,43 @@ describe('GfsUploadSessionService', () => {
     expect(session.active_part_count).toBe(1)
     expect(db.parts.find(part => Number(part.part_number) === 0)?.state).toBe('committed')
     expect(db.parts.find(part => Number(part.part_number) === 1)?.state).toBe('reserved')
+  })
+
+  it('removes a rename-before-commit orphan while the reserved lease is still locked', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-orphan-'))
+    const db = new MemoryDb()
+    const tx = new ThrowBeforePartCommitTransactor({ transaction: async fn => fn(db) })
+    const created = await service(db).create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'orphan.bin',
+      sizeBytes: TEST_CONFIG.preferredPartBytes,
+      idempotencyKey: '67676767-6767-4676-8676-676767676767',
+    })
+    const uploads = service(db, TEST_CONFIG, { tx })
+    const payload = Buffer.alloc(TEST_CONFIG.preferredPartBytes, 0x41)
+    const finalPath = join(tempRoot, '.uploads', created.session.uploadId, 'parts', '0.part')
+
+    await expect(
+      uploads.putPart(
+        created.session.uploadId,
+        partGeometry(
+          {
+            expectedBytes: TEST_CONFIG.preferredPartBytes,
+            partBytes: TEST_CONFIG.preferredPartBytes,
+          },
+          0
+        ),
+        createSha(payload),
+        Readable.from([payload]) as never,
+        principal
+      )
+    ).rejects.toBeInstanceOf(CommitOutcomeUnknownError)
+
+    await expect(stat(finalPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(db.parts[0]).toMatchObject({ state: 'failed' })
+    expect(db.sessions[0]).toMatchObject({ active_part_count: 0 })
   })
 
   it('cancels terminally and rejects a conflicting idempotency fingerprint', async () => {

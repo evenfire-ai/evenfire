@@ -325,6 +325,30 @@ describe('AppService GFS upload security scope', () => {
     }
   })
 
+  it('never falls back to a second legacy resource for an explicit resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-explicit-resume-no-fallback-'))
+    try {
+      const filePath = join(root, 'resume.bin')
+      await writeFile(filePath, Buffer.from('resume payload'))
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(
+        new DesktopUploadCapabilityError('resumable uploads are disabled')
+      )
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileUpload('parent-rid', 'resume.bin', filePath, 'main', 'resume-upload-id')
+      ).rejects.toBeInstanceOf(DesktopUploadCapabilityError)
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+      expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('keeps existing upload controls and read state available during a transient team hop', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-transient-controls-'))
     try {
@@ -368,16 +392,11 @@ describe('AppService GFS upload security scope', () => {
     try {
       const statePath = join(root, 'gfs-upload-sessions.json')
       const record = scopedUploadRecord('93939393-9393-4393-8393-939393939393')
+      await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
       const service = authenticatedUploadService(statePath)
-      // The normal state loader converts orphaned active records to
-      // suspended_auth. This injects the already-migrated persisted branch so
-      // the IPC boundary itself is still proven not to leak `active`.
-      ;(service as any).readDesktopGfsUploadState = vi
-        .fn()
-        .mockResolvedValue({ version: 2, records: [record], quarantined: [] })
 
       await expect(service.getGfsUploadSnapshot(record.uploadId, 'main')).resolves.toMatchObject({
-        state: 'uploading',
+        state: 'suspended_auth',
         uploadedBytes: 0,
         totalBytes: 4,
       })

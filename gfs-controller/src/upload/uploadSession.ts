@@ -1013,14 +1013,33 @@ export class GfsUploadSessionService {
       if (reconciliation)
         return { part: reconciliation.part, session: toReceipt(reconciliation.session) }
       await removeIfPresent(stagingPath)
-      if (finalPath && reconciliation !== undefined) await removeIfPresent(finalPath)
       await this.deps.tx
         .transaction(async client => {
+          // A definitive row lock separates a pre-commit failure from an
+          // outcome-unknown commit. Only a still-reserved row with the same
+          // lease may safely lose its computed final path; the lock fences a
+          // fresh reservation from racing that removal.
+          const currentPart = await client.query(
+            `SELECT state, lease_epoch FROM gfs_upload_parts
+              WHERE upload_id = $1 AND part_number = $2 FOR UPDATE`,
+            [uploadId, part.partNumber]
+          )
+          const current = currentPart.rows[0] as
+            | { state?: unknown; lease_epoch?: unknown }
+            | undefined
+          if (
+            !current ||
+            current.state !== 'reserved' ||
+            Number(current.lease_epoch) !== reserved.leaseEpoch
+          )
+            return
+          if (finalPath && !(await removeStrict(finalPath)))
+            throw new Error('could not remove an orphaned committed-part path')
           const failedPart = await client.query(
             `UPDATE gfs_upload_parts SET state = 'failed', committed_at = NULL
-            WHERE upload_id = $1 AND part_number = $2 AND state = 'reserved'
-            RETURNING 1`,
-            [uploadId, part.partNumber]
+              WHERE upload_id = $1 AND part_number = $2 AND state = 'reserved' AND lease_epoch = $3
+              RETURNING 1`,
+            [uploadId, part.partNumber, reserved.leaseEpoch]
           )
           // The commit transaction already decremented the durable counter when
           // it reached PostgreSQL. Only a part that was still reserved needs a

@@ -25,6 +25,10 @@ export function createRateLimiter(options: {
   }, windowMs).unref()
 
   return function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
+    // Each route owns its limiter instance, so auth/me/invitation budgets do
+    // not share counters with GFS. The key is intentionally evaluated after
+    // Express trust-proxy processing; callers must not be allowed to choose a
+    // different X-Forwarded-For chain by reaching this service directly.
     const key = keyFn(req)
     const now = Date.now()
     let bucket = buckets.get(key)
