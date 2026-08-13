@@ -770,6 +770,34 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('HCC-COLDSTART: a provider binding on a FRESH cluster (no catalog CM, no prior policy) fails loud (Ready=False), never crashes or ships a partial policy', async () => {
+      // Clean-install cold start: the seed/catalog ConfigMap does not exist yet
+      // AND there is no pre-existing NetworkPolicy to retain. The reconcile must
+      // fail loud (H3-by-throw) rather than rendering an empty/partial policy or
+      // throwing an UNCAUGHT error — the guarantee that a clean install never
+      // silently ships broken egress.
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockRejectedValue(
+        Object.assign(new Error('not found'), { statusCode: 404 })
+      )
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
+      // Fresh cluster: no NetworkPolicy exists yet.
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+
+      // H3-by-throw: the reconcile REJECTS instead of shipping a partial policy.
+      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+
+      // Nothing partial is created; nothing pre-existing is touched.
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      // The failure is surfaced as ExternalEgressReady=False — not a silent success.
+      expect(JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
+        'ExternalEgressRejected'
+      )
+    })
+
     it('fails closed when ExternalEgressReady status cannot be written', async () => {
       const statusError = new Error('status update denied')
       mockCustomApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce(statusError)

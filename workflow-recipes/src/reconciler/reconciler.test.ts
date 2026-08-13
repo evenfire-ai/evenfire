@@ -10056,6 +10056,50 @@ describe('WorkflowRecipeReconciler', () => {
       expect(provenance).toContain(`api.github.com=${GITHUB_API_CIDR}`)
     })
 
+    it('COLDSTART (WRC): a provider workload on a FRESH cluster (no catalog CM) fails loud, never active and never ships a partial workload NetworkPolicy', async () => {
+      // Clean-install cold start: the seed/catalog ConfigMap is not present yet.
+      // The reconcile must NOT report 'active' (silent success) and must NOT
+      // render a partial workload NetworkPolicy — it fails loud (H3-by-throw is
+      // caught by reconcile and surfaced as a non-active phase), guaranteeing a
+      // clean install never silently ships broken egress.
+      mockCoreApi.readNamespacedConfigMap.mockRejectedValue(
+        Object.assign(new Error('not found'), { statusCode: 404, code: 404 })
+      )
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      // No uncaught throw — reconcile returns a result and fails loud.
+      const result = await makeProviderReconciler().reconcile(recipe)
+      expect(result.phase).not.toBe('active')
+      // No partial workload NetworkPolicy was shipped (count the create calls
+      // directly — createdPolicyByName() asserts presence, so it can't verify absence).
+      const workloadNpCreates = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.filter(
+        c =>
+          (c[0] as { body: k8s.V1NetworkPolicy }).body?.metadata?.name ===
+          'wl-egress-test-recipe-worker'
+      )
+      expect(workloadNpCreates).toHaveLength(0)
+    })
+
     it('RED-2 (WRC-001): a provider declaration on an exact-host binding fails the recipe', async () => {
       const recipe = makeRecipe({
         spec: {
