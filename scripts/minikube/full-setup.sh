@@ -1343,6 +1343,11 @@ step_header 9 $TOTAL_STEPS "Seed Registry Catalog"
 # else still works.
 EVENFIRE_DIR_DEFAULT="$(cd "${PROJECT_DIR}/.." && pwd)/evenfire-registry"
 EVENFIRE_DIR="${EVENFIRE_REGISTRY_DIR:-${EVENFIRE_DIR_DEFAULT}}"
+# Track whether the catalog was actually seeded so the Step 12 summary tells the
+# truth: the three skip branches below are legitimate (sibling repo absent in this
+# distribution — non-fatal by design), so this stays a warn, not an abort, and the
+# summary ✓ is gated on this flag instead of printed unconditionally.
+REGISTRY_SEEDED=false
 if [[ ! -d "${EVENFIRE_DIR}" ]]; then
   warn "evenfire-registry not found at ${EVENFIRE_DIR} — skipping registry seed"
 elif ! $KC get deployment registry-api -n registry &>/dev/null; then
@@ -1353,6 +1358,7 @@ else
   log "Running evenfire-registry minikube-seed target..."
   if (cd "${EVENFIRE_DIR}" && make minikube-seed 2>&1 | tail -25); then
     ok "Registry catalog seeded"
+    REGISTRY_SEEDED=true
   else
     warn "Registry seed encountered errors — check output above"
   fi
@@ -1392,7 +1398,6 @@ fi
 SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-SEED_USER_OK=true
 if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    SEED_PROFILE="${SEED_PROFILE}" \
    ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
@@ -1401,7 +1406,6 @@ if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
   ok "Test user seeded"
 else
-  SEED_USER_OK=false
   if [ "$SEED_PROFILE" = "minimal" ]; then
     # This step is the only place that both creates the owner user AND
     # rotates the bootstrap admin credential (POST /admin/auth/setup, called
@@ -1416,7 +1420,13 @@ else
     err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
     exit 1
   else
-    warn "Test user seed encountered errors — check output above"
+    # The e2e gates depend on these fixtures; a partial seed produces broken
+    # journeys downstream. Previously this only warned and let setup exit 0 over
+    # a failed Step 10, hiding the breakage until a later gate failed. Fail loud
+    # here instead. Setup is idempotent: re-run after fixing the underlying
+    # error, e.g. `full-setup.sh --seed-profile=e2e --skip-build --keep-db`.
+    err "Test user seed failed under SEED_PROFILE=e2e — aborting. The e2e fixtures are incomplete and downstream gates would fail. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+    exit 1
   fi
 fi
 
@@ -1433,7 +1443,12 @@ else
      bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
     ok "Workflow-trigger E2E recipes seeded"
   else
-    warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
+    # Same fail-loud rationale as Step 10 (P5): under e2e a partial fixture seed
+    # ships broken journeys that only surface in a later gate, and the summary
+    # below prints an unconditional ✓ for this step — so a warn-and-continue here
+    # would leave a lying green checkmark. Abort; setup is idempotent.
+    err "Workflow-trigger E2E seed failed under SEED_PROFILE=e2e — aborting. Downstream desktop/control-ui workflow E2E gates depend on these fixtures. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+    exit 1
   fi
 
   if [ "$SKIP_UIS" = true ]; then
@@ -1444,7 +1459,11 @@ else
        bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
       ok "Sandbox-ui local test app seeded"
     else
-      warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+      # Fail loud like the workflow-trigger seed above (P5-consistent): an e2e
+      # install with incomplete Desktop Apps fixtures is broken, not a warning.
+      # The legitimate opt-out is --skip-uis (handled above), not a failed seed.
+      err "Sandbox-ui test app seed failed under SEED_PROFILE=e2e — aborting. Desktop Apps validation fixtures would be incomplete. Fix the error above and re-run setup (idempotent: --skip-build --keep-db)."
+      exit 1
     fi
   fi
 fi
@@ -1493,37 +1512,20 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-# Step 10 (Seed Test User) is what actually rotates the bootstrap admin
-# credential and creates the seed user. If it failed, SEED_USER_OK=false and
-# these lines must say so instead of printing a false ✓ (a failed Step 10
-# under minimal already aborts before reaching here — see Step 10 above —
-# so this else branch is reachable only via the e2e soft-fail path).
+# Step 10 (Seed Test User) rotates the bootstrap admin credential and creates
+# the seed user. A failed Step 10 aborts setup under either profile (minimal and
+# e2e both `err` + `exit 1` — see Step 10 above), so reaching this summary means
+# the seed succeeded; always report ✓.
+echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
 if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
-  fi
-else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
-  fi
-fi
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-  else
-    echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
+  echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
   echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
 else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-  else
-    echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
+  echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
 fi
-echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+if [ "${REGISTRY_SEEDED:-false}" = true ]; then
+  echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+else
+  echo -e "    ${YELLOW}○${NC} Registry catalog not seeded (evenfire-registry sibling repo absent or seed failed) — control-ui Registry tab will be empty"
+fi
 echo ""

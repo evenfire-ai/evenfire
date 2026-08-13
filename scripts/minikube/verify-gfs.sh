@@ -13,7 +13,10 @@ PG_PROBE_DEPLOY="${PG_PROBE_DEPLOY:-deploy/control-api}"
 PG_DB="${PG_DB:-profiles}"
 PG_HOST="${PG_HOST:-control-postgres.control-plane.svc.cluster.local}"
 PG_PORT="${PG_PORT:-5432}"
-VERIFY_ROLLOUT_TIMEOUT="${VERIFY_ROLLOUT_TIMEOUT:-60s}"
+# On a cold cluster a freshly-restarted gfsc-reader needs ~145s to reach Ready;
+# the old 60s default killed it prematurely. Still bounded and fail-loud, still
+# overridable via the env var.
+VERIFY_ROLLOUT_TIMEOUT="${VERIFY_ROLLOUT_TIMEOUT:-240s}"
 
 kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[verify-gfs] %s\n' "$*"; }

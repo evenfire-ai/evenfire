@@ -133,10 +133,33 @@ sync_gfs() {
   fi
   # gfsc reads the key at boot; restart the writer+reader so the new key takes
   # effect (label-based — the reconciler owns the deployment names).
-  if "${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null | grep -q .; then
+  local gfs_deploys
+  # No `|| true` / `2>/dev/null`: a label-selector LIST returns exit 0 with empty
+  # stdout when zero deployments match (legit first-run → else branch below), so
+  # only a genuine API error makes this non-zero. By here the gfs configmap and
+  # DSN guards above have passed, so a non-zero here IS a real error — let `set -e`
+  # abort loudly with kubectl's message rather than masking it as "no deployments".
+  gfs_deploys="$("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name)"
+  if [[ -n "${gfs_deploys}" ]]; then
     log "Restarting gfsc (${GFS_DEPLOY_SELECTOR}) after auth key drift"
     "${KCTL[@]}" rollout restart deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" >/dev/null
-    "${KCTL[@]}" rollout status deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" --timeout=90s || true
+    # Wait per-deployment (writer AND reader) with an independent budget each, and
+    # fail loud. A single label-wide `rollout status ... --timeout=90s || true`
+    # shared the budget across both deployments and swallowed the result: the
+    # writer's init-container chown starved the reader, and `|| true` hid that the
+    # reader never became Ready, so the failure resurfaced 60-150s later in
+    # verify-gfs. A genuinely stuck gfsc now fails here, named, instead of masked.
+    # Iterate the list captured above (single query — no re-query between guard
+    # and loop that could skip verification if the API blipped in that window).
+    # 240s per deployment matches verify-gfs.sh's VERIFY_ROLLOUT_TIMEOUT and
+    # deploy/scripts/provision-gfs-runtime.sh: a freshly-restarted gfsc-reader on
+    # a cold cluster needs ~145s to reach Ready, so a tighter budget here (this
+    # runs in the dev/prod deploy path too, via provision-gfs-runtime.sh) would
+    # abort a legitimately-slow rollout that those 240s gates would have absorbed.
+    local d
+    for d in ${gfs_deploys}; do
+      "${KCTL[@]}" rollout status "${d}" -n "${GFS_NAMESPACE}" --timeout=240s
+    done
   else
     log "No gfsc deployments exist yet; auth key is synced for future pods"
   fi
