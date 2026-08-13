@@ -136,11 +136,11 @@ export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
   'mcp-servers',
   'workflow-recipes',
   'directories',
+  'profile-admin',
   'cost',
   'communication-channels',
   'llm-models',
   'llm-secrets',
-  'profile-admin',
   'traces',
   'settings',
 ]

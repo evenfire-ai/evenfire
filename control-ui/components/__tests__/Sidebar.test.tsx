@@ -68,11 +68,11 @@ describe('Sidebar publisher gating', () => {
       'Installed connectors',
       'Installed plugins',
       'Files',
+      'Users & Teams',
       'Cost & Usage',
       'External Channels',
       'LLM Models',
       'Secrets',
-      'Users & Teams',
     ])
   })
 
