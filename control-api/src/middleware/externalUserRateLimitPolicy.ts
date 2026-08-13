@@ -18,6 +18,9 @@ export type ExternalUserRateLimitOperation =
   | 'workflow_approval_medium_mutation'
   | 'notification_preference_read'
   | 'notification_preference_mutation'
+  | 'authentication_attempt'
+  | 'session_verify'
+  | 'rpc_token'
 
 export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
@@ -58,6 +61,12 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
     bucketType: 'external_notification_preference_mutation',
     maxPerMinute: 10,
   },
+  authentication_attempt: {
+    bucketType: 'external_authentication_attempt',
+    maxPerMinute: 5,
+  },
+  session_verify: { bucketType: 'external_session_verify', maxPerMinute: 10 },
+  rpc_token: { bucketType: 'external_rpc_token', maxPerMinute: 10 },
 }
 
 function boundedIp(req: Request): string {
