@@ -1592,7 +1592,16 @@ export class ChannelReader {
     const conversationId = identity?.providerChannelId?.trim() || channelId
     const key = `${workspaceId}:${userId}:${conversationId}`
     if (this.unresolvedNoticesSent.has(key)) return
-    if (this.unresolvedNoticesSent.size >= UNRESOLVED_NOTICE_GLOBAL_CAP) return
+    if (this.unresolvedNoticesSent.size >= UNRESOLVED_NOTICE_GLOBAL_CAP) {
+      // Not deduplicated on purpose: a repeated line is the signal that this is
+      // an ongoing condition, not a one-off, while every provider goes silent
+      // for unresolved senders until the TTL sweep frees a slot.
+      console.warn(
+        `[Main] Unresolved-sender notice cap (${UNRESOLVED_NOTICE_GLOBAL_CAP}) reached; ` +
+          `suppressing notice to ${userId} in ${channelId}.`
+      )
+      return
+    }
     // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
     // must not produce one outbound call per inbound message.
     this.unresolvedNoticesSent.set(key, { seenAt: Date.now() })
@@ -1615,8 +1624,12 @@ export class ChannelReader {
         // produce a top-level post in a shared channel.
         await adapter.sendMessage(channelId, content, msg.messageId)
       } else if (msg.channelType === 'telegram') {
-        // No reply id: unlike Teams, Telegram has no channel-wide audience for a
-        // top-level post to leak this notice to.
+        // No reply id: the spec fixes this as sendMessage(channelId, content) for
+        // Telegram, with no threading. Group and supergroup chats do have a
+        // channel-wide audience (see telegramOperationalMessage.ts), so this is
+        // not a threading-is-pointless argument; the copy itself is deliberately
+        // terse so a top-level post leaks nothing meaningful, and threading here
+        // is a possible follow-up.
         await adapter.sendMessage(channelId, content)
       } else {
         if (!adapter.sendEphemeral) return

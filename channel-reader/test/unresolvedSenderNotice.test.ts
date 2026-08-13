@@ -94,7 +94,7 @@ describe('authorizeProviderMessage response shape', () => {
 interface BuildReaderOptions {
   /** Omit the key entirely for the default; pass `undefined` for "no reason at all". */
   reason?: 'unresolved' | 'error'
-  medium?: 'slack' | 'telegram' | 'teams'
+  medium?: 'slack' | 'telegram' | 'teams' | 'email'
   ephemeralThrows?: boolean
   profileUiUrl?: string
 }
@@ -338,10 +338,14 @@ describe('unresolved sender notice', () => {
     expect(sendEphemeral).not.toHaveBeenCalled()
   })
 
-  it('never sends for a non-Slack medium', async () => {
-    const { deliver, sendEphemeral } = buildReader({ medium: 'telegram' })
+  it('never sends for email, the one medium the guard excludes', async () => {
+    // Slack, Teams, and Telegram all send now (Telegram via sendMessage, asserted
+    // below), so this can no longer be phrased as "non-Slack" -- email is the
+    // only medium sendUnresolvedSenderNotice's top guard still drops.
+    const { deliver, sendEphemeral, sendMessage } = buildReader({ medium: 'email' })
     await deliver('C1', 'U1')
     expect(sendEphemeral).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
   })
 })
 
@@ -439,6 +443,26 @@ describe('unresolved notice global cap', () => {
     await deliverBatch(messages)
 
     expect(sendMessage).toHaveBeenCalledTimes(UNRESOLVED_NOTICE_GLOBAL_CAP)
+  })
+
+  it('warns once per blocked send once the cap is reached, without deduplicating', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { deliverBatch, buildMessage } = buildReader({ medium: 'teams' })
+
+    const messages = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(messages)
+
+    const capWarnings = warnSpy.mock.calls.filter(call =>
+      String(call[0]).includes('Unresolved-sender notice cap')
+    )
+    // One line per blocked send (5 excess messages), not one line total: a
+    // repeated line is the signal that this is an ongoing condition.
+    expect(capWarnings).toHaveLength(5)
+    expect(String(capWarnings[0][0])).toContain(String(UNRESOLVED_NOTICE_GLOBAL_CAP))
+
+    warnSpy.mockRestore()
   })
 })
 

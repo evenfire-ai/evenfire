@@ -263,12 +263,14 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
   })
 
-  it('warns instead of showing a command when the deployment has no public webhook origin', async () => {
+  it('warns and still renders a placeholder-origin command when the deployment has no public webhook origin', async () => {
     // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
     // localhost (not app.*), which is the minikube case. The endpoint the CLI
-    // would need is a bare path here, and registering a Teams bot against a bare
-    // path points it at a host that does not exist -- warn instead of handing
-    // over a command built from a placeholder origin.
+    // would need is a bare path here, and registering a Teams bot against a
+    // bare path points it at a host that does not exist -- but leaving the
+    // operator with nothing to run is worse: the documented minikube workflow
+    // is to substitute a real origin for the placeholder by hand, so the
+    // command still renders, built from the marker origin.
     render(
       <ToastProvider>
         <CreateCommunicationChannelPage />
@@ -281,14 +283,17 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
       target: { value: 'Evenfire Bot!' },
     })
 
-    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Copy Teams bot create command' })
-    ).not.toBeInTheDocument()
     const panel = document.querySelector('.cu-channel-provider-panel')
     expect(panel?.textContent ?? '').toMatch(
       /NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL|no public webhook origin/i
     )
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "evenfire-bot"')
+    // Pin the literal placeholder origin: this is what the operator is being
+    // told to replace by hand.
+    expect(command).toHaveTextContent('--endpoint "https://<public-webhook-origin>/webhooks/teams/')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
   })
 
   it('validates Teams CLIENT_ID and TENANT_ID before submission', async () => {

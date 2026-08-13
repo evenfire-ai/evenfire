@@ -46,6 +46,7 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
+  isValidTeamsBotName,
 } from '@lib/teamsSetup'
 
 type ChannelProvider = CommunicationChannelProvider
@@ -250,11 +251,12 @@ export default function EditCommunicationChannelPage() {
     slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
       ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
       : null
-  // Same reasoning as the Slack manifest above: a relative endpoint would point
-  // the Teams CLI at a host that does not exist, so warn instead of handing over
-  // a command built from a placeholder. This is also the repair path when a
-  // channel is recreated under a new name: retyping the Name field alone is
-  // enough to regenerate this command.
+  // A relative endpoint would point the Teams CLI at a host that does not
+  // exist, so a deployment with no public webhook origin falls back to
+  // teamsAppCreatePlaceholderCommand below instead of a command built from
+  // that relative path. This is also the repair path when a channel is
+  // recreated under a new name: retyping the Name field alone is enough to
+  // regenerate this command.
   const teamsAppCreateCommand =
     teamsRequestUrl && canGenerateTeamsCommand(teamsRequestUrl)
       ? buildTeamsAppCreateCommand({
@@ -262,6 +264,23 @@ export default function EditCommunicationChannelPage() {
           endpoint: teamsRequestUrl,
         })
       : null
+  // The minikube case: no public origin to build a real command from. Still
+  // render a runnable-looking command rather than nothing, using the marker
+  // origin LOCAL_TEAMS_ENDPOINT_ORIGIN, because substituting a real origin by
+  // hand for that marker is the documented self-hosted workflow.
+  const teamsAppCreatePlaceholderCommand =
+    teamsRequestUrl && !canGenerateTeamsCommand(teamsRequestUrl)
+      ? buildTeamsAppCreateCommand({
+          botName: draft?.teamsAppName || '',
+          endpoint: `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${teamsRequestUrl}`,
+        })
+      : null
+  // hasTeamsConfigForRequestUrl is satisfied by CLIENT_ID or TENANT_ID alone,
+  // so teamsAppCreateCommand can render with a blank Name -- which
+  // buildTeamsAppCreateCommand fills with the literal placeholder <bot-name>.
+  // Gate Copy on a valid name the same way the create page does, so that
+  // placeholder is never handed over as if it were runnable.
+  const teamsBotNameIsValid = isValidTeamsBotName(draft?.teamsAppName || '')
 
   async function persistDraft(nextDraft: DraftState, successMessage: string) {
     setSaving(true)
@@ -349,6 +368,17 @@ export default function EditCommunicationChannelPage() {
   async function copyTeamsAppCreateCommand() {
     if (!teamsAppCreateCommand) return
     const copied = await copyTextToClipboard(teamsAppCreateCommand)
+    showToast(
+      copied
+        ? 'Teams bot command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsAppCreatePlaceholderCommand() {
+    if (!teamsAppCreatePlaceholderCommand) return
+    const copied = await copyTextToClipboard(teamsAppCreatePlaceholderCommand)
     showToast(
       copied
         ? 'Teams bot command copied.'
@@ -735,7 +765,9 @@ export default function EditCommunicationChannelPage() {
                         </button>
                       </div>
                       <span className="cu-field__hint">
-                        Use this URL as the Messaging endpoint for the Teams bot app.
+                        {teamsRequestUrl
+                          ? 'Use this URL as the Messaging endpoint for the Teams bot app.'
+                          : 'Enter the Name above and this channel gets its Teams Request URL.'}
                       </span>
                     </div>
                     {teamsRequestUrl ? (
@@ -751,7 +783,7 @@ export default function EditCommunicationChannelPage() {
                                 size="sm"
                                 className="cu-command-block__copy"
                                 onClick={copyTeamsAppCreateCommand}
-                                disabled={saving}
+                                disabled={saving || !teamsBotNameIsValid}
                                 aria-label="Copy Teams bot create command"
                               >
                                 <IconCopy width={15} height={15} />
@@ -769,12 +801,36 @@ export default function EditCommunicationChannelPage() {
                           </span>
                         </div>
                       ) : (
-                        <div className="cu-banner cu-banner--warning">
-                          This deployment has no public webhook origin, so the command below cannot
-                          be generated. Set{' '}
-                          <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code>, or substitute
-                          your own public origin for <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>{' '}
-                          before running it.
+                        <div className="cu-field">
+                          <div className="cu-banner cu-banner--warning">
+                            This deployment has no public webhook origin. The command below uses the
+                            placeholder origin <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>, which
+                            must be replaced before running it, or set{' '}
+                            <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code> to have it
+                            filled in automatically.
+                          </div>
+                          {teamsAppCreatePlaceholderCommand && (
+                            <div className="cu-command-block">
+                              <div className="cu-command-block__toolbar">
+                                <span>Bash</span>
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  className="cu-command-block__copy"
+                                  onClick={copyTeamsAppCreatePlaceholderCommand}
+                                  disabled={saving || !teamsBotNameIsValid}
+                                  aria-label="Copy Teams bot create command"
+                                >
+                                  <IconCopy width={15} height={15} />
+                                  Copy
+                                </Button>
+                              </div>
+                              <pre className="cu-command-block__pre">
+                                <code>{teamsAppCreatePlaceholderCommand}</code>
+                              </pre>
+                            </div>
+                          )}
                         </div>
                       )
                     ) : null}

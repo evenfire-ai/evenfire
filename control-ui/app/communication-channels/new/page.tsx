@@ -39,6 +39,7 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
+  isValidTeamsBotName,
 } from '@lib/teamsSetup'
 
 type HostItem = {
@@ -63,7 +64,6 @@ type DraftState = {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
 const STEPS = ['Channel', 'Provider'] as const
 
 const STEP_DETAILS = [
@@ -102,10 +102,6 @@ function credentialLabel(key: keyof CredentialDraft): string {
 
 function toTeamsBotNameInput(value: string): string {
   return toKebabInput(value).slice(0, 64)
-}
-
-function isValidTeamsBotName(value: string): boolean {
-  return TEAMS_BOT_NAME_RE.test(value.trim())
 }
 
 function providerSettings(provider: ChannelProvider, draft: DraftState) {
@@ -206,11 +202,23 @@ export default function CreateCommunicationChannelPage() {
     [canUseBrowserWebhookOrigin, normalizedChannelName]
   )
   // A relative endpoint would register a Teams bot pointing at a host that does
-  // not exist, so a deployment with no public webhook origin warns instead of
-  // handing over a command built from a placeholder.
+  // not exist, so a deployment with no public webhook origin falls back to
+  // teamsAppCreatePlaceholderCommand below instead of a command built from
+  // that relative path.
   const teamsAppCreateCommand = useMemo(() => {
     if (!teamsWebhookUrl || !canGenerateTeamsCommand(teamsWebhookUrl)) return null
     return buildTeamsAppCreateCommand({ botName: draft.teamsAppName, endpoint: teamsWebhookUrl })
+  }, [draft.teamsAppName, teamsWebhookUrl])
+  // The minikube case: no public origin to build a real command from. Still
+  // render a runnable-looking command rather than nothing, using the marker
+  // origin LOCAL_TEAMS_ENDPOINT_ORIGIN, because substituting a real origin by
+  // hand for that marker is the documented self-hosted workflow.
+  const teamsAppCreatePlaceholderCommand = useMemo(() => {
+    if (!teamsWebhookUrl || canGenerateTeamsCommand(teamsWebhookUrl)) return null
+    return buildTeamsAppCreateCommand({
+      botName: draft.teamsAppName,
+      endpoint: `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${teamsWebhookUrl}`,
+    })
   }, [draft.teamsAppName, teamsWebhookUrl])
   // Slack's order is manifest first, credentials second: the bot token only exists
   // after the app is installed, so a manifest offered only once the channel is saved
@@ -346,6 +354,17 @@ export default function CreateCommunicationChannelPage() {
   async function copyTeamsAppCreateCommand() {
     if (!teamsAppCreateCommand) return
     const copied = await copyTextToClipboard(teamsAppCreateCommand)
+    showToast(
+      copied
+        ? 'Teams bot command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsAppCreatePlaceholderCommand() {
+    if (!teamsAppCreatePlaceholderCommand) return
+    const copied = await copyTextToClipboard(teamsAppCreatePlaceholderCommand)
     showToast(
       copied
         ? 'Teams bot command copied.'
@@ -764,13 +783,37 @@ export default function CreateCommunicationChannelPage() {
                             </pre>
                           </div>
                         ) : (
-                          <div className="cu-banner cu-banner--warning">
-                            This deployment has no public webhook origin, so the command below
-                            cannot be generated. Set{' '}
-                            <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code>, or
-                            substitute your own public origin for{' '}
-                            <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code> before running it.
-                          </div>
+                          <>
+                            <div className="cu-banner cu-banner--warning">
+                              This deployment has no public webhook origin. The command below uses
+                              the placeholder origin <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>,
+                              which must be replaced before running it, or set{' '}
+                              <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code> to have it
+                              filled in automatically.
+                            </div>
+                            {teamsAppCreatePlaceholderCommand && (
+                              <div className="cu-command-block">
+                                <div className="cu-command-block__toolbar">
+                                  <span>Bash</span>
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    className="cu-command-block__copy"
+                                    onClick={copyTeamsAppCreatePlaceholderCommand}
+                                    disabled={saving || !teamsBotNameIsValid}
+                                    aria-label="Copy Teams bot create command"
+                                  >
+                                    <IconCopy width={15} height={15} />
+                                    Copy
+                                  </Button>
+                                </div>
+                                <pre className="cu-command-block__pre">
+                                  <code>{teamsAppCreatePlaceholderCommand}</code>
+                                </pre>
+                              </div>
+                            )}
+                          </>
                         )}
                       </section>
                       <Field

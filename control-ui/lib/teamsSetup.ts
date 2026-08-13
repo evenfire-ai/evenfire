@@ -1,10 +1,22 @@
 /**
- * Placeholder origin shown in guidance copy when the deployment has no public
- * webhook address to substitute. Never used to build a real command: a
- * generated command either carries a real absolute endpoint or is not
- * generated at all.
+ * Placeholder origin shown in guidance copy, and used to build a placeholder
+ * command, when the deployment has no public webhook address to substitute.
+ * Substituting it by hand for a real origin is the documented workflow for a
+ * self-hosted (minikube) deployment, so a command built from this placeholder
+ * is deliberately still rendered rather than withheld.
  */
 export const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
+
+const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
+
+/**
+ * Teams CLI `--name` constraint: lowercase letters, numbers, and hyphens,
+ * starting with a letter. Shared by the create and edit pages so both gate
+ * Copy on the same rule instead of one silently drifting from the other.
+ */
+export function isValidTeamsBotName(value: string): boolean {
+  return TEAMS_BOT_NAME_RE.test(value.trim())
+}
 
 /**
  * The Teams CLI needs an absolute endpoint. A deployment with no

@@ -24,7 +24,13 @@ function formatDuration(ms: number): string {
 export function describeToolError(errorSummary: string | undefined): string {
   const raw = (errorSummary ?? '').toLowerCase()
   if (!raw) return 'unavailable.'
-  if (/auth|credential|unauthorized|forbidden|401|403/.test(raw)) {
+  // Anchored so this does not fire on "author" (bare auth) or a millisecond
+  // count that happens to contain "401"/"403" (bare digits).
+  if (
+    /unauthoriz|unauthenticat|authentication|authorization|credential|forbidden|\b401\b|\b403\b/.test(
+      raw
+    )
+  ) {
     return 'unavailable (authentication problem). Ask your administrator.'
   }
   if (/timed out|timeout|etimedout|deadline/.test(raw)) return 'unavailable (timed out).'

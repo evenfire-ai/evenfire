@@ -139,7 +139,10 @@ describe('EditCommunicationChannelPage', () => {
     })
 
     expect(screen.getByText('Teams Request URL')).toBeInTheDocument()
-    expect(screen.getByText(/\/webhooks\/teams\//)).toBeInTheDocument()
+    // Scoped to the readonly value field: the placeholder command block below
+    // also renders this same path as part of its (marker-origin) endpoint.
+    const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+    expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\//)
     expect(screen.getByText('General')).toBeInTheDocument()
     expect(screen.getByText('Channel')).toBeInTheDocument()
   })
@@ -519,9 +522,42 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
 
     await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
 
-    // After typing into the bot name field, the URL should appear
+    // After typing into the bot name field, the URL should appear. Scoped to
+    // the readonly value field: the placeholder command block below also
+    // renders this same path as part of its (marker-origin) endpoint.
     expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
-    expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
+    await waitFor(() => {
+      const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+      expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\/teams%3A/)
+    })
+  })
+
+  it('makes the Messaging endpoint hint conditional on the URL being available', async () => {
+    // Slack makes the equivalent hint conditional; the Teams hint stayed
+    // unconditional and kept telling the operator to use a URL that was not
+    // there whenever the field renders Unavailable.
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(
+      screen.getByText('Enter the Name above and this channel gets its Teams Request URL.')
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Use this URL as the Messaging endpoint for the Teams bot app.')
+    ).not.toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    expect(
+      screen.getByText('Use this URL as the Messaging endpoint for the Teams bot app.')
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Enter the Name above and this channel gets its Teams Request URL.')
+    ).not.toBeInTheDocument()
   })
 
   it('does not render a Teams request URL for a channel with only the stale teams-app-name annotation', async () => {
@@ -558,8 +594,13 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
 
     await user.type(screen.getByLabelText(/name/i), 'New Bot Name')
 
+    // Scoped to the readonly value field: the placeholder command block below
+    // also renders this same path as part of its (marker-origin) endpoint.
     expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
-    expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
+    await waitFor(() => {
+      const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+      expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\/teams%3A/)
+    })
   })
 })
 
@@ -596,12 +637,14 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     expect(updatedCommand).toHaveTextContent('--name "evenfire-bot-2"')
   })
 
-  it('warns instead of showing a command when the deployment has no public webhook origin', async () => {
+  it('warns and still renders a placeholder-origin command when the deployment has no public webhook origin', async () => {
     // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
     // localhost, which is the minikube case: the Teams Request URL above renders
     // as a bare path, and registering a bot against that path would point the
-    // CLI at a host that does not exist. Warn instead of handing over a command
-    // built from a placeholder origin.
+    // CLI at a host that does not exist -- but leaving the operator with
+    // nothing to run is worse: the documented minikube workflow is to
+    // substitute a real origin for the placeholder by hand, so the command
+    // still renders, built from the marker origin.
     mockChannel('teams-channel', {
       teamsSettings: { appName: 'evenfire', appId: '', tenantId: '' },
     })
@@ -610,14 +653,39 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
 
-    expect(screen.queryByText('Create the Teams bot')).not.toBeInTheDocument()
-    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Copy Teams bot create command' })
-    ).not.toBeInTheDocument()
     const warning = document.querySelector('.cu-banner--warning')
     expect(warning?.textContent ?? '').toMatch(/no public webhook origin/)
     expect(screen.getByText('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL')).toBeInTheDocument()
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "evenfire"')
+    // Pin the literal placeholder origin: this is what the operator is being
+    // told to replace by hand.
+    expect(command).toHaveTextContent('--endpoint "https://<public-webhook-origin>/webhooks/teams/')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('disables Copy on a command with a blank bot name, matching the create page', async () => {
+    // hasTeamsConfigForRequestUrl is satisfied by CLIENT_ID or TENANT_ID alone,
+    // so a channel with credentials but a blank Name still renders a command --
+    // one that buildTeamsAppCreateCommand fills with the literal placeholder
+    // <bot-name>. That placeholder must not look copyable and runnable.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: '', appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "<bot-name>"')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeDisabled()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
   })
 
   it('renders neither the command nor the warning until this channel has Teams config', async () => {
