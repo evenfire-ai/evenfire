@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ChannelReader, type ChannelReaderOptions } from '../src/main'
+import { ChannelReader, type ChannelReaderOptions, UNRESOLVED_NOTICE_GLOBAL_CAP } from '../src/main'
 import { RPCClient } from '../src/rpcClient'
 import type { ChannelAdapter, Message } from '../src/types'
 
@@ -384,6 +384,61 @@ describe('unresolved sender notice on Teams', () => {
     // uncalled when Teams is dropped at the provider guard entirely.
     expect(sendEphemeral).not.toHaveBeenCalled()
     expect(sendMessage).toHaveBeenCalled()
+  })
+})
+
+describe('unresolved sender notice on Telegram', () => {
+  it('sends a terse Telegram notice with no product or profile details', async () => {
+    const { deliver, sendMessage } = buildReader({
+      medium: 'telegram',
+      profileUiUrl: 'https://profile.test',
+    })
+
+    await deliver()
+
+    const content = sendMessage.mock.calls[0][1] as string
+    expect(content).not.toMatch(/evenfire/i)
+    expect(content).not.toMatch(/profile/i)
+    expect(content).not.toMatch(/https?:\/\//)
+  })
+
+  it('delivers the Telegram notice with no reply id, unlike Teams', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram' })
+
+    await deliver()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    // Teams threads under the triggering message via a third argument; Telegram
+    // must not, since Telegram has no channel-wide audience to protect against.
+    expect(sendMessage.mock.calls[0]).toEqual(['C1', expect.any(String)])
+  })
+
+  // Real Telegram messages always carry providerWorkspaceId: null (Telegram has no
+  // workspace/tenant concept), unlike Slack and Teams, which require one. A guard
+  // that keeps requiring a workspace id for every provider would silently drop
+  // this notice for every real Telegram sender while still passing a test harness
+  // that defaults workspaceId to a non-empty string.
+  it('sends the Telegram notice even though Telegram messages carry no workspace id', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram' })
+
+    await deliver('C1', 'U1', '')
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('unresolved notice global cap', () => {
+  it('stops sending notices once the global cap is reached', async () => {
+    const { deliverBatch, sendMessage, buildMessage } = buildReader({ medium: 'teams' })
+
+    // Distinct users so the per-conversation dedup never fires and only the
+    // global cap can be what stops the sends.
+    const messages = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(messages)
+
+    expect(sendMessage).toHaveBeenCalledTimes(UNRESOLVED_NOTICE_GLOBAL_CAP)
   })
 })
 

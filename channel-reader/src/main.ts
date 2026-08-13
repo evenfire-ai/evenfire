@@ -105,6 +105,16 @@ const UNRESOLVED_NOTICE_COPY =
 const UNRESOLVED_NOTICE_COPY_TEAMS =
   "I can't accept messages from this Teams account. If you haven't linked it yet, " +
   'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+// Telegram deliberately gets no Profile UI link and no product name: unlike Teams
+// and Slack, anyone who discovers the bot handle can message it, so a reply must
+// not confirm what the bot belongs to.
+const UNRESOLVED_NOTICE_COPY_TELEGRAM =
+  "I can't accept messages from this account. If you think that is wrong, contact your administrator."
+/**
+ * Ceiling on live notice records, so a misconfiguration cannot turn the bot
+ * into a flooder. Exported so tests assert against the real value.
+ */
+export const UNRESOLVED_NOTICE_GLOBAL_CAP = 50
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
 const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
@@ -1553,16 +1563,28 @@ export class ChannelReader {
   }
 
   /**
-   * Tell an unresolved Slack or Teams sender why the agent is ignoring them, at
-   * most once per user per conversation per UNRESOLVED_NOTICE_TTL_MS.
+   * Tell an unresolved Slack, Teams, or Telegram sender why the agent is ignoring
+   * them, at most once per user per conversation per UNRESOLVED_NOTICE_TTL_MS, and
+   * never past UNRESOLVED_NOTICE_GLOBAL_CAP live notice records in total.
    */
   private async sendUnresolvedSenderNotice(msg: Message): Promise<void> {
-    if (msg.channelType !== 'slack' && msg.channelType !== 'teams') return
+    if (
+      msg.channelType !== 'slack' &&
+      msg.channelType !== 'teams' &&
+      msg.channelType !== 'telegram'
+    )
+      return
     const identity = msg.providerIdentity
     const userId = identity?.providerUserId?.trim()
     const workspaceId = identity?.providerWorkspaceId?.trim()
     const channelId = msg.channelId?.trim()
-    if (!userId || !workspaceId || !channelId) return
+    if (!userId || !channelId) return
+    // Slack and Teams identities are scoped to a workspace/tenant an admin
+    // controls, and the limiter key below relies on that scope. Telegram has no
+    // such concept: every real Telegram message carries providerWorkspaceId: null,
+    // so requiring one here would silently drop the notice for every Telegram
+    // sender.
+    if (msg.channelType !== 'telegram' && !workspaceId) return
 
     // Scope the limiter by provider identity, the same way pendingApprovalChannelScope
     // does. The SEND still targets msg.channelId, which is what replyChannelId hands
@@ -1570,22 +1592,32 @@ export class ChannelReader {
     const conversationId = identity?.providerChannelId?.trim() || channelId
     const key = `${workspaceId}:${userId}:${conversationId}`
     if (this.unresolvedNoticesSent.has(key)) return
+    if (this.unresolvedNoticesSent.size >= UNRESOLVED_NOTICE_GLOBAL_CAP) return
     // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
     // must not produce one outbound call per inbound message.
     this.unresolvedNoticesSent.set(key, { seenAt: Date.now() })
 
     const adapter = this.adapterForMessage(msg)
     if (!adapter) return
-    const profileUrl = config.profileUiUrl?.trim()
-    const baseCopy =
-      msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
-    const content = profileUrl ? `${baseCopy} ${profileUrl}` : baseCopy
+    let content: string
+    if (msg.channelType === 'telegram') {
+      content = UNRESOLVED_NOTICE_COPY_TELEGRAM
+    } else {
+      const profileUrl = config.profileUiUrl?.trim()
+      const baseCopy =
+        msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
+      content = profileUrl ? `${baseCopy} ${profileUrl}` : baseCopy
+    }
     try {
       if (msg.channelType === 'teams') {
         // TeamsAdapter has no ephemeral concept, so the notice is a normal message.
         // Thread it under the triggering message so an unconnected user does not
         // produce a top-level post in a shared channel.
         await adapter.sendMessage(channelId, content, msg.messageId)
+      } else if (msg.channelType === 'telegram') {
+        // No reply id: unlike Teams, Telegram has no channel-wide audience for a
+        // top-level post to leak this notice to.
+        await adapter.sendMessage(channelId, content)
       } else {
         if (!adapter.sendEphemeral) return
         await adapter.sendEphemeral(channelId, userId, content)
