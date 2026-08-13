@@ -13928,8 +13928,7 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-drive__type,
-.da-gfs-drive__source {
+.da-gfs-drive__type {
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
@@ -14636,9 +14635,7 @@ pre {
   }
 
   .da-gfs-drive__type-column,
-  .da-gfs-drive__source-column,
-  .da-gfs-drive__type,
-  .da-gfs-drive__source {
+  .da-gfs-drive__type {
     display: none;
   }
 

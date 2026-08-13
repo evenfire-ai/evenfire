@@ -11,6 +11,7 @@ import {
   IconConnectors,
   IconContexts,
   IconDownload,
+  IconEye,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
@@ -102,11 +103,6 @@ function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjec
     options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
   }
   return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
-}
-
-function resourceSource(resource: GfsDriveResource, currentFolderName?: string): string {
-  if (currentFolderName) return currentFolderName
-  return resource.sources?.length ? resource.sources.join(' + ') : 'Shared'
 }
 
 function pickErrorMessage(error: unknown): string | null {
@@ -540,6 +536,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 size="sm"
                 variant="outline"
               >
+                <IconEye width={16} height={16} />
                 Open GFS link
               </Button>
               {current && !currentIsFile ? (
@@ -632,14 +629,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               className="da-grid da-gfs-drive__grid"
               style={{
                 '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(12rem, 1fr) minmax(5rem, 0.35fr) minmax(7rem, 0.55fr) 4.5rem',
+                  'calc(var(--space-5) + var(--space-1)) minmax(12rem, 1fr) minmax(5rem, 0.35fr) 4.5rem',
               }}
             >
               <div className="da-grid__head">
                 <span className="da-grid__col-header" aria-hidden="true" />
                 <span className="da-grid__col-header">Name</span>
                 <span className="da-grid__col-header da-gfs-drive__type-column">Type</span>
-                <span className="da-grid__col-header da-gfs-drive__source-column">Source</span>
                 <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
               </div>
               <div className="da-grid__body">
@@ -669,9 +665,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     </span>
                     <span className="da-gfs-drive__type da-grid__cell">
                       {resource.kind === 'directory' ? 'Folder' : 'File'}
-                    </span>
-                    <span className="da-gfs-drive__source da-grid__cell">
-                      {resourceSource(resource, currentIsFolder ? current?.name : undefined)}
                     </span>
                     <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
                       {resource.kind === 'file' ? (

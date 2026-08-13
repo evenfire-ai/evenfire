@@ -176,12 +176,6 @@ export function SidebarNav({
         testId: 'nav-mcp-servers',
         icon: <IconConnectors />,
       },
-      {
-        id: DESKTOP_ROUTES.files,
-        label: 'Global File System',
-        testId: 'nav-files',
-        icon: <IconAttachFile />,
-      },
     ],
     []
   )
@@ -561,6 +555,27 @@ export function SidebarNav({
                   )}
               </React.Fragment>
             ))}
+
+            <div
+              className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
+              title={collapsed ? 'Files' : undefined}
+              data-tooltip="Files"
+            >
+              <NavItemControl
+                data-testid="nav-files"
+                className="nav-link-main"
+                onClick={() => handleSelect(DESKTOP_ROUTES.files)}
+                aria-label="Files"
+                leadingIcon={<IconAttachFile />}
+                trailingIcon={
+                  <span className="nav-tooltip" role="tooltip">
+                    Files
+                  </span>
+                }
+              >
+                Files
+              </NavItemControl>
+            </div>
           </nav>
 
           <div className="sidebar-footer">
