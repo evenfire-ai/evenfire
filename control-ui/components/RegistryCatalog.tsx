@@ -164,13 +164,18 @@ export default function RegistryCatalog() {
         installedServerNames.has(entry.name)
       )
     }
+    // Guardrail hooks are installed against a specific agent, so the catalog has
+    // no single "installed" signal for them — always offer the install flow.
+    if (entry.entry_type === 'llm-hook') return false
     return installedRecipeKeys.has(`${entry.name}@${entry.version}`)
   }
 
   function renderInstallButton(entry: RegistryEntry) {
     const installed = isEntryInstalled(entry)
     const installing = installingRecipeKey === `${entry.name}@${entry.version}`
-    if (entry.entry_type === 'mcp-server') {
+    // Connectors and guardrail hooks both configure their install on the install
+    // page (which dispatches on entry_type); recipes install inline below.
+    if (entry.entry_type === 'mcp-server' || entry.entry_type === 'llm-hook') {
       return installed ? (
         <button type="button" className="cu-btn cu-btn--sm" disabled>
           Installed

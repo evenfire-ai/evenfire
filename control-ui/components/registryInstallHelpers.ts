@@ -29,6 +29,36 @@ export function getEmbeddedCredentialSchema(entry: RegistryEntry): CredentialSch
   }
 }
 
+// Guardrail-hook variant of getEmbeddedCredentialSchema: reads the credential
+// schema off `hook_meta` for `entry_type: "llm-hook"` entries. Used as the
+// offline fallback when the per-entry credential-schema endpoint is unavailable.
+export function getEmbeddedHookCredentialSchema(entry: RegistryEntry): CredentialSchema {
+  const raw = entry.hook_meta?.credentialSchema as
+    | (CredentialSchema & { keys?: unknown })
+    | undefined
+  if (!raw || !Array.isArray(raw.keys)) return NO_CREDENTIAL_SCHEMA
+  return {
+    required: raw.required === true,
+    authType: typeof raw.authType === 'string' ? raw.authType : 'none',
+    keys: raw.keys.flatMap(key => {
+      if (!key || typeof key !== 'object' || typeof (key as { name?: unknown }).name !== 'string') {
+        return []
+      }
+      const k = key as Record<string, unknown>
+      return [
+        {
+          name: k.name as string,
+          label: typeof k.label === 'string' ? k.label : (k.name as string),
+          kind: typeof k.kind === 'string' ? k.kind : 'password',
+          ...(typeof k.semanticType === 'string' ? { semanticType: k.semanticType } : {}),
+          ...(typeof k.description === 'string' ? { description: k.description } : {}),
+          ...(Array.isArray(k.enumValues) ? { enumValues: k.enumValues as string[] } : {}),
+        },
+      ]
+    }),
+  }
+}
+
 export function getExternalEgressNotice(entry: RegistryEntry): {
   targets: string[]
   ports: number[]
