@@ -297,13 +297,17 @@ export async function waitForSdkSandboxUiNotification(
       const logs = kubectl(['-n', RECIPE_NS, 'logs', pod, '--tail=80'], undefined, 30_000)
       const match = logs.match(/E2E_SDK_SANDBOX_UI_NOTIFICATION_OK=([0-9a-f-]{36})/i)
       if (match?.[1]) return match[1]
-      if (logs.includes('E2E_SDK_SANDBOX_UI_FAIL=')) {
+      if (findSdkSandboxUiFailureMarker(logs)) {
         throw new Error(`sandbox-ui SDK producer failed:\n${logs.slice(-2_000)}`)
       }
     }
     await new Promise(resolve => setTimeout(resolve, 3_000))
   }
   throw new Error(`sandbox-ui never emitted its client notification for recipe ${recipeName}`)
+}
+
+export function findSdkSandboxUiFailureMarker(logs: string): string | null {
+  return logs.match(/^E2E_SDK_SANDBOX_UI_FAIL=[^\r\n]+$/m)?.[0] ?? null
 }
 
 /**
