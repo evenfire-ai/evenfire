@@ -95,6 +95,7 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
+      <div data-testid="open-error">{ctrl.openError ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.accessibleResources.map(resource => (
         <button key={resource.resourceId} type="button" onClick={() => ctrl.openResource(resource)}>
@@ -597,6 +598,44 @@ describe('useGfsBrowserController', () => {
     )
     expect(screen.getByTestId('access-state').textContent).toBe('active')
     expect(screen.getByTestId('current').textContent).toBe('shared-folder')
+  })
+
+  it.each([
+    ['403 Forbidden: resource policy denied', '403 Forbidden: resource policy denied'],
+    ['401 Unauthorized', '401 Unauthorized'],
+  ] as const)('keeps the URI operation scoped for %s', async (_label, message) => {
+    const resolve = vi.fn(async () => {
+      throw new Error(message)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith('gfs://main/root'))
+
+    expect(screen.getByTestId('access-state').textContent).toBe(
+      message.startsWith('401') ? 'revoked' : 'active'
+    )
+    expect(screen.getByTestId('open-error').textContent).toBe(
+      message.startsWith('401') ? 'none' : message
+    )
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {

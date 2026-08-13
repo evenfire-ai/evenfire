@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
+import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -25,9 +26,10 @@ export function createExternalOauthGrantsRouter(): Router {
   const router = Router()
   const externalOauthGrantsRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.approvalRlExternalPerMin,
+    limit: config.approvalRlExternalEdgePerMin,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: externalClientRateLimitKey,
   })
 
   // GET /external/oauth/grants

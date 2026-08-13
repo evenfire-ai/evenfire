@@ -1,4 +1,4 @@
-import { type NextFunction, Router } from 'express'
+import { type Response as ExpressResponse, type NextFunction, type Request, Router } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -258,80 +258,90 @@ export function createExternalGfsRouter(): Router {
   // routing-boundary backstop so static analysis can prove every
   // auth/authority/handler path is metered. The all-route ingress guard is
   // deliberately wider than the product quotas; the per-class guards and
-  // distributed buckets retain the narrower security budgets. They keep no
-  // response quota headers: the distributed guard owns the externally
-  // forwarded values.
+  // distributed buckets retain the narrower security budgets. Edge rejects
+  // still expose a bounded Retry-After body/header so Desktop can recover
+  // without treating the backstop as an opaque 500.
+  const edgeRateLimitHandler = (_req: Request, res: ExpressResponse): void => {
+    const raw = res.getHeader('Retry-After')
+    const retryAfterSeconds =
+      typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
+        ? raw
+        : typeof raw === 'string' && /^\d+$/.test(raw)
+          ? Math.max(1, Number(raw))
+          : 60
+    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+  }
   const externalGfsIngressRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsIngressRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsIngressRateKey,
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsTokenRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsTokenUserRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsTokenRateKey,
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsResourceRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsReadRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('resource'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsProxyReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsReadRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('proxy-read'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsOperationRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('resource-mutation'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsGrantsReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsReadRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('grants-read'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsGrantsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsOperationRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('grants-mutation'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsSharesReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsReadRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('shares-read'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
   const externalGfsSharesMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsOperationRlPerMin,
-    standardHeaders: false,
+    standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsActorRateKey('shares-mutation'),
-    message: { error: 'Too Many Requests' },
+    handler: edgeRateLimitHandler,
   })
 
   // The source-IP guard intentionally precedes authentication and authority

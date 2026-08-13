@@ -1,7 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { config } from '../config.js'
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -23,6 +22,15 @@ export type ContextSharedFilesystemSummary = {
 }
 
 const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
+const PASSTHROUGH_HEADERS = [
+  'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
@@ -77,21 +85,21 @@ export function createContextSharedFilesystemsRouter(): Router {
           const idx = req.originalUrl.indexOf('?')
           return idx === -1 ? '' : req.originalUrl.slice(idx)
         })()
-        const target =
-          `${config.controlApiBaseUrl.replace(/\/+$/, '')}` +
+        const upstreamRes = await controlApiStreamRequest(
+          'GET',
           `/external/contexts/${encodeURIComponent(req.params.contextId)}` +
-          `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`
-
-        const upstreamRes = await fetch(target, {
-          method: req.method,
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'x-user-session-token': sessionToken,
-          },
-        })
+            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
+          {
+            userSessionToken: sessionToken,
+            throwOnHttpError: false,
+          }
+        )
 
         res.status(upstreamRes.status)
+        for (const name of PASSTHROUGH_HEADERS) {
+          const value = upstreamRes.headers.get(name)
+          if (value) res.setHeader(name, value)
+        }
         const ct = upstreamRes.headers.get('content-type')
         if (ct) res.setHeader('content-type', ct)
         const cd = upstreamRes.headers.get('content-disposition')

@@ -8,6 +8,7 @@ import { SubjectsDb, resolveAuthzContext } from "./subjectResolver";
  */
 function fakeDb(opts: {
   operators?: Set<string>;
+  adminGenerations?: Record<string, number | string>;
   teamsByUser?: Record<string, string[]>;
   users?: Record<string, { lifecycle_state?: string; lifecycle_version?: number | string }>;
   links?: Array<{
@@ -20,6 +21,7 @@ function fakeDb(opts: {
   calls: string[];
 } {
   const operators = opts.operators ?? new Set<string>();
+  const adminGenerations = opts.adminGenerations ?? {};
   const teamsByUser = opts.teamsByUser ?? {};
   const users = opts.users ?? {};
   const links = opts.links ?? [];
@@ -44,7 +46,9 @@ function fakeDb(opts: {
       if (text.includes("control_admin_users")) {
         const id = String(values?.[0]);
         return {
-          rows: operators.has(id) ? [{ id, status: "active", session_version: 1 }] : [],
+          rows: operators.has(id)
+            ? [{ id, status: "active", session_version: adminGenerations[id] ?? 1 }]
+            : [],
         };
       }
       if (text.includes("team_members")) {
@@ -104,6 +108,23 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
     expect(ctx.primarySubject).toBe(opId);
     // Resolution stops at the operator probe — no team lookup needed.
     expect(db.calls.some((q) => q.includes("team_members"))).toBe(false);
+  });
+
+  it("denies a stale direct control-admin bearer after the admin session epoch changes", async () => {
+    const adminId = "12121212-1212-4121-8121-121212121212";
+    const db = fakeDb({
+      operators: new Set([adminId]),
+      adminGenerations: { [adminId]: 2 },
+    });
+
+    await expect(
+      resolveAuthzContext(db, {
+        sub: adminId,
+        drive: "main",
+        principalType: "control-admin",
+        authGeneration: 1,
+      })
+    ).rejects.toThrow("control admin is not active");
   });
 
   it("keeps an unmarked colliding UUID on the conservative user path", async () => {
@@ -357,6 +378,41 @@ describe("resolveAuthzContext (spec §Subjects — check-time resolution)", () =
         },
       })
     ).rejects.toThrow("linked Desktop operator generation is not active");
+  });
+
+  it("denies a linked-admin bearer when the control-admin session epoch is stale", async () => {
+    const desktopUserId = "abababab-abab-4aba-8aba-abababababab";
+    const controlAdminId = "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc";
+    const db = fakeDb({
+      operators: new Set([controlAdminId]),
+      adminGenerations: { [controlAdminId]: 2 },
+      users: { [desktopUserId]: { lifecycle_state: "active", lifecycle_version: "1" } },
+      links: [
+        {
+          user_id: desktopUserId,
+          control_admin_id: controlAdminId,
+          lineage_id: "cdcdcdcd-cdcd-4cdc-8dcd-cdcdcdcdcdcd",
+          generation: "1",
+        },
+      ],
+    });
+
+    await expect(
+      resolveAuthzContext(db, {
+        sub: controlAdminId,
+        drive: "main",
+        principalType: "control-admin",
+        authGeneration: 1,
+        brokeredAuthority: {
+          desktopUserId,
+          controlAdminId,
+          authoritySource: "linked-admin",
+          linkLineageId: "cdcdcdcd-cdcd-4cdc-8dcd-cdcdcdcdcdcd",
+          linkGeneration: 1,
+          desktopUserGeneration: 1,
+        },
+      })
+    ).rejects.toThrow("linked admin is not active");
   });
 
   it("denies a linked-admin bearer when the Desktop user is retired even if the admin remains active", async () => {

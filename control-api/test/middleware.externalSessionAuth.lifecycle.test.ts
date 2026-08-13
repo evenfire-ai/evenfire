@@ -42,7 +42,7 @@ describe('external session lifecycle gate', () => {
     poolQuery.mockClear()
     verifyToken.mockClear()
     poolQuery.mockResolvedValue({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: 4 }],
+      rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
       rowCount: 1,
     })
   })
@@ -50,7 +50,7 @@ describe('external session lifecycle gate', () => {
   it('accepts an active session whose generation matches the user row', async () => {
     verifyToken.mockReturnValueOnce(claims)
     poolQuery.mockResolvedValueOnce({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: 4 }],
+      rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
       rowCount: 1,
     })
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
@@ -58,8 +58,8 @@ describe('external session lifecycle gate', () => {
   })
 
   it.each([
-    [{ lifecycle_state: 'retired', lifecycle_version: 5 }],
-    [{ lifecycle_state: 'active', lifecycle_version: 5 }],
+    [{ lifecycle_state: 'retired', lifecycle_version: '5' }],
+    [{ lifecycle_state: 'active', lifecycle_version: '5' }],
     [[]],
   ])('denies retired, stale, or missing authoritative rows', async row => {
     verifyToken.mockReturnValueOnce(claims)

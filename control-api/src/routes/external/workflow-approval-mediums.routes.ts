@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -74,9 +75,10 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
   const router = Router()
   const externalWorkflowApprovalEdgeRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.approvalRlExternalPerMin,
+    limit: config.approvalRlExternalEdgePerMin,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: externalClientRateLimitKey,
   })
 
   router.post(

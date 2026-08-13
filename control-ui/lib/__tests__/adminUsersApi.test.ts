@@ -37,4 +37,26 @@ describe('deleteAdminUser', () => {
       })
     )
   })
+
+  it('generates governed metadata when the caller uses the default request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ deleted: true, id: USER_ID }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await deleteAdminUser(USER_ID)
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+    const headers = init.headers as Record<string, string>
+    expect(JSON.parse(String(init.body))).toEqual({ reason: 'control_ui_user_retirement' })
+    expect(headers['Idempotency-Key']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
+    expect(headers['x-correlation-id']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
+  })
 })

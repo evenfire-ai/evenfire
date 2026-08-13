@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { AuditEvent, DbAuditSink, Queryable } from "./audit";
 
 class AuditDb implements Queryable {
@@ -102,6 +103,48 @@ describe("DbAuditSink", () => {
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       "linked-admin",
     ]);
+  });
+
+  it("uses a deterministic hash that changes when only actor attribution changes", async () => {
+    const ordinary = new AuditDb();
+    const linked = new AuditDb();
+    await new DbAuditSink(ordinary).record({
+      ...directDecision,
+      subject: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      desktopUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      authoritySource: "user-session",
+    });
+    await new DbAuditSink(linked).record({
+      ...directDecision,
+      subject: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      actorOnBehalfOf: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      desktopUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      authoritySource: "linked-admin",
+    });
+
+    const expected = createHash("sha256")
+      .update(
+        JSON.stringify([
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "linked-admin",
+          "read",
+          "gfs://main/resource-id",
+          "allow",
+          null,
+          "req-7",
+          "authorization_decision",
+          "agent:reader-1",
+          "direct_grant",
+          null,
+          null,
+        ])
+      )
+      .digest("hex");
+
+    expect(linked.values[6]).toBe(expected);
+    expect(linked.values[6]).not.toBe(ordinary.values[6]);
   });
 
   it("rejects a non-UUID Desktop actor before reaching the UUID audit cast", async () => {

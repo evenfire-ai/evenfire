@@ -644,6 +644,30 @@ describe('linked Desktop operator authority contract', () => {
     expect(mockQuery.mock.calls[0]?.[0]).toContain('lifecycle_state')
   })
 
+  it('returns a bounded retry body and header when the express edge backstop is exhausted', async () => {
+    const previous = config.externalGfsIngressRlPerMin
+    config.externalGfsIngressRlPerMin = 1
+    try {
+      auth()
+      const app = await buildApp()
+      await request(app)
+        .get('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+        .expect(404)
+      const res = await request(app)
+        .get('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+      expect(res.status).toBe(429)
+      expect(res.headers['retry-after']).toMatch(/^\d+$/)
+      expect(res.body).toEqual({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
+    } finally {
+      config.externalGfsIngressRlPerMin = previous
+    }
+  })
+
   it('rejects a pre-resolution rate limit before resolver or route work', async () => {
     auth()
     ;(config as { desktopGfsOperatorLinkingEnabled: boolean }).desktopGfsOperatorLinkingEnabled =
@@ -1498,6 +1522,18 @@ describe('user resource mutations via gfsc proxy', () => {
       .post(`/external/gfs/resources/${R}/children`)
       .set('x-user-session-token', 'operator-jwt')
       .send({ name: 'docs', kind: 'directory' })
+
+    expect(res.status).toBe(401)
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a mutation with no session header before minting or proxying', async () => {
+    mockVerifyExternalSessionToken.mockReturnValue(null)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const res = await request(app).delete(`/external/gfs/resources/${R}`).send({ ifMatch: 1 })
 
     expect(res.status).toBe(401)
     expect(mockSignGfsToken).not.toHaveBeenCalled()

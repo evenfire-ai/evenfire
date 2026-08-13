@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { requireApprovalDecisionAccess } from '../../middleware/approvalDecisionAccess.js'
+import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
 import { requireValidExternalSessionToken } from '../../middleware/externalSessionAuth.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
@@ -46,9 +47,10 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
   const router = Router()
   const externalApprovalEdgeRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.approvalRlExternalPerMin,
+    limit: config.approvalRlExternalEdgePerMin,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: externalClientRateLimitKey,
   })
 
   router.get(

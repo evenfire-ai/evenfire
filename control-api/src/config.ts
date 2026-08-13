@@ -131,6 +131,7 @@ type Config = {
   approvalRlRequestPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
+  approvalRlExternalEdgePerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
   // External Desktop GFS is a separate authority plane. The process-local
@@ -743,6 +744,7 @@ export const config: Config = {
   approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
   approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
+  approvalRlExternalEdgePerMin: Number(process.env.APPROVAL_RL_EXTERNAL_EDGE_PER_MIN || 120),
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
   // Approved GFS authority-boundary budgets. Keep them fixed here rather than

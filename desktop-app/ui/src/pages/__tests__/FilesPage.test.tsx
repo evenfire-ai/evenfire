@@ -233,12 +233,16 @@ describe('FilesPage', () => {
     )
   })
 
-  it.each(['401 Unauthorized', '403 Forbidden'])(
+  it.each([
+    ['401 Unauthorized', 'gfs_operator_link_invalid'],
+    ['401 Unauthorized', 'Unauthorized'],
+    ['403 Forbidden', 'gfs_operator_link_invalid'],
+  ])(
     'fails closed with a stable alert after a %s root mutation denial',
-    async status => {
+    async (status, errorCode) => {
       const rootResourceId = '11111111-1111-1111-1111-111111111111'
       const createFolder = vi.fn(async () => {
-        throw new Error(`${status}: gfs_operator_link_invalid`)
+        throw new Error(`${status}: ${errorCode}`)
       })
       const pushToast = vi.fn()
       hookMock.useGfsBrowserController.mockReturnValue({

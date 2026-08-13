@@ -28,6 +28,8 @@ const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 50
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
 const CONTROL_API_ERROR_HEADERS = [
   'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
   'x-ratelimit-reset',

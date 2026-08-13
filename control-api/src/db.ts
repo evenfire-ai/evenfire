@@ -2953,6 +2953,22 @@ async function applyGfsLifecycleAuthorityProjectionSchema(db: DbClient): Promise
   `)
 }
 
+/**
+ * The authorization epoch is one-based. Keep this as a new migration rather
+ * than editing the shipped baseline/session-version migrations: existing
+ * installations must receive the same default as fresh installations, and
+ * invitation inserts also stamp the first epoch explicitly.
+ */
+async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+    ALTER TABLE control_admin_users
+      ALTER COLUMN session_version SET DEFAULT 1;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -5834,6 +5850,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0095_gfs_lifecycle_authority_projection',
     apply: applyGfsLifecycleAuthorityProjectionSchema,
+  },
+  {
+    version: '0096_control_admin_session_version_default',
+    apply: applyControlAdminSessionVersionDefaultSchema,
   },
 ]
 

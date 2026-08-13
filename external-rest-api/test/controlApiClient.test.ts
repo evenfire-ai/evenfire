@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ControlApiError,
   controlApiBinaryRequestWithStatus,
+  controlApiRequest,
   controlApiRequestWithStatus,
   controlApiStreamRequest,
 } from '../src/controlApiClient.js'
+import { withExternalRequestContext } from '../src/requestContext.js'
 
 const ALLOWED_HEADERS = {
   'retry-after': '17',
@@ -56,5 +58,38 @@ describe('controlApiClient error headers', () => {
     expect(error.headers).not.toHaveProperty('set-cookie')
     expect(error.headers).not.toHaveProperty('server')
     expect(error.headers).not.toHaveProperty('x-internal-debug')
+  })
+})
+
+describe('controlApiClient request identity', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('forwards the proxy-attested client IP on non-GFS control-api calls', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await new Promise<void>((resolve, reject) => {
+      withExternalRequestContext(
+        {
+          ip: '203.0.113.41',
+          socket: { remoteAddress: '10.0.0.10' },
+        } as never,
+        {},
+        () => {
+          void controlApiRequest('GET', '/external/members')
+            .then(() => resolve())
+            .catch(reject)
+        }
+      )
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'x-external-client-ip': '203.0.113.41' }),
+      })
+    )
   })
 })

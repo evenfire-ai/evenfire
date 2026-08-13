@@ -1,12 +1,20 @@
 import { config } from './config.js'
+import { currentExternalClientIp } from './requestContext.js'
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+function addExternalClientIdentity(headers: Record<string, string>): void {
+  const clientIp = currentExternalClientIp()
+  if (clientIp) headers['x-external-client-ip'] = clientIp
+}
 
 // Response headers are an API contract only where a caller can safely act on
 // them. In particular, never relay Set-Cookie, server identity, CORS, or
 // arbitrary proxy headers from the internal control-api boundary.
 const FORWARDABLE_RESPONSE_HEADERS = [
   'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
@@ -84,6 +92,7 @@ export async function controlApiRequestWithStatus<T>(
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -165,6 +174,7 @@ export async function controlApiBinaryRequestWithStatus(
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -212,12 +222,14 @@ export async function controlApiStreamRequest(
     userSessionToken?: string
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
+    throwOnHttpError?: boolean
   }
 ): Promise<Response> {
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -230,7 +242,7 @@ export async function controlApiStreamRequest(
     headers,
     signal: options?.signal,
   })
-  if (!response.ok) {
+  if (!response.ok && options?.throwOnHttpError !== false) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
     try {
@@ -268,6 +280,7 @@ export async function controlApiPassthroughGet(
     headers: {
       authorization: `Bearer ${config.controlApiServiceToken}`,
       'x-service-token': config.controlApiServiceName,
+      ...(currentExternalClientIp() ? { 'x-external-client-ip': currentExternalClientIp()! } : {}),
     },
   })
   return {

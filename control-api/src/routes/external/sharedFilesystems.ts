@@ -3,6 +3,7 @@ import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -184,9 +185,10 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   const router = Router()
   const externalSharedFilesystemsRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.approvalRlExternalPerMin,
+    limit: config.approvalRlExternalEdgePerMin,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: externalClientRateLimitKey,
   })
   const sfsNs = config.sharedFilesystemsNamespace
   const ctxNs = config.contextsNamespace

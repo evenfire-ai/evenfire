@@ -9,6 +9,7 @@ const authTokenMock = vi.hoisted(() => ({
 
 const controlApiClientMock = vi.hoisted(() => ({
   controlApiRequest: vi.fn(),
+  controlApiStreamRequest: vi.fn(),
 }))
 
 vi.mock('../src/authToken.js', () => authTokenMock)
@@ -43,6 +44,7 @@ function buildApp() {
 beforeEach(() => {
   authTokenMock.verifyToken.mockReset()
   controlApiClientMock.controlApiRequest.mockReset()
+  controlApiClientMock.controlApiStreamRequest.mockReset()
 })
 
 describe('GET /me/contexts/:contextId/shared-filesystems', () => {
@@ -98,5 +100,48 @@ describe('Method gating', () => {
       expect(res.status).toBe(405)
     }
     expect(controlApiClientMock.controlApiRequest).not.toHaveBeenCalled()
+  })
+
+  it('uses the identity-aware stream client for proxy reads', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response('file-data', {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+    )
+
+    const res = await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1')
+      .set('authorization', 'Bearer good-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual(Buffer.from('file-data'))
+    expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
+      { userSessionToken: 'good-token', throwOnHttpError: false }
+    )
+  })
+
+  it('preserves upstream error status, body, and retry headers for proxy reads', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'forbidden' }), {
+        status: 429,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '7',
+        },
+      })
+    )
+
+    const res = await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files')
+      .set('authorization', 'Bearer good-token')
+
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'forbidden' })
+    expect(res.headers['retry-after']).toBe('7')
   })
 })

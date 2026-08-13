@@ -941,8 +941,8 @@ export async function completeControlAdminInvitation(input: {
     if (row.username_exists) return { error: 'duplicate_username' as const }
 
     const inserted = await db.query(
-      `INSERT INTO control_admin_users(email, username, password_hash, role, status)
-       VALUES($1, $2, $3, 'admin', 'active')
+      `INSERT INTO control_admin_users(email, username, password_hash, role, status, session_version)
+       VALUES($1, $2, $3, 'admin', 'active', 1)
        RETURNING id, username, email, password_hash, session_version, role, status, failed_attempts, locked_until`,
       [email, username, input.passwordHash]
     )

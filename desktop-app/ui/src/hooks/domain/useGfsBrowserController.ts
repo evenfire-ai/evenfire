@@ -132,7 +132,16 @@ export function isGfsSessionAuthorityFailure(
 ): boolean {
   const normalized = message.toLowerCase()
   if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
-  if (surface !== 'discovery') return false
+  if (surface !== 'discovery') {
+    // A bare 401 means the authenticated session is no longer accepted. It is
+    // distinct from a generic 403, which may be only a resource-policy denial
+    // and must not clear the whole browser session.
+    return (
+      /(^|\D)401(\D|$)/.test(normalized) ||
+      normalized.includes('not authenticated') ||
+      normalized.includes('unauthenticated')
+    )
+  }
   return (
     /(^|\D)(401|403)(\D|$)/.test(normalized) ||
     normalized.includes('unauthorized') ||
@@ -534,7 +543,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         return crumb
       } catch (error) {
         const message = toMessage(error)
-        if (isGfsSessionAuthorityFailure(message, 'discovery')) revokeAccess()
+        // Opening a URI is an operation on one resource. A generic 403 may be
+        // a per-resource policy decision; only typed lifecycle failures or a
+        // bare 401 invalidate the session-wide authority state.
+        if (isGfsSessionAuthorityFailure(message, 'operation')) revokeAccess()
         else setOpenError(message)
         return false
       } finally {
