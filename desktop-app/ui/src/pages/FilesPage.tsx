@@ -181,7 +181,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       ...agentSubjects.map(agent => ({
         type: 'host' as const,
         id: agent.id,
-        label: agent.name,
+        // Visible agent name (spec.displayName); the id-based `name` is the
+        // last-resort label for a blank/whitespace-only displayName so a
+        // selectable subject never renders an empty label.
+        label: (agent.displayName ?? '').trim() || agent.name,
         description: 'Agent',
         badge: 'Agent',
       })),

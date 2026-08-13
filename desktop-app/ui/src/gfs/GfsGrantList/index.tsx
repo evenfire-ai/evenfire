@@ -22,7 +22,9 @@ function subjectLabel(
 ): string {
   if (subject.type === 'host' && subject.id) {
     const agent = agents.find(candidate => candidate.id === subject.id)
-    if (agent) return agent.name
+    // Visible agent name (spec.displayName); fall back to the id-based `name`
+    // when the displayName is absent or blank/whitespace-only.
+    if (agent) return (agent.displayName ?? '').trim() || agent.name
   }
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
     const match = subjects.find(
