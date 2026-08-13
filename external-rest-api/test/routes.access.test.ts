@@ -107,4 +107,43 @@ describe('public access-contract forwarding', () => {
       },
     })
   })
+
+  it('preserves safe retry guidance for a locally sanitized access limit', async () => {
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError(
+        'rate limited',
+        429,
+        {
+          error: {
+            code: 'rate_limited',
+            details: { retryAfterSeconds: 17, bucket: 'secret-bucket' },
+          },
+        },
+        {
+          'retry-after': '17',
+          'x-ratelimit-limit': '30',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1900000000',
+          'x-internal-bucket': 'secret-bucket',
+        }
+      )
+    )
+
+    const response = await request(app())
+      .get('/me/access/capabilities')
+      .set('authorization', 'Bearer session-token')
+
+    expect(response.status).toBe(429)
+    expect(response.body.error).toMatchObject({
+      code: 'rate_limited',
+      retryable: true,
+      details: { retryAfterSeconds: 17 },
+    })
+    expect(response.headers['retry-after']).toBe('17')
+    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-remaining']).toBe('0')
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    expect(response.headers['x-internal-bucket']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toContain('secret-bucket')
+  })
 })
