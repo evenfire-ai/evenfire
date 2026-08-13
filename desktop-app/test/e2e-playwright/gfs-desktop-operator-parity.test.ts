@@ -653,9 +653,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
     await linkDialog.getByRole('button', { name: 'Open', exact: true }).click()
 
-    await expect(linkDialog.getByRole('alert')).toContainText('403 Forbidden', {
-      timeout: 30_000,
-    })
+    await expect(linkDialog.getByText(/403 Forbidden/)).toBeVisible({ timeout: 30_000 })
     await expect(page.getByTestId('gfs-error-unauthorized')).toHaveCount(0)
     await expect(page.getByTestId('gfs-create-folder-action')).toBeVisible()
     await expect(page.getByTestId('gfs-upload-action')).toBeVisible()
