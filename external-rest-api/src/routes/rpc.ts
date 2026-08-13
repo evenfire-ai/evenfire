@@ -15,7 +15,12 @@ export function createRpcRouter(): Router {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
-      const result = await issueRpcAccessToken(sessionToken, req.body?.scopes, req.body?.hostRefs)
+      const result = await issueRpcAccessToken(
+        sessionToken,
+        req.body?.scopes,
+        req.body?.hostRefs,
+        req.ip
+      )
       res.status(200).json(result)
     } catch (error) {
       const sanitized = sanitizeControlApiPublicError(error, RPC_PUBLIC_STATUSES)
