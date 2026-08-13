@@ -75,8 +75,13 @@ function groupByName(
 // (mcp-servers always have a serverMode; recipes don't). Prefer an explicit
 // entry_type if the registry ever starts sending it, else infer from serverMode.
 // "Connector" / "Plugin" mirror the labels in PublishToRegistryForm.
+function ownedEntryKind(e: OwnedRegistryEntry): string {
+  // Wire field is `entryType` (camelCase); `entry_type` kept as a fallback.
+  return e.entryType ?? e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+}
+
 function entryTypeLabel(e: OwnedRegistryEntry): string {
-  const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+  const kind = ownedEntryKind(e)
   if (kind === 'mcp-server') return 'Connector'
   if (kind === 'llm-hook') return 'Guardrail hook'
   return 'Plugin'
@@ -171,7 +176,7 @@ export function OwnedEntries({
   }, [])
 
   function isInstalled(e: OwnedRegistryEntry): boolean {
-    const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+    const kind = ownedEntryKind(e)
     const key = `${e.name}@${e.version}`
     if (kind === 'mcp-server') {
       return installedCatalogKeys.has(key) || installedServerNames.has(e.name)

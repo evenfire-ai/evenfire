@@ -3014,10 +3014,12 @@ export type OwnedRegistryEntry = {
   version: string
   visibility: 'public' | 'private'
   status: string // "published" | "deprecated" | "removed"
-  entry_type?: string // "mcp-server" | "recipe"
-  // Present ("local"/"remote") for mcp-servers, null/absent for recipes. The
-  // registry's /org/:org/entries returns this but NOT entry_type, so the
-  // Publisher's Type column infers Connector/Plugin from it (see OwnedEntries).
+  // The registry's /org/:org/entries returns the type as `entryType` (camelCase),
+  // NOT `entry_type`; keep both so the Publisher's Type column reads it directly
+  // instead of mis-inferring "Plugin" for llm-hook entries (see OwnedEntries).
+  entryType?: string // "mcp-server" | "recipe" | "llm-hook"
+  entry_type?: string
+  // Present ("local"/"remote") for mcp-servers, null/absent for others.
   serverMode?: string | null
 }
 export type OwnedRegistryEntriesResponse = {
