@@ -281,10 +281,12 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
 
     await waitFor(() => {
       expect(screen.queryByText(/Failed to create agent resources/i)).not.toBeInTheDocument()
+      // Create-only contract (R5-C1/R5-B1): the Host is POSTed to the collection,
+      // never PUT to a name (which would upsert-overwrite a foreign agent).
       expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/empty-access-test',
-        expect.any(Object)
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({ metadata: { name: 'empty-access-test' } })
       )
     })
 
@@ -356,16 +358,8 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
   })
 
   it('creates a new Telegram channel with provider settings and access grants', async () => {
-    vi.mocked(api.apiSend).mockImplementation(async (method, url) => {
-      if (
-        method === 'PUT' &&
-        String(url).includes('/api/v1/admin/communication-channels/new-telegram-channel')
-      ) {
-        throw new Error('not found')
-      }
-      return {}
-    })
-
+    // Create-only contract: the new channel is POSTed directly (no PUT-first
+    // upsert), so no per-URL mock trick is needed — every apiSend resolves.
     await renderWizard()
     await walkToAccessStep({ agentName: 'agent-with-channel' })
 
@@ -409,9 +403,10 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
     })
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/agent-with-channel',
+        'POST',
+        '/api/v1/admin/hosts',
         expect.objectContaining({
+          metadata: { name: 'agent-with-channel' },
           spec: expect.objectContaining({
             channels: ['new-telegram-channel'],
             workflowControl: {
@@ -506,14 +501,14 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
 
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/stateful-agent',
-        expect.any(Object)
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({ metadata: { name: 'stateful-agent' } })
       )
     })
     const hostCall = vi
       .mocked(api.apiSend)
-      .mock.calls.find(call => call[1] === '/api/v1/admin/hosts/stateful-agent')
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
     expect(hostCall).toBeDefined()
     const payload = hostCall![2] as { spec: Record<string, unknown> }
     expect('lifecycle' in payload.spec).toBe(false)

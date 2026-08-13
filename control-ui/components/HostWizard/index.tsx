@@ -53,6 +53,7 @@ import type {
   ChannelOption,
   ChannelProvider,
   ContextOption,
+  CreatedResource,
   HostWizardProps,
   NewChannelDraft,
   WizardSelectProps,
@@ -266,6 +267,80 @@ function displayHostPreflightMessage(rawHostName: string): string | null {
   return null
 }
 
+// The DELETE path for one tracked sibling. The server fixes each resource's
+// namespace (secrets → config.secretsNamespace; hosts/contexts/channels →
+// their configured namespace), so — exactly like the SecretsTable /
+// CommunicationChannelsTable / deleteContext call-sites — no namespace query is
+// sent. Deleting a communicationchannel also removes its credentials Secret
+// server-side, so a channel's credential Secret is never tracked or deleted
+// separately here.
+function compensationPath(entry: CreatedResource): string {
+  const encoded = encodeURIComponent(entry.name)
+  switch (entry.kind) {
+    case 'secret':
+      return `/api/v1/admin/secrets/${encoded}`
+    case 'context':
+      return `/api/v1/admin/contexts/${encoded}`
+    case 'communication-channel':
+      return `/api/v1/admin/communication-channels/${encoded}`
+  }
+}
+
+// Inverse-order (channel → context → secret) best-effort rollback of the
+// siblings THIS run created before the Host create failed, so a failed create
+// never leaves an orphaned secret/context/channel behind. Best-effort: each
+// DELETE is independent, a 404 is success (idempotent — the resource is already
+// gone), and NO failure is re-thrown — a rollback error must never mask the
+// original create error the caller is about to surface. The server performs a
+// direct delete with no referential-integrity/finalizer coupling between the
+// siblings, so inverse order is for tidiness, not correctness.
+async function compensateCreated(created: CreatedResource[]): Promise<void> {
+  for (let i = created.length - 1; i >= 0; i -= 1) {
+    const entry = created[i]
+    try {
+      await apiSend('DELETE', compensationPath(entry))
+    } catch (err) {
+      console.warn(
+        `HostWizard: best-effort rollback of ${entry.kind} "${entry.name}" failed after a create error`,
+        err
+      )
+    }
+  }
+}
+
+// A create-only POST, with the 409 disambiguation done HERE — at the create
+// site — never in the shared submitAll catch. This is deliberate: only a POST to
+// a create-only /admin/{secrets,contexts,communication-channels,hosts} endpoint
+// can turn a code-less 409 into an UNAMBIGUOUS AlreadyExists name collision. The
+// grant endpoints (409 `deleted_agent_history_limit_exceeded`) and the
+// `mode=existing` channel PUT (409 `conflict`/`resource_changed`) share the
+// top-level catch but can NEVER reach here, so their messages are preserved.
+//
+// The two 409 shapes from THESE endpoints (V-1):
+//   - WITH a body `code` (context_crd_outdated / communication_channel_crd_outdated)
+//     → a CRD-outdated response, NOT a collision. formatApiError already set
+//       e.message to the server's human `error` text, so re-throw e untouched.
+//   - WITHOUT a body `code` → apiserver AlreadyExists. The create-only POST
+//     refused to overwrite a foreign resource; replace the raw K8s text with the
+//     friendly, per-resource `collisionMessage`.
+// Discriminate on `body.code` (the field INSIDE the JSON body), never on the
+// client's `.code` (which formatApiError sets from `body.error`, the message).
+// Any non-409 error is re-thrown verbatim.
+async function createOrThrow(path: string, body: unknown, collisionMessage: string): Promise<void> {
+  try {
+    await apiSend('POST', path, body)
+  } catch (e) {
+    if (e instanceof Error && (e as Error & { status?: number }).status === 409) {
+      const errBody = (e as Error & { body?: { code?: unknown } }).body
+      const hasCode = typeof errBody?.code === 'string' && errBody.code.length > 0
+      // Code-less 409 from a create-only POST = unambiguous name collision.
+      if (!hasCode) throw new Error(collisionMessage)
+      // Coded 409 (CRD-outdated) keeps the server's own message (e.message).
+    }
+    throw e
+  }
+}
+
 function isStepValid(
   stepIndex: number,
   state: {
@@ -301,10 +376,10 @@ function isStepValid(
   // those siblings. isValidResourceSlug mirrors the server rule client-side.
   if (stepIndex === 0) {
     if (!isValidResourceSlug(state.hostName)) return false
-    // Block a slug that collides with an existing host: create's PUT-first
-    // upsert (submitAll → upsertResource('admin/hosts', …)) would otherwise
-    // overwrite that agent's entire spec and still report "created". Gating here
-    // stops the collision BEFORE any sibling (secret/context/channel) is created.
+    // Block a slug that collides with an existing host. The submit path is now
+    // create-only (POST), so the server 409s AlreadyExists on a collision rather
+    // than overwriting — this client gate is an early-UX layer that stops the
+    // collision BEFORE any sibling (secret/context/channel) is created.
     if (state.existingHostNames.includes(toKebabCase(state.hostName))) return false
     // Gate the free-text display value (spec.host) too: toKebabCase strips
     // control/bidi chars, so a name like "agent‮name" derives a clean slug
@@ -315,8 +390,8 @@ function isStepValid(
   }
   if (stepIndex === 1) {
     if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
-    // Same slug-derivation gate: the new context upsert runs before the host
-    // create, so an invalid/over-long derived name here has the same orphan risk.
+    // Same slug-derivation gate: the new context is created before the host, so
+    // an invalid/over-long derived name here has the same orphan risk.
     return isValidResourceSlug(state.contextName)
   }
   if (stepIndex === 2) {
@@ -392,8 +467,8 @@ export function HostWizard({
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
   // Existing host slugs (metadata.name), loaded up front so the step-0 gate can
-  // block a colliding name BEFORE any sibling is created. Without this, create's
-  // PUT-first upsert would silently overwrite an existing agent's whole spec.
+  // block a colliding name BEFORE any sibling is created — early UX ahead of the
+  // create-only POST, whose 409 AlreadyExists is the real backstop.
   const [existingHostNames, setExistingHostNames] = useState<string[]>([])
 
   const [contextName, setContextName] = useState('')
@@ -619,9 +694,9 @@ export function HostWizard({
         // Promise.all and blank the context/channel/member/team selectors. On
         // failure existingHostNames stays [] and the step-0 collision gate
         // degrades FAIL-OPEN (permits create) — the pre-fix behavior (the wizard
-        // never loaded hosts at all), not worse. The submit-time upsert is still
-        // PUT-first, so a true collision could overwrite a spec when the
-        // directory is down; that exposure predates this guard and is unchanged.
+        // never loaded hosts at all), not worse. Even with the directory down a
+        // true collision can NOT overwrite a foreign spec: submit is create-only
+        // (POST), so the server 409s AlreadyExists. This gate is only early UX.
         // Do NOT make this fail-closed: blocking every create when hosts can't
         // load is a strictly worse UX.
         (
@@ -824,19 +899,6 @@ export function HostWizard({
     existingHostNames,
   ])
 
-  async function upsertResource(
-    pluralPath: string,
-    name: string,
-    createBody: unknown,
-    updateBody: unknown
-  ) {
-    try {
-      await apiSend('PUT', `/api/v1/${pluralPath}/${encodeURIComponent(name)}`, updateBody)
-    } catch {
-      await apiSend('POST', `/api/v1/${pluralPath}`, createBody)
-    }
-  }
-
   function resetForm() {
     setStep(0)
     setError('')
@@ -901,20 +963,29 @@ export function HostWizard({
   async function submitAll(options: { skipChannels?: boolean } = {}) {
     setBusy(true)
     setError('')
+    // Rollback ledger for the create-only seam: every sibling THIS run POSTs
+    // successfully is appended here so a later failure (before the Host exists)
+    // can inverse-compensate it. Only successful POSTs of this execution are
+    // tracked — never inferred from slug/label — and the `mode=existing` channel
+    // PUT is an edit, so it is deliberately NOT recorded (deleting it would
+    // destroy a foreign resource). Declared outside the try so catch can read it.
+    const created: CreatedResource[] = []
+    let hostCreated = false
     try {
       const shouldSkipChannels = options.skipChannels || channelMode === 'skip'
       const normalizedHostName = toKebabCase(hostName)
-      // Collision guard, mirrored from the step-0 gate: create's PUT-first
-      // upsert would overwrite an existing agent's spec. Throw BEFORE creating
-      // any sibling (secret/context/channel) so a collision never orphans them.
+      // Collision guard, mirrored from the step-0 gate. Throw BEFORE creating any
+      // sibling so a collision never orphans one; the server-side create-only
+      // POST is the real backstop (409 AlreadyExists), this is just early UX.
       if (existingHostNames.includes(normalizedHostName)) {
         throw new Error('Identifier already in use — choose another name.')
       }
       // Hard preflight — defense in depth for the step gates (R5-H1). Everything
       // the server validates is checked HERE, before the first apiSend, so a
       // value the server would reject can never leave an orphaned sibling
-      // (secret/context/channel) ahead of the failing host create. This is
-      // purely additive: no write ordering or upsert behavior changes.
+      // (secret/context/channel) ahead of the failing host create. Additive to
+      // the create-only seam: it fails fast before any write, and if a write
+      // still fails past this point, compensateCreated rolls the siblings back.
       const displayHostIssue = validateDisplayField(displayHostValue(hostName), 'spec.host')
       if (displayHostIssue) {
         throw new Error(displayHostPreflightMessage(hostName) || 'Agent name is not valid.')
@@ -954,20 +1025,32 @@ export function HostWizard({
         if (slotErrors.length > 0) {
           throw new Error(slotErrors[0])
         }
-        await apiSend('POST', '/api/v1/admin/secrets', {
-          name: normalizedSecretName,
-          namespace: hostNamespace,
-          labels: {
-            [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never silently overwrite a foreign Secret via a PUT. The
+        // 409 → friendly message translation is scoped to createOrThrow.
+        await createOrThrow(
+          '/api/v1/admin/secrets',
+          {
+            name: normalizedSecretName,
+            namespace: hostNamespace,
+            labels: {
+              [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+            },
+            stringData,
           },
-          stringData,
-        })
+          `A credential secret named "${normalizedSecretName}" already exists — choose another name.`
+        )
+        // The host's own LLM Secret (${slug}-llm). Tracked so a later failure
+        // rolls it back explicitly by name (a channel's credential Secret is
+        // NOT tracked — the channel DELETE removes it server-side).
+        created.push({ kind: 'secret', name: normalizedSecretName })
       }
 
       if (contextMode === 'new') {
-        await upsertResource(
-          'admin/contexts',
-          normalizedContextName,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never silently overwrite a foreign context via a PUT.
+        await createOrThrow(
+          '/api/v1/admin/contexts',
           {
             metadata: { name: normalizedContextName },
             spec: {
@@ -976,14 +1059,9 @@ export function HostWizard({
               mcpServers: Array.from(new Set(selectedMcp)),
             },
           },
-          {
-            spec: {
-              contextId: normalizedContextName,
-              description: `Context for agent ${normalizedHostName}`,
-              mcpServers: Array.from(new Set(selectedMcp)),
-            },
-          }
+          `A context named "${normalizedContextName}" already exists — choose another name.`
         )
+        created.push({ kind: 'context', name: normalizedContextName })
       }
 
       if (!shouldSkipChannels && channelMode === 'new') {
@@ -1004,19 +1082,23 @@ export function HostWizard({
           ...providerSettings(channelProvider, newChannelDraft),
         }
 
-        await upsertResource(
-          'admin/communication-channels',
-          normalizedChannelName,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never overwrite a foreign channel via a PUT.
+        await createOrThrow(
+          '/api/v1/admin/communication-channels',
           {
             metadata: { name: normalizedChannelName },
             spec: channelSpec,
             credentials: cleanedCredentials,
           },
-          {
-            spec: channelSpec,
-          }
+          `A channel named "${normalizedChannelName}" already exists — choose another name.`
         )
+        created.push({ kind: 'communication-channel', name: normalizedChannelName })
       } else if (!shouldSkipChannels && channelMode === 'existing' && selectedChannelOption) {
+        // Deliberate edit of a channel the operator SELECTED: attach this host +
+        // its access to a resource that already exists. This is the ONE surviving
+        // PUT (not a create) and is intentionally NOT tracked in `created` —
+        // compensating it would delete a foreign resource we did not create.
         await apiSend(
           'PUT',
           `/api/v1/admin/communication-channels/${encodeURIComponent(selectedChannelOption.name)}`,
@@ -1069,21 +1151,26 @@ export function HostWizard({
           : {}),
       }
 
-      await upsertResource(
-        'admin/hosts',
-        normalizedHostName,
+      // Create-only POST (R5-C1/R5-B1): the Host is the seam boundary. A name
+      // collision must 409 AlreadyExists rather than overwrite a foreign agent's
+      // entire spec. Once this resolves, hostCreated flips the compensation off:
+      // the siblings now belong to a real Host and must NOT be rolled back.
+      await createOrThrow(
+        '/api/v1/admin/hosts',
         {
           metadata: { name: normalizedHostName },
           spec: hostSpec,
         },
-        {
-          spec: hostSpec,
-        }
+        `That agent name is already in use — choose another name.`
       )
+      hostCreated = true
 
       // Associate authorized users and teams with the new agent in a single
       // atomic call each, rather than looping N×(GET+PUT) per selection.
       // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams.
+      // These run AFTER hostCreated=true: if a grant fails, the Host + siblings
+      // stay (V-7) — the operator retries grants from the agent detail page — so
+      // no compensation runs for a grant failure.
       if (selectedUserIds.length > 0) {
         await updateAgentUsers(normalizedHostName, selectedUserIds)
       }
@@ -1097,6 +1184,21 @@ export function HostWizard({
       if (!mountedRef.current) return
       onClose()
     } catch (e) {
+      // The Host is the compensation boundary (V-7): if it never got created, the
+      // siblings created before it are orphans — inverse-compensate them
+      // best-effort. If it DID get created, leave everything (a grant failure is
+      // recoverable from the agent detail page). Always await the rollback before
+      // surfacing the error so a caller/test observes the terminal state.
+      if (!hostCreated) {
+        await compensateCreated(created)
+      }
+      // NO 409 remap here: each create-only POST already translated its OWN
+      // collision inside createOrThrow. This catch also sees errors from paths
+      // that run AFTER the Host — the grant calls (409
+      // `deleted_agent_history_limit_exceeded`) and the `mode=existing` channel
+      // PUT (409 `conflict`) — whose messages formatApiError already produced;
+      // masking them as "already in use" (the prior top-level remap) told the
+      // operator a collision that never happened. Preserve e.message verbatim.
       if (mountedRef.current) {
         setError(e instanceof Error ? e.message : 'Failed to create agent resources')
       }

@@ -90,7 +90,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-function formatApiError(res: Response, text: string): Error {
+export function formatApiError(res: Response, text: string): Error {
   let detail = text
   let parsedBody: Record<string, unknown> | null = null
   try {

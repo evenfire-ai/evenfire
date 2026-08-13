@@ -36,6 +36,16 @@ export type ChannelOption = {
   spec: Record<string, unknown>
 }
 
+// A sibling resource this wizard run created via a create-only POST, tracked so
+// a later failure (before the Host exists) can compensate it with an inverse
+// DELETE. ONLY POSTs succeeded by THIS submit are recorded — never inferred from
+// slug or label ownership. The channel `mode=existing` PUT is an edit of a
+// pre-existing resource and is NEVER tracked here.
+export type CreatedResource = {
+  kind: 'secret' | 'context' | 'communication-channel'
+  name: string
+}
+
 export type HostWizardProps = {
   existingSecrets: SecretMeta[]
   mcpServers: McpServer[]
