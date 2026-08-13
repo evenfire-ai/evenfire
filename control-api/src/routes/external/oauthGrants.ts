@@ -6,6 +6,8 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { deleteOAuthGrant, listUserOAuthGrants } from '../../oauth/store.js'
 
 function dbClient() {
@@ -35,6 +37,7 @@ export function createExternalOauthGrantsRouter(): Router {
     '/external/oauth/grants',
     ...externalOauthGrantsRateLimits,
     requireValidExternalSessionToken,
+    rateLimitMiddleware(externalUserRateLimitOptions('oauth_grant_read', 'authenticated')),
     (req: ExternalAuthedRequest, res, next) => {
       void (async () => {
         try {
@@ -61,6 +64,7 @@ export function createExternalOauthGrantsRouter(): Router {
     '/external/oauth/grants/:recipeNamespace/:recipeName/:oauthClientId',
     ...externalOauthGrantsRateLimits,
     requireValidExternalSessionToken,
+    rateLimitMiddleware(externalUserRateLimitOptions('oauth_grant_mutation', 'authenticated')),
     (req: ExternalAuthedRequest, res, next) => {
       void (async () => {
         try {
