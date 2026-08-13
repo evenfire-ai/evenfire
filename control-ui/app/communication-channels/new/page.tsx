@@ -28,9 +28,11 @@ import {
 } from '@lib/communicationChannelProviders'
 import {
   type CommunicationChannelItem,
+  slackWebhookUrlForChannelName,
   teamsWebhookPathForChannelName,
   teamsWebhookUrlForChannelName,
 } from '@lib/communicationChannels'
+import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 import { toKebabCase, toKebabInput } from '@lib/string'
 
 type HostItem = {
@@ -222,6 +224,26 @@ export default function CreateCommunicationChannelPage() {
       }),
     [draft.teamsAppName, teamsWebhookUrl]
   )
+  // Slack's order is manifest first, credentials second: the bot token only exists
+  // after the app is installed, so a manifest offered only once the channel is saved
+  // arrives after the step it describes. The Request URL encodes namespace and name
+  // only, so it is derivable here — from the NORMALIZED name, which is what the save
+  // will persist. Deriving it from the raw input would hand over a URL for a channel
+  // that never exists, which is the failure this manifest was written to remove.
+  const slackRequestUrl = useMemo(
+    () =>
+      normalizedChannelName && canUseBrowserWebhookOrigin
+        ? slackWebhookUrlForChannelName(normalizedChannelName)
+        : null,
+    [canUseBrowserWebhookOrigin, normalizedChannelName]
+  )
+  // No app name, no manifest: the name becomes display_information.name, and a
+  // placeholder would install an app under a name the operator never chose.
+  const slackManifest = useMemo(() => {
+    const appName = draft.slackBotHandle.trim()
+    if (!appName || !slackRequestUrl || !canGenerateSlackAppManifest(slackRequestUrl)) return null
+    return slackAppManifest(appName, slackRequestUrl)
+  }, [draft.slackBotHandle, slackRequestUrl])
   const teamsBotNameIsValid = isValidTeamsBotName(draft.teamsAppName)
 
   useEffect(() => {
@@ -339,6 +361,17 @@ export default function CreateCommunicationChannelPage() {
       copied
         ? 'Teams bot command copied.'
         : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copySlackAppManifest() {
+    if (!slackManifest) return
+    const copied = await copyTextToClipboard(slackManifest)
+    showToast(
+      copied
+        ? 'Slack app manifest copied.'
+        : 'Could not copy to clipboard. Select the manifest and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
   }
@@ -604,6 +637,38 @@ export default function CreateCommunicationChannelPage() {
                           autoComplete="off"
                         />
                       </Field>
+                      {slackManifest ? (
+                        <div className="cu-field">
+                          <span className="cu-field__label">Slack App Manifest</span>
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>YAML</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copySlackAppManifest}
+                                disabled={saving}
+                                aria-label="Copy Slack app manifest"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre cu-slack-manifest__pre">
+                              <code>{slackManifest}</code>
+                            </pre>
+                          </div>
+                          <span className="cu-field__hint">
+                            Create the Slack app from this first: in Slack, Create New App → From an
+                            app manifest → paste. It sets the scopes, the events, and both Request
+                            URLs, so the app is ready before you come back for the token below. The
+                            URLs point at <code>{normalizedChannelName}</code>, so create this
+                            channel under that name.
+                          </span>
+                        </div>
+                      ) : null}
                       <ChannelCredentialsPanel
                         ccName={channelName.trim()}
                         pending={true}
