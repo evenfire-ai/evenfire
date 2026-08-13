@@ -521,6 +521,54 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     expect(encoded.namespace).toBe('channels')
   })
 
+  it('links straight to Slack app creation, in a new tab', async () => {
+    // The manifest is only useful next to the page that consumes it, and that page
+    // is a different site. Sending the operator to find it themselves is the step
+    // this whole panel exists to remove. New tab, because the half-filled create
+    // form must survive the trip.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+    await screen.findByText(/display_information:/)
+
+    const link = screen.getByRole('link', { name: /create.*slack app/i })
+    expect(link).toHaveAttribute('href', 'https://api.slack.com/apps?new_app=1')
+    expect(link).toHaveAttribute('target', '_blank')
+    // Untrusted target: never hand it a live window.opener back to this form.
+    expect(link.getAttribute('rel') ?? '').toMatch(/noreferrer|noopener/)
+  })
+
+  it('explains itself when the deployment has no public webhook address', async () => {
+    // Minikube and localhost: no env var and a non-app.* hostname, so
+    // webhookUrlForPath returns a bare path and no manifest can be generated. The
+    // edit page shows a warning naming the missing variable; rendering nothing
+    // here leaves the operator following a doc that promises a manifest, with no
+    // cause shown anywhere. jsdom's hostname is localhost, so simply not stubbing
+    // the env reproduces it.
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+    const panel = document.querySelector('.cu-channel-provider-panel')
+    expect(panel?.textContent ?? '').toMatch(
+      /NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL|no public webhook address/i
+    )
+  })
+
   it('offers no manifest until the Slack App Name is set', async () => {
     // The app name is the manifest's display_information.name. Emitting one with a
     // placeholder would install an app under a name the operator never chose.
