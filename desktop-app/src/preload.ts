@@ -1,15 +1,39 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import {
-  type DesktopCommandId,
-  type DesktopCommandSource,
-  isDesktopCommandId,
-} from './desktopCommands.js'
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
 } from './types.js'
+
+// Sandboxed Electron preloads cannot load relative runtime modules. Keep this
+// allowlist self-contained and pin it to the authoritative registry in
+// desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
+const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
+  'chat.newTab',
+  'chat.closeTab',
+  'tabs.select1',
+  'tabs.select2',
+  'tabs.select3',
+  'tabs.select4',
+  'tabs.select5',
+  'tabs.select6',
+  'tabs.select7',
+  'tabs.select8',
+  'tabs.selectLast',
+  'tabs.next',
+  'tabs.previous',
+  'search.open',
+  'search.current',
+  'composer.focus',
+  'commands.open',
+  'settings.shortcuts',
+])
+
+function isDesktopCommandId(value: unknown): value is DesktopCommandId {
+  return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
+}
 
 const clerum = Object.freeze({
   shortcuts: {

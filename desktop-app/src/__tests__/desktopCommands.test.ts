@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+import ts from 'typescript'
 import {
   DESKTOP_COMMANDS,
   type DesktopShortcutInput,
@@ -24,6 +27,24 @@ function input(overrides: Partial<DesktopShortcutInput> = {}): DesktopShortcutIn
 }
 
 describe('Desktop command registry', () => {
+  it('keeps the sandboxed main preload self-contained and synchronized with command IDs', async () => {
+    const source = await fs.readFile(path.join(process.cwd(), 'src', 'preload.ts'), 'utf8')
+    const syntax = ts.createSourceFile('preload.ts', source, ts.ScriptTarget.Latest, false)
+    const relativeValueImports = syntax.statements
+      .filter(ts.isImportDeclaration)
+      .filter(statement => {
+        const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+          ? statement.moduleSpecifier.text
+          : ''
+        return specifier.startsWith('.') && !statement.importClause?.isTypeOnly
+      })
+      .map(statement => statement.getText(syntax))
+    expect(relativeValueImports).toEqual([])
+    for (const command of DESKTOP_COMMANDS) {
+      expect(source, `preload is missing ${command.id}`).toContain(`'${command.id}'`)
+    }
+  })
+
   it('has unique stable IDs and no binding collisions within a source', () => {
     expect(new Set(DESKTOP_COMMANDS.map(command => command.id)).size).toBe(DESKTOP_COMMANDS.length)
     for (const platform of ['darwin', 'win32'] as const) {
