@@ -21,6 +21,7 @@ const electronMocks = vi.hoisted(() => {
       this.currentUrl = url
     })
     setWindowOpenHandler = vi.fn()
+    stopFindInPage = vi.fn()
 
     on(event: string, handler: (...args: unknown[]) => void): this {
       if (!this.listeners.has(event)) this.listeners.set(event, new Set())
@@ -193,6 +194,9 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     await unmountSandboxUiView()
 
     expect(parentWindow.listenerCount('closed')).toBe(0)
+    expect(electronMocks.views[0]?.webContents.stopFindInPage).toHaveBeenCalledWith(
+      'clearSelection'
+    )
     parentWindow.emit('closed')
     expect(onClosed).not.toHaveBeenCalled()
   })
