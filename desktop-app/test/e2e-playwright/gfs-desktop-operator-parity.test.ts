@@ -732,9 +732,15 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       reason: 'control_ui_reactivate',
     })
 
-    // Retry is the user-visible next Desktop request. It cannot restore a
-    // client capability; the reactivated server link must return the root.
-    await page.getByTestId('gfs-retry-access-action').click()
+    // Re-open the link through the visible Desktop action. The session remains
+    // ordinary-user authenticated after revoke, so there is no session-level
+    // retry banner; the reactivated server link must return the operator root.
+    await page.getByRole('button', { name: 'Open GFS link' }).click()
+    const reactivatedLinkDialog = page.getByRole('dialog', { name: 'Open GFS link' })
+    await reactivatedLinkDialog
+      .getByLabel('gfs URI')
+      .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
+    await reactivatedLinkDialog.getByRole('button', { name: 'Open', exact: true }).click()
     await expect(page.getByTestId('gfs-view-operator')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByTestId('gfs-root-operator')).toHaveAttribute(
       'data-resource-id',
