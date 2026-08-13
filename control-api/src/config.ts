@@ -202,6 +202,8 @@ type Config = {
   // error; enforce mode rejects installs/updates with a disallowed image.
   allowedPluginImagePrefixes: string[]
   enforcePluginImageAllowlist: boolean
+  curatedHookOrgs: string[]
+  defaultHookTrustCap: string
 }
 
 function assertNotPlaceholder(label: string, value: string): void {
@@ -836,6 +838,19 @@ export const config: Config = {
   enforcePluginImageAllowlist:
     (process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST ?? '').toLowerCase() === 'true' ||
     process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST === '1',
+  // Guardrails install-hook trust policy (spec §8.4 / registry gap #1). The
+  // registry's entries.trust_level is publisher-influenced, so the saga only
+  // honors it for platform-CURATED orgs listed here; every other org's hook is
+  // capped at `defaultHookTrustCap` regardless of the column. Case-sensitive
+  // (org scopes carry '@'); NOT parseCsvList (which lowercases).
+  curatedHookOrgs: (process.env.CONTROL_API_CURATED_HOOK_ORGS ?? '@clerum,@evenfire')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+  // Trust ceiling applied to a non-curated org's hook. `mid` lets a self-published
+  // hook clear a `mid` floor but never reach `high` (so it can never unlock the
+  // content+egress combination gated at `high`, §8.4).
+  defaultHookTrustCap: (process.env.CONTROL_API_DEFAULT_HOOK_TRUST_CAP ?? 'mid').toLowerCase(),
 }
 
 // Namespace config validation: fail fast if any namespace is empty.

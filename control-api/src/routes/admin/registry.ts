@@ -12,6 +12,7 @@ import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
+import type { RegistryEntry } from '../../services/registryClient.js'
 import {
   RegistryProxyError,
   applyPublishScope,
@@ -125,6 +126,54 @@ const NO_CREDENTIAL_SCHEMA: RegistryCredentialSchema = {
   required: false,
   authType: 'none',
   keys: [],
+}
+
+// ── install-hook trust policy (guardrails spec §8.4) ────────────────────────
+const HOOK_TRUST_ORDER: Record<string, number> = { low: 0, mid: 1, high: 2 }
+// Lifecycle points that receive message/response CONTENT (§8.4). pre_call shaping
+// gets model+params+metadata, not bodies, so it is not content-bearing.
+const CONTENT_BEARING_POINTS = new Set(['moderate', 'postCallSuccess'])
+
+/** Registry `hook_meta` shape (mirrors the registry HookMeta / LlmHook.spec, §8.5). */
+type HookMetaShape = {
+  target: {
+    image?: { ref?: string; port?: number; security?: Record<string, unknown> }
+    service?: { name?: string; namespace?: string; port?: number }
+    remote?: { baseUrl?: string }
+  }
+  lifecyclePoints: string[]
+  path?: string
+  defaultConfig?: Record<string, unknown>
+  requiredEgress?: unknown[]
+}
+
+type HostGuardrailsShape = {
+  hooks?: Record<string, Array<{ id: string; digest?: string }>>
+  minInstalledHookTrustLevel?: string
+  capabilityCeiling?: string[]
+}
+type HostShape = { spec?: { guardrails?: HostGuardrailsShape } & Record<string, unknown> }
+
+/** The `@org` scope from an org-scoped entry name (`@org/name`), or null. */
+function hookOrgScope(entryName: string): string | null {
+  const m = /^@([^/]+)\//.exec(entryName)
+  return m ? `@${m[1]}` : null
+}
+
+/**
+ * Authoritative trust level for an installed hook (§8.4 / registry gap #1).
+ * `entries.trust_level` is publisher-influenced (trigger-computed from
+ * author-supplied creator tags), so it is honored ONLY for a platform-curated
+ * org; every other org's hook is capped at `config.defaultHookTrustCap` — a
+ * self-published hook can clear a `mid` floor but never reach `high` (and so can
+ * never unlock the content+egress combination §8.4 reserves for `high`).
+ */
+export function resolveHookTrustLevel(entry: Pick<RegistryEntry, 'name' | 'trust_level'>): string {
+  const column = (entry.trust_level || 'low').toLowerCase()
+  const org = hookOrgScope(entry.name)
+  if (org && config.curatedHookOrgs.includes(org)) return column
+  const cap = config.defaultHookTrustCap
+  return (HOOK_TRUST_ORDER[column] ?? 0) <= (HOOK_TRUST_ORDER[cap] ?? 1) ? column : cap
 }
 
 type SecretSnapshot = {
@@ -1558,6 +1607,362 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           registryVersion: body.registryEntryVersion,
           correlationId,
           pendingCredentials,
+        })
+      })
+    )
+  }
+
+  // ── POST /admin/registry/install-hook — install an org-scoped guardrail hook (spec §8.5) ──
+  if (gateway) {
+    router.post(
+      '/admin/registry/install-hook',
+      asyncHandler(async (req, res) => {
+        const body = req.body as {
+          hostRef?: string
+          registryEntryName?: string
+          registryEntryVersion?: string
+          hookName?: string
+          capabilities?: string[]
+          order?: number
+          failMode?: 'open' | 'closed'
+          credentials?: Record<string, string>
+        }
+
+        if (!body.registryEntryName || typeof body.registryEntryName !== 'string') {
+          res.status(400).json({ error: 'registryEntryName is required' })
+          return
+        }
+        if (!body.registryEntryVersion || typeof body.registryEntryVersion !== 'string') {
+          res.status(400).json({ error: 'registryEntryVersion is required' })
+          return
+        }
+        if (!body.hostRef || typeof body.hostRef !== 'string' || !isValidK8sName(body.hostRef)) {
+          res.status(400).json({ error: 'hostRef is required (a valid Host name)' })
+          return
+        }
+
+        // Step 1 — fetch entry; assert org-owned llm-hook with hook_meta (§8.5).
+        const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
+        if (entry.entry_type !== 'llm-hook') {
+          res.status(400).json({
+            error: `Entry "${body.registryEntryName}" is not an llm-hook (got: ${entry.entry_type})`,
+          })
+          return
+        }
+        if (entry.owner_type && entry.owner_type !== 'org') {
+          res.status(403).json({ error: 'hook_requires_org_scope' })
+          return
+        }
+        const hookMeta = entry.hook_meta as HookMetaShape | null
+        if (
+          !hookMeta?.target ||
+          !Array.isArray(hookMeta.lifecyclePoints) ||
+          hookMeta.lifecyclePoints.length === 0
+        ) {
+          res.status(422).json({ error: 'Registry entry has no hook_meta target/lifecyclePoints' })
+          return
+        }
+
+        // Step 2 — authoritative trust level (§8.4; never face-value for a self-published hook).
+        const trustLevel = resolveHookTrustLevel(entry)
+
+        // Step 3 — load target Host + its guardrails policy.
+        let host: HostShape
+        try {
+          host = (await gateway.getResource(
+            'hosts',
+            body.hostRef,
+            config.hostsNamespace
+          )) as HostShape
+        } catch (err) {
+          const k8sErr = extractK8sError(err)
+          res.status(k8sErr?.status ?? 404).json({ error: `Host "${body.hostRef}" not found` })
+          return
+        }
+        const guardrails = host.spec?.guardrails ?? {}
+        const floor = guardrails.minInstalledHookTrustLevel
+        const ceiling = guardrails.capabilityCeiling ?? []
+
+        // Step 4 — trust-floor gate (§8.4: a hook below the floor does not run at all).
+        if (floor && (HOOK_TRUST_ORDER[trustLevel] ?? 0) < (HOOK_TRUST_ORDER[floor] ?? 0)) {
+          res.status(403).json({
+            error: 'hook_below_trust_floor',
+            reason: `hook trust_level ${trustLevel} < Host minInstalledHookTrustLevel ${floor}`,
+          })
+          return
+        }
+
+        // Step 5 — content/egress separation gate (§8.4 / registry gap #2). A
+        // content-bearing hook that can also reach the network is an exfiltration
+        // path, admissible only for a vetted high-trust hook.
+        const isContentBearing = hookMeta.lifecyclePoints.some(p => CONTENT_BEARING_POINTS.has(p))
+        const hasEgress =
+          Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
+        const isRemote = !!hookMeta.target.remote
+        if (isContentBearing && (hasEgress || isRemote) && trustLevel !== 'high') {
+          res.status(403).json({
+            error: 'content_egress_requires_high_trust',
+            reason:
+              'a content-bearing hook (moderate/postCallSuccess) with egress or a remote target requires trust_level high (§8.4)',
+          })
+          return
+        }
+
+        // Step 6 — capability gate: requested ⊆ Host.capabilityCeiling; may_deny ⇒ fail closed.
+        const capabilities = Array.isArray(body.capabilities) ? body.capabilities : []
+        const outOfCeiling = capabilities.filter(c => !ceiling.includes(c))
+        if (outOfCeiling.length > 0) {
+          res.status(403).json({
+            error: 'capability_exceeds_ceiling',
+            reason: `capabilities not in Host capabilityCeiling: ${outOfCeiling.join(', ')}`,
+          })
+          return
+        }
+        const wantsDeny = capabilities.includes('may_deny')
+        const failMode = body.failMode ?? (wantsDeny ? 'closed' : 'open')
+        if (wantsDeny && failMode !== 'closed') {
+          res.status(400).json({
+            error: 'deny_requires_fail_closed',
+            reason: 'a may_deny hook must fail closed (§8.6)',
+          })
+          return
+        }
+
+        // Step 7 — image preflight: digest-pinned (§8.2 resolution) + allowlist (§8.5).
+        const image = hookMeta.target.image
+        if (image) {
+          if (!/@sha256:[0-9a-f]{64}$/.test(image.ref ?? '')) {
+            res.status(422).json({ error: 'image_ref_not_digest_pinned' })
+            return
+          }
+          if (
+            config.enforcePluginImageAllowlist &&
+            !config.allowedPluginImagePrefixes.some(p => (image.ref ?? '').startsWith(p))
+          ) {
+            res.status(422).json({ error: 'image_not_allowlisted', reason: image.ref })
+            return
+          }
+        }
+
+        const targetNs = config.llmHooksNamespace
+        const crName =
+          body.hookName?.trim() ||
+          generateRegistryName(body.registryEntryName, body.registryEntryVersion).replace(
+            /^mcp-/,
+            'hook-'
+          )
+        if (!isValidK8sName(crName)) {
+          res.status(400).json({ error: 'Invalid hookName: must be a valid K8s name' })
+          return
+        }
+
+        const registryLabels: Record<string, string> = { 'clerum.io/managed-by': 'control-api' }
+        const registryAnnotations: Record<string, string> = {
+          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+          // §8.4 stamp — platform-assigned, author cannot set it.
+          'clerum.io/trust-level': trustLevel,
+        }
+
+        // Step 8 — credential Secret from the hook's credentialSchema.
+        const credSchema = (await getCredentialSchema(
+          body.registryEntryName,
+          body.registryEntryVersion
+        ).catch(() => null)) as RegistryCredentialSchema | null
+        const credRequired = !!credSchema?.required
+        const credentials = body.credentials ?? {}
+        const secretName = `${crName}-creds`
+        let secretCreated = false
+        if (Object.keys(credentials).length > 0) {
+          const schemaKeys = new Set((credSchema?.keys ?? []).map(k => k.name))
+          const unknownKeys = Object.keys(credentials).filter(
+            k => schemaKeys.size > 0 && !schemaKeys.has(k)
+          )
+          if (unknownKeys.length > 0) {
+            res
+              .status(400)
+              .json({ error: 'unknown_credential_keys', reason: unknownKeys.join(', ') })
+            return
+          }
+          try {
+            await gateway.createSecret({
+              name: secretName,
+              namespace: targetNs,
+              type: 'Opaque',
+              labels: registryLabels,
+              annotations: registryAnnotations,
+              stringData: credentials,
+            })
+          } catch (err) {
+            const k8sErr = extractK8sError(err)
+            if (k8sErr) {
+              res.status(k8sErr.status).json({ error: `Secret creation failed: ${k8sErr.message}` })
+              return
+            }
+            throw err
+          }
+          secretCreated = true
+        }
+
+        // Ensure the evenfire pull secret for a private platform-registry image,
+        // before the CR references it (shared, not part of per-hook rollback).
+        const attachPullSecret = shouldAttachEvenfirePullSecret({
+          isLocal: true,
+          image: image?.ref,
+          registryUrl: config.registryUrl,
+        })
+        if (attachPullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, targetNs)
+          } catch (err) {
+            if (secretCreated) {
+              await gateway.deleteSecret(secretName, targetNs).catch(() => {})
+            }
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
+        // Step 9 — build + create the LlmHook CR (rollback the Secret on failure).
+        const targetSpec: Record<string, unknown> = {}
+        if (image) {
+          targetSpec.image = {
+            ref: image.ref,
+            port: image.port,
+            ...(image.security ? { security: image.security } : {}),
+            ...(secretCreated ? { envSecret: secretName } : {}),
+            ...(hasEgress ? { egressBindings: hookMeta.requiredEgress } : {}),
+            ...(attachPullSecret ? { imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME] } : {}),
+          }
+        } else if (hookMeta.target.service) {
+          targetSpec.service = hookMeta.target.service
+        } else if (hookMeta.target.remote) {
+          targetSpec.remote = hookMeta.target.remote
+        }
+        const hookSpec: Record<string, unknown> = {
+          target: targetSpec,
+          path: hookMeta.path ?? '/',
+          lifecyclePoints: hookMeta.lifecyclePoints,
+          order: typeof body.order === 'number' ? body.order : 100,
+          failMode,
+          ...(capabilities.length > 0 ? { capabilities } : {}),
+          ...(hookMeta.defaultConfig ? { config: hookMeta.defaultConfig } : {}),
+        }
+
+        try {
+          await gateway.createResource(
+            'llmhooks',
+            {
+              metadata: { name: crName, labels: registryLabels, annotations: registryAnnotations },
+              spec: hookSpec,
+            },
+            targetNs
+          )
+        } catch (err) {
+          if (secretCreated) {
+            await gateway.deleteSecret(secretName, targetNs).catch(() => {})
+          }
+          const k8sErr = extractK8sError(err)
+          if (k8sErr) {
+            res.status(k8sErr.status).json({ error: k8sErr.message })
+            return
+          }
+          throw err
+        }
+
+        // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
+        // {id, digest}. If this fails the hook exists but no Host runs it, so roll
+        // the CR (+ Secret) back rather than return a false success.
+        const digest = image?.ref?.includes('@') ? image.ref.split('@')[1] : undefined
+        try {
+          const freshHost = (await gateway.getResource(
+            'hosts',
+            body.hostRef,
+            config.hostsNamespace
+          )) as HostShape
+          const g: HostGuardrailsShape = { ...(freshHost.spec?.guardrails ?? {}) }
+          const hooks: Record<string, Array<{ id: string; digest?: string }>> = {
+            ...(g.hooks ?? {}),
+          }
+          for (const phase of hookMeta.lifecyclePoints) {
+            const arr = hooks[phase] ? [...hooks[phase]] : []
+            if (!arr.some(h => h.id === crName)) {
+              arr.push({ id: crName, ...(digest ? { digest } : {}) })
+            }
+            hooks[phase] = arr
+          }
+          g.hooks = hooks
+          await gateway.updateResource(
+            'hosts',
+            body.hostRef,
+            { spec: { ...freshHost.spec, guardrails: g } },
+            config.hostsNamespace
+          )
+        } catch (err) {
+          try {
+            await gateway.deleteResource('llmhooks', crName, targetNs)
+            await waitForDeletion(
+              () => gateway.getResource('llmhooks', crName, targetNs),
+              `LlmHook/${crName}`
+            )
+          } catch {
+            // Best-effort rollback; preserve the original Host-update error.
+          }
+          if (secretCreated) {
+            try {
+              await gateway.deleteSecret(secretName, targetNs)
+              await waitForDeletion(
+                () => gateway.getSecret(secretName, targetNs),
+                `Secret/${secretName}`
+              )
+            } catch {
+              // Best-effort rollback; preserve the original Host-update error.
+            }
+          }
+          const k8sErr = extractK8sError(err)
+          const message =
+            k8sErr?.message ||
+            (err instanceof Error ? err.message : 'Failed to update Host guardrails')
+          res
+            .status(k8sErr?.status ?? 500)
+            .json({ error: `Host guardrails update failed: ${message}` })
+          return
+        }
+
+        // Step 11 — report install (fire-and-forget) + audit.
+        const correlationId = crypto.randomUUID()
+        reportInstall(body.registryEntryName, correlationId, body.registryEntryVersion).catch(
+          () => {}
+        )
+        auditLog('hook_installed', {
+          hookName: crName,
+          hostRef: body.hostRef,
+          trustLevel,
+          lifecyclePoints: hookMeta.lifecyclePoints,
+          registryEntry: body.registryEntryName,
+        })
+
+        res.status(201).json({
+          hookName: crName,
+          namespace: targetNs,
+          hostRef: body.hostRef,
+          trustLevel,
+          lifecyclePoints: hookMeta.lifecyclePoints,
+          registryEntry: body.registryEntryName,
+          registryVersion: body.registryEntryVersion,
+          correlationId,
+          pendingCredentials:
+            credRequired && !secretCreated
+              ? [
+                  {
+                    kind: 'hookEnvSecret',
+                    secretName,
+                    namespace: targetNs,
+                    keys: (credSchema?.keys ?? []).map(k => k.name),
+                    field: 'spec.target.image.envSecret',
+                  },
+                ]
+              : [],
         })
       })
     )
