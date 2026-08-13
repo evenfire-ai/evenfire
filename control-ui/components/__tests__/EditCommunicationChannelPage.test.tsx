@@ -512,8 +512,53 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
 
     const user = userEvent.setup()
     await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    // Before typing, the URL should show Unavailable
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
+
     await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
 
+    // After typing into the bot name field, the URL should appear
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
+  })
+
+  it('does not render a Teams request URL for a channel with only the stale teams-app-name annotation', async () => {
+    mockChannel(
+      'telegram-channel',
+      { telegramSettings: { botHandle: '@ops_bot' } },
+      {
+        'clerum.io/teams-app-name': 'Stale Teams Name',
+      }
+    )
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
+  })
+
+  it('shows the Teams request URL once an App Name is typed over a stale annotation', async () => {
+    mockChannel(
+      'telegram-channel',
+      { telegramSettings: { botHandle: '@ops_bot' } },
+      {
+        'clerum.io/teams-app-name': 'Stale Teams Name',
+      }
+    )
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'New Bot Name')
+
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
     expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
   })
 })

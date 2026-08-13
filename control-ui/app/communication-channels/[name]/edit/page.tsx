@@ -28,7 +28,7 @@ import {
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
   hasSlackConfigForRequestUrl,
-  hasTeamsConfig,
+  hasTeamsConfigForRequestUrl,
 } from '@lib/communicationChannelEdit'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
@@ -232,7 +232,7 @@ export default function EditCommunicationChannelPage() {
   // step it describes. The URL depends only on namespace/name, both fixed at
   // create time, and the reader resolves that id regardless of teamsSettings.
   const teamsRequestUrl =
-    draft && hasTeamsConfig(draft)
+    draft && hasTeamsConfigForRequestUrl(draft)
       ? teamsWebhookUrlForChannelName(
           item?.metadata?.name?.trim() || name,
           item?.metadata?.namespace
@@ -634,7 +634,14 @@ export default function EditCommunicationChannelPage() {
                         value={draft.teamsAppName}
                         onChange={event =>
                           setDraft(current =>
-                            current ? { ...current, teamsAppName: event.target.value } : current
+                            current
+                              ? {
+                                  ...current,
+                                  teamsAppName: event.target.value,
+                                  // Typed, so no longer just an inherited label.
+                                  teamsAppNameFromAnnotation: false,
+                                }
+                              : current
                           )
                         }
                         placeholder="Your Teams Bot"
