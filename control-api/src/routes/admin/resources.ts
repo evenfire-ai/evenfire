@@ -211,8 +211,10 @@ async function rollbackPrunedContextCreate(
   try {
     await gateway.deleteResource('contexts', name, namespace)
   } catch (err) {
+    const safeName = String(name).replace(/[\r\n]/g, '')
+    const safeErrMsg = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')
     console.warn(
-      `[Admin] context pruned-displayName rollback failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
+      `[Admin] context pruned-displayName rollback failed for "${safeName}": ${safeErrMsg}`
     )
   }
 }
