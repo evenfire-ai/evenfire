@@ -120,6 +120,32 @@ describe('slackAppManifest', () => {
   })
 })
 
+describe('slackAppManifest — direct messages', () => {
+  const yaml = slackAppManifest('Evenfire', URL)
+
+  // Slack defaults messages_tab_enabled to false, and an app installed from a
+  // manifest that says nothing about app_home has DMs switched off: the member
+  // sees "Sending messages to this app has been turned off." That breaks the
+  // documented enrolment path, which tells people to send `verify 123456` as a
+  // DM, and it contradicts this same manifest asking for im:history and im:read.
+  it('enables the messages tab so the app can be DMed', () => {
+    expect(yaml).toContain('app_home:')
+    expect(yaml).toMatch(/messages_tab_enabled:\s*true/)
+  })
+
+  it('does not make the messages tab read-only', () => {
+    // Read-only leaves the tab visible but still refuses the member's message,
+    // which looks identical to the bug it is meant to fix.
+    expect(yaml).toMatch(/messages_tab_read_only_enabled:\s*false/)
+  })
+
+  it('keeps the DM scopes it already requests meaningful', () => {
+    const scopes = listItemsUnder(yaml, 'bot:')
+    expect(scopes).toContain('im:history')
+    expect(scopes).toContain('im:read')
+  })
+})
+
 describe('canGenerateSlackAppManifest', () => {
   it('accepts an absolute request URL', () => {
     expect(canGenerateSlackAppManifest(URL)).toBe(true)
