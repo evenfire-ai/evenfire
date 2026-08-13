@@ -1,6 +1,8 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { IconX } from '../icons'
 import { Button, SelectInput, TextInput } from '../ui'
 import { GUARDRAIL_BUILTIN_OPTIONS, GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
@@ -28,6 +30,7 @@ export function HostGuardrailsSection({
   canWrite,
   defaultEditing = false,
 }: HostGuardrailsSectionProps) {
+  const router = useRouter()
   const [editing, setEditing] = useState(defaultEditing)
   const [draft, setDraft] = useState<HostGuardrails>(() => cloneGuardrails(initialGuardrails))
 
@@ -97,9 +100,10 @@ export function HostGuardrailsSection({
   return (
     <div className="cu-host-approval-section">
       <p className="cu-muted cu-host-approval-section__description">
-        Installed guardrail hooks referenced by this agent, plus built-in guardrails. Remove a hook
-        reference or add a built-in. Manage installed hooks cluster-wide from the Guardrails
-        section.
+        Installed guardrail hooks referenced by this agent, plus built-in guardrails. Use{' '}
+        <strong>Add hook</strong> to install a guardrail from the Marketplace onto this agent, add a
+        built-in, or remove a hook reference. Manage installed guardrails cluster-wide from the
+        Installed Guardrails section.
       </p>
 
       <div className="cu-host-approval-section__content">
@@ -170,14 +174,24 @@ export function HostGuardrailsSection({
             </button>
           </>
         ) : canWrite ? (
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            onClick={() => setEditing(true)}
-            disabled={busy}
-          >
-            Edit
-          </button>
+          <>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
+              disabled={busy}
+            >
+              Add hook
+            </button>
+            <button
+              type="button"
+              className="cu-btn cu-btn--ghost cu-btn--sm"
+              onClick={() => setEditing(true)}
+              disabled={busy}
+            >
+              Edit
+            </button>
+          </>
         ) : null}
       </div>
     </div>

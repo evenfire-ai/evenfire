@@ -63,6 +63,7 @@ export const CONTROL_ROUTES = {
   globalFileSystem: '/global-file-system',
   guardrails: {
     root: '/guardrails',
+    detail: (name: string) => `/guardrails/${segment(name)}`,
   },
   llmModels: {
     root: '/llm-models',

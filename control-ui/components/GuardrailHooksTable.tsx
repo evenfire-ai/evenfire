@@ -1,6 +1,8 @@
 'use client'
 
-import React, { Fragment, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
 import type {
   GuardrailHooksTableProps,
@@ -16,7 +18,7 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconChevronRight, IconRefresh, IconX } from './icons'
 
 const HOOK_COLUMNS: TableHeaderColumn[] = [
-  { key: 'expand', ariaLabel: 'Expand hook' },
+  { key: 'open', ariaLabel: 'Open guardrail' },
   { key: 'name', label: 'Name' },
   { key: 'lifecycle', label: 'Lifecycle' },
   { key: 'order', label: 'Order' },
@@ -78,8 +80,8 @@ export function GuardrailHooksTable({
   refreshing,
   loading,
 }: GuardrailHooksTableProps) {
+  const router = useRouter()
   const [searchQuery, setSearchQuery] = useState('')
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
 
   const rows = useMemo(
     () =>
@@ -119,13 +121,8 @@ export function GuardrailHooksTable({
     return () => clearInterval(id)
   }, [onRefresh])
 
-  function toggleExpanded(key: string) {
-    setExpandedKeys(current => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
+  function openDetail(name: string) {
+    router.push(CONTROL_ROUTES.guardrails.detail(name))
   }
 
   const isInitialLoad = loading && items.length === 0
@@ -136,7 +133,9 @@ export function GuardrailHooksTable({
         title={
           <>
             <IconShield />
-            {isInitialLoad ? 'Guardrail Hooks' : `Guardrail Hooks (${filteredRows.length})`}
+            {isInitialLoad
+              ? 'Installed Guardrails'
+              : `Installed Guardrails (${filteredRows.length})`}
           </>
         }
         subtitle="Installed LLM guardrail hooks across the cluster."
@@ -145,8 +144,8 @@ export function GuardrailHooksTable({
             <SectionSearchInput
               value={searchQuery}
               onChange={setSearchQuery}
-              placeholder="Search hooks"
-              ariaLabel="Search guardrail hooks"
+              placeholder="Search guardrails"
+              ariaLabel="Search installed guardrails"
               disabled={isInitialLoad}
             />
             {onRefresh ? (
@@ -155,7 +154,7 @@ export function GuardrailHooksTable({
                 className="cu-btn cu-btn--icon cu-btn--toolbar"
                 onClick={() => void onRefresh()}
                 disabled={refreshing || isInitialLoad}
-                aria-label={refreshing ? 'Refreshing...' : 'Reload guardrail hooks'}
+                aria-label={refreshing ? 'Refreshing...' : 'Reload installed guardrails'}
               >
                 <IconRefresh
                   className={refreshing ? 'cu-spin' : undefined}
@@ -180,7 +179,7 @@ export function GuardrailHooksTable({
         </div>
       ) : filteredRows.length === 0 ? (
         <div className="cu-empty">
-          {normalizedSearch ? 'No hooks match this search.' : 'No guardrail hooks installed.'}
+          {normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'}
         </div>
       ) : (
         <div className="cu-table-wrap cu-guardrails-table-wrap">
@@ -191,132 +190,71 @@ export function GuardrailHooksTable({
             <tbody>
               {filteredRows.map(({ key, name, item }) => {
                 const spec = (item.spec || {}) as LlmHookSpecView
-                const expanded = expandedKeys.has(key)
                 const lifecycle = (spec.lifecyclePoints || []).join(', ')
-                const target = describeTarget(spec.target)
                 return (
-                  <Fragment key={key}>
-                    <tr
-                      className="cu-table__row cu-table__row--clickable cu-expandable-row"
-                      role="button"
-                      onClick={() => toggleExpanded(key)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          toggleExpanded(key)
-                        }
-                      }}
-                      tabIndex={0}
-                      aria-expanded={expanded}
-                      aria-controls={`hook-details-${key}`}
-                      aria-label={`${expanded ? 'Collapse' : 'Expand'} hook ${name}`}
+                  <tr
+                    key={key}
+                    className="cu-table__row cu-table__row--clickable"
+                    role="button"
+                    onClick={() => openDetail(name)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        openDetail(name)
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-label={`View guardrail ${name}`}
+                  >
+                    <td className="cu-expandable-row__chevron" aria-hidden="true">
+                      <IconChevronRight width={18} height={18} />
+                    </td>
+                    <td>
+                      <span className="cu-expandable-row__name">{name}</span>
+                    </td>
+                    <td>{lifecycle ? lifecycle : <span className="cu-muted">—</span>}</td>
+                    <td>
+                      {typeof spec.order === 'number' ? (
+                        spec.order
+                      ) : (
+                        <span className="cu-muted">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <FailModeBadge failMode={spec.failMode} />
+                    </td>
+                    <td>
+                      <StatusBadge status={item.status} />
+                    </td>
+                    <td
+                      className="cu-table__cell-actions"
+                      onClick={event => event.stopPropagation()}
+                      onKeyDown={event => event.stopPropagation()}
                     >
-                      <td className="cu-expandable-row__chevron" aria-hidden="true">
-                        <IconChevronRight
-                          className={expanded ? 'is-expanded' : undefined}
-                          width={18}
-                          height={18}
-                        />
-                      </td>
-                      <td>
-                        <span className="cu-expandable-row__name">{name}</span>
-                      </td>
-                      <td>{lifecycle ? lifecycle : <span className="cu-muted">—</span>}</td>
-                      <td>
-                        {typeof spec.order === 'number' ? (
-                          spec.order
-                        ) : (
-                          <span className="cu-muted">—</span>
-                        )}
-                      </td>
-                      <td>
-                        <FailModeBadge failMode={spec.failMode} />
-                      </td>
-                      <td>
-                        <StatusBadge status={item.status} />
-                      </td>
-                      <td
-                        className="cu-table__cell-actions"
-                        onClick={event => event.stopPropagation()}
-                        onKeyDown={event => event.stopPropagation()}
-                      >
-                        <div className="cu-table-actions">
-                          {onUninstall ? (
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void onUninstall({ name })}
-                              disabled={uninstallingKey === key}
-                              aria-label={
-                                uninstallingKey === key
-                                  ? 'Uninstalling...'
-                                  : `Uninstall hook ${name}`
-                              }
-                              title={
-                                uninstallingKey === key
-                                  ? 'Uninstalling...'
-                                  : `Uninstall hook ${name}`
-                              }
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                    {expanded ? (
-                      <tr id={`hook-details-${key}`} className="cu-expandable-detail-row">
-                        <td colSpan={HOOK_COLUMNS.length}>
-                          <div className="cu-expandable-detail cu-connector-detail">
-                            <div className="cu-expandable-detail__fields">
-                              <div className="cu-expandable-field cu-expandable-field--wide">
-                                <span className="cu-expandable-field__label">Target</span>
-                                <span className="cu-expandable-field__code">{target || '—'}</span>
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Path</span>
-                                <span className="cu-expandable-field__code">
-                                  {spec.path || '/'}
-                                </span>
-                              </div>
-                              <div className="cu-expandable-field cu-expandable-field--wide">
-                                <span className="cu-expandable-field__label">Capabilities</span>
-                                {spec.capabilities && spec.capabilities.length > 0 ? (
-                                  <div className="cu-expandable-tags">
-                                    {spec.capabilities.map(capability => (
-                                      <span key={capability} className="cu-registry-tag">
-                                        {capability}
-                                      </span>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="cu-muted">None declared</span>
-                                )}
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Observed digest</span>
-                                <span className="cu-expandable-field__code">
-                                  {item.status?.observedDigest || '—'}
-                                </span>
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Ready replicas</span>
-                                <span>
-                                  {typeof item.status?.readyReplicas === 'number'
-                                    ? item.status.readyReplicas
-                                    : '—'}
-                                </span>
-                              </div>
-                              <div className="cu-expandable-field">
-                                <span className="cu-expandable-field__label">Last reconciled</span>
-                                <span>{item.status?.lastReconciled || '—'}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : null}
-                  </Fragment>
+                      <div className="cu-table-actions">
+                        {onUninstall ? (
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                            onClick={() => void onUninstall({ name })}
+                            disabled={uninstallingKey === key}
+                            aria-label={
+                              uninstallingKey === key
+                                ? 'Uninstalling...'
+                                : `Uninstall guardrail ${name}`
+                            }
+                            title={
+                              uninstallingKey === key
+                                ? 'Uninstalling...'
+                                : `Uninstall guardrail ${name}`
+                            }
+                          >
+                            <IconX width={16} height={16} />
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
                 )
               })}
             </tbody>

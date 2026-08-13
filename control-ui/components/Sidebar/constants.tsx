@@ -34,7 +34,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   },
   contexts: { label: 'Contexts', href: CONTROL_ROUTES.contexts.root, icon: <IconGroupWork /> },
   guardrails: {
-    label: 'Guardrails',
+    label: 'Installed Guardrails',
     href: CONTROL_ROUTES.guardrails.root,
     icon: <IconShield />,
   },
