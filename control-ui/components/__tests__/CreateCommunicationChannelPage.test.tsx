@@ -628,6 +628,13 @@ describe('CreateCommunicationChannelPage — Teams CLI instruction', () => {
     await fillStep1AndContinue()
     fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
 
+    // Absence of old sentence
     expect(screen.queryByText(/project directory that has the Teams CLI project/i)).toBeNull()
+    // Presence of new sentence confirms the Teams instruction panel renders
+    expect(
+      screen.getByText(
+        /Run this from any directory. The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i
+      )
+    ).toBeInTheDocument()
   })
 })
