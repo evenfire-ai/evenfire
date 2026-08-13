@@ -412,7 +412,24 @@ async function maybeWarnStale(
   if (tol.storedRoles.any.has(key)) return
   if (tol.warnedKeys.has(key)) return
   const getState = tol.deps.getModelAllowlistState ?? getModelAllowlistStateDefault
-  const state = await getState(provider, model)
+  // Best-effort: this is an EXTRA lookup (separate from the isModelAllowed gate
+  // query) that ONLY feeds the additive stale warning. The PR invariant is that
+  // the soft quarantine is additive and NEVER blocks a write (never 422/409/500).
+  // A blip on this query (connection reset) must not turn a valid Host
+  // create/update into an HTTP 500 — swallow it, proceed WITHOUT a warning, and
+  // let the write persist. The correctness gate (isModelAllowed) is untouched: it
+  // still propagates its failures and still hard-rejects a disallowed model.
+  let state: { enabled: boolean; stale: boolean } | null
+  try {
+    state = await getState(provider, model)
+  } catch (err) {
+    console.warn(
+      `[Admin] stale-model warning lookup failed for "${provider}/${model}"; proceeding without a warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+    return
+  }
   if (state?.enabled && state.stale) {
     tol.warnedKeys.add(key)
     tol.warnings.push({ code: STALE_MODEL_ASSIGNED, provider, model, field })
