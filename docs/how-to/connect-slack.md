@@ -48,24 +48,18 @@ send to link your account.
 8. In Slack, invite the app to the channel you want it in (`/invite @YourApp`),
    or open a DM with it.
 
-**Do not build the app by hand.** The Control UI generates a manifest carrying
-all of this, both Request URLs already filled in, and you get it before the
-channel exists. Skip to [In the Control UI](#in-the-control-ui) and come back
-here only if you want to know what the manifest contains or you are building an
-app without the Control UI.
-
-The generated manifest looks like this:
+For reference, the manifest the Control UI generates looks like this:
 
 ```yaml
 display_information:
-  name: Evenfire
+  name: "Evenfire"
 features:
   app_home:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: Evenfire
+    display_name: "Evenfire"
     always_online: false
 oauth_config:
   scopes:
@@ -187,11 +181,14 @@ Two Slack-side traps when pasting it:
 - **The field truncates on screen**, often exactly where two channels' URLs
   diverge. Press `End` in the field to see the tail before saving.
 
-Slack does not prompt for a reinstall after you subscribe to the bot events
-above, because the manifest already granted the scopes those events need. That
-is expected, not a failure. If you want one anyway: **Settings → Install App →
-Reinstall to Workspace**, then re-check the bot token, since a reinstall can
-issue a new one.
+Whether Slack prompts for a reinstall after you subscribe to the bot events
+depends on how the app was built. An app installed from the generated manifest
+already holds the scopes those events need, so no prompt appears and that is
+expected. An app built by hand **does** need the matching `*:history` scopes
+granted, and without a reinstall the subscription is accepted while no message
+event ever arrives. If you are repairing such an app, reinstall deliberately
+rather than waiting to be asked: **Settings → Install App → Reinstall to
+Workspace**, then re-check the bot token, since a reinstall can issue a new one.
 
 ## On minikube (quickstart stack)
 
@@ -199,18 +196,30 @@ Complete the [Quickstart](../get-started/quickstart.md) first so the platform
 runs.
 
 There is no `.env` shortcut for Slack. `CLERUM_SLACK_BOT_TOKEN` is read only by
-`channel-reader`'s dev-mode resolver when the process runs outside the cluster,
-and is ignored in-cluster, where credentials come from
-`spec.credentialsSecretRef` only. It changes where the token is read from and
-nothing else: Slack is webhook-driven either way, and no code path polls it.
+`channel-reader`'s `DevCredentialsResolver`, and the switch is
+**`CLERUM_DEV_MODE=true`**, not whether the process runs in a cluster
+(`channel-reader/src/credentials.ts`). Setting dev mode on an in-cluster
+deployment therefore does resolve every CommunicationChannel to the same
+env-supplied token. It also only supplies the bot token — there is no
+`CLERUM_SLACK_SIGNING_SECRET`, so the dev path cannot verify a single inbound
+Slack request, which is why real use always comes from
+`spec.credentialsSecretRef`.
 
 The bigger constraint is reachability. `webhook-proxy` runs in the
 `webhook-ingress` namespace on port 8095, and the base manifests ship no
 Ingress for it (production fronts it with cloudflared). A local minikube is not
 reachable from Slack, so expose the proxy through a public tunnel and use
-`<your-public-base>/webhooks/slack/<targetId>` as the Request URL. The Control
-UI only prints the path when `NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL` is
-unset, so prefix it with your own public base.
+`<your-public-base>/webhooks/slack/<targetId>` as the Request URL.
+
+The Control UI resolves that base in two steps: it uses
+`NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL` when set, and otherwise derives
+`webhook.<domain>` from the page's own hostname when that hostname starts with
+`app.`. Only when **neither** applies — the usual minikube and `localhost` case
+— does it fall back to a bare path, and then the Slack panel shows a warning
+instead of a manifest, because a relative `request_url` is invalid to Slack.
+That is the case where you prefix the path with your own public base by hand.
+On an `app.<domain>` deployment the URL is already absolute; prefixing it again
+produces a Request URL Slack cannot verify.
 
 Without that, the Slack app installs fine and the channel saves fine, but no
 message ever arrives.

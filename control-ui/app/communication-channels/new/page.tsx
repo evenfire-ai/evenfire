@@ -17,6 +17,7 @@ import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { SLACK_NEW_APP_URL } from '@constants/slack'
 import { apiGet, apiSend } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
@@ -59,9 +60,6 @@ type DraftState = {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
 const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
-
-/** Slack's "Create an app" chooser, where "From an app manifest" is one of the options. */
-const SLACK_NEW_APP_URL = 'https://api.slack.com/apps?new_app=1'
 const STEPS = ['Channel', 'Provider'] as const
 
 const STEP_DETAILS = [
@@ -682,6 +680,17 @@ export default function CreateCommunicationChannelPage() {
                             The Request URLs point at <code>{normalizedChannelName}</code>, so this
                             channel has to be created under that name.
                           </span>
+                        </div>
+                      ) : draft.slackBotHandle.trim() && normalizedChannelName ? (
+                        // Named and ready, but no absolute URL resolved: a manifest with a
+                        // relative request_url is invalid to Slack. Say so rather than render
+                        // nothing -- the operator is following a guide that promises a manifest
+                        // here, and silence gives them no cause to chase.
+                        <div className="cu-banner cu-banner--warning">
+                          No app manifest: this deployment has no public webhook address, so the
+                          Request URL would be a path Slack cannot reach. Expose the webhook proxy
+                          publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to that
+                          address, then reload this page.
                         </div>
                       ) : null}
                       <ChannelCredentialsPanel

@@ -545,6 +545,30 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     expect(link.getAttribute('rel') ?? '').toMatch(/noreferrer|noopener/)
   })
 
+  it('explains itself when the deployment has no public webhook address', async () => {
+    // Minikube and localhost: no env var and a non-app.* hostname, so
+    // webhookUrlForPath returns a bare path and no manifest can be generated. The
+    // edit page shows a warning naming the missing variable; rendering nothing
+    // here leaves the operator following a doc that promises a manifest, with no
+    // cause shown anywhere. jsdom's hostname is localhost, so simply not stubbing
+    // the env reproduces it.
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+
+    expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+    const panel = document.querySelector('.cu-channel-provider-panel')
+    expect(panel?.textContent ?? '').toMatch(
+      /NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL|no public webhook address/i
+    )
+  })
+
   it('offers no manifest until the Slack App Name is set', async () => {
     // The app name is the manifest's display_information.name. Emitting one with a
     // placeholder would install an app under a name the operator never chose.
