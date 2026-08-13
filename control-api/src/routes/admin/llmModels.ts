@@ -105,8 +105,11 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // this single module (regla D4).
   const impactSources = modelImpactSourcesFromGateway(gateway, hostNamespaces)
 
-  // Availability-reduction gate (Fase 3). A DELETE (always) or a PUT that flips
-  // `enabled` true→false yanks the model out of the runtime allowlist ConfigMap.
+  // Availability-reduction gate (Fase 3). A DELETE (always), a PUT that flips
+  // `enabled` true→false, or a PUT that RENAMES an enabled pair (its old
+  // identity leaves the ConfigMap on re-materialize) yanks the model out of the
+  // runtime allowlist ConfigMap. The caller computes the impact over whichever
+  // pair leaves — the OLD one on rename.
   // Without `?force`, if any Host/grant still references `(provider, model)`,
   // answer 409 WITH the impact body so the operator sees what would be stranded
   // instead of breaking it silently. Returns true when a 409 was sent (the
@@ -234,18 +237,34 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
         return
       }
       // Read the stored row FIRST: needed both to 404 a missing row and to
-      // classify whether this write REDUCES availability. Only a transition of
-      // `enabled` true→false pulls the model out of the runtime ConfigMap and
-      // can strand references; a PUT that keeps it enabled (incl. a re-enable or
-      // a metadata-only edit) never trips the gate.
+      // classify whether this write pulls the PUBLISHED `(provider, model)` pair
+      // out of the runtime ConfigMap and can strand references. Two mutations do
+      // that, both only while the row is currently enabled (an already-disabled
+      // pair is not in the ConfigMap, so nothing can be stranded — case 4):
+      //   (a) DISABLE — `enabled` true→false; the pair leaves the allowlist.
+      //   (b) RENAME  — the identity `(provider, model)` changes while the row
+      //       stays enabled; re-materialization regroups from the CURRENT rows
+      //       (`listEnabledGroupedByProvider`), so the OLD pair vanishes from the
+      //       ConfigMap exactly like a disable, silently invalidating any
+      //       Host/grant that referenced it. The impact is computed over the OLD
+      //       pair (`existing.provider`/`existing.model`) — that is what would be
+      //       stranded — and answered with the same 409+impact body and `?force`
+      //       escape as disable/delete.
+      // RENAME compares VALUES, not key-presence: the admin UI form resubmits
+      // `provider` and `model` on every PUT even when unchanged, so a presence
+      // check would false-positive every toggle/metadata edit.
       const existing = await getAllowedModel(req.params.id)
       if (!existing) {
         res.status(404).json({ error: 'not_found' })
         return
       }
-      const reducesAvailability = existing.enabled === true && parsed.data.enabled === false
+      const disables = parsed.data.enabled === false
+      const renamed =
+        (parsed.data.provider !== undefined && parsed.data.provider !== existing.provider) ||
+        (parsed.data.model !== undefined && parsed.data.model !== existing.model)
+      const oldPairLeavesConfigMap = existing.enabled === true && (disables || renamed)
       if (
-        reducesAvailability &&
+        oldPairLeavesConfigMap &&
         (await blockedByImpact(req, res, existing.provider, existing.model))
       ) {
         return
