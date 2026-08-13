@@ -58,11 +58,11 @@ describe('installed hooks (end-to-end via HookedLlmPort)', () => {
     ...over,
   })
 
-  it('a moderate deny returns a filtered response and aborts the in-flight call (§7.1)', async () => {
+  it('a moderate deny returns a graceful refusal and aborts the in-flight call (§7.1)', async () => {
     const inner = fakePort()
     const moderateDeny: FetchLike = async url => ({
       status: url.endsWith('/v1/moderate') ? 422 : 200,
-      text: async () => '{"code":"blocked"}',
+      text: async () => '{"code":"moderation_blocked"}',
     })
     const hooks = buildLlmLaneHooks(
       [dscr({ lifecyclePoints: ['moderate'], capabilities: ['may_deny'] })],
@@ -73,10 +73,33 @@ describe('installed hooks (end-to-end via HookedLlmPort)', () => {
     )
     const hooked = new HookedLlmPort(inner, r => r, hooks)
     const res = await hooked.completeWithTools({ messages: [], tools: [] })
-    expect(res.finish_reason).toBe('content_filter')
+    // Graceful: a normal Stop completion with a first-party refusal message, so
+    // the turn completes instead of failing as LLM_CONTENT_FILTERED.
+    expect(res.finish_reason).toBe('stop')
+    expect(res.content).toBe(
+      "I can't help with that — the request was flagged by a content policy."
+    )
+    expect(res.tool_calls).toBeNull()
     // Concurrent: the call is launched, then the moderation deny aborts it.
     expect(vi.mocked(inner.completeWithTools)).toHaveBeenCalledTimes(1)
     expect(inner.lastToolReq?.signal?.aborted).toBe(true)
+  })
+
+  it('a pre_call reject returns a graceful refusal without calling the model', async () => {
+    const inner = fakePort()
+    const preReject: FetchLike = async () => ({
+      status: 200,
+      text: async () => '{"action":"reject","code":"jailbreak_blocked"}',
+    })
+    const hooks = buildLlmLaneHooks(
+      [dscr({ lifecyclePoints: ['pre_call'], capabilities: ['may_deny'] })],
+      { getAuthToken: () => '', fetchImpl: preReject }
+    )
+    const hooked = new HookedLlmPort(inner, r => r, hooks)
+    const res = await hooked.completeWithTools({ messages: [], tools: [] })
+    expect(res.finish_reason).toBe('stop')
+    expect(res.content).toBe("I can't comply with that request.")
+    expect(vi.mocked(inner.completeWithTools)).not.toHaveBeenCalled()
   })
 
   it('moderation runs concurrently with the call; a pass proceeds to the result', async () => {

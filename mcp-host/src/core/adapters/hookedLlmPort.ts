@@ -7,11 +7,12 @@
  *   1. apply the first-party built-in request-shaping chain (`prompt-shaping`,
  *      `token-trim`);
  *   2. run installed `pre_call` hooks (each may rewrite the request or reject) —
- *      a `deny` returns a content-filtered response WITHOUT calling the model;
+ *      a `deny` returns a graceful refusal (finish_reason Stop) WITHOUT calling
+ *      the model, so the turn completes with a message instead of erroring;
  *   3. dispatch the (possibly rewritten) request. When `moderate` hooks exist they
  *      run CONCURRENTLY with the model call (spec §7.1) — a moderation `deny`
  *      aborts the in-flight call via a linked `AbortSignal` (no tokens wasted) and
- *      returns a filtered response; the happy path proceeds to `post_call`;
+ *      returns a graceful refusal; the happy path proceeds to `post_call`;
  *   4. if the model call throws, run installed `on_error` hooks — a gated hook may
  *      `substitute` a safe text-only result (else the error surfaces);
  *   5. run installed `post_call` hooks over the result — each may redact content or
@@ -22,7 +23,7 @@
  * Response-capability enforcement (F4), system-prompt immutability (N4), and
  * subtractive actions (N5) are enforced inside `RemoteLlmHook`.
  */
-import { aggregateDecision } from '../guardrails'
+import { aggregateDecision, pickPresentationReason } from '../guardrails'
 import type { Contributor, GuardrailsConfig } from '../guardrails'
 import { type RequestShaper, buildLlmBuiltinChain } from '../guardrails/llm/builtinChain'
 import {
@@ -42,13 +43,34 @@ import {
 
 const EMPTY_HOOKS: LlmLaneHooks = { preCall: [], moderate: [], postCall: [], onError: [] }
 
-/** A safe content-filtered response returned in place of a denied model call (spec §7.1). */
-function filteredResponse(): ToolCompletionResponse {
+/**
+ * First-party refusal text keyed by the winning deny `reasonCode`. The hook's
+ * own message (`audit.modelReason`) is UNTRUSTED — it comes from an out-of-process
+ * container — so it is never surfaced to the user verbatim (§8.4); we map the
+ * controlled reason code to a canned message instead.
+ */
+const REFUSAL_BY_REASON: Record<string, string> = {
+  moderation_blocked: "I can't help with that — the request was flagged by a content policy.",
+  jailbreak_blocked: "I can't comply with that request.",
+  content_filtered: "I can't help with that request.",
+  hook_unavailable:
+    "I can't complete that request right now — a required safety check is unavailable. Please try again shortly.",
+}
+const DEFAULT_REFUSAL = "I can't help with that request."
+
+/**
+ * A denied model call renders as a GRACEFUL assistant refusal — `finish_reason:
+ * Stop` + refusal text — not a content-filter error. The turn then flows through
+ * the normal text→response delivery path (the user gets a message, the task
+ * completes) instead of failing as `LLM_CONTENT_FILTERED`. The refusal text is
+ * first-party, selected by the winning deny `reasonCode` (spec §7.1/§8.4).
+ */
+function refusalResponse(reason?: string): ToolCompletionResponse {
   return {
-    content: 'This request was blocked by a content guardrail policy.',
+    content: (reason && REFUSAL_BY_REASON[reason]) || DEFAULT_REFUSAL,
     tool_calls: null,
     usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-    finish_reason: FinishReason.ContentFilter,
+    finish_reason: FinishReason.Stop,
   }
 }
 
@@ -90,7 +112,11 @@ export class HookedLlmPort implements LlmPort {
         if (c.rewrite) req = c.rewrite // already system-role-stripped + capability-gated (N4/F4)
       }
     }
-    if (aggregateDecision(preContribs) === 'deny') return filteredResponse()
+    if (aggregateDecision(preContribs) === 'deny') {
+      const reason = pickPresentationReason(preContribs, 'deny')
+      console.warn(`[HookedLlmPort] pre_call deny — refusing turn (reason=${reason ?? 'unknown'})`)
+      return refusalResponse(reason)
+    }
 
     return this.hooks.moderate.length === 0
       ? this.dispatch(req)
@@ -128,13 +154,20 @@ export class HookedLlmPort implements LlmPort {
       response => ({ ok: true as const, response }),
       error => ({ ok: false as const, error })
     )
-    const moderationVerdict = Promise.all(this.hooks.moderate.map(hook => hook.moderate(req))).then(
-      cs => aggregateDecision(cs.filter((c): c is NonNullable<typeof c> => c != null))
-    )
+    // Keep the contributions (not just the verdict) so a deny can carry its
+    // reason code into the graceful refusal message.
+    const moderationContribs = Promise.all(
+      this.hooks.moderate.map(hook => hook.moderate(req))
+    ).then(cs => cs.filter((c): c is NonNullable<typeof c> => c != null))
 
-    if ((await moderationVerdict) === 'deny') {
+    const contribs = await moderationContribs
+    if (aggregateDecision(contribs) === 'deny') {
       controller.abort() // cancel the in-flight call (§7.1)
-      return filteredResponse()
+      const reason = pickPresentationReason(contribs, 'deny')
+      console.warn(
+        `[HookedLlmPort] moderation deny — refusing turn (reason=${reason ?? 'unknown'})`
+      )
+      return refusalResponse(reason)
     }
 
     const outcome = await modelOutcome
