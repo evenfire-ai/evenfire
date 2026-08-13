@@ -42,12 +42,19 @@ vi.mock('../../../lib/api', () => ({
 }))
 
 type TestContext = {
-  metadata: { name: string }
+  metadata: { name: string; resourceVersion?: string }
   spec: Record<string, unknown>
 }
 
 function mockContext(ctx: TestContext) {
-  ;(api.getContext as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(ctx)
+  // dev's contexts page now uses optimistic concurrency: buildContextUpdatePayload
+  // requires the loaded resourceVersion, so the load fixture must carry one or
+  // every save throws "Context version is unavailable" before the PUT.
+  const withVersion = {
+    ...ctx,
+    metadata: { resourceVersion: 'rv-context-read', ...ctx.metadata },
+  }
+  ;(api.getContext as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(withVersion)
 }
 
 function render(children: ReactNode) {
@@ -205,7 +212,15 @@ describe('ContextDetailsPage spec preservation on connector/SFS edits (R5-M3)', 
     expect(spec.contextId).toBe('prod-ctx')
   })
 
-  it('saveSharedFileSystems preserves an unmodeled spec field (gfs) while applying the SFS change', async () => {
+  // SKIPPED by the dev sync: dev removed the 'agent-files' tab from the context
+  // page (CONTEXT_TABS dropped it) and moved SharedFileSystem management to the
+  // dedicated /agent-files route — same restructure as channels → the detach
+  // control this test drives no longer renders here. The R5-M3 invariant
+  // (unmodeled spec fields survive an edit via the loadedSpec spread) is still
+  // enforced in saveSharedFileSystems' code and is covered on the reachable path
+  // by the saveMcpServers case above. Un-skip and retarget only if the SFS UI is
+  // reinstated on the context page.
+  it.skip('saveSharedFileSystems preserves an unmodeled spec field (gfs) while applying the SFS change', async () => {
     // Land directly on the agent-files tab, where the detach control lives.
     mockParams = { name: 'prod-ctx', tab: 'agent-files' }
     mockContext({

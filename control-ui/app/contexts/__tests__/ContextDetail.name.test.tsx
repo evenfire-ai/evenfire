@@ -42,12 +42,19 @@ vi.mock('../../../lib/api', () => ({
 }))
 
 type TestContext = {
-  metadata: { name: string }
+  metadata: { name: string; resourceVersion?: string }
   spec: Record<string, unknown>
 }
 
 function mockContext(ctx: TestContext) {
-  ;(api.getContext as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(ctx)
+  // dev's contexts page now uses optimistic concurrency: buildContextUpdatePayload
+  // requires the loaded resourceVersion, so the load fixture must carry one or
+  // every save throws "Context version is unavailable" before the PUT.
+  const withVersion = {
+    ...ctx,
+    metadata: { resourceVersion: 'rv-context-read', ...ctx.metadata },
+  }
+  ;(api.getContext as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(withVersion)
 }
 
 function render(children: ReactNode) {
