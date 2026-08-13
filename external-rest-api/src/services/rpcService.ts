@@ -14,7 +14,8 @@ type IssuedRpcToken = {
 export async function issueRpcAccessToken(
   sessionToken: string,
   requestedScopesInput: unknown,
-  requestedHostRefsInput: unknown
+  requestedHostRefsInput: unknown,
+  clientIp?: string
 ): Promise<IssuedRpcToken> {
   return controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
     body: {
@@ -22,5 +23,6 @@ export async function issueRpcAccessToken(
       scopes: requestedScopesInput,
       hostRefs: requestedHostRefsInput,
     },
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
 }

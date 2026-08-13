@@ -1,6 +1,4 @@
 import { Request, Response, Router } from 'express'
-import { OAuth2Client } from 'google-auth-library'
-import { config } from '../config.js'
 import { ControlApiError } from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
@@ -17,7 +15,6 @@ import {
   setProfileSessionCookie,
 } from '../sessionCookie.js'
 
-const googleClient = new OAuth2Client(config.googleClientId)
 const passwordResetRateLimit = createRateLimiter({
   windowMs: 60_000,
   maxRequests: 5,
@@ -31,12 +28,6 @@ const passwordResetRateLimit = createRateLimiter({
 
 function isControlApiStatus(error: unknown, status: number): error is ControlApiError {
   return error instanceof ControlApiError && error.status === status
-}
-
-type GooglePayload = {
-  email: string
-  name?: string
-  picture?: string
 }
 
 type LoginResponse = {
@@ -67,25 +58,6 @@ function sendLoginResponse(req: Request, res: Response, result: LoginResponse): 
   res.status(200).json(body)
 }
 
-async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
-  const ticket = await googleClient.verifyIdToken({
-    idToken,
-    audience: config.googleClientId,
-  })
-  const payload = ticket.getPayload()
-  if (!payload?.email) {
-    throw new Error('Google token has no email')
-  }
-  if (payload.email_verified !== true) {
-    throw new Error('Google token email is not verified')
-  }
-  return {
-    email: payload.email.toLowerCase(),
-    name: payload.name,
-    picture: payload.picture,
-  }
-}
-
 export function createAuthRouter(): Router {
   const router = Router()
 
@@ -97,11 +69,13 @@ export function createAuthRouter(): Router {
         return
       }
 
-      await verifyGoogleToken(idToken)
-      const result = await loginWithGoogle({
-        idToken,
-        ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
-      })
+      const result = await loginWithGoogle(
+        {
+          idToken,
+          ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
+        },
+        req.ip
+      )
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (isControlApiStatus(error, 404)) {
@@ -127,7 +101,7 @@ export function createAuthRouter(): Router {
         return
       }
 
-      const result = await loginWithPassword(email, password, requestedSessionContract(req))
+      const result = await loginWithPassword(email, password, requestedSessionContract(req), req.ip)
       sendLoginResponse(req, res, result)
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
