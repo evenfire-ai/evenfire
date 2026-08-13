@@ -264,6 +264,7 @@ export function App() {
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
+  const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
   const [settingsShortcutsRequestId, setSettingsShortcutsRequestId] = React.useState(0)
   const chatLocalSearchPreviousFocusRef = React.useRef<HTMLElement | null>(null)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
@@ -1044,6 +1045,7 @@ export function App() {
     setChatLocalSearchOpen(false)
     setSandboxLocalSearchRequestId(0)
     setCommandPaletteOpen(false)
+    setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
 
@@ -1067,14 +1069,28 @@ export function App() {
     [desktopCommandContext]
   )
 
+  const closeCommandPalette = React.useCallback(() => {
+    const returnToSandbox = commandPaletteReturnToSandbox
+    setCommandPaletteOpen(false)
+    setCommandPaletteReturnToSandbox(false)
+    if (returnToSandbox) {
+      requestAnimationFrame(() => {
+        void window.clerum.sandboxUi.focusActive().catch(() => undefined)
+      })
+    }
+  }, [commandPaletteReturnToSandbox])
+
   const executeDesktopCommand = React.useCallback(
-    (commandId: DesktopCommandId, source: 'shortcut' | 'palette' = 'shortcut') => {
+    (
+      commandId: DesktopCommandId,
+      origin: 'shortcut-host' | 'shortcut-sandbox' | 'palette' = 'shortcut-host'
+    ) => {
       if (!vm.isAuthenticated) return
-      if (source === 'shortcut' && commandPaletteOpen) {
-        if (commandId === 'commands.open') setCommandPaletteOpen(false)
+      if (origin !== 'palette' && commandPaletteOpen) {
+        if (commandId === 'commands.open') closeCommandPalette()
         return
       }
-      if (source === 'shortcut' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
+      if (origin !== 'palette' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
         return
       }
       const command = getDesktopCommand(commandId)
@@ -1082,8 +1098,18 @@ export function App() {
       if (!isDesktopCommandEligible(command, desktopCommandContext)) return
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
-        setCommandPaletteOpen(true)
+        if (origin === 'palette') {
+          setCommandPaletteOpen(false)
+          setCommandPaletteReturnToSandbox(false)
+        } else {
+          setCommandPaletteReturnToSandbox(origin === 'shortcut-sandbox')
+          setCommandPaletteOpen(true)
+        }
         return
+      }
+      if (origin === 'palette') {
+        setCommandPaletteOpen(false)
+        setCommandPaletteReturnToSandbox(false)
       }
       if (commandId === 'settings.shortcuts') {
         closeChatLocalSearch(false)
@@ -1147,6 +1173,7 @@ export function App() {
     [
       activeSandboxUiApp,
       closeChatLocalSearch,
+      closeCommandPalette,
       commandPaletteOpen,
       desktopCommandContext,
       handleCloseChatViewTab,
@@ -1161,7 +1188,9 @@ export function App() {
 
   React.useEffect(() => {
     if (!window.clerum.shortcuts) return undefined
-    return window.clerum.shortcuts.onCommand(commandId => executeDesktopCommand(commandId))
+    return window.clerum.shortcuts.onCommand((commandId, source) =>
+      executeDesktopCommand(commandId, source === 'sandbox' ? 'shortcut-sandbox' : 'shortcut-host')
+    )
   }, [executeDesktopCommand])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
@@ -1742,8 +1771,9 @@ export function App() {
                           <CommandPalette
                             platform={platformFromNavigator(navigator.platform)}
                             isEligible={isCommandEligible}
-                            onClose={() => setCommandPaletteOpen(false)}
+                            onClose={closeCommandPalette}
                             onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
+                            restorePreviousFocus={!commandPaletteReturnToSandbox}
                           />
                         ) : null}
                         {desktopUpdateRequiredDialog}

@@ -35,7 +35,7 @@ describe('CommandPalette', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
-  it('supports click, wrapping arrows, focus trap, and focus restoration', () => {
+  it('supports click, wrapping arrows, and the focus trap', () => {
     const previous = document.createElement('button')
     document.body.append(previous)
     previous.focus()
@@ -61,6 +61,31 @@ describe('CommandPalette', () => {
     fireEvent.keyDown(input, { key: 'Tab', shiftKey: true })
     expect(document.activeElement).not.toBe(input)
     unmount()
+    return new Promise<void>(resolve =>
+      requestAnimationFrame(() => {
+        expect(document.activeElement).not.toBe(previous)
+        previous.remove()
+        resolve()
+      })
+    )
+  })
+
+  it('restores previous focus when dismissed without executing a command', () => {
+    const previous = document.createElement('button')
+    document.body.append(previous)
+    previous.focus()
+    let close = () => undefined
+    const rendered = render(
+      <CommandPalette
+        platform="darwin"
+        isEligible={() => true}
+        onClose={() => close()}
+        onExecute={vi.fn()}
+      />
+    )
+    close = rendered.unmount
+
+    fireEvent.keyDown(screen.getByRole('dialog', { name: 'Command palette' }), { key: 'Escape' })
     return new Promise<void>(resolve =>
       requestAnimationFrame(() => {
         expect(document.activeElement).toBe(previous)

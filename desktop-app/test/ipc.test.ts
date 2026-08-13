@@ -120,6 +120,7 @@ describe('ipc host status stream handlers', () => {
     setSandboxUiVisible: vi.fn(),
     findInActiveSandboxUi: vi.fn().mockResolvedValue(9),
     stopActiveSandboxUiFind: vi.fn().mockResolvedValue(undefined),
+    focusActiveSandboxUi: vi.fn().mockResolvedValue(true),
   }
 
   beforeEach(async () => {
@@ -182,6 +183,20 @@ describe('ipc host status stream handlers', () => {
     const handler = testState.handlers.get('sandboxUi:stopFindInPage')
     await Promise.resolve(handler?.(makeTrustedEvent().event))
     expect(service.stopActiveSandboxUiFind).toHaveBeenCalledOnce()
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+  })
+
+  it('restores focus to an active sandbox only for the trusted renderer', async () => {
+    const handler = testState.handlers.get('sandboxUi:focusActive')
+    await expect(Promise.resolve(handler?.(makeTrustedEvent().event))).resolves.toBe(true)
+    expect(service.focusActiveSandboxUi).toHaveBeenCalledOnce()
     await expect(
       Promise.resolve(
         handler?.({

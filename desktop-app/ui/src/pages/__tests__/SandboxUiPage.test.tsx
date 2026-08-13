@@ -15,6 +15,7 @@ const sandboxUi = {
   capturePreview: vi.fn(),
   findInPage: vi.fn(),
   stopFindInPage: vi.fn(),
+  focusActive: vi.fn(),
   onFindResult: vi.fn(() => vi.fn()),
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
@@ -31,6 +32,7 @@ describe('SandboxUiPage', () => {
     sandboxUi.setVisible.mockResolvedValue(undefined)
     sandboxUi.findInPage.mockResolvedValue(17)
     sandboxUi.stopFindInPage.mockResolvedValue(undefined)
+    sandboxUi.focusActive.mockResolvedValue(true)
     installClerumApi()
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0)
@@ -201,7 +203,10 @@ describe('SandboxUiPage', () => {
       findNext: true,
     })
     fireEvent.keyDown(input, { key: 'Escape' })
-    expect(sandboxUi.stopFindInPage).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(sandboxUi.stopFindInPage).toHaveBeenCalled()
+      expect(sandboxUi.focusActive).toHaveBeenCalled()
+    })
     expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()
   })
 

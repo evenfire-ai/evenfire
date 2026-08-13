@@ -7,12 +7,19 @@ import {
 } from '../../../../src/desktopCommands'
 import type { CommandPaletteProps } from './types'
 
-export function CommandPalette({ platform, isEligible, onClose, onExecute }: CommandPaletteProps) {
+export function CommandPalette({
+  platform,
+  isEligible,
+  onClose,
+  onExecute,
+  restorePreviousFocus = true,
+}: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<DesktopCommandId | null>(null)
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
+  const restoreFocusOnUnmountRef = useRef(restorePreviousFocus)
   const commands = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
     return DESKTOP_COMMANDS.filter(command => command.visibleInPalette)
@@ -32,9 +39,11 @@ export function CommandPalette({ platform, isEligible, onClose, onExecute }: Com
     inputRef.current?.focus()
     return () => {
       const previous = previousFocusRef.current
-      requestAnimationFrame(() => {
-        if (previous?.isConnected) previous.focus()
-      })
+      if (restoreFocusOnUnmountRef.current) {
+        requestAnimationFrame(() => {
+          if (previous?.isConnected) previous.focus()
+        })
+      }
     }
   }, [])
 
@@ -55,6 +64,7 @@ export function CommandPalette({ platform, isEligible, onClose, onExecute }: Com
 
   const execute = (commandId: DesktopCommandId) => {
     if (!isEligible(commandId)) return
+    restoreFocusOnUnmountRef.current = false
     onExecute(commandId)
   }
 

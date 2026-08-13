@@ -199,7 +199,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
-  let emitCommand: ((commandId: DesktopCommandId) => void) | null
+  let emitCommand: ((commandId: DesktopCommandId, source?: 'host' | 'sandbox') => void) | null
   const clearPendingDeepLinks = vi.fn().mockResolvedValue(undefined)
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
@@ -227,10 +227,12 @@ describe('App deep-link orchestration', () => {
       configurable: true,
       value: {
         shortcuts: {
-          onCommand: vi.fn((callback: (commandId: DesktopCommandId) => void) => {
-            emitCommand = callback
-            return vi.fn()
-          }),
+          onCommand: vi.fn(
+            (callback: (commandId: DesktopCommandId, source: 'host' | 'sandbox') => void) => {
+              emitCommand = (commandId, source = 'host') => callback(commandId, source)
+              return vi.fn()
+            }
+          ),
         },
         app: {
           rendererReady: vi.fn().mockResolvedValue(undefined),
@@ -241,6 +243,7 @@ describe('App deep-link orchestration', () => {
           clearPendingDeepLinks,
           acknowledgeDeepLink,
           close: closeSandboxUi,
+          focusActive: vi.fn().mockResolvedValue(true),
           onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
             emitDeepLink = callback
             return vi.fn()
@@ -318,7 +321,7 @@ describe('App deep-link orchestration', () => {
         label: 'App',
         defaultPath: '/',
       })
-      emitCommand?.('commands.open')
+      emitCommand?.('commands.open', 'sandbox')
     })
 
     expect(commandPaletteHarness.props).not.toBeNull()
@@ -327,6 +330,19 @@ describe('App deep-link orchestration', () => {
 
     act(() => commandPaletteHarness.props?.onExecute('search.open'))
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+    expect(document.querySelector('[aria-label="Command palette"]')).toBeNull()
+  })
+
+  it('restores native app focus when a sandbox-opened palette is dismissed', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => emitCommand?.('commands.open', 'sandbox'))
+    act(() => commandPaletteHarness.props?.onClose())
+
+    await waitFor(() => expect(window.clerum.sandboxUi.focusActive).toHaveBeenCalledOnce())
   })
 
   it('opens Settings Shortcuts through the registered palette action', () => {

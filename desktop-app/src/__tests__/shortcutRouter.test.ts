@@ -52,6 +52,7 @@ describe('main-process Desktop shortcut routing', () => {
     expect(preventDefault).toHaveBeenCalledOnce()
     expect(current.trustedRenderer.send).toHaveBeenCalledWith('shortcuts:command', {
       commandId: 'search.open',
+      source: 'sandbox',
     })
 
     current.isCurrentSource = () => false
@@ -65,9 +66,11 @@ describe('main-process Desktop shortcut routing', () => {
     routeDesktopShortcut(current, { preventDefault: vi.fn() }, input({ shift: true }))
     expect(current.trustedRenderer.send).toHaveBeenNthCalledWith(1, 'shortcuts:command', {
       commandId: 'search.open',
+      source: 'sandbox',
     })
     expect(current.trustedRenderer.send).toHaveBeenNthCalledWith(2, 'shortcuts:command', {
       commandId: 'search.current',
+      source: 'sandbox',
     })
   })
 

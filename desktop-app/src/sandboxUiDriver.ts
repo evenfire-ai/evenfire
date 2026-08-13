@@ -751,6 +751,12 @@ export function stopActiveSandboxUiFind(): void {
   }
 }
 
+export function focusActiveSandboxUi(): boolean {
+  if (!active || active.view.webContents.isDestroyed()) return false
+  active.view.webContents.focus()
+  return true
+}
+
 export async function captureSandboxUiPreview(): Promise<string | null> {
   if (!active) return null
   if (active.view.webContents.isDestroyed()) return null

@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { type DesktopCommandId, isDesktopCommandId } from './desktopCommands.js'
+import {
+  type DesktopCommandId,
+  type DesktopCommandSource,
+  isDesktopCommandId,
+} from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
@@ -9,9 +13,17 @@ import type {
 
 const clerum = Object.freeze({
   shortcuts: {
-    onCommand: (callback: (commandId: DesktopCommandId) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { commandId?: unknown }) => {
-        if (isDesktopCommandId(payload?.commandId)) callback(payload.commandId)
+    onCommand: (callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { commandId?: unknown; source?: unknown }
+      ) => {
+        if (
+          isDesktopCommandId(payload?.commandId) &&
+          (payload?.source === 'host' || payload?.source === 'sandbox')
+        ) {
+          callback(payload.commandId, payload.source)
+        }
       }
       ipcRenderer.on('shortcuts:command', listener)
       return () => ipcRenderer.off('shortcuts:command', listener)
@@ -467,6 +479,7 @@ const clerum = Object.freeze({
     findInPage: (query: string, options: { forward: boolean; findNext: boolean }) =>
       ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<number | null>,
     stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
+    focusActive: () => ipcRenderer.invoke('sandboxUi:focusActive') as Promise<boolean>,
     onFindResult: (
       callback: (result: {
         requestId: number

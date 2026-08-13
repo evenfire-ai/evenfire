@@ -41,7 +41,10 @@ export function routeDesktopShortcut(
   )
   if (!command) return false
   event.preventDefault()
-  route.trustedRenderer.send('shortcuts:command', { commandId: command.id })
+  route.trustedRenderer.send('shortcuts:command', {
+    commandId: command.id,
+    source: route.source,
+  })
   return true
 }
 

@@ -1,4 +1,4 @@
-import type { DesktopCommandId } from './desktopCommands.js'
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -55,7 +55,9 @@ declare global {
   interface Window {
     clerum: {
       shortcuts: {
-        onCommand: (callback: (commandId: DesktopCommandId) => void) => () => void
+        onCommand: (
+          callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void
+        ) => () => void
       }
       auth: {
         getSessionState: () => Promise<SessionState>
@@ -559,6 +561,7 @@ declare global {
           options: { forward: boolean; findNext: boolean }
         ) => Promise<number | null>
         stopFindInPage: () => Promise<void>
+        focusActive: () => Promise<boolean>
         onFindResult: (
           callback: (result: {
             requestId: number

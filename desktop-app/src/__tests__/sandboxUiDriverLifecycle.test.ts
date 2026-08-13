@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  focusActiveSandboxUi,
   installSandboxUiCookie,
   mountSandboxUiView,
   unmountSandboxUiView,
@@ -22,6 +23,7 @@ const electronMocks = vi.hoisted(() => {
     })
     setWindowOpenHandler = vi.fn()
     stopFindInPage = vi.fn()
+    focus = vi.fn()
 
     on(event: string, handler: (...args: unknown[]) => void): this {
       if (!this.listeners.has(event)) this.listeners.set(event, new Set())
@@ -199,6 +201,15 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     )
     parentWindow.emit('closed')
     expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  it('focuses only the currently mounted native view', async () => {
+    expect(focusActiveSandboxUi()).toBe(false)
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+
+    expect(focusActiveSandboxUi()).toBe(true)
+    expect(electronMocks.views[0]?.webContents.focus).toHaveBeenCalledOnce()
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {

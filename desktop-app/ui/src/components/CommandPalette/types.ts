@@ -5,4 +5,5 @@ export type CommandPaletteProps = {
   isEligible: (commandId: DesktopCommandId) => boolean
   onClose: () => void
   onExecute: (commandId: DesktopCommandId) => void
+  restorePreviousFocus?: boolean
 }

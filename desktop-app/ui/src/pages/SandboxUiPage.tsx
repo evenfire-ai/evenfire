@@ -229,15 +229,22 @@ export function SandboxUiPage({
   }, [])
 
   const stopLocalSearch = useCallback(() => {
+    const previous = localSearchPreviousFocusRef.current
     activeFindRequestIdRef.current = null
     setLocalSearchOpen(false)
     setLocalSearchQuery('')
     setLocalSearchResult({ current: 0, total: 0 })
-    void window.clerum.sandboxUi.stopFindInPage().catch(() => undefined)
-    const previous = localSearchPreviousFocusRef.current
-    requestAnimationFrame(() => {
-      if (previous?.isConnected) previous.focus()
-    })
+    void window.clerum.sandboxUi
+      .stopFindInPage()
+      .then(() => window.clerum.sandboxUi.focusActive())
+      .then(focused => {
+        if (!focused) {
+          requestAnimationFrame(() => {
+            if (previous?.isConnected) previous.focus()
+          })
+        }
+      })
+      .catch(() => undefined)
   }, [])
 
   const runLocalSearch = useCallback(

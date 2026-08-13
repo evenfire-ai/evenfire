@@ -1570,6 +1570,11 @@ export function registerIpcHandlers(service: AppService): void {
     await service.stopActiveSandboxUiFind()
   })
 
+  ipcMain.handle('sandboxUi:focusActive', async event => {
+    assertTrustedSender(event)
+    return service.focusActiveSandboxUi()
+  })
+
   // Embed-side refresh request. NOTE: this IPC is exposed to *untrusted*
   // recipe JS via the embed preload, so we deliberately do NOT call
   // `assertTrustedSender` (the embed loads from the rpc-proxy URL, not

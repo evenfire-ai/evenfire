@@ -3230,6 +3230,11 @@ export class AppService {
     stopActiveSandboxUiFind()
   }
 
+  async focusActiveSandboxUi(): Promise<boolean> {
+    const { focusActiveSandboxUi } = await import('./sandboxUiDriver.js')
+    return focusActiveSandboxUi()
+  }
+
   /**
    * Embed-side refresh request. The IPC layer hands us the sender's
    * `webContents.id`; we delegate to the refresh module which gates the
