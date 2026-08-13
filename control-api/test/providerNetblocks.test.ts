@@ -21,15 +21,22 @@ const noopMetrics = (): TickMetrics => ({
   cidrs: vi.fn(),
 })
 
-function fakePool(acquired = true): Pool {
+function fakePoolHandle(opts: { acquired?: boolean; unlockError?: Error } = {}) {
+  const { acquired = true, unlockError } = opts
   const client = {
     query: vi.fn(async (sql: string) => {
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired }] }
+      if (sql.includes('pg_advisory_unlock') && unlockError) throw unlockError
       return { rows: [] }
     }),
     release: vi.fn(),
   }
-  return { connect: vi.fn(async () => client) } as unknown as Pool
+  const pool = { connect: vi.fn(async () => client) } as unknown as Pool
+  return { pool, client }
+}
+
+function fakePool(acquired = true): Pool {
+  return fakePoolHandle({ acquired }).pool
 }
 
 function fakeCmStore(
@@ -287,6 +294,42 @@ describe('runProviderNetblocksTick', () => {
     expect(data['github.api.ipv4'].split('\n')).toHaveLength(24)
     expect(data['github.api.ipv6']).toBe('2a0a:a440::/29')
     expect(data['_meta']).toContain('contentHash')
+  })
+
+  it('OPS-9a: an advisory-unlock failure DESTROYS the pooled session — release(err), never release()', async () => {
+    // pg-pool only destroys a connection on release(err) with a truthy arg. A
+    // session whose pg_advisory_unlock failed still HOLDS the session-scoped lock;
+    // returning it to the pool healthy wedges every replica on 'skipped_lock'.
+    const cm = fakeCmStore()
+    const { pool, client } = fakePoolHandle({ unlockError: new Error('unlock query failed') })
+    const result = await runProviderNetblocksTick({
+      fetchers: [syntheticFetcher(okResult({ api: API_24 }))],
+      cmStore: cm.store,
+      pool,
+      http,
+      now: 1000,
+      metrics: noopMetrics(),
+    })
+    expect(result).toBe('written') // the unlock failure never changes the tick outcome (§4)
+    expect(client.release).toHaveBeenCalledTimes(1)
+    const releaseArg = client.release.mock.calls[0][0]
+    expect(releaseArg).toBeInstanceOf(Error)
+  })
+
+  it('OPS-9b: happy path — release() is called with NO error (connection returns to the pool)', async () => {
+    const cm = fakeCmStore()
+    const { pool, client } = fakePoolHandle()
+    const result = await runProviderNetblocksTick({
+      fetchers: [syntheticFetcher(okResult({ api: API_24 }))],
+      cmStore: cm.store,
+      pool,
+      http,
+      now: 1000,
+      metrics: noopMetrics(),
+    })
+    expect(result).toBe('written')
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(client.release).toHaveBeenCalledWith() // zero args — pooled connection kept alive
   })
 })
 

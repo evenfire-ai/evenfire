@@ -29,6 +29,13 @@
 #            NetworkPolicy, then assert the rendered NP carries that CIDR as a
 #            port-scoped ipBlock + the clerum.io/egress-provider-ranges provenance
 #            annotation, and status ExternalEgressReady=True.
+#   Phase 4b Provider RENDER proof — WRC twin (PR335-E2E-003; designed, live-
+#            certified only under T1/T2): the REAL workflow-recipes reconciler
+#            renders the workload NetworkPolicy wl-egress-<recipe>-<workload>
+#            with the catalog CIDR port-scoped to the provider port + the
+#            provenance annotation, AND — the WRC-002 isolation net — the
+#            sibling exact-host binding (same dns, different port) must NOT
+#            inherit the provider CIDR (only its /32 residual).
 #   Phase 5  Drift canary: the binding's dns resolves OUTSIDE the narrow declared
 #            range → clerum_hcc_external_egress_provider_drift_total increments
 #            (scraped from the HCC /metrics endpoint) AND a Warning log is emitted
@@ -71,6 +78,9 @@
 #                     IPs fall OUTSIDE TEST_CIDR (default: one.one.one.one →
 #                     1.1.1.1/1.0.0.1, deterministically outside the /24)
 #   PROVIDER_PORT     destination port (default: 443)
+#   E2E_SIBLING_PORT  sibling exact-host port for the WRC-002 isolation net —
+#                     same dns as the provider binding, MUST NOT inherit the
+#                     provider CIDR (default: 2222)
 #   E2E_KEEP_RESOURCES=1  skip cleanup (debugging)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -94,9 +104,11 @@ PROVIDER_CATEGORY="edge"
 CM_KEY="${PROVIDER_NAME}.${PROVIDER_CATEGORY}.ipv4"
 PROVIDER_DNS="${PROVIDER_DNS:-one.one.one.one}"
 PROVIDER_PORT="${PROVIDER_PORT:-443}"
+SIBLING_PORT="${E2E_SIBLING_PORT:-2222}"
 DRIFT_METRIC="clerum_hcc_external_egress_provider_drift_total"
 ANNOTATION_KEY="clerum.io/egress-provider-ranges"
 HCC_DEPLOY="host-context-controller"
+WRC_DEPLOY="workflow-recipes"
 HCC_METRICS_PORT="${HCC_METRICS_PORT:-8081}"
 
 TIMEOUT="${TIMEOUT:-150}"
@@ -108,6 +120,10 @@ MCP_SERVER_H3="e2e-provcidr-h3-${RID}"
 WFR="e2e-provcidr-wfr-${RID}"
 NP_NAME="ext-egress-${MCP_SERVER}-${PROVIDER_DNS}-${PROVIDER_PORT}"
 NP_NAME_H3="ext-egress-${MCP_SERVER_H3}-${PROVIDER_DNS}-${PROVIDER_PORT}"
+# WRC workload egress NP name — rb.workloadEgressPolicyName(recipe, workloadId)
+# in workflow-recipes/src/reconciler/resourceBuilder.ts renders
+# `wl-egress-<recipe>-<workload>` (recipe stem untrimmed at our name lengths).
+WFR_NP="wl-egress-${WFR}-fetcher"
 ABSENT_CATEGORY="nope-${RID}"
 
 # ─── Logging + assertion accounting ──────────────────────────────────
@@ -130,6 +146,8 @@ cleanup() {
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
   # Belt-and-suspenders: remove any NP the reconciler left for our servers.
   kc delete networkpolicy "$NP_NAME" "$NP_NAME_H3" -n "$MCP_NS" \
+    --ignore-not-found >/dev/null 2>&1 || true
+  kc delete networkpolicy "$WFR_NP" -n "$WFR_NS" \
     --ignore-not-found >/dev/null 2>&1 || true
   # Restore the catalog: drop the test key we injected (leave every real key).
   kc patch configmap "$CM_NAME" -n "$CONTROL_NS" --type=json \
@@ -160,6 +178,13 @@ wait_cond() {
 dump_hcc() {
   warn "recent host-context-controller logs:"
   kc -n "$CONTROL_NS" logs "deploy/${HCC_DEPLOY}" --tail=60 2>/dev/null || true
+}
+
+dump_wrc() {
+  warn "recent workflow-recipes controller logs:"
+  kc -n "$CONTROL_NS" logs "deploy/${WRC_DEPLOY}" --tail=60 2>/dev/null || true
+  warn "WorkflowRecipe ${WFR} status:"
+  kc get workflowrecipe "$WFR" -n "$WFR_NS" -o jsonpath='{.status}' 2>/dev/null || true
 }
 
 # ═════════════════════════════════════════════════════════════════════
@@ -277,6 +302,12 @@ spec:
           provider:
             name: ${PROVIDER_NAME}
             categories: [${PROVIDER_CATEGORY}]
+        # WRC-002 regression net: exact-host sibling on the SAME dns but a
+        # DIFFERENT port — Phase 4b asserts the provider CIDR never leaks
+        # onto this rule (it must carry only its /32 residual).
+        - egressClass: exact-host
+          dns: ${PROVIDER_DNS}
+          port: ${SIBLING_PORT}
   ui:
     workloadRef: ui
     port: 8080
@@ -424,6 +455,92 @@ else
   dump_hcc
   die "McpServer never reported ExternalEgressReady=True"
 fi
+
+# ─── Phase 4b — WRC workload provider RENDER proof ───────────────────
+# WRC twin of the McpServer render proof above — closes PR335-E2E-003 (WRC
+# render + WRC-002 sibling isolation). DESIGNED phase: live-certified only
+# under a T1/T2 minikube run (minikube intentionally paused at design time).
+log "Phase 4b — WRC workload provider RENDER proof (real workflow-recipes reconciler)"
+
+# The TEST_CIDR is already in the catalog (patched in Phase 4). Nudge a fresh
+# WRC reconcile so the recipe re-reads it for the fetcher workload.
+kc annotate workflowrecipe "$WFR" -n "$WFR_NS" \
+  "e2e.clerum.io/rev=${RID}-p4b" --overwrite >/dev/null 2>&1 || true
+
+# One line per egress rule: "<ports space-joined>|<ipBlock cidrs space-joined>".
+wfr_np_rules() {
+  kc get networkpolicy "$WFR_NP" -n "$WFR_NS" \
+    -o jsonpath='{range .spec.egress[*]}{.ports[*].port}{"|"}{.to[*].ipBlock.cidr}{"\n"}{end}' 2>/dev/null || true
+}
+
+wfr_np_has_cidr() {
+  kc get networkpolicy "$WFR_NP" -n "$WFR_NS" \
+    -o jsonpath='{.spec.egress[*].to[*].ipBlock.cidr}' 2>/dev/null | grep -qF "$TEST_CIDR"
+}
+if wait_cond "WRC workload NP renders test CIDR" "$TIMEOUT" wfr_np_has_cidr; then
+  ok "WRC rendered NetworkPolicy ${WFR_NP} with ipBlock ${TEST_CIDR}"
+else
+  warn "NetworkPolicy ${WFR_NP} did not render ${TEST_CIDR} within ${TIMEOUT}s"
+  kc get networkpolicy "$WFR_NP" -n "$WFR_NS" -o yaml 2>/dev/null || warn "NP not found"
+  dump_wrc
+  die "WRC workload NP did not render the catalog CIDR (WRC render path regressed)"
+fi
+
+# The provider-CIDR rule(s) must be port-scoped to PROVIDER_PORT — a rule that
+# carries TEST_CIDR on any OTHER port is a scoping regression.
+misscoped="$(wfr_np_rules | grep -F "$TEST_CIDR" | grep -vw "$PROVIDER_PORT" || true)"
+if [ -n "$misscoped" ]; then
+  warn "rules carrying ${TEST_CIDR} without port ${PROVIDER_PORT}:"
+  printf '%s\n' "$misscoped"
+  dump_wrc
+  die "WRC provider-CIDR rule is not port-scoped to ${PROVIDER_PORT}"
+fi
+ok "WRC provider-CIDR rule(s) are port-scoped to ${PROVIDER_PORT}"
+
+# WRC-002 isolation (the key new coverage): the sibling exact-host binding on
+# SIBLING_PORT must render its OWN rule (else the check would be vacuous) and
+# that rule must NEVER carry the provider CIDR — only its /32 residual.
+sibling_rules() {
+  wfr_np_rules | awk -F'|' -v p="$SIBLING_PORT" \
+    '{ n = split($1, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) { print; next } }'
+}
+sibling_rule_present() { sibling_rules | grep -q .; }
+if wait_cond "sibling exact-host rule renders" "$TIMEOUT" sibling_rule_present; then
+  ok "sibling exact-host rule for port ${SIBLING_PORT} rendered"
+else
+  warn "rendered egress rules (port|cidrs):"
+  wfr_np_rules
+  dump_wrc
+  die "sibling exact-host rule for port ${SIBLING_PORT} never rendered — WRC-002 isolation cannot be proven"
+fi
+
+sib_rules="$(sibling_rules)"
+if printf '%s' "$sib_rules" | grep -qF "$TEST_CIDR"; then
+  warn "sibling rules (port|cidrs):"
+  printf '%s\n' "$sib_rules"
+  dump_wrc
+  die "WRC-002 sibling widening regressed: the sibling port ${SIBLING_PORT} rule carries the provider CIDR ${TEST_CIDR}"
+fi
+printf '%s' "$sib_rules" | grep -q '/32' \
+  || die "sibling port ${SIBLING_PORT} rule carries no /32 residual; rules='${sib_rules}'"
+ok "WRC-002 isolation holds — port ${SIBLING_PORT} carries only /32 residual(s), never ${TEST_CIDR}"
+
+# Provenance annotation on the WFR NP carries dns + the test CIDR.
+wfr_annot="$(kc get networkpolicy "$WFR_NP" -n "$WFR_NS" \
+  -o "jsonpath={.metadata.annotations.clerum\.io/egress-provider-ranges}" 2>/dev/null || true)"
+printf '%s' "$wfr_annot" | grep -qF "$TEST_CIDR" \
+  || { dump_wrc; die "WFR NP provenance annotation '${ANNOTATION_KEY}' missing test CIDR; got '${wfr_annot}'"; }
+printf '%s' "$wfr_annot" | grep -qF "$PROVIDER_DNS" \
+  || { dump_wrc; die "WFR NP provenance annotation '${ANNOTATION_KEY}' missing dns '${PROVIDER_DNS}'; got '${wfr_annot}'"; }
+ok "WFR NP carries provenance annotation ${ANNOTATION_KEY}='${wfr_annot}'"
+
+# The recipe must not have failed while rendering the provider binding.
+wfr_phase="$(kc get workflowrecipe "$WFR" -n "$WFR_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+if [ "$wfr_phase" = "failed" ]; then
+  dump_wrc
+  die "WorkflowRecipe ${WFR} reached status.phase=failed while rendering the provider binding"
+fi
+ok "WorkflowRecipe ${WFR} status.phase='${wfr_phase}' (not failed)"
 
 # ─── Phase 5 — Drift canary ──────────────────────────────────────────
 log "Phase 5 — Drift canary (dns resolves OUTSIDE the declared range)"

@@ -902,12 +902,12 @@ export class NetworkPolicyReconciler {
     if (bindings.some(b => b.egressClass === 'provider')) {
       try {
         const cm = await this.coreApi.readNamespacedConfigMap({
-          name: config.providerNetblocksConfigMapName,
+          name: 'clerum-provider-netblocks',
           namespace: config.controlPlaneNamespace,
         })
         netblocksCm = parseProviderNetblocks(cm.data)
       } catch (err) {
-        netblocksCmError = `failed to read ConfigMap "${config.providerNetblocksConfigMapName}": ${this.errorMessage(err)}`
+        netblocksCmError = `failed to read ConfigMap "clerum-provider-netblocks": ${this.errorMessage(err)}`
       }
     }
 
@@ -1072,10 +1072,7 @@ export class NetworkPolicyReconciler {
           declaredCategories: binding.provider?.categories,
           registryLookup: lookupFqdnProvider(binding.dns),
           cmCategories: netblocksCm.categories,
-          bounds: {
-            ...providerBounds(binding.provider?.name ?? ''),
-            ...(config.providerRangeBoundsOverrides ?? {}),
-          },
+          bounds: providerBounds(binding.provider?.name ?? ''),
         })
         if (resolved.kind === 'invalid') {
           failures.push(`provider egress for "${binding.dns}": ${resolved.reasons.join('; ')}`)

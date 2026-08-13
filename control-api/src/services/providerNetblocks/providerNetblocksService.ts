@@ -273,14 +273,23 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     return 'error'
   } finally {
     if (lockClient) {
+      let unlockError: Error | undefined
       if (acquired) {
         try {
           await lockClient.query(`SELECT pg_advisory_unlock(${LOCK_KEY_SQL})`)
-        } catch {
-          // best-effort unlock; the session-scoped lock releases on connection close anyway
+        } catch (err) {
+          unlockError = err instanceof Error ? err : new Error(String(err))
+          console.error(
+            `[provider-netblocks] advisory unlock failed — destroying the pooled session so the session-scoped lock cannot wedge future ticks: ${unlockError.message}`
+          )
         }
       }
-      lockClient.release()
+      // pg-pool only destroys a connection on release(err) with a truthy arg. A
+      // live session whose unlock failed still HOLDS the session-scoped advisory
+      // lock; returning it to the pool healthy would make every subsequent tick
+      // in all replicas report 'skipped_lock'. Destroy it instead (§2).
+      if (unlockError) lockClient.release(unlockError)
+      else lockClient.release()
     }
   }
 }

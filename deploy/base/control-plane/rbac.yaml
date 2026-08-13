@@ -89,10 +89,18 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["get", "list"]
 ---
-# issue #299 Phase 2: provider-netblocks catalog. Writer scoped to the ONE CM
-# name (G5). `create` cannot carry resourceNames (K8s authz evaluates create
-# before the name exists); the seed ships in deploy/base so create is only the
-# fresh-cluster path.
+# issue #299 Phase 2: provider-netblocks catalog. This Role is NAME-scoped to the
+# ONE CM (get/update/patch on clerum-provider-netblocks) and adds `patch` as the
+# only genuinely new authority. `create` cannot carry resourceNames (K8s authz
+# evaluates create before the name exists); the seed ships in deploy/base so
+# create is only the fresh-cluster path.
+# NOTE (not the effective-SA property): the control-api ServiceAccount ALSO holds
+# `control-api-secrets-role` (see control-api-secrets-binding above), which already
+# grants namespace-wide configmaps get/list/create/update. So this scoped Role does
+# NOT narrow the SA's effective ConfigMap authority — it documents intent. Truly
+# isolating the fetcher (a dedicated SA bound only to this Role, or splitting the
+# broad pre-existing role) is tracked separately; that broad grant is pre-existing
+# (control-api legitimately needs it for other duties), not introduced by this PR.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

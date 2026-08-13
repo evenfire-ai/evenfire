@@ -800,6 +800,7 @@ test-e2e-bash: ## Run bash-based E2E suites (scripts/e2e/*.sh)
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-backend-compat.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-legacy-job-cleanup.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-security.sh
+	$(MAKE) test-e2e-provider-cidr-egress MINIKUBE_PROFILE=$(E2E_KUBECONTEXT)
 
 .PHONY: test-e2e-workflow-runtime
 test-e2e-workflow-runtime: ## Run workflow runtime E2E gate

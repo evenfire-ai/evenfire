@@ -712,6 +712,37 @@ describe('Phase 2 – Schema', () => {
       r.issues.some(i => i.message.includes('public-web egressBindings must not declare'))
     ).toBe(true)
   })
+
+  it('rejects public-web egressBindings that declare a provider object (CRD CEL parity)', () => {
+    const r = validateRecipe(
+      JSON.stringify({
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'WorkflowRecipe',
+        metadata: { name: 'r' },
+        spec: {
+          workloads: [
+            {
+              id: 'w',
+              type: 'deployment',
+              image: 'x',
+              port: 3000,
+              transport: { type: 'streamableHttp' },
+              egressBindings: [{ egressClass: 'public-web', provider: { name: 'github' } }],
+            },
+          ],
+        },
+      })
+    )
+
+    expect(
+      r.issues.some(
+        i =>
+          i.severity === 'error' &&
+          i.path === 'spec.workloads[0].egressBindings[0].provider' &&
+          i.message === 'provider declarations require egressClass "provider"'
+      )
+    ).toBe(true)
+  })
 })
 
 describe('WorkflowRecipe egress limits', () => {

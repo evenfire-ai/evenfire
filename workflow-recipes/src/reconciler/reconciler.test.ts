@@ -9960,4 +9960,240 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.phase).not.toBe('failed')
     })
   })
+
+  // ─── issue #299 Phase 2 — PR335-WRC-001/002: provider egressClass on workload
+  // bindings + index-aligned provider-range resolution ─────────────────────────
+  describe('provider egress (PR335-WRC-001 / PR335-WRC-002)', () => {
+    const GITHUB_API_CIDR = '140.82.112.0/20'
+    const GITHUB_WEB_CIDR = '185.199.108.0/22'
+    // An IP inside github.api (140.82.112.0/20), outside github.web.
+    const GITHUB_API_IP = '140.82.113.6'
+    const PROVIDER_NETBLOCKS_CM = {
+      metadata: { resourceVersion: '1' },
+      data: {
+        'github.api.ipv4': GITHUB_API_CIDR,
+        'github.web.ipv4': GITHUB_WEB_CIDR,
+      },
+    }
+
+    function mockProviderNetblocksCm() {
+      mockCoreApi.readNamespacedConfigMap.mockImplementation(({ name }: { name?: string }) =>
+        name === 'clerum-provider-netblocks'
+          ? Promise.resolve(PROVIDER_NETBLOCKS_CM)
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+    }
+
+    afterEach(() => {
+      // The suite-level beforeEach only clears calls — restore the module-scope
+      // default implementation so later tests never see the netblocks catalog.
+      mockCoreApi.readNamespacedConfigMap.mockReset()
+      mockCoreApi.readNamespacedConfigMap.mockResolvedValue({ metadata: { resourceVersion: '1' } })
+    })
+
+    function makeProviderReconciler() {
+      return new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => ({ kind: 'ok', ipv4: [GITHUB_API_IP], ipv6: [], ttlSeconds: 300 }),
+      })
+    }
+
+    /** Flatten a NetworkPolicy body's egress rules into (ipBlock cidr, port) pairs. */
+    function collectIpBlockPairs(body: k8s.V1NetworkPolicy): Array<{ cidr: string; port: number }> {
+      const pairs: Array<{ cidr: string; port: number }> = []
+      for (const rule of body.spec?.egress ?? []) {
+        const cidrs = (rule.to ?? [])
+          .map(t => t.ipBlock?.cidr)
+          .filter((c): c is string => typeof c === 'string')
+        const ports = (rule.ports ?? [])
+          .map(p => p.port)
+          .filter((p): p is number => typeof p === 'number')
+        for (const cidr of cidrs) {
+          for (const port of ports) pairs.push({ cidr, port })
+        }
+      }
+      return pairs
+    }
+
+    function createdPolicyByName(name: string): k8s.V1NetworkPolicy {
+      const bodies = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+        .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+        .filter(b => b?.metadata?.name === name)
+      expect(bodies.length).toBeGreaterThan(0)
+      return bodies[bodies.length - 1]
+    }
+
+    it('RED-1 (WRC-001): a non-transport workload provider egressBinding reconciles and renders catalog CIDRs', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await makeProviderReconciler().reconcile(recipe)
+
+      expect(result.phase).toBe('active')
+      const body = createdPolicyByName('wl-egress-test-recipe-worker')
+      const pairs = collectIpBlockPairs(body)
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+      const provenance = body.metadata?.annotations?.['clerum.io/egress-provider-ranges']
+      expect(provenance).toContain(`api.github.com=${GITHUB_API_CIDR}`)
+    })
+
+    it('RED-2 (WRC-001): a provider declaration on an exact-host binding fails the recipe', async () => {
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'exact-host',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github' },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await makeProviderReconciler().reconcile(recipe)
+
+      expect(result.phase).toBe('failed')
+      expect(result.message).toContain(
+        'Workload "worker" egressBindings[0]: provider declarations require egressClass "provider"'
+      )
+    })
+
+    it('RED-3 (WRC-001): a provider binding targeting a cluster-local sibling fails the recipe', async () => {
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'db.sandbox-recipes.svc.cluster.local',
+                  port: 5432,
+                  provider: { name: 'github' },
+                },
+              ],
+            },
+            { id: 'db', type: 'deployment', image: 'postgres:16', port: 5432 },
+          ],
+        },
+      })
+
+      const result = await makeProviderReconciler().reconcile(recipe)
+
+      expect(result.phase).toBe('failed')
+      expect(result.message).toContain(
+        'Workload "worker" egressBindings[0]: provider egressBindings must target a public DNS hostname, not a cluster-local sibling'
+      )
+    })
+
+    it('RED-4 (WRC-002): a same-FQDN exact-host sibling on another port does NOT inherit provider CIDRs (UI path)', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: {
+              external: [
+                {
+                  fqdn: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+                { fqdn: 'api.github.com', port: 22 },
+              ],
+            },
+          },
+        },
+      })
+
+      await makeProviderReconciler().reconcile(recipe)
+
+      const body = createdPolicyByName('ui-egress-test-recipe')
+      const pairs = collectIpBlockPairs(body)
+      // Provider CIDR ONLY on the declaring entry's port.
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+      expect(pairs).not.toContainEqual({ cidr: GITHUB_API_CIDR, port: 22 })
+      // The non-provider sibling keeps its /32 window entry.
+      expect(pairs).toContainEqual({ cidr: `${GITHUB_API_IP}/32`, port: 22 })
+    })
+
+    it('RED-5 (WRC-002): same-FQDN multi-provider declarations are order-independent (each port gets its own categories)', async () => {
+      const apiDecl = {
+        fqdn: 'github.com',
+        port: 443,
+        provider: { name: 'github', categories: ['api'] },
+      }
+      const webDecl = {
+        fqdn: 'github.com',
+        port: 8443,
+        provider: { name: 'github', categories: ['web'] },
+      }
+
+      for (const external of [
+        [apiDecl, webDecl],
+        [webDecl, apiDecl],
+      ]) {
+        mockProviderNetblocksCm()
+        mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+        const recipe = makeRecipe({
+          spec: {
+            contextRef: 'default',
+            workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+            ui: {
+              workloadRef: 'frontend',
+              port: 8080,
+              egress: { external },
+            },
+          },
+        })
+
+        await makeProviderReconciler().reconcile(recipe)
+
+        const body = createdPolicyByName('ui-egress-test-recipe')
+        const pairs = collectIpBlockPairs(body)
+        // Each port carries its OWN declaration's category ranges — regardless
+        // of declaration order.
+        expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+        expect(pairs).not.toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 443 })
+        expect(pairs).toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 8443 })
+        expect(pairs).not.toContainEqual({ cidr: GITHUB_API_CIDR, port: 8443 })
+      }
+    })
+  })
 })

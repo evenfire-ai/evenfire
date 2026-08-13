@@ -175,6 +175,10 @@ export interface McpServerCondition {
 
 export interface McpServerResolvedEgressIP {
   dns: string
+  // issue #299 Phase 2: the exact egress set opened in the rendered NetworkPolicy
+  // for this dns — /32 IP literals for exact-host bindings, and declared provider
+  // CIDR ranges (e.g. 140.82.112.0/20) for egressClass=provider. May be CIDRs, not
+  // only IP literals; kept as the truthful audit record of what egress is open.
   ips: string[]
   resolvedAt: string
 }

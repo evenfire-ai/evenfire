@@ -212,19 +212,6 @@ export interface Config {
   // HCC_EXTERNAL_EGRESS_MAX_ENTRIES.
   externalEgressMaxEntries: number
 
-  // issue #299 Phase 2 — provider-CIDR egress. Name of the cluster ConfigMap
-  // holding the published provider netblocks (materialized by control-api). HCC
-  // only READS it, on the existing resync. Set via HCC_PROVIDER_NETBLOCKS_CONFIGMAP.
-  providerNetblocksConfigMapName: string
-  // Optional GLOBAL override for provider-range validation bounds. Undefined
-  // unless the operator explicitly sets one of the HCC_EXTERNAL_EGRESS_*_PROVIDER_*
-  // vars — otherwise the per-provider bounds from the registry win.
-  providerRangeBoundsOverrides?: {
-    minPrefixLength?: number
-    maxRanges?: number
-    maxSpanAddresses?: number
-  }
-
   // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
   // local-mode McpServer images. Audit mode (default) logs would-be denials
   // without blocking; enforce mode blocks the workload build.
@@ -494,35 +481,6 @@ export function validateExternalEgressResyncInvariant(cfg: {
   }
 }
 
-// issue #299 Phase 2 — build the optional GLOBAL provider-range bounds override.
-// A field is included ONLY when its env var is explicitly set; an out-of-range
-// value is refused at boot (never clamped, matching this file's doctrine).
-// Returns undefined when nothing is set so the registry per-provider bounds win.
-function getProviderRangeBoundsOverrides():
-  | { minPrefixLength?: number; maxRanges?: number; maxSpanAddresses?: number }
-  | undefined {
-  const readBounded = (name: string, min: number, max: number): number | undefined => {
-    const raw = getEnv(name)
-    if (raw === undefined || raw === '') return undefined
-    const n = Number(raw)
-    if (!Number.isInteger(n) || n < min || n > max) {
-      throw new Error(`${name} must be an integer between ${min} and ${max}, got '${raw}'`)
-    }
-    return n
-  }
-  const minPrefixLength = readBounded('HCC_EXTERNAL_EGRESS_MIN_PROVIDER_PREFIX', 8, 32)
-  const maxRanges = readBounded('HCC_EXTERNAL_EGRESS_MAX_PROVIDER_RANGES', 1, 4096)
-  const maxSpanAddresses = readBounded('HCC_EXTERNAL_EGRESS_MAX_PROVIDER_SPAN', 1, 2 ** 28)
-  if (minPrefixLength === undefined && maxRanges === undefined && maxSpanAddresses === undefined) {
-    return undefined
-  }
-  const out: { minPrefixLength?: number; maxRanges?: number; maxSpanAddresses?: number } = {}
-  if (minPrefixLength !== undefined) out.minPrefixLength = minPrefixLength
-  if (maxRanges !== undefined) out.maxRanges = maxRanges
-  if (maxSpanAddresses !== undefined) out.maxSpanAddresses = maxSpanAddresses
-  return out
-}
-
 export const config: Config = {
   devMode,
 
@@ -762,13 +720,6 @@ export const config: Config = {
     5
   ),
   externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
-
-  // issue #299 Phase 2 — provider-CIDR egress catalog + optional global bounds.
-  providerNetblocksConfigMapName: getEnv(
-    'HCC_PROVIDER_NETBLOCKS_CONFIGMAP',
-    'clerum-provider-netblocks'
-  )!,
-  providerRangeBoundsOverrides: getProviderRangeBoundsOverrides(),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
   // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).

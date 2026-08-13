@@ -424,7 +424,12 @@ spec:
               properties:
                 resolvedEgressIPs:
                   type: array
-                  description: Resolved IPs for DNS-based egress bindings (for auditability).
+                  description: >-
+                    Resolved egress ranges for DNS-based bindings (for auditability):
+                    individual /32 IP literals for exact-host bindings, and the
+                    declared provider CIDR ranges (e.g. 140.82.112.0/20) for
+                    egressClass=provider bindings. Entries are the exact set opened
+                    in the rendered NetworkPolicy, so they may be CIDRs, not only IPs.
                   items:
                     type: object
                     properties:
@@ -432,6 +437,9 @@ spec:
                         type: string
                       ips:
                         type: array
+                        description: >-
+                          Resolved /32 IP literals and/or provider CIDR ranges
+                          for this binding (whatever the NetworkPolicy egress opened).
                         items:
                           type: string
                       resolvedAt:

@@ -95,6 +95,14 @@ describe('validateMcpServerSpec', () => {
           })
         )
       })
+      it('rejects a provider object on a public-web binding (CRD CEL parity)', () => {
+        expect(check({ egressClass: 'public-web', provider: { name: 'github' } })).toContainEqual(
+          expect.objectContaining({
+            field: 'spec.egressBindings[0].provider',
+            message: expect.stringContaining('egressClass'),
+          })
+        )
+      })
       it('rejects an unknown egressClass', () => {
         expect(check({ egressClass: 'weird' })).toContainEqual(
           expect.objectContaining({ field: 'spec.egressBindings[0].egressClass' })

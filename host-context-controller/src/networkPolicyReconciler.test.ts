@@ -25,9 +25,9 @@ vi.mock('./config', () => ({
     // #299 sliding-window knobs read by reconcileExternalEgress.
     externalEgressOverlapSec: 300,
     externalEgressMaxEntries: 128,
-    // #299 Phase 2 — provider-CIDR catalog. providerRangeBoundsOverrides omitted
-    // ⇒ the registry per-provider bounds win.
-    providerNetblocksConfigMapName: 'clerum-provider-netblocks',
+    // #299 Phase 2 — the provider-CIDR catalog name ('clerum-provider-netblocks')
+    // is hardcoded in production (shared with WRC), and per-provider bounds come
+    // from the registry only, so neither appears in config.
   },
 }))
 
@@ -706,6 +706,13 @@ describe('NetworkPolicyReconciler', () => {
       resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }]) // covered by the /20
 
       await r.reconcileExternalEgress(providerServer())
+
+      // PR335-OPS-008: the catalog name is hardcoded to the canonical contract
+      // shared with WRC and control-api — no config knob can point HCC elsewhere.
+      expect(mockCore.readNamespacedConfigMap).toHaveBeenCalledWith({
+        name: 'clerum-provider-netblocks',
+        namespace: 'control-plane',
+      })
 
       expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       const body = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body

@@ -900,6 +900,21 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
             }
           }
 
+          // CRD CEL parity: `!has(self.provider) || egressClass == 'provider'` —
+          // a provider object on any non-provider binding (public-web included)
+          // is rejected at apply time, so reject it here too.
+          if (
+            egressClass !== 'provider' &&
+            Object.prototype.hasOwnProperty.call(binding, 'provider')
+          ) {
+            issues.push({
+              phase: 'schema',
+              severity: 'error',
+              path: `${bindingPath}.provider`,
+              message: 'provider declarations require egressClass "provider"',
+            })
+          }
+
           if (egressClass === 'public-web') {
             const hasExactHostFields =
               Object.prototype.hasOwnProperty.call(binding, 'dns') ||
@@ -980,13 +995,6 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
                 })
               }
             }
-          } else if (Object.prototype.hasOwnProperty.call(binding, 'provider')) {
-            issues.push({
-              phase: 'schema',
-              severity: 'error',
-              path: `${bindingPath}.provider`,
-              message: 'provider declarations require egressClass "provider"',
-            })
           }
 
           const dns = typeof binding.dns === 'string' ? binding.dns.trim() : ''

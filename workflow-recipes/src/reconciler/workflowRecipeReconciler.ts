@@ -294,8 +294,40 @@ function validateWorkloadEgressBindings(
     }
 
     const egressClass = binding.egressClass ?? 'exact-host'
-    if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
-      throw new Error(`${prefix}: egressClass must be exact-host or public-web`)
+    if (
+      egressClass !== 'exact-host' &&
+      egressClass !== 'public-web' &&
+      egressClass !== 'provider'
+    ) {
+      throw new Error(`${prefix}: egressClass must be exact-host, public-web, or provider`)
+    }
+
+    // issue #299 Phase 2 (PR335-WRC-001) — defense-in-depth SHAPE validation
+    // mirroring the CRD CEL and the HCC reconciler. SHAPE ONLY: catalog
+    // validity stays at reconcile via resolveProviderRanges.
+    if (binding.provider !== undefined && egressClass !== 'provider') {
+      throw new Error(`${prefix}: provider declarations require egressClass "provider"`)
+    }
+    if (egressClass === 'provider') {
+      if (binding.provider === undefined) {
+        throw new Error(`${prefix}: egressClass "provider" requires a provider declaration`)
+      }
+      if (typeof binding.provider.name !== 'string' || binding.provider.name.trim() === '') {
+        throw new Error(`${prefix}: provider.name must be a non-empty string`)
+      }
+      if (binding.provider.categories !== undefined) {
+        if (
+          !Array.isArray(binding.provider.categories) ||
+          binding.provider.categories.length === 0 ||
+          binding.provider.categories.some(c => typeof c !== 'string' || c.trim() === '')
+        ) {
+          throw new Error(
+            `${prefix}: provider.categories must be a non-empty array of non-empty strings`
+          )
+        }
+      }
+      // NO `continue`: a provider binding falls through to the port + dns
+      // strictness block below, exactly like exact-host.
     }
 
     if (egressClass === 'public-web') {
@@ -349,6 +381,14 @@ function validateWorkloadEgressBindings(
       // public-DNS strictness below.
       const resolved = rb.resolveClusterLocalBinding(dns, recipe, workloadNamespace)
       if (resolved) {
+        // issue #299 Phase 2 (PR335-WRC-001) — provider ranges are public
+        // netblocks; a cluster-local sibling target makes no sense and would
+        // smuggle catalog CIDRs onto an internal hop.
+        if (egressClass === 'provider') {
+          throw new Error(
+            `${prefix}: provider egressBindings must target a public DNS hostname, not a cluster-local sibling`
+          )
+        }
         if (workload.transport) {
           throw new Error(
             `${prefix}: cluster-local egressBindings are only supported on non-transport workloads`
@@ -3967,12 +4007,16 @@ export class WorkflowRecipeReconciler {
   // clerum-provider-netblocks catalog (read at most once per call). ANY failure
   // THROWS (H3-by-throw): the reconciler's existing throw path retains the live
   // policy and surfaces the failure — a CM outage becomes LKG, never egress loss.
-  private async resolveProviderRangesByFqdn(
+  // PR335-WRC-002: results are POSITIONALLY ALIGNED with `declared` (never
+  // FQDN-keyed) so a same-FQDN exact-host sibling on another port cannot
+  // inherit provider CIDRs and same-FQDN multi-provider declarations each keep
+  // their OWN category ranges (no last-write-wins).
+  private async resolveProviderRangesPerDeclaration(
     declared: Array<{ fqdn: string; provider?: { name: string; categories?: string[] } }>,
     label: string
-  ): Promise<Map<string, string[]>> {
-    const wanting = declared.filter(d => d.provider)
-    const out = new Map<string, string[]>()
+  ): Promise<Array<string[] | undefined>> {
+    const out: Array<string[] | undefined> = new Array(declared.length).fill(undefined)
+    const wanting = declared.map((d, i) => ({ d, i })).filter(x => x.d.provider)
     if (wanting.length === 0) return out
     let cm: k8s.V1ConfigMap
     try {
@@ -3983,7 +4027,7 @@ export class WorkflowRecipeReconciler {
     } catch (err) {
       throw egressResolutionError(
         `${label} provider netblocks catalog unavailable`,
-        wanting.map(d => ({
+        wanting.map(({ d }) => ({
           fqdn: d.fqdn,
           error: err instanceof Error ? err.message : String(err),
           retryable: true,
@@ -3992,7 +4036,7 @@ export class WorkflowRecipeReconciler {
     }
     const parsed = parseProviderNetblocks(cm.data)
     const failures: Array<{ fqdn: string; error: string; retryable: boolean }> = []
-    for (const d of wanting) {
+    for (const { d, i } of wanting) {
       const resolved = resolveProviderRanges({
         fqdn: d.fqdn,
         declaredName: d.provider!.name,
@@ -4004,7 +4048,7 @@ export class WorkflowRecipeReconciler {
       if (resolved.kind === 'invalid') {
         failures.push({ fqdn: d.fqdn, error: resolved.reasons.join('; '), retryable: false })
       } else {
-        out.set(d.fqdn, resolved.ranges)
+        out[i] = resolved.ranges
       }
     }
     if (failures.length > 0) {
@@ -4016,15 +4060,22 @@ export class WorkflowRecipeReconciler {
   // issue #299 Phase 2 — stamp the provenance annotation (EXCLUDED from the WRC
   // write gate, which compares the spec-derived egressSignature only). Pure audit
   // view; unchanged when no provider ranges exist (byte-identical /32 mode).
+  // PR335-WRC-002: takes the declared array + the index-aligned ranges so the
+  // annotation reflects exactly the declarations that resolved (format stays
+  // `fqdn=cidr,cidr;...` — substring-compatible with the e2e greps).
   private withProviderProvenance(
     annotations: Record<string, string>,
-    providerRangesByFqdn: Map<string, string[]>
+    declared: Array<{ fqdn: string }>,
+    providerRanges: Array<string[] | undefined>
   ): Record<string, string> {
-    if (providerRangesByFqdn.size === 0) return annotations
-    const value = [...providerRangesByFqdn.entries()]
-      .map(([fqdn, ranges]) => `${fqdn}=${ranges.join(',')}`)
-      .sort()
-      .join(';')
+    const pairs = declared
+      .map((d, i) => ({ fqdn: d.fqdn, ranges: providerRanges[i] }))
+      .filter(
+        (p): p is { fqdn: string; ranges: string[] } =>
+          p.ranges !== undefined && p.ranges.length > 0
+      )
+    if (pairs.length === 0) return annotations
+    const value = [...new Set(pairs.map(p => `${p.fqdn}=${p.ranges.join(',')}`))].sort().join(';')
     return { ...annotations, 'clerum.io/egress-provider-ranges': value }
   }
 
@@ -4091,17 +4142,17 @@ export class WorkflowRecipeReconciler {
     if (externals.length > 0) {
       // issue #299 Phase 2 — resolve provider ranges from the catalog first
       // (H3-by-throw: a CM/spec problem throws, retaining the live policy).
-      const providerRangesByFqdn = await this.resolveProviderRangesByFqdn(
+      const providerRanges = await this.resolveProviderRangesPerDeclaration(
         externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
         `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
       )
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
-        externals: externals.map(e => ({
+        externals: externals.map((e, i) => ({
           fqdn: e.fqdn,
           port: e.port,
-          providerRanges: providerRangesByFqdn.get(e.fqdn),
+          providerRanges: providerRanges[i],
         })),
         resolveResult: { resolved, failures },
         previousAnnotations: existing?.metadata?.annotations,
@@ -4135,7 +4186,7 @@ export class WorkflowRecipeReconciler {
       effectiveResolved = acc.resolved.filter(
         r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
       )
-      stateAnnotations = this.withProviderProvenance(acc.annotations, providerRangesByFqdn)
+      stateAnnotations = this.withProviderProvenance(acc.annotations, externals, providerRanges)
       egressRenewalDue = acc.renewalDue
       egressStateChanged = acc.changed
       for (const [driftFqdn, driftIps] of Object.entries(acc.uncoveredFreshIpsByFqdn)) {
@@ -4571,16 +4622,16 @@ export class WorkflowRecipeReconciler {
       existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
         // issue #299 Phase 2 — resolve provider ranges (H3-by-throw retains the NP).
-        const providerRangesByFqdn = await this.resolveProviderRangesByFqdn(
+        const providerRanges = await this.resolveProviderRangesPerDeclaration(
           externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
           `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
         )
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
-          externals: externalDeclared.map(e => ({
+          externals: externalDeclared.map((e, i) => ({
             fqdn: e.fqdn,
             port: e.port,
-            providerRanges: providerRangesByFqdn.get(e.fqdn),
+            providerRanges: providerRanges[i],
           })),
           resolveResult: { resolved: resolvedExternal, failures },
           previousAnnotations: existingWlPolicy?.metadata?.annotations,
@@ -4602,7 +4653,11 @@ export class WorkflowRecipeReconciler {
         effectiveExternal = acc.resolved.filter(
           r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
         )
-        wlStateAnnotations = this.withProviderProvenance(acc.annotations, providerRangesByFqdn)
+        wlStateAnnotations = this.withProviderProvenance(
+          acc.annotations,
+          externalDeclared,
+          providerRanges
+        )
         wlEgressRenewalDue = acc.renewalDue
         wlEgressStateChanged = acc.changed
         for (const [driftFqdn, driftIps] of Object.entries(acc.uncoveredFreshIpsByFqdn)) {

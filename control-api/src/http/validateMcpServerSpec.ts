@@ -294,6 +294,15 @@ export function validateMcpServerSpec(
           })
           return
         }
+        // CRD CEL parity: `!has(self.provider) || egressClass == 'provider'` —
+        // a provider object on any non-provider binding (public-web included)
+        // is rejected at apply time, so reject it here too.
+        if (binding.provider !== undefined && egressClass !== 'provider') {
+          errors.push({
+            field: `${field}.provider`,
+            message: 'provider declarations require egressClass "provider"',
+          })
+        }
         if (egressClass === 'public-web') {
           if (
             binding.dns !== undefined ||
@@ -354,12 +363,6 @@ export function validateMcpServerSpec(
             }
           }
         } else {
-          if (binding.provider !== undefined) {
-            errors.push({
-              field: `${field}.provider`,
-              message: 'provider declarations require egressClass "provider"',
-            })
-          }
           const hasDns = typeof binding.dns === 'string' && binding.dns.trim().length > 0
           const hasCidr = typeof binding.cidr === 'string' && binding.cidr.trim().length > 0
           if (hasDns === hasCidr) {
