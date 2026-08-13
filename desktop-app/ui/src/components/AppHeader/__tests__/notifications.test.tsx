@@ -73,6 +73,7 @@ describe('AppHeader notification tray presentation', () => {
     cleanup()
     notificationMocks.notifications.length = 0
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('opens a notification when its card surface is clicked', () => {
@@ -214,5 +215,31 @@ describe('AppHeader notification tray presentation', () => {
         .getByRole('dialog', { name: 'Notifications and approvals' })
         .classList.contains('notification-menu--app-drawer')
     ).toBe(false)
+  })
+
+  it('uses a compact search label at constrained widths while retaining the full hover text', () => {
+    vi.stubGlobal('innerWidth', 1200)
+
+    render(<AppHeader />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(search.getAttribute('placeholder')).toBe('Search workspace...')
+    expect(search.getAttribute('title')).toBe(
+      'Search teams, contexts, members, agents or connectors...'
+    )
+  })
+
+  it('uses the full search label above the constrained-width breakpoint', () => {
+    vi.stubGlobal('innerWidth', 1400)
+
+    render(<AppHeader />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(search.getAttribute('placeholder')).toBe(
+      'Search teams, contexts, members, agents or connectors...'
+    )
+    expect(search.getAttribute('title')).toBe(
+      'Search teams, contexts, members, agents or connectors...'
+    )
   })
 })
