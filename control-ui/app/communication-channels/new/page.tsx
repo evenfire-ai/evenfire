@@ -59,6 +59,9 @@ type DraftState = {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
 const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
+
+/** Slack's "Create an app" chooser, where "From an app manifest" is one of the options. */
+const SLACK_NEW_APP_URL = 'https://api.slack.com/apps?new_app=1'
 const STEPS = ['Channel', 'Provider'] as const
 
 const STEP_DETAILS = [
@@ -661,11 +664,23 @@ export default function CreateCommunicationChannelPage() {
                             </pre>
                           </div>
                           <span className="cu-field__hint">
-                            Create the Slack app from this first: in Slack, Create New App → From an
-                            app manifest → paste. It sets the scopes, the events, and both Request
-                            URLs, so the app is ready before you come back for the token below. The
-                            URLs point at <code>{normalizedChannelName}</code>, so create this
-                            channel under that name.
+                            Copy this, then{' '}
+                            <a
+                              className="cu-link"
+                              href={SLACK_NEW_APP_URL}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              create your Slack app
+                            </a>{' '}
+                            — choose <strong>From an app manifest</strong>, pick the workspace, and
+                            paste. It sets the scopes, the events, and both Request URLs, so the app
+                            is ready before you come back here for the token below. Opens in a new
+                            tab so this form keeps what you have typed.
+                          </span>
+                          <span className="cu-field__hint">
+                            The Request URLs point at <code>{normalizedChannelName}</code>, so this
+                            channel has to be created under that name.
                           </span>
                         </div>
                       ) : null}
