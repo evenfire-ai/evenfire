@@ -372,12 +372,18 @@ describe('unresolved sender notice on Teams', () => {
     expect(sendMessage).toHaveBeenCalledTimes(1)
   })
 
-  it('does not use sendEphemeral for Teams', async () => {
-    const { deliver, sendEphemeral } = buildReader({ medium: 'teams' })
+  it('delivers the Teams notice via sendMessage, never sendEphemeral', async () => {
+    const { deliver, sendEphemeral, sendMessage } = buildReader({ medium: 'teams' })
 
     await deliver()
 
+    // Pinned in both directions: if TeamsAdapter ever grows a sendEphemeral shim
+    // and this code gets routed onto it, the notice becomes invisible to everyone
+    // and the feature silently dies. sendMessage having been called is what makes
+    // this assertion able to fail; sendEphemeral alone cannot, since it is also
+    // uncalled when Teams is dropped at the provider guard entirely.
     expect(sendEphemeral).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalled()
   })
 })
 
