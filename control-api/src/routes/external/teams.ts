@@ -9,6 +9,8 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -45,6 +47,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/users/:userId/current',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
@@ -59,19 +62,25 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     }
   )
 
-  router.post('/external/teams', rejectBodyUserTeamMismatch, async (req, res, next) => {
-    try {
-      const userId = String(req.body?.userId || '').trim()
-      const name = String(req.body?.name || '').trim()
-      if (!userId || !name) return res.status(400).json({ error: 'userId and name are required' })
-      return res.status(200).json(await createTeamForUser(userId, name))
-    } catch (error) {
-      return next(error)
+  router.post(
+    '/external/teams',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
+    rejectBodyUserTeamMismatch,
+    async (req, res, next) => {
+      try {
+        const userId = String(req.body?.userId || '').trim()
+        const name = String(req.body?.name || '').trim()
+        if (!userId || !name) return res.status(400).json({ error: 'userId and name are required' })
+        return res.status(200).json(await createTeamForUser(userId, name))
+      } catch (error) {
+        return next(error)
+      }
     }
-  })
+  )
 
   router.put(
     '/external/teams/:teamId/name',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
@@ -97,6 +106,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/members',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
@@ -110,6 +120,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/contexts',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     async (req, res, next) => {
       try {
@@ -135,6 +146,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/agents',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     async (req, res, next) => {
       try {
@@ -175,6 +187,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/members/:userId/role',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
@@ -190,6 +203,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.patch(
     '/external/teams/:teamId/members/:userId/role',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
@@ -217,6 +231,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/teams/:teamId/invitations',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin', 'inviter']),
     rejectBodyUserTeamMismatch,
@@ -251,6 +266,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.delete(
     '/external/teams/:teamId/members/:userId',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin']),
     async (req, res, next) => {

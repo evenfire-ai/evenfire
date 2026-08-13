@@ -46,6 +46,8 @@ vi.mock('../src/services/directory/index.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/directory/index.js')>()),
   ...directory,
 }))
+const rateLimitMock = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 
 function app() {
   const value = express()
@@ -55,7 +57,16 @@ function app() {
 }
 
 describe('legacy external team invitation responses', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    rateLimitMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      count: 1,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+  })
 
   it('never serializes the invitation acceptance capability', async () => {
     directory.createManagedInvitationForUser.mockResolvedValueOnce({
@@ -69,5 +80,45 @@ describe('legacy external team invitation responses', () => {
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ id: 'inv-1' })
     expect(JSON.stringify(response.body)).not.toContain('must-never-leave-control-api')
+  })
+
+  it('rate limits team reads before directory access', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      count: 31,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+
+    const response = await request(app()).get('/external/teams/team-1/members')
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_team_user_read:user:manager-1',
+      30
+    )
+    expect(directory.listMembers).not.toHaveBeenCalled()
+  })
+
+  it('rate limits team mutations before invitation creation', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      count: 11,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+
+    const response = await request(app())
+      .post('/external/teams/team-1/invitations')
+      .send({ email: 'invitee@example.com', role: 'member' })
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_team_user_mutation:user:manager-1',
+      10
+    )
+    expect(directory.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
 })

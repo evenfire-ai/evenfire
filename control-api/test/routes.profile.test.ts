@@ -1104,4 +1104,52 @@ describe('routes/profile', () => {
     )
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
+
+  it('rate limits user-directory reads before listing teams', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 31,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/teams')
+    )
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_team_user_read:user:u1',
+      30
+    )
+    expect(svc.listTeams).not.toHaveBeenCalled()
+  })
+
+  it('rate limits user profile mutations before updating profile data', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/users/u1/profile')
+    ).send({ displayName: 'New Name' })
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_team_user_mutation:user:u1',
+      10
+    )
+    expect(svc.updateProfile).not.toHaveBeenCalled()
+  })
 })
