@@ -4,6 +4,7 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { useProfileAccess } from '@components/ProfileAccessContext'
 import { useReleaseIdentity } from '@components/ReleaseLabel'
+import { formatReleaseTitle } from '@lib/releaseIdentity'
 import { PROFILE_SIDEBAR_ITEMS } from './constants'
 import { IconLogout } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
@@ -26,7 +27,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
       className={`cu-sidebar${isOpen ? ' cu-sidebar--open' : ''}`}
       aria-label="Main navigation"
     >
-      <div className="cu-sidebar__brand" title={releaseId ? `Release ${releaseId}` : undefined}>
+      <div className="cu-sidebar__brand" title={formatReleaseTitle(releaseId)}>
         <Image
           className="cu-sidebar__brand-mark"
           src="/brand/logo.svg"

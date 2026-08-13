@@ -1,9 +1,9 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { ReleaseLabel } from '@components/ReleaseLabel'
-import { resetReleaseIdentityCache } from '@lib/releaseIdentity'
+import { refreshReleaseIdentity, resetReleaseIdentityCache } from '@lib/releaseIdentity'
 
 const api = vi.hoisted(() => ({
   getDesktopRelease: vi.fn(),
@@ -54,6 +54,36 @@ describe('ReleaseLabel', () => {
 
     expect(await screen.findByText('Release unavailable')).toBeInTheDocument()
     expect(screen.queryByText(/Version 0\.1\./)).not.toBeInTheDocument()
+  })
+
+  // The settings Refresh button drives refreshReleaseIdentity(). A label that
+  // caught a transient failure must heal in place, without remounting.
+  it('heals a mounted label in place when a later read succeeds', async () => {
+    api.getDesktopRelease.mockRejectedValueOnce(new Error('503 Service Unavailable'))
+
+    render(<ReleaseLabel />)
+    expect(await screen.findByText('Release unavailable')).toBeInTheDocument()
+
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
+    await act(async () => {
+      await refreshReleaseIdentity()
+    })
+
+    expect(screen.getByText('Release v0.6.0')).toBeInTheDocument()
+  })
+
+  it('publishes one read to every mounted label', async () => {
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
+
+    render(
+      <>
+        <ReleaseLabel className="first" />
+        <ReleaseLabel className="second" />
+      </>
+    )
+
+    expect(await screen.findAllByText('Release v0.6.0')).toHaveLength(2)
+    expect(api.getDesktopRelease).toHaveBeenCalledTimes(1)
   })
 
   it('reads the release once and shares it with later mounts', async () => {

@@ -5,6 +5,7 @@ import {
   formatReleaseLabel,
   loadReleaseIdentity,
   readCachedReleaseIdentity,
+  subscribeReleaseIdentity,
 } from '@lib/releaseIdentity'
 import type { ReleaseIdentityState, ReleaseLabelProps } from './types'
 
@@ -13,6 +14,10 @@ import type { ReleaseIdentityState, ReleaseLabelProps } from './types'
 // number is a per-commit counter (scripts/precommit/bump-staged-package-versions.mjs)
 // and is not a release coordinate, so it can never be matched to a tag, a
 // release, or a docs page.
+//
+// The hook lives here rather than in lib/ because lib/ is React-free, and
+// because a hook exported from its component's index.tsx is the established
+// shape in this app (useAuth, useToast, useProfileAccess, useConfirmDialog).
 export function useReleaseIdentity(): ReleaseIdentityState {
   const cached = readCachedReleaseIdentity()
   const [releaseId, setReleaseId] = useState<string | null>(cached?.releaseId ?? null)
@@ -20,13 +25,20 @@ export function useReleaseIdentity(): ReleaseIdentityState {
 
   useEffect(() => {
     let active = true
-    void loadReleaseIdentity().then(identity => {
+    const apply = (identity: { releaseId: string } | null) => {
       if (!active) return
       setReleaseId(identity?.releaseId ?? null)
       setLoading(false)
-    })
+    }
+
+    // Subscribe before loading: a read resolved for any other mounted label,
+    // or a refresh driven by the settings page, lands on this instance too.
+    const unsubscribe = subscribeReleaseIdentity(apply)
+    void loadReleaseIdentity().then(apply)
+
     return () => {
       active = false
+      unsubscribe()
     }
   }, [])
 

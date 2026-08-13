@@ -37,6 +37,7 @@ import {
   removeDraftRow,
   updateDraftRow,
 } from '@lib/profileSettings'
+import { refreshReleaseIdentity } from '@lib/releaseIdentity'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import type { Me } from '@/app/types/profile'
@@ -143,6 +144,11 @@ export function SettingsContent({
   async function loadAll(forceAccess = false) {
     setState('loading')
     setError('')
+    // An explicit Refresh re-reads the release too, so a label left on
+    // "Release unavailable" by a transient failure heals here instead of
+    // waiting for a remount. Deliberately not on the mount path: that would
+    // defeat the per-session cache the label shares with the sidebar.
+    if (forceAccess) void refreshReleaseIdentity()
     try {
       const [current, , nextAccounts] = await Promise.all([
         getMe(),
