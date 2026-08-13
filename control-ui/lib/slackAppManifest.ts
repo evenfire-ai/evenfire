@@ -61,6 +61,10 @@ export function slackAppManifest(appName: string, requestUrl: string): string {
   return `display_information:
   name: ${name}
 features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: ${name}
     always_online: false
