@@ -475,7 +475,9 @@ describe('ChannelCredentialsPanel — where the Slack credentials live', () => {
     renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
     // Must be on the field, not only in the panel note below it: the note is a
     // paragraph people skip, and this is the value they cannot locate.
-    expect(hintFor('Slack Signing Secret')).toMatch(/Basic Information/i)
+    // "Settings" matters: Slack's sidebar has Basic Information under Settings and
+    // a separate Features group, and the path is useless without the group name.
+    expect(hintFor('Slack Signing Secret')).toMatch(/Settings\s*(?:→|->|>)\s*Basic Information/i)
   })
 
   it('warns the signing secret is absent from the post-install dialog', () => {

@@ -682,6 +682,14 @@ export default function CreateCommunicationChannelPage() {
                             The Request URLs point at <code>{normalizedChannelName}</code>, so this
                             channel has to be created under that name.
                           </span>
+                          <span className="cu-field__hint">
+                            Slack checks the URL the moment you save the manifest and will report{' '}
+                            <strong>&ldquo;Your URL didn&rsquo;t respond&rdquo;</strong>. That is
+                            expected here: the URL names a channel that does not exist yet, so there
+                            are no credentials to verify the request against. Finish creating this
+                            channel, then press <strong>Retry</strong> on Slack&rsquo;s Event
+                            Subscriptions page and it turns green.
+                          </span>
                         </div>
                       ) : null}
                       <ChannelCredentialsPanel

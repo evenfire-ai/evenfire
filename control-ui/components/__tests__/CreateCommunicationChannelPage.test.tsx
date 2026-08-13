@@ -545,6 +545,33 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     expect(link.getAttribute('rel') ?? '').toMatch(/noreferrer|noopener/)
   })
 
+  it('warns that Slack will report the Request URL as unreachable until the channel exists', async () => {
+    // Inherent to handing the manifest over first: the reader authorises a Slack
+    // request by resolving the target channel's signing secret BEFORE answering
+    // the url_verification challenge, so a URL naming a channel that does not
+    // exist yet cannot verify. Slack shows "Your URL didn't respond" in orange the
+    // moment the manifest is saved, which reads as a broken setup unless the page
+    // says otherwise, and the fix is a Retry once the channel is created.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+    await goToSlackProviderStep('support-bot')
+    fireEvent.change(document.getElementById('slack-bot-handle')!, {
+      target: { value: 'Evenfire' },
+    })
+    await screen.findByText(/display_information:/)
+
+    const panel = document.querySelector('.cu-channel-provider-panel')
+    const copy = panel?.textContent ?? ''
+    // Either apostrophe: the copy uses a typographic one, and which glyph it is
+    // has nothing to do with whether the warning is present.
+    expect(copy).toMatch(/did(?:n['’]t| not) respond|unreachable/i)
+    expect(copy).toMatch(/Retry/i)
+  })
+
   it('offers no manifest until the Slack App Name is set', async () => {
     // The app name is the manifest's display_information.name. Emitting one with a
     // placeholder would install an app under a name the operator never chose.
