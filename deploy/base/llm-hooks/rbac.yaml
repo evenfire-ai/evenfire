@@ -1,0 +1,58 @@
+# --- Role: host-context-controller (llm-hooks namespace) ---
+# Namespace-scoped grant for the HCC ServiceAccount to reconcile LlmHook CRDs
+# into shared Deployment+Service+NetworkPolicy workloads (guardrails phase-4).
+# Modeled on deploy/base/mcp-server/rbac.yaml, plus `pods` get/list which the
+# McpServer Role does NOT grant — HCC needs it to read the LIVE pod's container
+# image for status.observedDigest (mirrors the workflow-recipes Role).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: llm-hooks
+rules:
+  # Watch LlmHook CRDs
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Read + write LlmHook status conditions / observedDigest / readyReplicas
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks/status"]
+    verbs: ["get", "patch"]
+  # Manage the shared hook Deployments (digest-dedup: one Deployment per pod key)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Manage the shared hook Services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # ConfigMaps (forward-compat for hook config materialization)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Read hook envSecret content for the credentials-revision digest
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  # Manage the per-pod-key NetworkPolicies (reverse-index ingress + egress)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Read the LIVE hook pod's container status for status.observedDigest
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane

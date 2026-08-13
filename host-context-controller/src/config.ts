@@ -32,6 +32,15 @@ export interface Config {
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
+  // Kubernetes namespace where LlmHook image workloads (guardrail hook pods)
+  // live and where the LlmHook CRDs are watched.
+  llmHooksNamespace: string
+
+  // Periodic LlmHook fullReconcile interval (seconds). Drives the reference-
+  // counted orphan sweep (guardrails phase-4 §3) and readiness convergence when
+  // a watch drops events. 0 disables.
+  llmHookResyncIntervalSec: number
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -391,6 +400,12 @@ export const config: Config = {
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,
 
+  // LlmHook image-workload / CRD-watch namespace (guardrails phase-4).
+  llmHooksNamespace: getEnv('CONTEXT_MAPPER_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
+  // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
+  llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
 
@@ -427,7 +442,9 @@ export const config: Config = {
   // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
-    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
+    // llm-hooks is included so ensureDefaultPolicies lays down default-deny +
+    // infra (DNS/HCC API/K8s API) egress for guardrail hook pods (§5).
+    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy,llm-hooks'
   )!.split(','),
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
