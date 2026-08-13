@@ -5,6 +5,7 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type { DesktopCommandId } from '../../../src/desktopCommands'
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
@@ -157,6 +158,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
+  let emitCommand: ((commandId: DesktopCommandId) => void) | null
   const clearPendingDeepLinks = vi.fn().mockResolvedValue(undefined)
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
@@ -172,12 +174,19 @@ describe('App deep-link orchestration', () => {
     listPendingDeepLinks.mockResolvedValue({ links: [] })
     closeSandboxUi.mockResolvedValue(undefined)
     emitDeepLink = null
+    emitCommand = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => currentController)
 
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        shortcuts: {
+          onCommand: vi.fn((callback: (commandId: DesktopCommandId) => void) => {
+            emitCommand = callback
+            return vi.fn()
+          }),
+        },
         app: {
           rendererReady: vi.fn().mockResolvedValue(undefined),
         },
@@ -193,6 +202,24 @@ describe('App deep-link orchestration', () => {
           }),
         },
       } as unknown as Window['clerum'],
+    })
+  })
+
+  it('runs registered new-tab and composer-focus commands through existing chat selection', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => emitCommand?.('chat.newTab'))
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
+      selectLatest: false,
+    })
+
+    act(() => emitCommand?.('composer.focus'))
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
+      selectLatest: false,
     })
   })
 

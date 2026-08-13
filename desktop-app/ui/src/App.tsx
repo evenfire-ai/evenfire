@@ -11,6 +11,7 @@ import {
 } from '@contexts/index'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
+import { ChatTabs } from '@components/ChatTabs'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
@@ -21,6 +22,19 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import {
+  activeChatViewTab,
+  addBlankChatViewTab,
+  closeChatViewTab,
+  createChatViewTabsState,
+  cycleChatViewTab,
+  focusBlankChatViewTab,
+  openPersistedChatViewTab,
+  selectChatViewTab,
+  selectChatViewTabAt,
+  selectLastChatViewTab,
+} from '@lib/chatViewTabs'
+import type { ChatViewTab } from '@lib/chatViewTabs.types'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
@@ -63,6 +77,7 @@ import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
+import { type DesktopCommandId, getDesktopCommand } from '../../src/desktopCommands'
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
@@ -232,6 +247,12 @@ export function App() {
     PendingSandboxUiDeepLink[]
   >([])
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
+  const nextChatTabSequenceRef = React.useRef(2)
+  const [chatViewTabs, setChatViewTabs] = React.useState(() =>
+    createChatViewTabsState('chat-tab-1')
+  )
+  const chatViewTabsRef = React.useRef(chatViewTabs)
+  const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
@@ -241,6 +262,81 @@ export function App() {
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
+  chatViewTabsRef.current = chatViewTabs
+
+  const nextChatTabId = React.useCallback(() => `chat-tab-${nextChatTabSequenceRef.current++}`, [])
+
+  const leaveSandboxForChat = React.useCallback(() => {
+    setActiveSandboxUiApp(null)
+    setSandboxUiConversationOrigin(null)
+    setHeaderShellOverlayOpen(false)
+    setSidebarSettingsMenuOpen(false)
+  }, [])
+
+  const revealChatViewTab = React.useCallback(
+    (tab: ChatViewTab) => {
+      leaveSandboxForChat()
+      if (tab.agentRef) {
+        vm.handleSelectChatAgent(
+          tab.agentRef,
+          tab.chatId
+            ? { chatId: tab.chatId, title: tab.title, selectLatest: false }
+            : { selectLatest: false }
+        )
+      } else {
+        vm.handleNavSelect(DESKTOP_ROUTES.chat)
+      }
+    },
+    [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+  )
+
+  const handleSelectChatViewTab = React.useCallback(
+    (id: string) => {
+      const state = selectChatViewTab(chatViewTabsRef.current, id)
+      if (state === chatViewTabsRef.current) return
+      setChatViewTabs(state)
+      revealChatViewTab(activeChatViewTab(state))
+    },
+    [revealChatViewTab]
+  )
+
+  const handleCloseChatViewTab = React.useCallback(
+    (id: string) => {
+      const current = chatViewTabsRef.current
+      const wasActive = current.activeTabId === id
+      const next = closeChatViewTab(current, id, nextChatTabId())
+      if (next === current) return
+      setChatViewTabs(next)
+      if (wasActive) revealChatViewTab(activeChatViewTab(next))
+    },
+    [nextChatTabId, revealChatViewTab]
+  )
+
+  const handleNewChatViewTab = React.useCallback(() => {
+    const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
+    setChatViewTabs(next)
+    revealChatViewTab(activeChatViewTab(next))
+  }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
+
+  const handleSelectChatAgentWithTabs = React.useCallback(
+    (
+      agentName: string,
+      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
+    ) => {
+      const chatId = String(options.chatId || '').trim()
+      const next = chatId
+        ? openPersistedChatViewTab(chatViewTabsRef.current, {
+            id: nextChatTabId(),
+            agentRef: agentName,
+            chatId,
+            title: options.title,
+          })
+        : focusBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), agentName)
+      setChatViewTabs(next)
+      vm.handleSelectChatAgent(agentName, options)
+    },
+    [nextChatTabId, vm.handleSelectChatAgent]
+  )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
@@ -889,34 +985,84 @@ export function App() {
   )
 
   React.useEffect(() => {
-    const handleNewChatShortcut = (event: KeyboardEvent) => {
-      const isNewChatShortcut =
-        event.key.toLowerCase() === 'n' &&
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey
+    if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent) return
+    if (!vm.activeChatId) {
+      setChatViewTabs(state =>
+        focusBlankChatViewTab(state, nextChatTabId(), vm.selectedAgent as string)
+      )
+      return
+    }
+    const conversation =
+      vm.chatList.find(chat => chat.id === vm.activeChatId) ??
+      vm.latestChatSessions.find(
+        chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
+      )
+    setChatViewTabs(state =>
+      openPersistedChatViewTab(state, {
+        id: nextChatTabId(),
+        agentRef: vm.selectedAgent as string,
+        chatId: vm.activeChatId as string,
+        title: conversation?.title,
+      })
+    )
+  }, [
+    nextChatTabId,
+    vm.activeChatId,
+    vm.chatList,
+    vm.latestChatSessions,
+    vm.navItem,
+    vm.selectedAgent,
+  ])
 
-      if (!isNewChatShortcut || event.repeat || event.defaultPrevented) return
+  React.useEffect(() => {
+    nextChatTabSequenceRef.current = 2
+    setChatViewTabs(createChatViewTabsState('chat-tab-1'))
+    setComposerFocusRequestId(0)
+  }, [vm.authenticatedPrincipalIdentity])
 
-      event.preventDefault()
-      if (activeSandboxUiApp) {
-        setActiveSandboxUiApp(null)
-        setSandboxUiConversationOrigin(null)
-      }
-      setHeaderShellOverlayOpen(false)
-      setSidebarSettingsMenuOpen(false)
-
-      if (vm.selectedAgent) {
-        vm.handleSelectChatAgent(vm.selectedAgent, { selectLatest: false })
+  React.useEffect(() => {
+    if (!window.clerum.shortcuts) return undefined
+    return window.clerum.shortcuts.onCommand((commandId: DesktopCommandId) => {
+      if (!vm.isAuthenticated || document.querySelector('[role="dialog"][aria-modal="true"]')) {
         return
       }
-
-      vm.handleNavSelect(DESKTOP_ROUTES.chat)
-    }
-
-    window.addEventListener('keydown', handleNewChatShortcut)
-    return () => window.removeEventListener('keydown', handleNewChatShortcut)
-  }, [activeSandboxUiApp, vm.handleNavSelect, vm.handleSelectChatAgent, vm.selectedAgent])
+      const command = getDesktopCommand(commandId)
+      const state = chatViewTabsRef.current
+      if (commandId === 'chat.newTab') {
+        handleNewChatViewTab()
+        return
+      }
+      if (commandId === 'chat.closeTab') {
+        handleCloseChatViewTab(state.activeTabId)
+        return
+      }
+      if (command.eligibility === 'tab-index' && command.tabIndex !== undefined) {
+        const next = selectChatViewTabAt(state, command.tabIndex)
+        if (next !== state) {
+          setChatViewTabs(next)
+          revealChatViewTab(activeChatViewTab(next))
+        }
+        return
+      }
+      if (commandId === 'tabs.selectLast') {
+        const next = selectLastChatViewTab(state)
+        setChatViewTabs(next)
+        revealChatViewTab(activeChatViewTab(next))
+        return
+      }
+      if (commandId === 'tabs.next' || commandId === 'tabs.previous') {
+        if (state.tabs.length < 2) return
+        const next = cycleChatViewTab(state, commandId === 'tabs.next' ? 'next' : 'previous')
+        setChatViewTabs(next)
+        revealChatViewTab(activeChatViewTab(next))
+        return
+      }
+      if (commandId === 'composer.focus') {
+        revealChatViewTab(activeChatViewTab(state))
+        setComposerFocusRequestId(value => value + 1)
+      }
+    })
+  }, [handleCloseChatViewTab, handleNewChatViewTab, revealChatViewTab, vm.isAuthenticated])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
@@ -1104,7 +1250,7 @@ export function App() {
       selectedTeam: vm.selectedTeam,
       handleNavSelect: vm.handleNavSelect,
       handleOpenAgentWorkspace: vm.handleOpenAgentWorkspace,
-      handleSelectChatAgent: vm.handleSelectChatAgent,
+      handleSelectChatAgent: handleSelectChatAgentWithTabs,
       handleBackToAgents: vm.handleBackToAgents,
       handleOpenContextDetails: vm.handleOpenContextDetails,
       handleBackToContexts: vm.handleBackToContexts,
@@ -1119,7 +1265,7 @@ export function App() {
       vm.handleOpenAgentWorkspace,
       vm.handleOpenContextDetails,
       vm.handleOpenTeamDetails,
-      vm.handleSelectChatAgent,
+      handleSelectChatAgentWithTabs,
       vm.navItem,
       vm.selectedAgent,
       vm.selectedAgentRoute,
@@ -1221,6 +1367,7 @@ export function App() {
       agentError: vm.agentError,
       failedAgentSend: vm.failedAgentSend,
       activeMessageCount: vm.activeMessages.length,
+      composerFocusRequestId,
     }),
     [
       vm.activeChatId,
@@ -1230,6 +1377,7 @@ export function App() {
       vm.agentError,
       vm.failedAgentSend,
       vm.activeMessages.length,
+      composerFocusRequestId,
     ]
   )
 
@@ -1407,7 +1555,15 @@ export function App() {
                               />
                               <ToastStack items={vm.toasts} />
                               {vm.navItem === DESKTOP_ROUTES.chat && (
-                                <ChatPage scrollContainerRef={contentPanelRef} />
+                                <section className="chat-view-workspace" id="chat-view-panel">
+                                  <ChatTabs
+                                    tabs={chatViewTabs.tabs}
+                                    activeTabId={chatViewTabs.activeTabId}
+                                    onSelect={handleSelectChatViewTab}
+                                    onClose={handleCloseChatViewTab}
+                                  />
+                                  <ChatPage scrollContainerRef={contentPanelRef} />
+                                </section>
                               )}
                               {vm.navItem === DESKTOP_ROUTES.agents && (
                                 <AgentsPage scrollContainerRef={contentPanelRef} />
