@@ -20,7 +20,11 @@ export const CHANNEL_CREDENTIAL_FIELDS: CredentialField[] = [
     key: 'slack-signing-secret',
     label: 'Slack Signing Secret',
     placeholder: 'signing secret',
-    helpText: 'Required for Slack Events and Interactivity signature verification.',
+    // The one value operators cannot find. Slack never shows it during install,
+    // so the dialog that hands over the bot token looks complete when it is not.
+    // Naming the page beats describing what the secret does.
+    helpText:
+      'In your Slack app: Basic Information → App Credentials → Signing Secret, then Show. It is not in the dialog shown after you install the app — that one only carries the bot token. Used to verify that Events and Interactivity requests really came from Slack.',
   },
   {
     channelType: 'slack',
@@ -28,7 +32,7 @@ export const CHANNEL_CREDENTIAL_FIELDS: CredentialField[] = [
     label: 'Slack Bot User OAuth Token',
     placeholder: 'xoxb-…',
     helpText:
-      'Required after the app is installed in the workspace. Used to read and send messages.',
+      'In your Slack app: OAuth & Permissions → Bot User OAuth Token, and it only exists once you have installed the app to the workspace. Starts xoxb-, not xapp-. Used to read and send messages.',
   },
   {
     channelType: 'teams',

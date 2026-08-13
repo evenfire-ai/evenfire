@@ -35,8 +35,13 @@ const STORED_KEYS_ERROR =
  * Secret is filed next to a Client Secret on a page the dialog never links to,
  * so both wrong values are the easy ones to grab.
  */
+/**
+ * Only the "ignore these" half. Where each value lives now sits on the field that
+ * asks for it, which is where someone hunting for it is actually looking -- this
+ * note is a paragraph under both inputs and is easy to skip.
+ */
 const SLACK_CREDENTIAL_NOTE =
-  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack hands out the xapp- token beside the xoxb- one, and the Signing Secret is not in that dialog at all: find it on Basic Information, under App Credentials.'
+  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack offers the xapp- token right beside the xoxb- one, so it is easy to copy the wrong value.'
 
 /**
  * Per-CommunicationChannel provider credential form.
