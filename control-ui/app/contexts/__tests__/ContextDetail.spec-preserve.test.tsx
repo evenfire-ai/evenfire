@@ -163,3 +163,75 @@ describe('ContextDetailsPage spec preservation on update (R5-M2)', () => {
     expect(spec.displayName).toBe('Prod Ctx')
   })
 })
+
+describe('ContextDetailsPage spec preservation on connector/SFS edits (R5-M3)', () => {
+  // spec.gfs — modeled on the real context CRD (charts/clerum-crds/crds/context.yaml,
+  // spec.gfs.mounts[].{drive,target,scopes}) — is an additive field the form has no
+  // input for. saveMcpServers / saveSharedFileSystems build a full-replace PUT, so
+  // without a spread of the loaded spec they silently drop it.
+  const gfs = {
+    mounts: [{ drive: 'main', target: '/data/shared', scopes: ['gfs.read'] }],
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockParams = { name: 'prod-ctx' }
+  })
+
+  it('saveMcpServers preserves an unmodeled spec field (gfs) while applying the connector change', async () => {
+    mockContext({
+      metadata: { name: 'prod-ctx' },
+      spec: {
+        contextId: 'prod-ctx',
+        description: 'Original description',
+        mcpServers: ['srv-a', 'srv-b'],
+        displayName: 'Prod Ctx',
+        gfs,
+      },
+    })
+
+    render(<ContextDetailsPage />)
+    // Connectors is the default tab — remove one connector to trigger saveMcpServers.
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector srv-b' }))
+
+    await waitFor(() => expect(api.updateContext).toHaveBeenCalled())
+    const spec = lastPutSpec()
+    // The unmodeled field survives the connector edit.
+    expect(spec.gfs).toEqual(gfs)
+    // The change the handler owns is applied…
+    expect(spec.mcpServers).toEqual(['srv-a'])
+    // …and the echoed fields are intact.
+    expect(spec.displayName).toBe('Prod Ctx')
+    expect(spec.contextId).toBe('prod-ctx')
+  })
+
+  it('saveSharedFileSystems preserves an unmodeled spec field (gfs) while applying the SFS change', async () => {
+    // Land directly on the agent-files tab, where the detach control lives.
+    mockParams = { name: 'prod-ctx', tab: 'agent-files' }
+    mockContext({
+      metadata: { name: 'prod-ctx' },
+      spec: {
+        contextId: 'prod-ctx',
+        description: 'Original description',
+        mcpServers: ['srv-a'],
+        sharedFileSystems: [{ name: 'sfs-a', mountPath: '/workspace/sfs-a' }],
+        displayName: 'Prod Ctx',
+        gfs,
+      },
+    })
+
+    render(<ContextDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Detach shared filesystem sfs-a' }))
+
+    await waitFor(() => expect(api.updateContext).toHaveBeenCalled())
+    const spec = lastPutSpec()
+    // The unmodeled field survives the SFS edit.
+    expect(spec.gfs).toEqual(gfs)
+    // The change the handler owns is applied…
+    expect(spec.sharedFileSystems).toEqual([])
+    // …and the echoed fields are intact.
+    expect(spec.mcpServers).toEqual(['srv-a'])
+    expect(spec.displayName).toBe('Prod Ctx')
+    expect(spec.contextId).toBe('prod-ctx')
+  })
+})

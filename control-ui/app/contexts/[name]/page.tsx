@@ -464,16 +464,21 @@ export default function ContextDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      await updateContext(routeName, {
-        spec: {
-          contextId: resolvedContextId,
-          // Echo the persisted display name so a connector edit never drops it.
-          ...(savedDisplayName.trim() ? { displayName: savedDisplayName.trim() } : {}),
-          description: descriptionDraft.trim(),
-          mcpServers: nextServers,
-          sharedFileSystems: sharedFileSystemsDraft,
-        },
-      })
+      // Full-replace PUT: spread the loaded spec so additive fields the form
+      // doesn't model (e.g. spec.gfs) survive a connector edit, then overwrite
+      // only the fields this handler owns (all re-echoed from current state).
+      const nextSpec: Record<string, unknown> = {
+        ...loadedSpec,
+        contextId: resolvedContextId,
+        description: descriptionDraft.trim(),
+        mcpServers: nextServers,
+        sharedFileSystems: sharedFileSystemsDraft,
+      }
+      // Echo the persisted display name; a cleared name must REMOVE it, not leave
+      // the spread's stale value — so a delete is required (mirrors save()).
+      if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
+      else delete nextSpec.displayName
+      await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
       setMcpServersDraft(nextServers)
       showToast('Connectors updated.', { tone: 'success' })
     } catch (e) {
@@ -487,16 +492,21 @@ export default function ContextDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      await updateContext(routeName, {
-        spec: {
-          contextId: resolvedContextId,
-          // Echo the persisted display name so an SFS edit never drops it.
-          ...(savedDisplayName.trim() ? { displayName: savedDisplayName.trim() } : {}),
-          description: descriptionDraft.trim(),
-          mcpServers: mcpServersDraft,
-          sharedFileSystems: nextRefs,
-        },
-      })
+      // Full-replace PUT: spread the loaded spec so additive fields the form
+      // doesn't model (e.g. spec.gfs) survive an SFS edit, then overwrite only
+      // the fields this handler owns (all re-echoed from current state).
+      const nextSpec: Record<string, unknown> = {
+        ...loadedSpec,
+        contextId: resolvedContextId,
+        description: descriptionDraft.trim(),
+        mcpServers: mcpServersDraft,
+        sharedFileSystems: nextRefs,
+      }
+      // Echo the persisted display name; a cleared name must REMOVE it, not leave
+      // the spread's stale value — so a delete is required (mirrors save()).
+      if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
+      else delete nextSpec.displayName
+      await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
       setSharedFileSystemsDraft(nextRefs)
       showToast('Shared filesystems updated.', { tone: 'success' })
     } catch (e) {
