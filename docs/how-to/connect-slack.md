@@ -10,7 +10,12 @@ as an Events API callback on `webhook-proxy`, which hands it to
 able to reach your cluster before anything works, including the setup code you
 send to link your account.
 
-## Create the Slack app
+## Create the Slack app, the long way
+
+> Start at [In the Control UI](#in-the-control-ui) instead. It hands you a
+> manifest that does every step below in one paste, including the two Request
+> URLs and the Messages Tab that are easiest to miss. This section is here for
+> repairing an existing app, or for setting one up without the Control UI.
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps), **Create New App**,
    **From scratch**, and pick the workspace.
@@ -30,20 +35,35 @@ send to link your account.
 
 3. Under **Event Subscriptions**, enable events and subscribe to these bot
    events: `app_mention`, `message.channels`, `message.groups`, `message.im`,
-   `message.mpim`. Leave the Request URL for now, you get it in the next
-   section.
-4. **Install to Workspace**, then copy the **Bot User OAuth Token** (`xoxb-…`).
-5. Under **Basic Information**, copy the **Signing Secret**.
-6. In Slack, invite the app to the channel you want it in (`/invite @YourApp`),
+   `message.mpim`, and set the Request URL from the channel's edit page.
+4. Under **Interactivity & Shortcuts**, set the **same** Request URL. Separate
+   page, separate Save button. Skipping it leaves approval buttons dead.
+5. Under **Features → App Home → Show Tabs**, enable the **Messages Tab** and
+   tick "Allow users to send Slash commands and messages from the messages tab",
+   or the app refuses DMs and `verify <code>` cannot be sent.
+6. **Install to Workspace**, then copy the **Bot User OAuth Token** (`xoxb-…`)
+   from **Features → OAuth & Permissions**.
+7. Copy the **Signing Secret** from **Settings → Basic Information → App
+   Credentials**.
+8. In Slack, invite the app to the channel you want it in (`/invite @YourApp`),
    or open a DM with it.
 
-Steps 1 and 2 are faster from a manifest. **Create New App** → **From an app
-manifest**, then paste:
+**Do not build the app by hand.** The Control UI generates a manifest carrying
+all of this, both Request URLs already filled in, and you get it before the
+channel exists. Skip to [In the Control UI](#in-the-control-ui) and come back
+here only if you want to know what the manifest contains or you are building an
+app without the Control UI.
+
+The generated manifest looks like this:
 
 ```yaml
 display_information:
   name: Evenfire
 features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: Evenfire
     always_online: false
@@ -68,54 +88,84 @@ settings:
   token_rotation_enabled: false
 ```
 
-The manifest deliberately omits `event_subscriptions` and `interactivity`.
-Slack verifies a Request URL the moment you save one, and that URL does not
-exist until the channel is created below.
+The generated manifest also sets `settings.event_subscriptions.request_url` and
+`settings.interactivity.request_url` to this channel's URL, which the block above
+omits because it depends on the channel. Those two are the reason to use the
+generated one: Slack keeps them on separate pages with separate Save buttons, and
+setting only Event Subscriptions leaves approval buttons dead with nothing in the
+logs.
+
+`app_home.messages_tab_enabled` matters more than it looks. Slack defaults it to
+**false**, and an app installed from a manifest that says nothing about
+`app_home` refuses direct messages with *"Sending messages to this app has been
+turned off."* That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
+which asks you to DM the app. **If your app was created before this was added,
+switch it on by hand: Features → App Home → Show Tabs → Messages Tab, and tick
+"Allow users to send Slash commands and messages from the messages tab".**
 
 Two things to know about credentials:
 
 - The "app is ready" dialog offers a **Bot token** (`xoxb-…`) and an **App
   token** (`xapp-…`). Only the bot token is used. The `xapp-` token is for
   Socket Mode, which this platform does not use.
-- The **Signing Secret** is not in that dialog. It lives under **Basic
-  Information → App Credentials**, as a 32-character hex string. It is not the
-  Client Secret.
+- The **Signing Secret** is not in that dialog. It lives under **Settings →
+  Basic Information → App Credentials**, as a 32-character hex string. It is not
+  the Client Secret sitting directly above it. The bot token lives elsewhere
+  again, under **Features → OAuth & Permissions**.
 
 ## In the Control UI
 
 External Channels → `/external-channels` → **Create** builds the
 `CommunicationChannel` resource.
 
-> **Create a dedicated channel. Do not add Slack to an existing Telegram or
-> email channel.** Adding a Slack App Name to a channel whose Secret holds only
-> another provider's credentials is currently accepted on update, and produces a
-> channel that advertises Slack, shows a Slack Request URL, and appears in the
-> Profile UI as a target, but answers every Slack request with
-> `409 slack_signing_secret_missing`.
+> **Use a dedicated channel for Slack.** Adding Slack to a channel whose Secret
+> holds only another provider's credentials is now refused with a `400` naming
+> the missing key, so you cannot create the half-configured state that used to
+> answer every Slack request with `409 slack_signing_secret_missing`. Editing a
+> channel that already has Slack is unaffected.
 
-1. Pick the host, then the **Slack** provider.
-2. Set **Slack App Name**. It is required, and it is what users are told to
-   message, so use the app's real name.
-3. Toggles:
+Do not go to Slack first. The manifest is here, and it needs nothing from Slack:
+
+1. Name the channel and pick the host.
+2. Choose the **Slack** provider.
+3. Set **Slack App Name**. It is required, it becomes the manifest's
+   `display_information.name`, and it is what users are told to message.
+4. Toggles:
    - **Only reply when mentioned** (on by default). In a channel the app then
      only acts on `app_mention` events and messages that start with a mention.
      DMs always work, and `/approve` and `/deny` are always accepted.
    - **Reply in threads**: replies go in a thread on the triggering message.
-4. Paste the **Slack signing secret** and the **Slack Bot User OAuth token** as
-   write-only credentials. This writes a Secret in the `channels` namespace and
-   points `spec.credentialsSecretRef` at it.
-5. Grant access to the users and teams allowed on this channel.
+5. **The Slack App Manifest appears.** Copy it, follow the link to Slack, and
+   build the app from it — **Create New App** → **From an app manifest** → pick
+   the workspace → paste. It sets the scopes, the five bot events and both
+   Request URLs. Then **Install to Workspace** and collect the two credentials.
+6. Back in the still-open form, paste the **Slack signing secret** and the
+   **Slack Bot User OAuth token** as write-only credentials. This writes a Secret
+   in the `channels` namespace and points `spec.credentialsSecretRef` at it.
+7. Grant access to the users and teams allowed on this channel, and save.
+
+The Request URLs the manifest carries encode the channel **name**, so the channel
+has to be created under the name you had typed when you copied it. Rename before
+saving and the app points at a channel that never exists.
+
+Finally, invite the app to the channel you want it in (`/invite @YourApp`).
 
 `spec.slack[]` starts empty. Conversations are added when users confirm them,
-not by hand.
+not by hand — which is why an unlinked sender gets the notice described in
+[Confirm your Slack identity](#confirm-your-slack-identity) rather than silence.
 
-### Get the Request URL, from the right channel
+### If you are pasting a Request URL by hand
 
-Reopen the channel you just created and copy the **Slack Request URL** from its
-edit page. Paste it into the Slack app as both the **Event Subscriptions**
-request URL and the **Interactivity & Shortcuts** request URL. Slack's
-`url_verification` handshake is answered for you, so the URL verifies on its own
-once it is reachable.
+You should not have to. The manifest carries both Request URLs, and an app built
+from it needs no URL pasted anywhere. This section is for repairing an app that
+was set up before the manifest existed, or one pointed at the wrong channel.
+
+The **Slack Request URL** is on the channel's edit page. It goes in **two**
+places in Slack, each with its own Save button: **Event Subscriptions** and
+**Interactivity & Shortcuts**. Setting only the first is the classic failure —
+messages work, approval buttons are dead, and nothing appears in the logs.
+Slack's `url_verification` handshake is answered for you, so a reachable URL
+verifies on its own.
 
 The URL is per channel, and the page renders the URL of whichever channel you
 are looking at. Copying from the wrong channel's page is the single easiest
