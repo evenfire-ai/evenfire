@@ -114,6 +114,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'Unknown error')
 }
 
+function hasBlockingDesktopDialog(): boolean {
+  return Boolean(
+    document.querySelector('[role="dialog"][aria-modal="true"], .da-plugin-consent[role="dialog"]')
+  )
+}
+
 function errorCode(error: unknown): string {
   if (!error || typeof error !== 'object') return ''
   const record = error as { code?: unknown; cause?: { code?: unknown } }
@@ -1090,10 +1096,8 @@ export function App() {
         if (commandId === 'commands.open') closeCommandPalette()
         return
       }
-      if (origin !== 'palette' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
-        return
-      }
       const command = getDesktopCommand(commandId)
+      if (origin !== 'palette' && hasBlockingDesktopDialog()) return
       const state = chatViewTabsRef.current
       if (!isDesktopCommandEligible(command, desktopCommandContext)) return
       if (commandId === 'commands.open') {

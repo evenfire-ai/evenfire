@@ -288,6 +288,20 @@ describe('App deep-link orchestration', () => {
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
   })
 
+  it('suppresses application commands while plugin consent owns the app surface', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    const consent = document.createElement('div')
+    consent.className = 'da-plugin-consent'
+    consent.setAttribute('role', 'dialog')
+    document.body.append(consent)
+
+    act(() => emitCommand?.('search.open'))
+
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
+    consent.remove()
+  })
+
   it('routes contextual search to the current sandbox app without opening global search', () => {
     currentController = makeController({
       initialExperienceLoading: false,
