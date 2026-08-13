@@ -86,3 +86,17 @@ Reverse of apply: (1) flip provider bindings back to `/32` mode; (2) revert cont
 (3) kill-switch/revert the control-api fetcher (seed + `/32` window keep working); (4) leave
 the CRD `provider` property in place; (5) revert the core **last**. Never revert controllers
 while provider-mode bindings still exist (old code has no `provider` branch → egress loss).
+
+## Duplicate-binding guard: McpServer only (by design)
+
+The duplicate-`(dns, port)` guard (H4) lives on the **McpServer/HCC** surface only —
+`mcpserver.yaml` CEL (`egressBindings must not declare the same (dns, port) twice`) plus the
+HCC reconciler dup check. It exists because HCC derives a **NetworkPolicy name per (dns, port)**,
+so two identical pairs would collide on the same NP name.
+
+It is intentionally **absent** on the **WorkflowRecipe/WRC** surface. WRC renders **one
+NetworkPolicy per workload**, with each binding contributing *rules* inside that single policy —
+there is no per-binding NP name to collide, so the collision hazard the guard prevents does not
+exist there. A duplicate `(dns, port)` declaration on a WRC workload renders redundant-but-identical
+egress rules (harmless; the CNI de-duplicates). Adding an authoring-time WRC dup guard for symmetry
+is a possible future nicety, not a correctness fix.
