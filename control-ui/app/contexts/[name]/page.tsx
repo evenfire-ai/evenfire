@@ -181,6 +181,10 @@ export default function ContextDetailsPage() {
   const [contextNameDraft, setContextNameDraft] = useState(isNew ? '' : routeName)
   const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
+  // The raw spec exactly as it arrived from the server. A context PUT is a
+  // full-replace: spreading this on save preserves any additive spec field the
+  // form doesn't model yet (e.g. spec.gfs) instead of dropping it on a rename.
+  const [loadedSpec, setLoadedSpec] = useState<Record<string, unknown>>({})
   const [mcpServersDraft, setMcpServersDraft] = useState<string[]>([])
   const [sharedFileSystemsDraft, setSharedFileSystemsDraft] = useState<
     ContextSharedFileSystemRef[]
@@ -267,6 +271,7 @@ export default function ContextDetailsPage() {
       try {
         const context = await getContext(routeName)
         const spec = (context.spec || {}) as Partial<ContextSpec>
+        setLoadedSpec((context.spec || {}) as Record<string, unknown>)
         const metadata = (context.metadata || {}) as ContextResource['metadata']
         const resolvedName = metadata?.name || spec.contextId || routeName
         const resolvedContext = spec.contextId || resolvedName
@@ -406,32 +411,42 @@ export default function ContextDetailsPage() {
   async function save() {
     if (!canSave) return
     const trimmedDisplay = displayNameDraft.trim()
-    // Full-replace safety: echo every spec field the form knows about
-    // (identifier + all editables). The visible name lives in spec.displayName;
-    // omit it when empty so an unset display stays absent, not "".
-    const payload = {
-      spec: {
-        contextId: contextNameDraft.trim(),
-        ...(trimmedDisplay ? { displayName: trimmedDisplay } : {}),
-        description: descriptionDraft.trim(),
-        mcpServers: mcpServersDraft,
-        sharedFileSystems: sharedFileSystemsDraft,
-      },
-    }
+    const contextId = contextNameDraft.trim()
 
     setBusy(true)
     setError('')
     try {
       if (isNew) {
-        await createContext({
-          metadata: { name: contextNameDraft.trim() },
-          spec: payload.spec,
-        })
-        const nextName = encodeURIComponent(contextNameDraft.trim())
+        // Create: no prior server spec to preserve — build a fresh spec.
+        // The visible name lives in spec.displayName; omit it when empty so an
+        // unset display stays absent, not "".
+        const createSpec: ContextSpec = {
+          contextId,
+          ...(trimmedDisplay ? { displayName: trimmedDisplay } : {}),
+          description: descriptionDraft.trim(),
+          mcpServers: mcpServersDraft,
+          sharedFileSystems: sharedFileSystemsDraft,
+        }
+        await createContext({ metadata: { name: contextId }, spec: createSpec })
+        const nextName = encodeURIComponent(contextId)
         router.replace(CONTROL_ROUTES.contexts.detail(nextName))
       } else {
-        await updateContext(routeName, payload)
-        setResolvedContextId(payload.spec.contextId)
+        // Full-replace PUT: spread the spec exactly as it was loaded so additive
+        // fields the form doesn't model (e.g. spec.gfs) survive a rename, then
+        // overwrite only the fields the form owns.
+        const nextSpec: Record<string, unknown> = {
+          ...loadedSpec,
+          contextId,
+          description: descriptionDraft.trim(),
+          mcpServers: mcpServersDraft,
+          sharedFileSystems: sharedFileSystemsDraft,
+        }
+        // Clearing the display name must REMOVE it, not leave the spread's stale
+        // value — so a delete is required, the empty-omit ternary no longer suffices.
+        if (trimmedDisplay) nextSpec.displayName = trimmedDisplay
+        else delete nextSpec.displayName
+        await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
+        setResolvedContextId(contextId)
         setSavedDescription(descriptionDraft)
         setSavedContextName(contextNameDraft)
         setSavedDisplayName(trimmedDisplay)
