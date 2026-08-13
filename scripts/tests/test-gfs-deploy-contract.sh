@@ -92,13 +92,30 @@ assert_minikube_upgrade_classifier() {
      "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
+assert_pre_gate_defers_gfs_reconcile() {
+  local block="$({ awk -v start="$1" -v end="$2" '
+    index($0, start) { active=1 }
+    active { print }
+    active && index($0, end) { exit }
+  ' "$3"; })"
+  local dsn defer reconcile migration serving
+  dsn="$(grep -n 'writer_dsn=.*get secret gfs-controller-db' <<<"$block" | head -1 | cut -d: -f1)"
+  defer="$(grep -ni 'deferring GFS credential reconciliation until after schema migration' <<<"$block" | head -1 | cut -d: -f1)"
+  reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1 || true)"
+  migration="$(grep -n 'run-control-api-db-migration.sh' "$3" | head -1 | cut -d: -f1)"
+  serving="$(grep -n 'provision_gfs_serving' "$3" | tail -1 | cut -d: -f1)"
+  [[ -n "$dsn" && -n "$defer" && -z "$reconcile" ]] \
+    || fail "$3 must defer GFS credential reconciliation before migration"
+  [[ -n "$migration" && -n "$serving" && "$migration" -lt "$serving" ]] \
+    || fail "$3 must provision GFS serving only after schema migration"
+}
 # The block ends where the overlay apply begins. That apply no longer names a
 # fixed overlay: it resolves one from the mode the cluster's images were
 # acquired in (scripts/minikube/image-mode.sh), so the resolver call is the
 # anchor.
 assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
-assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'incremental_build_images'
+assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_build_images' scripts/minikube/pre-gate-sync.sh
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
