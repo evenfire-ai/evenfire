@@ -641,8 +641,10 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
 
     operatorJourney.deniedAuditFloor = operatorJourney.auditFloor()
     // Keep the user-visible direct-access dialog open across the Control UI
-    // action. Its resolve request is the next same-session Desktop request and
-    // must close the dialog while clearing all stale operator controls.
+    // action. Its resolve request is the next same-session Desktop request.
+    // After revocation the session remains valid for ordinary-user GFS access,
+    // so the operator-root URI is a resource-scoped generic 403 and must stay
+    // local to the dialog rather than revoking the whole Desktop session.
     await page.getByRole('button', { name: 'Open GFS link' }).click()
     const linkDialog = page.getByRole('dialog', { name: 'Open GFS link' })
     await expect(linkDialog).toBeVisible()
@@ -651,16 +653,14 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
     await linkDialog.getByRole('button', { name: 'Open', exact: true }).click()
 
-    const denial = page.getByTestId('gfs-error-unauthorized')
-    await expect(denial).toBeVisible({ timeout: 30_000 })
-    await expect(denial).toHaveAttribute('aria-label', 'File access is not authorized')
-    await expect(denial).toContainText(
-      'Your current Desktop session cannot access this location. Sign in again or contact an administrator.'
-    )
+    await expect(linkDialog.getByRole('alert')).toContainText('403 Forbidden', {
+      timeout: 30_000,
+    })
+    await expect(page.getByTestId('gfs-error-unauthorized')).toHaveCount(0)
+    await expect(page.getByTestId('gfs-create-folder-action')).toBeVisible()
+    await expect(page.getByTestId('gfs-upload-action')).toBeVisible()
+    await linkDialog.getByRole('button', { name: 'Close GFS link dialog' }).click()
     await expect(linkDialog).toHaveCount(0)
-    await expect(page.getByTestId('gfs-create-folder-action')).toHaveCount(0)
-    await expect(page.getByTestId('gfs-upload-action')).toHaveCount(0)
-    await expect(page.getByTestId('gfs-manage-access-action')).toHaveCount(0)
     await expect
       .poll(() =>
         operatorJourney.readResource(
