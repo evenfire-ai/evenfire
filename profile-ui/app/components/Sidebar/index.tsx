@@ -3,7 +3,7 @@
 import Image from 'next/image'
 import Link from 'next/link'
 import { useProfileAccess } from '@components/ProfileAccessContext'
-import packageJson from '../../../package.json'
+import { useReleaseIdentity } from '@components/ReleaseLabel'
 import { PROFILE_SIDEBAR_ITEMS } from './constants'
 import { IconLogout } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
@@ -11,6 +11,7 @@ import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
 export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
   const { approvalTargets, approvalTargetsLoading, canManageMembers, manageableTeamsLoading } =
     useProfileAccess()
+  const { releaseId } = useReleaseIdentity()
   const hasExternalChannelAccess = approvalTargets.length > 0
 
   const navigationItems = (
@@ -25,7 +26,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
       className={`cu-sidebar${isOpen ? ' cu-sidebar--open' : ''}`}
       aria-label="Main navigation"
     >
-      <div className="cu-sidebar__brand" title={`Version ${packageJson.version}`}>
+      <div className="cu-sidebar__brand" title={releaseId ? `Release ${releaseId}` : undefined}>
         <Image
           className="cu-sidebar__brand-mark"
           src="/brand/logo.svg"
