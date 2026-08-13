@@ -31,7 +31,7 @@ function normalizeTeamId(rawTeamId) {
 function isUnsafeRouteSegment(rawSegment) {
   let segment = rawSegment
   for (let depth = 0; depth <= MAX_ROUTE_SEGMENT_DECODE_DEPTH; depth += 1) {
-    if (segment === '.' || segment === '..') return true
+    if (segment === '.' || segment === '..' || segment.trim() !== segment) return true
     if (
       segment.includes('/') ||
       segment.includes('\\') ||
@@ -54,8 +54,25 @@ function isUnsafeRouteSegment(rawSegment) {
   return RECURSIVE_ROUTE_ESCAPE_PATTERN.test(segment)
 }
 
+function canonicalizeRouteSegment(rawSegment) {
+  let segment = rawSegment
+  for (let depth = 0; depth <= MAX_ROUTE_SEGMENT_DECODE_DEPTH; depth += 1) {
+    if (isUnsafeRouteSegment(segment)) return null
+    if (!PERCENT_ESCAPE_PATTERN.test(segment)) return segment
+    let decoded
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return null
+    }
+    if (decoded === segment) return segment
+    segment = decoded
+  }
+  return PERCENT_ESCAPE_PATTERN.test(segment) ? null : segment
+}
+
 function normalizeSandboxUiRoute(rawPath) {
-  const routePath = String(rawPath || '').trim()
+  const routePath = String(rawPath || '')
   if (!routePath) return undefined
   if (
     routePath.length > MAX_APP_ROUTE_LENGTH ||
@@ -68,8 +85,15 @@ function normalizeSandboxUiRoute(rawPath) {
   ) {
     return null
   }
-  if (routePath.split('/').some(isUnsafeRouteSegment)) return null
-  return routePath
+  const canonicalSegments = []
+  for (const segment of routePath.split('/')) {
+    const canonicalSegment = canonicalizeRouteSegment(segment)
+    if (canonicalSegment === null) return null
+    canonicalSegments.push(canonicalSegment)
+  }
+  const canonicalPath = canonicalSegments.join('/')
+  if (canonicalPath.length > MAX_APP_ROUTE_LENGTH) return null
+  return canonicalPath
 }
 
 function validateParts(parts) {

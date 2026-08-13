@@ -19,6 +19,10 @@ import type {
   SearchTeamResult,
 } from './types'
 
+const FULL_SEARCH_PLACEHOLDER = 'Search teams, contexts, members, agents or connectors...'
+const COMPACT_SEARCH_PLACEHOLDER = 'Search workspace...'
+const COMPACT_SEARCH_BREAKPOINT = 1220
+
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
@@ -121,6 +125,9 @@ export const AppHeader = React.memo(function AppHeader({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [compactSearch, setCompactSearch] = useState(
+    () => window.innerWidth <= COMPACT_SEARCH_BREAKPOINT
+  )
   const searchRef = useRef<HTMLDivElement | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
@@ -133,6 +140,13 @@ export const AppHeader = React.memo(function AppHeader({
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const updateCompactSearch = () =>
+      setCompactSearch(window.innerWidth <= COMPACT_SEARCH_BREAKPOINT)
+    window.addEventListener('resize', updateCompactSearch)
+    return () => window.removeEventListener('resize', updateCompactSearch)
   }, [])
 
   useClickOutside(searchRef, searchOpen, () => setSearchOpen(false))
@@ -539,9 +553,10 @@ export const AppHeader = React.memo(function AppHeader({
         <div className="global-search" ref={searchRef}>
           <TextInput
             type="text"
-            placeholder="Search teams, contexts, members, agents or connectors..."
+            placeholder={compactSearch ? COMPACT_SEARCH_PLACEHOLDER : FULL_SEARCH_PLACEHOLDER}
             className="search-input"
             aria-label="Search"
+            title={FULL_SEARCH_PLACEHOLDER}
             value={searchQuery}
             onChange={event => {
               setSearchQuery(event.target.value)

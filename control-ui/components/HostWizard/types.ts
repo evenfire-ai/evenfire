@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import type { ChannelType } from '../../lib/channelTypes'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
@@ -8,19 +7,9 @@ export type McpServer = {
 export type SecretMeta = {
   metadata?: { name?: string; namespace?: string }
   name?: string
+  // Data-key names only; Secret values are never included in this response.
+  keys?: string[]
   type?: string
-}
-
-export type { ChannelType }
-
-export type ChannelProvider = Extract<ChannelType, 'telegram' | 'slack'>
-
-export type NewChannelDraft = {
-  slackBotHandle: string
-  slackReplyOnlyWhenMentioned: boolean
-  slackReplyInThreads: boolean
-  telegramBotHandle: string
-  telegramReplyOnlyWhenMentioned: boolean
 }
 
 export type ContextOption = {

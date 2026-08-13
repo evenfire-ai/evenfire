@@ -110,7 +110,16 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 function buildUpstreamUrl(req: NextRequest, path: string[]): string {
   const base = CONTROL_API_INTERNAL_URL.replace(/\/$/, '')
-  return `${base}/${path.join('/')}${req.nextUrl.search}`
+  const proxyPrefix = '/control-api'
+  // App Router decodes catch-all params, so a scoped registry name such as
+  // `@org/connector` arrives in `path` with its encoded `%2F` restored to `/`.
+  // Joining those params changes one route segment into two and makes the
+  // upstream Express route return 404. Preserve the encoded pathname from the
+  // request itself; retain an encoded-param fallback for direct handler calls.
+  const upstreamPath = req.nextUrl.pathname.startsWith(`${proxyPrefix}/`)
+    ? req.nextUrl.pathname.slice(proxyPrefix.length)
+    : `/${path.map(segment => encodeURIComponent(segment)).join('/')}`
+  return `${base}${upstreamPath}${req.nextUrl.search}`
 }
 
 function copyRequestHeaders(req: NextRequest): Headers {

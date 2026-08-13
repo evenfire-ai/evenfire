@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -23,6 +24,8 @@ import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { FallbackBadge } from './FallbackBadge'
 import { SessionTokensIndicator } from './SessionTokensIndicator'
 import { AGENT_ROUTE_LABELS, AGENT_ROUTE_OPTIONS } from './agentRoutes'
+
+const CHAT_SCROLL_TO_BOTTOM_SHOW_DELAY_MS = 250
 
 type AgentWorkspaceMode = 'agents' | 'chat'
 
@@ -82,12 +85,42 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const { sessionStateByChatId, activeChatId } = useChatListContext()
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
+  const { scrollChatToBottom } = useAgentChatActionsContext()
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
+  const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
+  const [delayedScrollToBottomChatId, setDelayedScrollToBottomChatId] = useState<string | null>(
+    null
+  )
   const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
   const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
   const mcpHealthNow = undefined
+
+  const handleScrollPositionChange = useCallback(
+    (isScrolledAwayFromBottom: boolean) => {
+      setScrollToBottomChatId(isScrolledAwayFromBottom ? activeChatId : null)
+    },
+    [activeChatId]
+  )
+
+  const showScrollToBottom = Boolean(activeChatId) && scrollToBottomChatId === activeChatId
+  const showDelayedScrollToBottom =
+    Boolean(activeChatId) && delayedScrollToBottomChatId === activeChatId
+
+  useEffect(() => {
+    if (!showScrollToBottom) {
+      setDelayedScrollToBottomChatId(null)
+      return
+    }
+
+    const chatId = activeChatId
+    const timeoutId = window.setTimeout(
+      () => setDelayedScrollToBottomChatId(chatId),
+      CHAT_SCROLL_TO_BOTTOM_SHOW_DELAY_MS
+    )
+    return () => window.clearTimeout(timeoutId)
+  }, [activeChatId, showScrollToBottom])
 
   useClickOutside(chatAgentRouteMenuRef, chatAgentRouteMenuOpen, () =>
     setChatAgentRouteMenuOpen(false)
@@ -520,7 +553,28 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               <ComposerPanel inline />
             </>
           )}
-          {isChatMode && <ChatThread />}
+          {isChatMode && (
+            <div className="chat-thread-container">
+              <ChatThread onScrollPositionChange={handleScrollPositionChange} />
+              {showDelayedScrollToBottom && (
+                <div className="chat-scroll-to-bottom">
+                  <IconButton
+                    className="chat-scroll-to-bottom-button"
+                    color="neutral"
+                    label="Scroll to latest messages"
+                    onClick={scrollChatToBottom}
+                    size="sm"
+                    variant="solid"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M12 4v14" />
+                      <path d="m6 12 6 6 6-6" />
+                    </svg>
+                  </IconButton>
+                </div>
+              )}
+            </div>
+          )}
           {isChatMode && activeChatId && (
             <div className="agent-chat-composer-dock">
               {activeSessionState?.offlineMode || activeSessionState?.syncing ? (

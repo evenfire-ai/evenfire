@@ -13,6 +13,7 @@ import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
+import { buildContextUpdatePayload, contextMutationError } from '@lib/contextMutation'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { IconFolder, IconGroupWork } from '../../../components/Sidebar/icons'
 import { IconMoreHorizontal, IconX } from '../../../components/icons'
@@ -45,7 +46,7 @@ import {
 } from '../../../lib/api'
 
 type ContextTab = 'connectors' | 'agent-files' | 'agents' | 'teams' | 'members'
-const CONTEXT_TABS: ContextTab[] = ['connectors', 'agent-files', 'agents', 'teams', 'members']
+const CONTEXT_TABS: ContextTab[] = ['connectors', 'agents', 'teams', 'members']
 
 const TAB_LABELS: Record<ContextTab, string> = {
   connectors: 'Connectors',
@@ -177,6 +178,7 @@ export default function ContextDetailsPage() {
   const [contextUsers, setContextUsers] = useState<ContextUser[]>([])
   const [contextTeams, setContextTeams] = useState<ContextTeam[]>([])
   const [resolvedContextId, setResolvedContextId] = useState(isNew ? '' : routeName)
+  const [contextResourceVersion, setContextResourceVersion] = useState<string | undefined>()
 
   const [contextNameDraft, setContextNameDraft] = useState(isNew ? '' : routeName)
   const [displayNameDraft, setDisplayNameDraft] = useState('')
@@ -275,6 +277,7 @@ export default function ContextDetailsPage() {
         const metadata = (context.metadata || {}) as ContextResource['metadata']
         const resolvedName = metadata?.name || spec.contextId || routeName
         const resolvedContext = spec.contextId || resolvedName
+        setContextResourceVersion(metadata?.resourceVersion)
         setContextNameDraft(resolvedName)
         setSavedContextName(resolvedName)
         setResolvedContextId(resolvedContext)
@@ -445,7 +448,14 @@ export default function ContextDetailsPage() {
         // value — so a delete is required, the empty-omit ternary no longer suffices.
         if (trimmedDisplay) nextSpec.displayName = trimmedDisplay
         else delete nextSpec.displayName
-        await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
+        // Optimistic concurrency: carry the loaded resourceVersion so a stale
+        // edit 409s instead of clobbering a concurrent write, and track the
+        // version the server echoes back for the next save.
+        const updated = await updateContext(
+          routeName,
+          buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
+        )
+        setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
         setResolvedContextId(contextId)
         setSavedDescription(descriptionDraft)
         setSavedContextName(contextNameDraft)
@@ -454,7 +464,7 @@ export default function ContextDetailsPage() {
       }
       showToast('Context saved.', { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save context')
+      setError(contextMutationError(e, 'Failed to save context'))
     } finally {
       setBusy(false)
     }
@@ -478,11 +488,15 @@ export default function ContextDetailsPage() {
       // the spread's stale value — so a delete is required (mirrors save()).
       if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
       else delete nextSpec.displayName
-      await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
+      const updated = await updateContext(
+        routeName,
+        buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
+      )
+      setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
       setMcpServersDraft(nextServers)
       showToast('Connectors updated.', { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update connectors')
+      setError(contextMutationError(e, 'Failed to update connectors'))
     } finally {
       setBusy(false)
     }
@@ -506,11 +520,15 @@ export default function ContextDetailsPage() {
       // the spread's stale value — so a delete is required (mirrors save()).
       if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
       else delete nextSpec.displayName
-      await updateContext(routeName, { spec: nextSpec as unknown as ContextSpec })
+      const updated = await updateContext(
+        routeName,
+        buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
+      )
+      setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
       setSharedFileSystemsDraft(nextRefs)
       showToast('Shared filesystems updated.', { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update shared filesystems')
+      setError(contextMutationError(e, 'Failed to update shared filesystems'))
     } finally {
       setBusy(false)
     }

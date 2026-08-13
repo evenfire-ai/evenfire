@@ -96,6 +96,9 @@ docs/analysis/
 # Local developer notes (untracked)
 .local-notes/
 
+# Agent session transcripts can contain internal infrastructure details.
+session-ses_*.md
+
 # Session-only recovery / diagnostic scripts (one-shot fixes, cleanup helpers,
 # context-switching wrappers). Not reusable infrastructure — recreate on demand.
 # Evidence of the work lives in git log, issues, and memory files.

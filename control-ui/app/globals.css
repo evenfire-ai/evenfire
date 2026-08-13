@@ -46,6 +46,7 @@
   --cu-selection-text: #ffffff;
   --cu-radius: 12px;
   --cu-radius-sm: 8px;
+  --cu-radius-pill: 999px;
   --cu-space-1: 0.35rem;
   --cu-space-2: 0.5rem;
   --cu-space-3: 0.75rem;
@@ -263,6 +264,11 @@ body.cu-body {
   display: grid;
   gap: 0.75rem;
   max-width: min(28rem, 100%);
+}
+
+.cu-connector-credentials-form {
+  display: grid;
+  gap: var(--cu-space-3);
 }
 
 .cu-form-grid {
@@ -1193,7 +1199,13 @@ body.cu-body {
   margin-bottom: 1rem;
 }
 
-.cu-field label {
+/* `.cu-field__label` captions a block that is not a form control -- a Request URL
+   or a generated manifest sitting in a <pre>. A <label> would be the wrong element
+   there because it labels nothing, so the class carries the same treatment as a
+   real field label instead. Without it the caption falls back to body type and
+   renders larger than the inputs it sits above. */
+.cu-field label,
+.cu-field__label {
   font-size: 0.75rem;
   font-weight: 500;
   color: var(--cu-text-muted);
@@ -1458,6 +1470,14 @@ textarea.cu-input {
   width: max-content;
 }
 
+.cu-kebab__menu--portal {
+  position: fixed;
+  right: auto;
+  z-index: 60;
+  width: max-content;
+  max-width: calc(100vw - var(--cu-space-4));
+}
+
 .cu-kebab__item {
   width: 100%;
   display: flex;
@@ -1663,6 +1683,10 @@ textarea.cu-input {
 
 .cu-tabs--tight {
   margin: 0 0 1rem;
+}
+
+.cu-marketplace-tabs {
+  margin-inline-start: var(--cu-space-4);
 }
 
 .cu-table-wrap {
@@ -1937,9 +1961,9 @@ textarea.cu-input {
 }
 
 .cu-connector-detail .cu-expandable-detail__fields {
-  flex: 0 1 45rem;
+  flex: 1 1 auto;
   width: 100%;
-  max-width: 45rem;
+  max-width: none;
 }
 
 .cu-connector-detail .cu-expandable-detail__description {
@@ -1956,7 +1980,72 @@ textarea.cu-input {
 
 .cu-connector-detail .cu-expandable-field > .cu-link {
   max-width: 100%;
-  overflow-wrap: anywhere;
+}
+
+.cu-connector-detail__metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  flex: 0 0 100%;
+  gap: var(--cu-space-4);
+  min-width: 0;
+}
+
+.cu-connector-copyable-value {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-connector-copyable-value > .cu-expandable-field__code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-copyable-value__button {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+}
+
+.cu-connector-access-field {
+  gap: var(--cu-space-2);
+}
+
+.cu-connector-access-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.cu-connector-context-access__list li {
+  align-items: center;
+}
+
+.cu-connector-context-access__name {
+  flex: 1 1 auto;
+}
+
+.cu-connector-context-access__name > .cu-link {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-context-access__remove {
+  width: var(--cu-space-5);
+  height: var(--cu-space-5);
+  flex: 0 0 auto;
+}
+
+.cu-connector-context-access__add {
+  width: 100%;
+  margin-top: auto;
 }
 
 .cu-expandable-detail__fields {
@@ -2026,6 +2115,26 @@ textarea.cu-input {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--cu-space-1);
+}
+
+.cu-context-connector-bindings {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-context-connector-bindings__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
+.cu-context-connector-bindings__tag .cu-btn--icon {
+  width: var(--cu-space-5);
+  height: var(--cu-space-5);
+}
+
+.cu-context-connector-bindings__hint {
+  margin: 0;
 }
 
 .cu-connector-badge {
@@ -2343,7 +2452,7 @@ textarea.cu-input {
 }
 
 .cu-marketplace-table {
-  min-width: 68rem;
+  min-width: 52rem;
   --cu-expandable-inset-left: calc(3rem + 0.85rem);
   --cu-expandable-inset-right: 4.75rem;
 }
@@ -2359,24 +2468,12 @@ textarea.cu-input {
 }
 
 .cu-marketplace-table th:nth-child(4),
-.cu-marketplace-table td:nth-child(4),
-.cu-marketplace-table th:nth-child(5),
-.cu-marketplace-table td:nth-child(5) {
-  width: 8rem;
-}
-
-.cu-marketplace-table th:nth-child(6),
-.cu-marketplace-table td:nth-child(6) {
+.cu-marketplace-table td:nth-child(4) {
   width: 7rem;
 }
 
-.cu-marketplace-table th:nth-child(7),
-.cu-marketplace-table td:nth-child(7) {
-  width: 5.25rem;
-}
-
-.cu-marketplace-table th:nth-child(8),
-.cu-marketplace-table td:nth-child(8) {
+.cu-marketplace-table th:nth-child(5),
+.cu-marketplace-table td:nth-child(5) {
   width: 4.75rem;
 }
 
@@ -2398,16 +2495,16 @@ textarea.cu-input {
   padding-left: 0.15rem;
 }
 
-.cu-marketplace-table td:nth-child(7) {
+.cu-marketplace-table td:nth-child(4) {
   text-align: center;
 }
 
-.cu-marketplace-table td:nth-child(7) .cu-btn {
+.cu-marketplace-table td:nth-child(4) .cu-btn {
   max-width: 100%;
   padding-inline: var(--cu-space-1);
 }
 
-.cu-marketplace-table td:nth-child(8) {
+.cu-marketplace-table td:nth-child(5) {
   text-align: left;
 }
 
@@ -2480,6 +2577,259 @@ textarea.cu-input {
   display: grid;
   gap: var(--cu-space-2);
   padding: var(--cu-space-3) var(--cu-space-4);
+}
+
+.cu-registry-install-flow .cu-agent-form-stack--wide {
+  max-width: 100%;
+}
+
+.cu-registry-install-entry-heading {
+  justify-content: flex-start;
+}
+
+.cu-registry-install-entry-description,
+.cu-registry-install-egress-detail {
+  margin-top: var(--cu-space-2);
+}
+
+.cu-registry-install-validation-list {
+  margin: var(--cu-space-2) 0 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-registry-context-access {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: rgba(var(--cu-panel-rgb), 0.35);
+}
+
+.cu-registry-context-access__intro {
+  display: grid;
+  gap: calc(var(--cu-space-1) / 2);
+  margin-top: var(--cu-space-1);
+}
+
+.cu-registry-context-access__intro > span {
+  color: var(--cu-text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cu-registry-context-access__intro > p {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.cu-registry-context-access__group {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  min-height: 7.75rem;
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background:
+    linear-gradient(145deg, rgba(var(--cu-accent-rgb), 0.09), transparent 52%), var(--cu-surface);
+  overflow: hidden;
+}
+
+.cu-registry-context-access__group::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: var(--cu-accent);
+  content: '';
+}
+
+.cu-registry-context-access__group[data-kind='teams'] {
+  background:
+    linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%), var(--cu-surface);
+}
+
+.cu-registry-context-access__group[data-kind='teams']::before {
+  background: var(--cu-success);
+}
+
+.cu-registry-context-access__group[data-kind='agents'] {
+  background:
+    linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%), var(--cu-surface);
+}
+
+.cu-registry-context-access__group[data-kind='agents']::before {
+  background: var(--cu-warning);
+}
+
+.cu-registry-context-access__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+}
+
+.cu-registry-context-access__heading h4 {
+  margin: 0;
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cu-registry-context-access__heading span {
+  display: inline-grid;
+  place-items: center;
+  min-width: calc(var(--cu-space-3) * 2);
+  min-height: calc(var(--cu-space-3) * 2);
+  padding: calc(var(--cu-space-1) / 3) var(--cu-space-1);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__heading span {
+  border-color: rgba(var(--cu-success-rgb), 0.35);
+  background: rgba(var(--cu-success-rgb), 0.12);
+}
+
+.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__heading span {
+  border-color: rgba(var(--cu-warning-rgb), 0.35);
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-registry-context-access__list {
+  display: grid;
+  gap: var(--cu-space-1);
+  max-height: 10rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  list-style: none;
+}
+
+.cu-registry-context-access__list li {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-width: 0;
+}
+
+.cu-registry-context-access__list li::before {
+  width: var(--cu-space-1);
+  height: var(--cu-space-1);
+  flex: 0 0 auto;
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-accent-rgb), 0.75);
+  content: '';
+}
+
+.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__list li::before {
+  background: rgba(var(--cu-success-rgb), 0.8);
+}
+
+.cu-registry-context-access__group[data-kind='agents']
+  .cu-registry-context-access__list
+  li::before {
+  background: rgba(var(--cu-warning-rgb), 0.8);
+}
+
+.cu-registry-context-access__list li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-registry-context-access__group .cu-muted {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.cu-registry-install-access-summary {
+  display: grid;
+}
+
+.cu-registry-install-access-summary__row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 10rem) minmax(0, 1fr);
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3) 0;
+  border-top: 1px solid var(--cu-border-subtle);
+  color: var(--cu-text-soft);
+  font-size: 0.875rem;
+}
+
+.cu-registry-install-access-summary__row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.cu-registry-install-access-summary__row:last-child {
+  padding-bottom: 0;
+}
+
+.cu-registry-install-access-summary__row strong {
+  color: var(--cu-text);
+  overflow-wrap: anywhere;
+}
+
+.cu-modal-panel--install-success {
+  width: min(27rem, calc(100vw - (var(--cu-space-4) * 2)));
+  justify-items: center;
+  padding: calc(var(--cu-space-5) + var(--cu-space-1));
+  text-align: center;
+}
+
+.cu-registry-install-success__icon {
+  display: grid;
+  place-items: center;
+  width: calc((var(--cu-space-4) * 2) + var(--cu-space-5));
+  height: calc((var(--cu-space-4) * 2) + var(--cu-space-5));
+  border: 1px solid rgba(var(--cu-success-rgb), 0.48);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-success-rgb), 0.14);
+  color: var(--cu-success);
+}
+
+.cu-registry-install-success__content {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-registry-install-success__eyebrow {
+  margin: 0;
+  color: var(--cu-success);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cu-modal-panel--install-success .cu-modal-copy {
+  max-width: 23rem;
+}
+
+.cu-modal-panel__foot.cu-registry-install-success__actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  border-top: 0;
+  padding-top: 0;
 }
 
 .cu-registry-trust-chip {
@@ -4293,6 +4643,10 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+.cu-channel-credentials__note {
+  margin: 0;
+}
+
 .cu-channel-credentials__actions {
   display: flex;
   justify-content: flex-end;
@@ -5034,6 +5388,19 @@ textarea.cu-input {
   background: var(--cu-bg-elevated);
 }
 
+.cu-connector-edit-tabs {
+  margin-inline: var(--cu-space-3);
+}
+
+.cu-connector-edit-context-name {
+  margin: 0 0 var(--cu-space-3);
+  color: var(--cu-text-muted);
+}
+
+.cu-connector-edit-context-name strong {
+  color: var(--cu-text);
+}
+
 .cu-connector-edit-form {
   flex: 1;
   min-height: 0;
@@ -5554,6 +5921,69 @@ textarea.cu-input {
   font-weight: 600;
 }
 
+.cu-agent-context-mcp-summary {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: rgba(var(--cu-panel-rgb), 0.35);
+}
+
+.cu-agent-context-mcp-summary__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cu-agent-context-mcp-summary__head > span:last-child {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0.1rem var(--cu-space-1);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-agent-context-mcp-summary__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+  max-height: 8rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.cu-agent-context-mcp-summary__list li {
+  max-width: 100%;
+  padding: 0.2rem var(--cu-space-2);
+  overflow: hidden;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-agent-context-mcp-summary > .cu-muted {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
 .cu-agent-mcp-grid {
   display: grid;
   gap: var(--cu-space-2);
@@ -6065,6 +6495,10 @@ textarea.cu-input {
   border-radius: var(--cu-radius-sm);
   background: var(--cu-surface);
   box-shadow: var(--cu-shadow);
+}
+
+.cu-image-reference-combobox .cu-selection-dropdown__option {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .cu-selection-dropdown--inline .cu-selection-dropdown__menu {
@@ -7130,6 +7564,37 @@ textarea.cu-input {
   gap: 0.5rem;
 }
 
+.cu-llm-config__block-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cu-llm-config__block-toggle:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 3px;
+  border-radius: calc(var(--cu-radius-sm) / 2);
+}
+
+.cu-llm-config__block-toggle-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
+.cu-llm-config__block-toggle svg {
+  color: var(--cu-text-muted);
+  transition: transform var(--cu-control-transition) ease;
+}
+
+.cu-llm-config__block-toggle svg.is-expanded {
+  transform: rotate(90deg);
+}
+
 .cu-llm-config__block-title {
   font-weight: 600;
   font-size: 0.95rem;
@@ -8035,6 +8500,11 @@ textarea.cu-input {
 .cu-table__sort-link {
   color: var(--cu-text-muted);
   white-space: nowrap;
+}
+
+.cu-table__sort-link.is-active {
+  color: var(--cu-text);
+  font-weight: var(--font-weight-medium, 500);
 }
 
 .cu-row-actions {
@@ -9186,6 +9656,14 @@ textarea.cu-input {
 .cu-channel-provider-panel,
 .cu-channel-access {
   display: grid;
+  /* minmax(0, 1fr), not the default `auto` track. An auto track is max-content
+     sized and its items keep `min-width: auto`, so the widest unbreakable line
+     in the panel sets the track width and the content paints outside the panel
+     box, which does not clip it. The Slack app manifest triggers this: its
+     `request_url` line runs ~140 monospace characters, measured here at 1088px
+     inside a 670px panel. With a 0 floor the track shrinks to the panel and the
+     manifest's own `overflow-x: auto` scrolls it instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--cu-space-4);
   padding: var(--cu-space-4);
   border: 1px solid var(--cu-border-subtle);
@@ -9217,6 +9695,18 @@ textarea.cu-input {
   width: 1rem;
   height: 1rem;
   accent-color: var(--cu-accent);
+}
+
+/* A cu-toggle-row plus its note, kept together so the surrounding panel gap
+   does not separate the note from the control it explains. */
+.cu-toggle-field {
+  display: grid;
+  gap: var(--cu-space-1);
+}
+
+/* Indented past the checkbox so the note reads as that control's, not a new row. */
+.cu-toggle-row__hint {
+  margin: 0 0 0 calc(1rem + var(--cu-space-2));
 }
 
 .cu-credential-field {
@@ -9324,6 +9814,13 @@ textarea.cu-input {
   font-size: 0.8125rem;
   line-height: 1.55;
   white-space: pre;
+}
+
+/* The Slack app manifest runs ~25 lines. Cap it so the credentials panel below
+   stays reachable instead of being pushed off the form. */
+.cu-slack-manifest__pre {
+  max-height: 18rem;
+  overflow-y: auto;
 }
 
 .cu-channel-conversations-table__name {
@@ -9797,13 +10294,31 @@ textarea.cu-input {
 }
 
 /* Discovery: persistent "last synced" line under the panel header. */
+.cu-discovery-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-3);
+}
+
+.cu-discovery-bar > .cu-tabs {
+  flex: 0 1 auto;
+  margin: var(--cu-space-5) 0 var(--cu-space-4);
+}
+
+.cu-discovery-bar > .cu-discovery-status {
+  margin-top: var(--cu-space-5);
+  margin-bottom: var(--cu-space-4);
+}
+
 .cu-discovery-status {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--cu-space-2);
-  padding: var(--cu-space-3) 1rem 0;
+  padding: 0 var(--cu-space-4);
   font-size: 0.8125rem;
   color: var(--cu-text-muted);
 }
@@ -10523,14 +11038,6 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-breadcrumb__drive-icon svg {
   width: 100%;
   height: 100%;
-}
-
-.cu-gfs-breadcrumb__drive-label {
-  color: var(--cu-text-muted);
-  font-size: 0.625rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
 .cu-gfs-list-frame {

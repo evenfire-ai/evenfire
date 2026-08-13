@@ -4,13 +4,15 @@ export interface DelegationAffordances {
   canCreateShare: boolean
 }
 
-export type GfsDelegationSubjectType = 'user' | 'team'
+export type GfsDelegationSubjectType = 'user' | 'team' | 'host'
 
 export interface GfsDelegationSubjectOption {
   type: GfsDelegationSubjectType
   id: string
   label: string
   description?: string
+  /** Display label for the subject kind (e.g. "Agent"); falls back to `type`. */
+  badge?: string
 }
 
 export interface GfsDelegationPanelProps {
@@ -18,7 +20,9 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
-  onGrant: (subjectKeys: string[], bits: string[]) => Promise<void>
+  /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
+  isDirectory: boolean
+  onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
   onCreateShare?: (subjectKeys: string[]) => Promise<void>
 }
 

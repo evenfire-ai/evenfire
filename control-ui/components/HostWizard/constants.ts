@@ -2,7 +2,7 @@ export const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 export const HOST_SECRET_LABEL_VALUE = 'true'
 export const HOST_NAMESPACE = 'mcp-host'
 
-export const STEPS = ['Agent', 'Context', 'Model & Credentials', 'Access', 'Channels'] as const
+export const STEPS = ['Agent', 'Context', 'Model & Credentials', 'Access'] as const
 
 export const STEP_DETAILS = [
   {
@@ -24,10 +24,5 @@ export const STEP_DETAILS = [
     description: 'Set permissions and sharing',
     title: 'Access',
     subtitle: 'Grant members or teams permission to use this agent.',
-  },
-  {
-    description: 'Optional channel setup',
-    title: 'Channels',
-    subtitle: 'Attach an external channel now, or skip and configure one later.',
   },
 ] as const

@@ -8,6 +8,13 @@ export type CommunicationChannelDraftState = {
   hostRef: string
   slack: CommunicationChannelGroup[]
   slackBotHandle: string
+  /**
+   * True when `slackBotHandle` was seeded from the `clerum.io/slack-bot-label`
+   * annotation rather than from `spec.slackSettings` or from typing. Absent
+   * means "not from the annotation": a hand-built draft has no annotation
+   * history, and anything the operator types clears the flag.
+   */
+  slackBotHandleFromAnnotation?: boolean
   slackReplyOnlyWhenMentioned: boolean
   slackReplyInThreads: boolean
   slackWorkspaceId: string
@@ -56,6 +63,37 @@ export function hasSlackConfig(
   )
 }
 
+/**
+ * Gate for the Slack Request URL and app manifest, and for nothing else.
+ *
+ * `hasSlackConfig` counts a `slackBotHandle` seeded from the
+ * `clerum.io/slack-bot-label` annotation, which is how a Telegram-only channel
+ * carrying a stale label rendered a copyable Request URL and a full manifest for
+ * a Slack app that does not exist. An annotation is a leftover label, not a
+ * declaration that this channel has a Slack provider.
+ *
+ * Everything else keeps reading `hasSlackConfig`: the annotation still fills the
+ * visible App Name field, still decides which tab the edit page opens on, and
+ * still reaches the saved spec. Only the copyable URL and the manifest wait for
+ * a real Slack provider, whether persisted or typed into the open draft.
+ */
+export function hasSlackConfigForRequestUrl(
+  draft: Pick<
+    CommunicationChannelDraftState,
+    | 'slack'
+    | 'slackBotHandle'
+    | 'slackBotHandleFromAnnotation'
+    | 'slackReplyInThreads'
+    | 'slackReplyOnlyWhenMentioned'
+    | 'slackWorkspaceId'
+  >
+): boolean {
+  return hasSlackConfig({
+    ...draft,
+    slackBotHandle: draft.slackBotHandleFromAnnotation ? '' : draft.slackBotHandle,
+  })
+}
+
 export function hasTeamsConfig(
   draft: Pick<
     CommunicationChannelDraftState,
@@ -74,6 +112,8 @@ export function createCommunicationChannelDraft(
   item: CommunicationChannelItem
 ): CommunicationChannelDraftState {
   const spec = item.spec || {}
+  const slackBotHandleFromSpec = spec.slackSettings?.botHandle || ''
+  const slackBotHandleFromLabel = annotationValue(item, ['clerum.io/slack-bot-label'])
   return {
     accessTeamIds: spec.access?.teams || [],
     accessUserIds: spec.access?.users || [],
@@ -82,8 +122,8 @@ export function createCommunicationChannelDraft(
       : {}),
     hostRef: spec.hostRef || '',
     slack: spec.slack || [],
-    slackBotHandle:
-      spec.slackSettings?.botHandle || annotationValue(item, ['clerum.io/slack-bot-label']),
+    slackBotHandle: slackBotHandleFromSpec || slackBotHandleFromLabel,
+    slackBotHandleFromAnnotation: !slackBotHandleFromSpec && Boolean(slackBotHandleFromLabel),
     slackReplyOnlyWhenMentioned: spec.slackSettings?.replyOnlyWhenMentioned === true,
     slackReplyInThreads: spec.slackSettings?.replyInThreads === true,
     slackWorkspaceId: spec.slackSettings?.workspaceId || '',

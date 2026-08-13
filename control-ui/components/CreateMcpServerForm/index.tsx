@@ -1,34 +1,46 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconX } from '@/components/icons'
-import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
+import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
+import { getAgentDisplayName } from '@/lib/agentName'
 import {
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
   getContext,
+  getContextTeams,
+  getContextUsers,
   getContexts,
+  getHosts,
+  listOrgImages,
   updateContext,
 } from '@/lib/api'
-import type { EnvSecretKeyMapping, EnvVar } from '@/lib/api'
+import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
+import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
 import { EgressEditor } from '../EgressEditor'
+import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
-const STEPS = ['Connector', 'Secrets'] as const
+const STEPS = ['Connector', 'Context', 'Secrets'] as const
 
 const STEP_DETAILS = [
   {
-    description: 'Name, image, and context',
+    description: 'Name, image, and runtime',
     title: 'Connector identity',
-    subtitle: 'Register the connector name, image, and Context allowlist target.',
+    subtitle: 'Register the connector name, image, and runtime configuration.',
+  },
+  {
+    description: 'Choose connector access',
+    title: 'Context',
+    subtitle: 'Choose where this connector will be available and review who can use it.',
   },
   {
     description: 'Environment and credentials',
@@ -36,6 +48,117 @@ const STEP_DETAILS = [
     subtitle: 'Add environment variables and optional Secret-backed credentials.',
   },
 ] as const
+
+type ContextAccess = {
+  agents: Array<{ id: string; label: string }>
+  teams: Array<{ id: string; label: string }>
+  users: Array<{ id: string; label: string }>
+}
+
+const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
+
+const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
+  { key: 'users', title: 'Users' },
+  { key: 'teams', title: 'Teams' },
+  { key: 'agents', title: 'Agents' },
+]
+
+type OrgImageOption = {
+  value: string
+  label: string
+  description: string
+}
+
+function ImageReferenceCombobox({
+  disabled,
+  onChange,
+  options,
+  value,
+}: {
+  disabled: boolean
+  onChange: (value: string) => void
+  options: OrgImageOption[]
+  value: string
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const matchingOptions = useMemo(() => {
+    const query = value.trim().toLowerCase()
+    if (!query) return options
+    return options.filter(option =>
+      [option.label, option.description].some(candidate => candidate.toLowerCase().includes(query))
+    )
+  }, [options, value])
+
+  useEffect(() => {
+    if (!open) return
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  return (
+    <div className="cu-selection-dropdown cu-image-reference-combobox" ref={rootRef}>
+      <TextInput
+        aria-autocomplete="list"
+        aria-controls="organization-image-options"
+        aria-expanded={open && matchingOptions.length > 0}
+        aria-haspopup="listbox"
+        monospace
+        onChange={event => {
+          onChange(event.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        placeholder="us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest"
+        disabled={disabled}
+        role="combobox"
+        value={value}
+      />
+      {open && matchingOptions.length > 0 ? (
+        <div className="cu-selection-dropdown__menu">
+          <div
+            className="cu-selection-dropdown__list"
+            id="organization-image-options"
+            role="listbox"
+          >
+            {matchingOptions.map(option => (
+              <button
+                key={option.value}
+                type="button"
+                className="cu-selection-dropdown__option"
+                role="option"
+                aria-label={option.label}
+                aria-selected={option.value === value}
+                data-selected={option.value === value ? 'true' : undefined}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}
+              >
+                <span className="cu-selection-dropdown__option-copy">
+                  <span className="cu-selection-dropdown__option-label">{option.label}</span>
+                  <span className="cu-selection-dropdown__option-description">
+                    {option.description}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function parseCommaSeparated(input: string): string[] {
   if (!input.trim()) return []
@@ -78,11 +201,16 @@ export function CreateMcpServerForm({
   const [contexts, setContexts] = useState<Array<{ name: string }>>([])
   const [contextsLoading, setContextsLoading] = useState(true)
   const [contextsError, setContextsError] = useState('')
+  const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
+  const [contextAccessError, setContextAccessError] = useState('')
+  const [loadingContextAccess, setLoadingContextAccess] = useState(false)
+  const [orgImages, setOrgImages] = useState<OrgImage[]>([])
+  const [orgImageScope, setOrgImageScope] = useState('')
   const [managed, setManaged] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [envVars, setEnvVars] = useState<EnvVar[]>([])
-  const [useEnvSecret, setUseEnvSecret] = useState(false)
+  const [credentialMode, setCredentialMode] = useState<'secret' | 'none' | null>(null)
   const [envSecretName, setEnvSecretName] = useState('')
   const [envSecretKeys, setEnvSecretKeys] = useState<EnvSecretKeyMapping[]>([])
   const [secretValues, setSecretValues] = useState<string[]>([])
@@ -93,13 +221,53 @@ export function CreateMcpServerForm({
 
   const nameValid = MCP_SERVER_NAME_PATTERN.test(name) && name.length <= 63
   const egressValid = !egressStatus || egressStatus.errors.length === 0
-  const canSubmit = Boolean(name && image && contextRef) && nameValid && egressValid && !submitting
-  const canContinue =
-    step === 0 ? Boolean(name && image && contextRef && nameValid) && egressValid : egressValid
+  const useEnvSecret = credentialMode === 'secret'
+  const hasCompleteSecretMapping = envSecretKeys.some((row, index) => {
+    return Boolean(row.secretKey.trim() && row.envVar.trim() && (secretValues[index] ?? '').trim())
+  })
+  const hasIncompleteSecretMapping = envSecretKeys.some((row, index) => {
+    const values = [row.secretKey.trim(), row.envVar.trim(), (secretValues[index] ?? '').trim()]
+    return values.some(Boolean) && !values.every(Boolean)
+  })
+  const credentialsConfigured =
+    credentialMode === 'none' ||
+    (credentialMode === 'secret' &&
+      Boolean(envSecretName.trim()) &&
+      hasCompleteSecretMapping &&
+      !hasIncompleteSecretMapping)
+  const canSubmit =
+    Boolean(name && image && contextRef) &&
+    nameValid &&
+    egressValid &&
+    credentialsConfigured &&
+    !submitting
+  const connectorComplete = Boolean(name && image && nameValid) && egressValid
+  const contextComplete = Boolean(contextRef)
+  const canContinue = step === 0 ? connectorComplete : step === 1 ? contextComplete : egressValid
   const contextOptions = useMemo(
     () => contexts.map(context => ({ value: context.name, label: context.name })),
     [contexts]
   )
+  const orgImageOptions = useMemo<OrgImageOption[]>(() => {
+    if (!orgImageScope) return []
+
+    return orgImages.flatMap(orgImage => {
+      const tags = orgImage.tags ?? []
+      if (tags.length === 0) {
+        const coordinate = `${DEFAULT_REGISTRY_HOST}/${orgImageScope.replace(/^@/, '')}/${orgImage.name}`
+        return [{ value: coordinate, label: orgImage.name, description: coordinate }]
+      }
+      return tags.map(tag => {
+        const coordinate = buildImageCoordinate(
+          DEFAULT_REGISTRY_HOST,
+          orgImageScope,
+          orgImage.name,
+          tag
+        )
+        return { value: coordinate, label: `${orgImage.name}:${tag}`, description: coordinate }
+      })
+    })
+  }, [orgImageScope, orgImages])
 
   useEffect(() => {
     let cancelled = false
@@ -131,9 +299,93 @@ export function CreateMcpServerForm({
     }
   }, [])
 
+  useEffect(() => {
+    const selectedContext = contextRef.trim()
+    if (!selectedContext) {
+      setContextAccess(EMPTY_CONTEXT_ACCESS)
+      setContextAccessError('')
+      setLoadingContextAccess(false)
+      return
+    }
+
+    let cancelled = false
+    setLoadingContextAccess(true)
+    setContextAccessError('')
+
+    void (async () => {
+      const [usersResult, teamsResult, hostsResult] = await Promise.allSettled([
+        getContextUsers(selectedContext),
+        getContextTeams(selectedContext),
+        getHosts(),
+      ])
+      if (cancelled) return
+
+      const failed =
+        usersResult.status === 'rejected' ||
+        teamsResult.status === 'rejected' ||
+        hostsResult.status === 'rejected'
+      setContextAccess({
+        users:
+          usersResult.status === 'fulfilled'
+            ? (usersResult.value.items ?? []).map(user => ({
+                id: user.id,
+                label: user.displayName || user.name || user.email || user.id,
+              }))
+            : [],
+        teams:
+          teamsResult.status === 'fulfilled'
+            ? (teamsResult.value.items ?? []).map(team => ({ id: team.id, label: team.name }))
+            : [],
+        agents:
+          hostsResult.status === 'fulfilled'
+            ? (hostsResult.value.items ?? [])
+                .filter(host => String(host.spec?.contextRef ?? '').trim() === selectedContext)
+                .map(host => {
+                  const agentName = host.metadata?.name || 'unknown'
+                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
+                })
+            : [],
+      })
+      setContextAccessError(
+        failed
+          ? 'Some access information could not be loaded. The lists below may be incomplete.'
+          : ''
+      )
+      setLoadingContextAccess(false)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [contextRef])
+
+  useEffect(() => {
+    let cancelled = false
+
+    listOrgImages()
+      .then(result => {
+        if (cancelled) return
+        setOrgImageScope(result.org)
+        setOrgImages(result.images ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) {
+          // Image selection is a convenience. Creating a connector with a
+          // manual image coordinate must still work if registry listing is off.
+          setOrgImageScope('')
+          setOrgImages([])
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    return Boolean(name && image && contextRef && nameValid && egressValid)
+    if (targetStep === 1) return connectorComplete
+    return connectorComplete && contextComplete
   }
 
   const handleEgressChange = useCallback(
@@ -186,15 +438,20 @@ export function CreateMcpServerForm({
       if (canContinue) setStep(current => Math.min(STEPS.length - 1, current + 1))
       return
     }
+
+    if (credentialMode === null) {
+      setError('Choose whether this connector needs credentials before creating it.')
+      return
+    }
     if (!canSubmit) return
 
     // ── Client-side envSecret validation (PR-A / A2) ─────────────────────────
-    // If the operator enabled envSecret with a Secret name, they must provide
+    // If the operator chose a Secret, they must provide
     // at least one key-value pair so we actually create the Secret in-band.
     // Referencing a pre-existing Secret from this form is not supported here:
     // it's the exact "Secret missing → HCC silent hang" class we're closing.
-    // Operators who need to reference an existing Secret should disable the
-    // envSecret checkbox and manage it via kubectl / the API directly.
+    // Operators who need to reference an existing Secret should manage it via
+    // kubectl or the API directly.
     if (useEnvSecret && envSecretName.trim()) {
       const builtSecretData: Record<string, string> = {}
       envSecretKeys.forEach((row, index) => {
@@ -205,13 +462,8 @@ export function CreateMcpServerForm({
         }
       })
 
-      // Any row with a key set but an empty value is a hard error — the user
-      // clearly meant to provide credentials and forgot one.
-      const hasRowWithEmptyValue = envSecretKeys.some(
-        (row, index) => row.secretKey.trim() !== '' && (secretValues[index] ?? '') === ''
-      )
-      if (hasRowWithEmptyValue) {
-        setError('All envSecret values must be non-empty')
+      if (hasIncompleteSecretMapping) {
+        setError('Complete every Secret key, environment variable, and value before creating it.')
         return
       }
       if (Object.keys(builtSecretData).length === 0) {
@@ -297,13 +549,15 @@ export function CreateMcpServerForm({
         const existingServers = context.spec?.mcpServers ?? []
 
         if (!existingServers.includes(name)) {
-          await updateContext(contextRef, {
-            spec: {
+          await updateContext(
+            contextRef,
+            buildContextUpdatePayload(context.metadata?.resourceVersion, {
               contextId: context.spec?.contextId ?? contextRef,
               description: context.spec?.description,
               mcpServers: [...existingServers, name],
-            },
-          })
+              sharedFileSystems: context.spec?.sharedFileSystems ?? [],
+            })
+          )
         }
       } catch (contextError) {
         setError(
@@ -362,7 +616,7 @@ export function CreateMcpServerForm({
       <form onSubmit={handleSubmit}>
         <CreateStepFlow
           ariaLabel="Create connector steps"
-          className="cu-create-step-flow--2"
+          className="cu-create-step-flow--3"
           currentStep={step}
           onStepChange={setStep}
           canSelectStep={canSelectStep}
@@ -395,47 +649,25 @@ export function CreateMcpServerForm({
                 />
               </Field>
 
-              <Field description="Container image for the connector." label="Image" required>
-                <TextInput
-                  monospace
-                  onChange={event => setImage(event.target.value)}
-                  placeholder="us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest"
-                  disabled={submitting}
-                  value={image}
-                />
-              </Field>
-
-              <Field
-                description={
-                  contextsLoading
-                    ? 'Loading available contexts...'
-                    : contexts.length > 0
-                      ? "The server will be added to this context's allowlist."
-                      : 'Create a context before creating a connector.'
-                }
-                error={contextsError || undefined}
-                label="Context"
-                required
-              >
-                <SelectionDropdown
-                  multiple={false}
-                  onChange={next => setContextRef(next[0] ?? '')}
-                  disabled={submitting || contextsLoading || contexts.length === 0}
-                  value={contextRef ? [contextRef] : []}
-                  options={contextOptions}
-                  placeholder={contextsLoading ? 'Loading contexts...' : 'Select a context...'}
-                  searchPlaceholder="Search contexts..."
-                  emptyLabel="No contexts available."
-                  selectionLabel="Context"
-                />
-              </Field>
-
               <Field label="Description">
                 <TextInput
                   onChange={event => setDescription(event.target.value)}
                   placeholder="Optional description of this connector"
                   disabled={submitting}
                   value={description}
+                />
+              </Field>
+
+              <Field
+                description="Choose one of your organization’s images or enter another container image URL."
+                label="Image"
+                required
+              >
+                <ImageReferenceCombobox
+                  disabled={submitting}
+                  onChange={setImage}
+                  options={orgImageOptions}
+                  value={image}
                 />
               </Field>
 
@@ -493,7 +725,9 @@ export function CreateMcpServerForm({
                         Yes — Evenfire creates and manages the Deployment, Service, and
                         NetworkPolicies
                       </option>
-                      <option value="false">No — I will deploy the pod myself (discovery only)</option>
+                      <option value="false">
+                        No — I will deploy the pod myself (discovery only)
+                      </option>
                     </SelectInput>
                   </Field>
 
@@ -538,6 +772,87 @@ export function CreateMcpServerForm({
 
           {step === 1 ? (
             <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
+              <section className="cu-form-section">
+                <div className="cu-form-section__header">
+                  <h3 className="cu-form-section__title">Context access</h3>
+                  <p className="cu-form-section__description">
+                    Choose the context where this connector will be available. The access lists
+                    update for the selected context.
+                  </p>
+                </div>
+                <Field
+                  description={
+                    contextsLoading
+                      ? 'Loading available contexts...'
+                      : contexts.length > 0
+                        ? "The connector will be added to this context's allowlist."
+                        : 'Create a context before creating a connector.'
+                  }
+                  error={contextsError || undefined}
+                  label="Context"
+                  required
+                >
+                  <SelectionDropdown
+                    id="create-connector-context"
+                    multiple={false}
+                    onChange={next => setContextRef(next[0] ?? '')}
+                    disabled={submitting || contextsLoading || contexts.length === 0}
+                    value={contextRef ? [contextRef] : []}
+                    options={contextOptions}
+                    placeholder={contextsLoading ? 'Loading contexts...' : 'Select a context...'}
+                    searchPlaceholder="Search contexts..."
+                    emptyLabel="No contexts available."
+                    selectionLabel="Context"
+                    showSelectedChips={false}
+                  />
+                </Field>
+
+                {loadingContextAccess ? (
+                  <p className="cu-muted">Loading context access…</p>
+                ) : contextRef ? (
+                  <>
+                    {contextAccessError ? (
+                      <p className="cu-banner cu-banner--warn" role="status">
+                        {contextAccessError}
+                      </p>
+                    ) : null}
+                    <div className="cu-registry-context-access__intro">
+                      <span>Access preview</span>
+                      <p>These people and agents can use this connector in {contextRef}.</p>
+                    </div>
+                    <section className="cu-registry-context-access" aria-label="Context access">
+                      {CONTEXT_ACCESS_GROUPS.map(group => (
+                        <section
+                          className="cu-registry-context-access__group"
+                          data-kind={group.key}
+                          key={group.key}
+                        >
+                          <div className="cu-registry-context-access__heading">
+                            <h4>{group.title}</h4>
+                            <span>{contextAccess[group.key].length}</span>
+                          </div>
+                          {contextAccess[group.key].length > 0 ? (
+                            <ul className="cu-registry-context-access__list">
+                              {contextAccess[group.key].map(principal => (
+                                <li key={principal.id}>
+                                  <span>{principal.label}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="cu-muted">No {group.title.toLowerCase()} have access.</p>
+                          )}
+                        </section>
+                      ))}
+                    </section>
+                  </>
+                ) : null}
+              </section>
+            </div>
+          ) : null}
+
+          {step === 2 ? (
+            <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
               <FormSection
                 description="Additional environment variables injected into the container."
                 title="Environment Variables"
@@ -580,21 +895,58 @@ export function CreateMcpServerForm({
                 </Button>
               </FormSection>
 
-              <FormSection title="Secret Reference">
-                <CheckboxField
-                  checked={useEnvSecret}
-                  label="Use Kubernetes Secret for credentials"
-                  disabled={submitting}
-                  onChange={event => setUseEnvSecret(event.target.checked)}
-                />
+              <FormSection
+                description="Choose this explicitly so keyless connectors are not confused with connectors missing credentials."
+                title="Credentials"
+              >
+                <div className="cu-agent-radio-group" role="radiogroup" aria-label="Credentials">
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
+                      checked={credentialMode === 'secret'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('secret')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">Create Kubernetes Secret</span>
+                      <span className="cu-agent-radio__description">
+                        Enter API keys or tokens now. Evenfire creates the Secret before the
+                        connector.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
+                      checked={credentialMode === 'none'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('none')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">No credentials required</span>
+                      <span className="cu-agent-radio__description">
+                        Use this only for keyless connectors, such as Playwright or public
+                        documentation MCPs.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                {credentialMode === null ? (
+                  <p className="cu-form-section__description">
+                    Choose an option to enable Create connector.
+                  </p>
+                ) : null}
 
                 {useEnvSecret ? (
                   <>
                     <Field
                       description={
                         <>
-                          Name of an existing Secret in the <code>mcp-server</code> namespace that
-                          contains your credentials.
+                          Name for the new Secret in the <code>mcp-server</code> namespace that will
+                          contain these credentials.
                         </>
                       }
                       label="Kubernetes Secret Name"
