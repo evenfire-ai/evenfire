@@ -32,6 +32,46 @@ export type DesktopCommandDefinition = {
   visibleInSettings: boolean
 }
 
+export type DesktopCommandRuntimeContext = {
+  tabCount: number
+  searchableContent: boolean
+  composerAvailable: boolean
+}
+
+function tabSelectCommand<const Id extends `tabs.select${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8}`>(
+  id: Id,
+  tabIndex: number
+) {
+  const number = tabIndex + 1
+  return {
+    id,
+    label: `Select tab ${number}`,
+    description: `Switch to chat tab ${number}.`,
+    group: 'Navigation' as const,
+    order: 30 + tabIndex,
+    defaultBinding: { key: String(number), mod: true as const },
+    sources: ['host', 'sandbox'] as const,
+    eligibility: 'tab-index' as const,
+    tabIndex,
+    editingPolicy: 'allow' as const,
+    modalPolicy: 'block' as const,
+    actionOwner: 'renderer' as const,
+    visibleInPalette: true,
+    visibleInSettings: true,
+  }
+}
+
+const TAB_SELECT_COMMANDS = [
+  tabSelectCommand('tabs.select1', 0),
+  tabSelectCommand('tabs.select2', 1),
+  tabSelectCommand('tabs.select3', 2),
+  tabSelectCommand('tabs.select4', 3),
+  tabSelectCommand('tabs.select5', 4),
+  tabSelectCommand('tabs.select6', 5),
+  tabSelectCommand('tabs.select7', 6),
+  tabSelectCommand('tabs.select8', 7),
+] as const
+
 const definitions = [
   {
     id: 'chat.newTab',
@@ -63,22 +103,7 @@ const definitions = [
     visibleInPalette: true,
     visibleInSettings: true,
   },
-  ...Array.from({ length: 8 }, (_, index) => ({
-    id: `tabs.select${index + 1}` as const,
-    label: `Select tab ${index + 1}`,
-    description: `Switch to chat tab ${index + 1}.`,
-    group: 'Navigation' as const,
-    order: 30 + index,
-    defaultBinding: { key: String(index + 1), mod: true as const },
-    sources: ['host', 'sandbox'] as const,
-    eligibility: 'tab-index' as const,
-    tabIndex: index,
-    editingPolicy: 'allow' as const,
-    modalPolicy: 'block' as const,
-    actionOwner: 'renderer' as const,
-    visibleInPalette: true,
-    visibleInSettings: true,
-  })),
+  ...TAB_SELECT_COMMANDS,
   {
     id: 'tabs.selectLast',
     label: 'Select last tab',
@@ -224,6 +249,20 @@ export function getDesktopCommand(id: DesktopCommandId): DesktopCommandDefinitio
   const command = definitions.find(candidate => candidate.id === id)
   if (!command) throw new Error(`Unknown Desktop command: ${id}`)
   return command
+}
+
+export function isDesktopCommandEligible(
+  command: DesktopCommandDefinition,
+  context: DesktopCommandRuntimeContext
+): boolean {
+  if (command.eligibility === 'always') return true
+  if (command.eligibility === 'tab-exists') return context.tabCount > 0
+  if (command.eligibility === 'multiple-tabs') return context.tabCount > 1
+  if (command.eligibility === 'tab-index') {
+    return command.tabIndex !== undefined && command.tabIndex < context.tabCount
+  }
+  if (command.eligibility === 'searchable-content') return context.searchableContent
+  return context.composerAvailable
 }
 
 export function platformFromNode(platform: NodeJS.Platform): DesktopShortcutPlatform {

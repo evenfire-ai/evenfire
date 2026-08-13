@@ -13,6 +13,7 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatTabs } from '@components/ChatTabs'
+import { CommandPalette } from '@components/CommandPalette'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
@@ -78,7 +79,12 @@ import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
-import { type DesktopCommandId, getDesktopCommand } from '../../src/desktopCommands'
+import {
+  type DesktopCommandId,
+  getDesktopCommand,
+  isDesktopCommandEligible,
+  platformFromNavigator,
+} from '../../src/desktopCommands'
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
@@ -257,6 +263,8 @@ export function App() {
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
+  const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
+  const [settingsShortcutsRequestId, setSettingsShortcutsRequestId] = React.useState(0)
   const chatLocalSearchPreviousFocusRef = React.useRef<HTMLElement | null>(null)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
@@ -1035,16 +1043,55 @@ export function App() {
     setGlobalSearchFocusRequestId(0)
     setChatLocalSearchOpen(false)
     setSandboxLocalSearchRequestId(0)
+    setCommandPaletteOpen(false)
+    setSettingsShortcutsRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
 
-  React.useEffect(() => {
-    if (!window.clerum.shortcuts) return undefined
-    return window.clerum.shortcuts.onCommand((commandId: DesktopCommandId) => {
-      if (!vm.isAuthenticated || document.querySelector('[role="dialog"][aria-modal="true"]')) {
+  const desktopCommandContext = React.useMemo(
+    () => ({
+      tabCount: chatViewTabs.tabs.length,
+      searchableContent:
+        (vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)) ||
+        (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.activeChatId)),
+      composerAvailable:
+        vm.navItem === DESKTOP_ROUTES.chat &&
+        Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
+        vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
+    }),
+    [activeSandboxUiApp, chatViewTabs, vm.activeChatId, vm.hostRuntimeStatus, vm.navItem]
+  )
+
+  const isCommandEligible = React.useCallback(
+    (commandId: DesktopCommandId) =>
+      isDesktopCommandEligible(getDesktopCommand(commandId), desktopCommandContext),
+    [desktopCommandContext]
+  )
+
+  const executeDesktopCommand = React.useCallback(
+    (commandId: DesktopCommandId, source: 'shortcut' | 'palette' = 'shortcut') => {
+      if (!vm.isAuthenticated) return
+      if (source === 'shortcut' && commandPaletteOpen) {
+        if (commandId === 'commands.open') setCommandPaletteOpen(false)
+        return
+      }
+      if (source === 'shortcut' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
         return
       }
       const command = getDesktopCommand(commandId)
       const state = chatViewTabsRef.current
+      if (!isDesktopCommandEligible(command, desktopCommandContext)) return
+      if (commandId === 'commands.open') {
+        closeChatLocalSearch(false)
+        setCommandPaletteOpen(true)
+        return
+      }
+      if (commandId === 'settings.shortcuts') {
+        closeChatLocalSearch(false)
+        setCommandPaletteOpen(false)
+        vm.handleNavSelect(DESKTOP_ROUTES.settings)
+        setSettingsShortcutsRequestId(value => value + 1)
+        return
+      }
       if (commandId === 'chat.newTab') {
         closeChatLocalSearch(false)
         handleNewChatViewTab()
@@ -1096,17 +1143,26 @@ export function App() {
           setChatLocalSearchOpen(true)
         }
       }
-    })
-  }, [
-    activeSandboxUiApp,
-    closeChatLocalSearch,
-    handleCloseChatViewTab,
-    handleNewChatViewTab,
-    revealChatViewTab,
-    vm.activeChatId,
-    vm.isAuthenticated,
-    vm.navItem,
-  ])
+    },
+    [
+      activeSandboxUiApp,
+      closeChatLocalSearch,
+      commandPaletteOpen,
+      desktopCommandContext,
+      handleCloseChatViewTab,
+      handleNewChatViewTab,
+      revealChatViewTab,
+      vm.activeChatId,
+      vm.handleNavSelect,
+      vm.isAuthenticated,
+      vm.navItem,
+    ]
+  )
+
+  React.useEffect(() => {
+    if (!window.clerum.shortcuts) return undefined
+    return window.clerum.shortcuts.onCommand(commandId => executeDesktopCommand(commandId))
+  }, [executeDesktopCommand])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
@@ -1637,7 +1693,9 @@ export function App() {
                                   boundsRefreshKey={sandboxUiBoundsRefreshKey}
                                   conversationOrigin={sandboxUiConversationOrigin}
                                   currentTeamId={vm.currentTeamId}
-                                  headerShellOverlayOpen={headerShellOverlayOpen}
+                                  headerShellOverlayOpen={
+                                    headerShellOverlayOpen || commandPaletteOpen
+                                  }
                                   sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
                                   toastShellOverlayOpen={vm.toasts.length > 0}
                                   shortcutApp={activeSandboxUiApp}
@@ -1654,6 +1712,7 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.settings && (
                                 <SettingsPage
+                                  shortcutsFocusRequestId={settingsShortcutsRequestId}
                                   notificationSettings={vm.notificationSettings}
                                   desktopNotificationPermission={vm.desktopNotificationPermission}
                                   themeMode={themeMode}
@@ -1679,6 +1738,14 @@ export function App() {
                             </section>
                           </section>
                         </main>
+                        {commandPaletteOpen ? (
+                          <CommandPalette
+                            platform={platformFromNavigator(navigator.platform)}
+                            isEligible={isCommandEligible}
+                            onClose={() => setCommandPaletteOpen(false)}
+                            onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
+                          />
+                        ) : null}
                         {desktopUpdateRequiredDialog}
                         {environmentSetupConfirmationDialog}
                         {environmentSetupSuccessDialog}

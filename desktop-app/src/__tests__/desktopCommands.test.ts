@@ -5,6 +5,7 @@ import {
   desktopBindingCollisionKey,
   formatDesktopShortcut,
   getDesktopCommand,
+  isDesktopCommandEligible,
   matchDesktopCommand,
 } from '../desktopCommands.js'
 
@@ -67,5 +68,15 @@ describe('Desktop command registry', () => {
   it('maps Mod+9 to last-tab semantics rather than a ninth-index command', () => {
     expect(matchDesktopCommand(input({ key: '9' }), 'darwin', 'host')?.id).toBe('tabs.selectLast')
     expect(DESKTOP_COMMANDS.some(command => command.id === 'tabs.select9')).toBe(false)
+  })
+
+  it('enables commands from the same registry context used by keyboard and palette actions', () => {
+    const context = { tabCount: 1, searchableContent: false, composerAvailable: false }
+    expect(isDesktopCommandEligible(getDesktopCommand('tabs.select1'), context)).toBe(true)
+    expect(isDesktopCommandEligible(getDesktopCommand('tabs.select2'), context)).toBe(false)
+    expect(isDesktopCommandEligible(getDesktopCommand('tabs.next'), context)).toBe(false)
+    expect(isDesktopCommandEligible(getDesktopCommand('search.current'), context)).toBe(false)
+    expect(isDesktopCommandEligible(getDesktopCommand('composer.focus'), context)).toBe(false)
+    expect(isDesktopCommandEligible(getDesktopCommand('search.open'), context)).toBe(true)
   })
 })

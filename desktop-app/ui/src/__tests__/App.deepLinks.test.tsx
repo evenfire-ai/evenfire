@@ -22,8 +22,17 @@ const appHeaderHarness = vi.hoisted(() => ({
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
 
+const commandPaletteHarness = vi.hoisted(() => ({
+  props: null as null | {
+    isEligible: (commandId: DesktopCommandId) => boolean
+    onClose: () => void
+    onExecute: (commandId: DesktopCommandId) => void
+  },
+}))
+
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
+    headerShellOverlayOpen?: boolean
     shortcutOpenRequestId?: number
     localSearchRequestId?: number
     onEmbeddedAppOpening?: (app: {
@@ -60,6 +69,12 @@ vi.mock('@components/ChatLocalSearch', () => ({
     return null
   },
 }))
+vi.mock('@components/CommandPalette', () => ({
+  CommandPalette: (props: NonNullable<typeof commandPaletteHarness.props>) => {
+    commandPaletteHarness.props = props
+    return <div role="dialog" aria-modal="true" aria-label="Command palette" />
+  },
+}))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -83,7 +98,15 @@ vi.mock('@pages/SandboxUiPage', () => ({
     return null
   },
 }))
-vi.mock('@pages/SettingsPage', () => ({ SettingsPage: () => null }))
+const settingsPageHarness = vi.hoisted(() => ({
+  props: null as null | { shortcutsFocusRequestId?: number },
+}))
+vi.mock('@pages/SettingsPage', () => ({
+  SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
+    settingsPageHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
 vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
@@ -188,6 +211,8 @@ describe('App deep-link orchestration', () => {
     confirmDialogHarness.props = null
     appHeaderHarness.props = null
     chatLocalSearchHarness.rendered.mockReset()
+    commandPaletteHarness.props = null
+    settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
@@ -278,6 +303,40 @@ describe('App deep-link orchestration', () => {
     act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
+  })
+
+  it('opens the palette, executes eligible registry actions, and captures the sandbox view', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+      emitCommand?.('commands.open')
+    })
+
+    expect(commandPaletteHarness.props).not.toBeNull()
+    expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(true)
+    expect(commandPaletteHarness.props?.isEligible('search.current')).toBe(true)
+
+    act(() => commandPaletteHarness.props?.onExecute('search.open'))
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+  })
+
+  it('opens Settings Shortcuts through the registered palette action', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+    act(() => commandPaletteHarness.props?.onExecute('settings.shortcuts'))
+
+    expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.settings)
+    expect(settingsPageHarness.props?.shortcutsFocusRequestId).toBe(1)
   })
 
   afterEach(() => {
