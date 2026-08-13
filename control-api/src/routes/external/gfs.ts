@@ -14,6 +14,7 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
@@ -195,6 +196,7 @@ export function createExternalGfsRouter(): Router {
   // ── token mint (mirror /external/rpc/token, but a gfs token sub=users.id) ──
   router.post(
     '/external/gfs/token',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_mutation', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const claims = req.externalAuth!
       const body = (req.body ?? {}) as { drive?: unknown; scopes?: unknown }
@@ -261,6 +263,7 @@ export function createExternalGfsRouter(): Router {
   // EXISTING checkAccess (same allow() engine as assertMayGrant). Read-only.
   router.get(
     '/external/gfs/resources/:id/affordances',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_read', 'authenticated')),
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const caller = resolveCaller(req)
@@ -278,12 +281,14 @@ export function createExternalGfsRouter(): Router {
 
   router.patch(
     '/external/gfs/resources/:id',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_mutation', 'authenticated')),
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handlePatch)
   )
 
   router.post(
     '/external/gfs/resources/:id/children',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_mutation', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const rid = String(req.params.id)
       if (!UUID_RE.test(rid)) {
@@ -303,6 +308,7 @@ export function createExternalGfsRouter(): Router {
 
   router.put(
     '/external/gfs/resources/:id/content',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_mutation', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const rid = String(req.params.id)
       if (!UUID_RE.test(rid)) {
@@ -322,6 +328,7 @@ export function createExternalGfsRouter(): Router {
 
   router.delete(
     '/external/gfs/resources/:id',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_mutation', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const rid = String(req.params.id)
       if (!UUID_RE.test(rid)) {
@@ -341,6 +348,7 @@ export function createExternalGfsRouter(): Router {
 
   router.get(
     '/external/gfs/resources',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_read', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const drive = driveOf(req.query.drive)
       const subjects = await externalCallerSubjects(req)
@@ -459,6 +467,7 @@ export function createExternalGfsRouter(): Router {
   // (deny-by-default), so a user only reads what it is granted. GET only. ──
   router.get(
     '/external/gfs/resolve',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_read', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const uri = typeof req.query.uri === 'string' ? req.query.uri : ''
       if (!uri) {
@@ -480,6 +489,7 @@ export function createExternalGfsRouter(): Router {
 
   router.get(
     '/external/gfs/resources/:id/children',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_read', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const rid = String(req.params.id)
       if (!UUID_RE.test(rid)) {
@@ -502,6 +512,7 @@ export function createExternalGfsRouter(): Router {
 
   router.get(
     '/external/gfs/proxy/:rid',
+    rateLimitMiddleware(externalUserRateLimitOptions('gfs_read', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const rid = String(req.params.rid)
       if (!UUID_RE.test(rid)) {

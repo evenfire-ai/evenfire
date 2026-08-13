@@ -206,6 +206,22 @@ function dbReturning(
 }
 
 describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)', () => {
+  it('rate limits token issuance before minting a GFS token', async () => {
+    auth()
+    dbReturning([], { rateLimitCount: 11 })
+    const response = await request(await buildApp())
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'sess')
+      .send({ scopes: ['gfs.read'] })
+
+    expect(response.status).toBe(429)
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    const bucketCall = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )
+    expect(bucketCall?.[1]?.[0]).toBe(`external_gfs_mutation:user:${U1}`)
+  })
+
   it('mints a gfs token for the user with the EXISTING signGfsToken (sub=users.id)', async () => {
     auth()
     const app = await buildApp()
@@ -1188,6 +1204,21 @@ describe('user resource mutations via gfsc proxy', () => {
 })
 
 describe('GET /external/gfs/resources', () => {
+  it('rate limits resource reads before querying accessible resources', async () => {
+    auth()
+    dbReturning([], { rateLimitCount: 31 })
+    const response = await request(await buildApp())
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'sess')
+
+    expect(response.status).toBe(429)
+    expect(response.headers['retry-after']).toBeDefined()
+    const bucketCall = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )
+    expect(bucketCall?.[1]?.[0]).toBe(`external_gfs_read:user:${U1}`)
+  })
+
   it('lists readable direct user resources and active-team resources as Desktop entry points', async () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
