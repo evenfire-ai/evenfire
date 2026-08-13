@@ -51,13 +51,15 @@ export function classifyByHttpStatus(err: unknown): ClassifiedError | null {
 
   switch (e.status) {
     case 401:
-      // A rotatable bad credential — kept on `auth` failover class.
-      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message: rawMsg, ...diag }
     case 403:
-      // 403 ≠ 401: not a bad key value but account access / billing / permission.
-      // Split off AuthenticationFailed so a forbidden model/account does not
-      // masquerade as a rotatable-credential failure (spec 02 §3.1).
-      return { code: LlmErrorCode.InsufficientQuota, retryable: false, message: rawMsg, ...diag }
+      // 401 (bad key) and 403 (forbidden: account access / IAM permission) are
+      // both identity/authorization failures — the caller must fix credentials
+      // or grants before this provider serves. Genuine quota has its own channel
+      // (body `insufficient_quota`, Vertex RESOURCE_EXHAUSTED, Bedrock
+      // ServiceQuotaExceededException), so 403 stays on the `auth` failover class
+      // uniformly across all four provider arms (R1-M1). The 401-vs-403 detail
+      // survives in `httpStatus`/`providerCode` (diag), not in the class.
+      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message: rawMsg, ...diag }
     case 402:
       return { code: LlmErrorCode.InsufficientQuota, retryable: false, message: rawMsg, ...diag }
     case 404:

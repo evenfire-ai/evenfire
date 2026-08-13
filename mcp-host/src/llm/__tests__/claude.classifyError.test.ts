@@ -66,10 +66,13 @@ describe('ClaudeProvider.classifyError', () => {
     expect(c.message).toBe('billing issue')
   })
 
-  it('classifies error.type permission_error as InsufficientQuota (account access), not retryable', () => {
+  it('classifies error.type permission_error as AuthenticationFailed (403 identity/authz), not retryable (R1-M1)', () => {
+    // A 403 is identity/authorization (account access / IAM permission), not
+    // billing — it lands on the `auth` failover class uniformly with the other
+    // arms. billing_error above keeps InsufficientQuota (Anthropic's quota channel).
     const err = anthropicApiError(403, 'permission_error', 'no permission')
     const c = provider.classifyError(err)
-    expect(c.code).toBe(LlmErrorCode.InsufficientQuota)
+    expect(c.code).toBe(LlmErrorCode.AuthenticationFailed)
     expect(c.retryable).toBe(false)
     expect(c.providerCode).toBe('permission_error')
     expect(c.message).toBe('no permission')

@@ -85,10 +85,14 @@ export class ClaudeProvider implements SingleTurnProvider {
           case 'overloaded_error':
             return { code: LlmErrorCode.ModelOverloaded, retryable: true, message: rawMsg }
           case 'billing_error':
-          case 'permission_error':
-            // Account access / billing, not a rotatable credential (kept off
-            // AuthenticationFailed — see the 403 split in errorClassification).
+            // Genuine billing / credit exhaustion — Anthropic's dedicated quota
+            // channel (like body `insufficient_quota`). Stays on InsufficientQuota.
             return { code: LlmErrorCode.InsufficientQuota, retryable: false, message: rawMsg }
+          case 'permission_error':
+            // A 403: account access / IAM permission — an identity/authorization
+            // failure, not billing. Classify as AuthenticationFailed so it lands
+            // on the `auth` failover class uniformly with the other arms (R1-M1).
+            return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message: rawMsg }
           default:
             return null
         }

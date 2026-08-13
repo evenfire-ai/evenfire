@@ -19,13 +19,13 @@ describe('classifyByHttpStatus', () => {
     })
   })
 
-  it('maps 403 to InsufficientQuota (account/billing access), NOT AuthenticationFailed', () => {
-    // 403 is separated from 401: a bad credential is 401 (a rotatable key); 403
-    // is account access / billing / permission and must not masquerade as a
-    // credential failure (which would silently divert traffic via the `auth`
-    // failover class).
+  it('maps 403 to AuthenticationFailed (identity/authorization), uniform with 401 (R1-M1)', () => {
+    // 403 is an identity/authorization failure (account access / IAM permission),
+    // not billing — genuine quota has its own channel. It shares the `auth`
+    // failover class with 401 across all four provider arms; the 401-vs-403
+    // detail survives in httpStatus, not in the failover class.
     const c = classifyByHttpStatus({ status: 403, message: 'forbidden' })
-    expect(c?.code).toBe(LlmErrorCode.InsufficientQuota)
+    expect(c?.code).toBe(LlmErrorCode.AuthenticationFailed)
     expect(c?.retryable).toBe(false)
     expect(c?.httpStatus).toBe(403)
   })
