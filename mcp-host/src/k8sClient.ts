@@ -15,6 +15,59 @@ const customObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi)
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const HOSTS_PLURAL = 'hosts'
+const LLMHOOKS_PLURAL = 'llmhooks'
+
+/**
+ * Raw LlmHook CR (spec §8) as read by mcp-host. mcp-host READS these to resolve
+ * `Host.spec.guardrails.hooks` references into runtime hook descriptors; it never
+ * writes them (the status subresource is controller-owned).
+ */
+export interface LlmHookCR {
+  metadata?: { name?: string }
+  spec?: {
+    target?: {
+      image?: {
+        ref?: string
+        port?: number
+        envSecret?: string
+        egressBindings?: Array<{ cidr?: string; toFQDN?: string; ports?: number[] }>
+        security?: { addCapabilities?: string[] }
+      }
+      service?: { name?: string; namespace?: string; port?: number }
+      remote?: { baseUrl?: string }
+    }
+    path?: string
+    lifecyclePoints?: string[]
+    order?: number
+    failMode?: 'open' | 'closed'
+    capabilities?: string[]
+  }
+  status?: { observedDigest?: string }
+}
+
+/**
+ * Get an LlmHook CR by name from the llm-hooks namespace (spec §8.2). Returns
+ * null on 404 so a dangling `Host.spec.guardrails.hooks` reference resolves to
+ * "skip", not a hard failure.
+ */
+export async function getLlmHook(name: string): Promise<LlmHookCR | null> {
+  try {
+    const response = await customObjectsApi.getNamespacedCustomObject({
+      group: GROUP,
+      version: VERSION,
+      namespace: config.llmHooksNamespace,
+      plural: LLMHOOKS_PLURAL,
+      name,
+    })
+    return response as LlmHookCR
+  } catch (error) {
+    if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
+      console.warn(`[K8s] LlmHook not found: ${name} (ns=${config.llmHooksNamespace})`)
+      return null
+    }
+    throw error
+  }
+}
 
 /**
  * Get a Host CRD by name.

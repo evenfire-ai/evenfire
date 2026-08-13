@@ -86,3 +86,36 @@ subjects:
   - kind: ServiceAccount
     name: control-api
     namespace: control-plane
+---
+# --- Role: mcp-host hook reader (llm-hooks namespace) ---
+# mcp-host is a READ-ONLY consumer of LlmHook CRs (spec §8.2): at boot each
+# host pod resolves its `Host.spec.guardrails.hooks` references into runtime
+# hook descriptors (endpoint/capabilities/failMode). Host SAs are per-host
+# (`host-<name>-sa` in the mcp-host namespace), so the binding targets the whole
+# mcp-host ServiceAccount group rather than enumerating each host.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-host-hook-reader
+  namespace: llm-hooks
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-host-hook-reader
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-host-hook-reader
+subjects:
+  - kind: Group
+    name: system:serviceaccounts:mcp-host
+    apiGroup: rbac.authorization.k8s.io

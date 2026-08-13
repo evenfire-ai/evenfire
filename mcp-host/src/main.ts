@@ -50,7 +50,11 @@ import { WorkflowResultTool } from './core/tools/workflow'
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
-import { HostWatcher, getHost } from './k8sClient'
+import {
+  resolveGuardrailHookDescriptors,
+  withResolvedHookDescriptors,
+} from './guardrailHookResolver'
+import { HostWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
@@ -1259,7 +1263,17 @@ async function initializeAgent(): Promise<void> {
   agent.setApprovalConfig(approvalCfg)
 
   // Guardrails (spec §5/§6) — Host block, dev-env fallback. Absent = today.
-  agent.setGuardrailsConfig(currentHost?.spec.guardrails ?? config.guardrailsConfig)
+  // Resolve installed-hook references (§8.2) into runtime descriptors so the
+  // LLM lane actually calls the hook pods; dangling/invalid refs degrade to skip.
+  const hostGuardrails = currentHost?.spec.guardrails ?? config.guardrailsConfig
+  const resolvedHookDescriptors = await resolveGuardrailHookDescriptors(hostGuardrails, {
+    getLlmHook,
+    llmHooksNamespace: config.llmHooksNamespace,
+  }).catch(err => {
+    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
+    return []
+  })
+  agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolvedHookDescriptors))
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   console.log(
     `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`

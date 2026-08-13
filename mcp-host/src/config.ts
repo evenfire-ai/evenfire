@@ -47,6 +47,10 @@ export interface Config {
   // Kubernetes namespace
   namespace: string
 
+  // Namespace where installed LlmHook workloads/Services live (spec §8.2). The
+  // guardrail hook resolver derives in-cluster endpoints against this namespace.
+  llmHooksNamespace: string
+
   // Name of the operator-managed LLM allowlist ConfigMap watched by the
   // ConfigStore (R3). Configurable so canary/test namespaces can point at a
   // differently-named artifact; default matches the control-api writer.
@@ -534,6 +538,9 @@ export const config: Config = {
 
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
+
+  // Namespace where installed LlmHook workloads/Services live (spec §8.2).
+  llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
 
   // LLM allowlist ConfigMap name (R3). CROSS-SERVICE CONTRACT: the default
   // (`clerum-llm-allowed-models`) is the CM produced by control-api
