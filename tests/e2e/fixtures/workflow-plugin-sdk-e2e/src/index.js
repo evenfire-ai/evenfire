@@ -191,6 +191,12 @@ function startSandboxUiFixture() {
         `<!doctype html><title>E2E Layout Notification App</title><main><h1>E2E Layout Notification App</h1><p data-notification-id="${notificationId}">Notification sent.</p></main>`
       )
     } catch (error) {
+      const reason =
+        error instanceof Error &&
+        /^client notification failed: (?:[a-z0-9_-]+|http_\d+)$/i.test(error.message)
+          ? error.message.replace('client notification failed: ', '')
+          : 'notification_emit_failed'
+      log(`E2E_SDK_SANDBOX_UI_FAIL=${reason}`)
       res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
       res.end(
         `Could not emit Sandbox UI notification: ${error instanceof Error ? error.message : error}`
