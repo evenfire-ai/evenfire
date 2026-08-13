@@ -95,14 +95,14 @@ describe('Sidebar publisher gating', () => {
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'Global File System', '/global-file-system'],
-  ])('selects the matching Directories child for %s', (pathname, label, href) => {
+  ])('selects the matching Files child for %s', (pathname, label, href) => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
     navigationState.pathname = pathname
     render(<Sidebar currentTab="directories" />)
 
-    const group = screen.getByRole('button', { name: 'Directories' })
+    const group = screen.getByRole('button', { name: 'Files' })
     expect(group).toHaveAttribute('aria-expanded', 'true')
     expect(group).toHaveAttribute('data-active', 'true')
     const child = screen.getByRole('link', { name: label })
@@ -122,13 +122,13 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
-  it('renders an icon for the Directories group', () => {
+  it('renders an icon for the Files group', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
     render(<Sidebar currentTab="directories" />)
 
-    const directories = screen.getByRole('button', { name: 'Directories' })
+    const directories = screen.getByRole('button', { name: 'Files' })
     expect(directories.querySelector('.cu-sidebar__icon svg')).toBeInTheDocument()
   })
 
@@ -165,7 +165,7 @@ describe('Sidebar publisher gating', () => {
 
   it('sorts standard sidebar groups by the displayed child label', () => {
     for (const [tab, item] of Object.entries(SIDEBAR_TABS)) {
-      if (tab === 'cost') continue
+      if (tab === 'cost' || tab === 'directories') continue
       const labels = item.children?.map(child => child.label) ?? []
       expect(labels).toEqual([...labels].sort((first, second) => first.localeCompare(second)))
     }
@@ -174,6 +174,10 @@ describe('Sidebar publisher gating', () => {
       'Usage',
       'Token Budgets',
       'LLM Prices',
+    ])
+    expect(SIDEBAR_TABS.directories.children?.map(child => child.label)).toEqual([
+      'Global File System',
+      'Agent Outputs',
     ])
   })
 
