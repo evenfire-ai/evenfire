@@ -50,7 +50,7 @@ describe('Sidebar publisher gating', () => {
     expect(screen.getByRole('link', { name: /agents/i })).toBeInTheDocument()
   })
 
-  it('keeps Traces hidden and sorts visible navigation labels alphabetically', () => {
+  it('keeps Traces hidden and renders visible navigation in the defined order', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
@@ -61,9 +61,19 @@ describe('Sidebar publisher gating', () => {
     const labels = Array.from(nav.children).map(item =>
       item.querySelector('.cu-sidebar__label')?.textContent?.trim()
     )
-    expect(labels).toEqual(
-      [...labels].sort((first, second) => (first ?? '').localeCompare(second ?? ''))
-    )
+    expect(labels).toEqual([
+      'Agents',
+      'Contexts',
+      'Marketplace',
+      'Cost & Usage',
+      'External Channels',
+      'Files',
+      'Installed connectors',
+      'Installed plugins',
+      'LLM Models',
+      'Secrets',
+      'Users & Teams',
+    ])
   })
 
   it('keeps Settings in the footer on its canonical route', () => {

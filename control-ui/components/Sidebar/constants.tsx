@@ -128,3 +128,19 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   },
   settings: { label: 'Settings', href: CONTROL_ROUTES.settings.ui, icon: <IconSettings /> },
 }
+
+export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
+  'hosts',
+  'contexts',
+  'registry-catalog',
+  'cost',
+  'communication-channels',
+  'directories',
+  'mcp-servers',
+  'workflow-recipes',
+  'llm-models',
+  'llm-secrets',
+  'profile-admin',
+  'traces',
+  'settings',
+]
