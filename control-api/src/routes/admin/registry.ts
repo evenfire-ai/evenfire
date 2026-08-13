@@ -161,17 +161,38 @@ function hookOrgScope(entryName: string): string | null {
 }
 
 /**
+ * Official evenfire scopes — always curated (the platform's own reserved orgs).
+ * Hardcoded so a misconfigured `CONTROL_API_CURATED_HOOK_ORGS` can never drop
+ * platform trust, and so the env list is reserved for extra THIRD-PARTY orgs.
+ */
+const OFFICIAL_EVENFIRE_HOOK_ORGS = ['@clerum', '@evenfire']
+
+/**
  * Authoritative trust level for an installed hook (§8.4 / registry gap #1).
  * `entries.trust_level` is publisher-influenced (trigger-computed from
- * author-supplied creator tags), so it is honored ONLY for a platform-curated
- * org; every other org's hook is capped at `config.defaultHookTrustCap` — a
- * self-published hook can clear a `mid` floor but never reach `high` (and so can
- * never unlock the content+egress combination §8.4 reserves for `high`).
+ * author-supplied creator tags), so it is honored ONLY for a CURATED org; every
+ * other org's hook is capped at `config.defaultHookTrustCap` — a self-published
+ * hook can clear a `mid` floor but never reach `high` (and so can never unlock
+ * the content+egress combination §8.4 reserves for `high`).
+ *
+ * Curated = the cluster's OWN org (`clusterOrgScope`, from resolvePublishScope) ∪
+ * official evenfire (`@clerum`/`@evenfire`) ∪ the additive
+ * `CONTROL_API_CURATED_HOOK_ORGS` allowlist (other third-party orgs). The first
+ * two are trusted automatically — they are the operator's own org and the
+ * platform — so the env is only consulted for orgs that are NEITHER.
  */
-export function resolveHookTrustLevel(entry: Pick<RegistryEntry, 'name' | 'trust_level'>): string {
+export function resolveHookTrustLevel(
+  entry: Pick<RegistryEntry, 'name' | 'trust_level'>,
+  clusterOrgScope: string | null
+): string {
   const column = (entry.trust_level || 'low').toLowerCase()
   const org = hookOrgScope(entry.name)
-  if (org && config.curatedHookOrgs.includes(org)) return column
+  const curated =
+    !!org &&
+    (org === clusterOrgScope ||
+      OFFICIAL_EVENFIRE_HOOK_ORGS.includes(org) ||
+      config.curatedHookOrgs.includes(org))
+  if (curated) return column
   const cap = config.defaultHookTrustCap
   return (HOOK_TRUST_ORDER[column] ?? 0) <= (HOOK_TRUST_ORDER[cap] ?? 1) ? column : cap
 }
@@ -1663,8 +1684,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Step 2 — authoritative trust level (§8.4; never face-value for a self-published hook).
-        const trustLevel = resolveHookTrustLevel(entry)
+        // Step 2 — authoritative trust level (§8.4; never face-value for a
+        // self-published hook). The cluster's OWN org (this deployment's publish
+        // scope) and official evenfire are auto-curated; other orgs are capped
+        // unless in the additive CONTROL_API_CURATED_HOOK_ORGS allowlist.
+        const clusterOrgScope = await resolvePublishScope()
+          .then(s => s.scope)
+          .catch(() => null)
+        const trustLevel = resolveHookTrustLevel(entry, clusterOrgScope)
 
         // Step 3 — load target Host + its guardrails policy.
         let host: HostShape

@@ -840,10 +840,13 @@ export const config: Config = {
     process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST === '1',
   // Guardrails install-hook trust policy (spec §8.4 / registry gap #1). The
   // registry's entries.trust_level is publisher-influenced, so the saga only
-  // honors it for platform-CURATED orgs listed here; every other org's hook is
-  // capped at `defaultHookTrustCap` regardless of the column. Case-sensitive
-  // (org scopes carry '@'); NOT parseCsvList (which lowercases).
-  curatedHookOrgs: (process.env.CONTROL_API_CURATED_HOOK_ORGS ?? '@clerum,@evenfire')
+  // honors it for CURATED orgs; every other org's hook is capped at
+  // `defaultHookTrustCap` regardless of the column. The cluster's OWN org (from
+  // resolvePublishScope) and official evenfire (`@clerum`/`@evenfire`) are ALWAYS
+  // curated — not listed here — so this env is purely ADDITIVE, for extra
+  // third-party orgs the operator chooses to trust. Empty by default. Case-
+  // sensitive (org scopes carry '@'); NOT parseCsvList (which lowercases).
+  curatedHookOrgs: (process.env.CONTROL_API_CURATED_HOOK_ORGS ?? '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean),
