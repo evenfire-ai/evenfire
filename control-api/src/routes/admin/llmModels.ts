@@ -133,10 +133,11 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   }
 
   // ── Operator attention feed (Fase 5, Pieza C) ───────────────────────────────
-  // Persistent alert backing the non-destructive Fase 4 cron: every `stale`
-  // catalog model that is STILL referenced by a Host/grant, so the operator can
-  // disable it through the impact-gated PUT. Only actionable items (referenced)
-  // appear; an unreferenced stale model yields nothing. Reuses `impactSources`
+  // Persistent alert backing the non-destructive Fase 4 cron: every enabled
+  // `stale` catalog model that is STILL referenced by a Host/grant, so the
+  // operator can disable it through the impact-gated PUT. Only actionable items
+  // appear; an unreferenced stale model — or one already disabled — yields
+  // nothing (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
   // (the same fail-loud enumeration the `?force` gate uses, regla D4): if any
   // Host LIST fails, `computeAttention` propagates → asyncHandler → 500, never a
   // partial feed that hides a live reference. Inherits the `/admin/*` control-ui

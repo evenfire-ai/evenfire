@@ -55,6 +55,9 @@ const ACTIVE_ADMIN = {
 const PROVIDER = 'claude'
 const STALE_MODEL = 'claude-haiku-4-5'
 const OTHER_STALE_MODEL = 'claude-opus-legacy'
+// A stale row that has ALREADY been disabled. Sorts after STALE_MODEL under the
+// query's ORDER BY provider, model, so a leaked ordering is deterministic.
+const DISABLED_STALE_MODEL = 'claude-sonnet-disabled'
 
 // A raw `llm_allowed_models` DB row shaped to the migration schema, run through
 // the REAL `rowToModel` mapper on the way out (T1). `stale` defaults true here
@@ -126,7 +129,17 @@ function installPool(opts: {
       return { rows, rowCount: rows.length }
     }
     if (/FROM llm_allowed_models/.test(text) && /WHERE stale/.test(text)) {
-      return { rows: staleRows, rowCount: staleRows.length }
+      // No real Postgres in this suite, so emulate the query's OWN WHERE clause
+      // instead of trusting the caller to pre-filter: when the SQL under test
+      // filters `AND enabled`, drop disabled rows exactly as Postgres would.
+      // Keying off the real SQL is what lets this stand in for the DB across the
+      // fix — pre-fix (`WHERE stale`) the disabled row leaks through, post-fix it
+      // is filtered. Rows keep the real `rowToModel` input shape (T1).
+      const filtersEnabled = /\bAND enabled\b/.test(text)
+      const rows = filtersEnabled
+        ? staleRows.filter(r => (r as { enabled?: unknown }).enabled === true)
+        : staleRows
+      return { rows, rowCount: rows.length }
     }
     return { rows: [], rowCount: 0 }
   })
@@ -284,6 +297,38 @@ describe('GET /admin/attention', () => {
       STALE_MODEL,
       OTHER_STALE_MODEL,
     ])
+  })
+
+  it('a stale but DISABLED referenced model is NOT actionable → absent; an enabled one appears (R1-M2)', async () => {
+    // A force-disable can leave a dangling reference: stale=true, enabled=false,
+    // still referenced by a Host. Its suggested action ("disable it, impact-gated
+    // PUT") is ALREADY done, so the feed must NOT re-surface it — otherwise it
+    // never converges to zero after the action it itself asked for. A stale AND
+    // enabled referenced model still must appear. Both rows carry the real
+    // `rowToModel` input shape (T1); the assertion is the observable item list the
+    // banner renders (T4).
+    installPool({
+      staleRows: [
+        makeModelRow({
+          id: '11111111-1111-4111-8111-111111111111',
+          model: STALE_MODEL,
+          enabled: true,
+        }),
+        makeModelRow({
+          id: '44444444-4444-4444-8444-444444444444',
+          model: DISABLED_STALE_MODEL,
+          enabled: false,
+        }),
+      ],
+    })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-enabled', primarySpec(STALE_MODEL))
+    await seedHost(gateway, 'agent-disabled', primarySpec(DISABLED_STALE_MODEL))
+
+    const res = await authedGet(gateway).expect(200)
+    // Only the enabled stale model is an actionable item; the disabled one, though
+    // still referenced, is filtered out at the query (`WHERE stale AND enabled`).
+    expect(res.body.items.map((i: { model: string }) => i.model)).toEqual([STALE_MODEL])
   })
 
   it('detects stale references across BOTH real host namespaces', async () => {
