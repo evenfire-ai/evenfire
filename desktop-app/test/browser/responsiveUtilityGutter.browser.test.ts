@@ -13,7 +13,7 @@ type HeaderGeometry = {
   searchWidth: number
 }
 
-let browser: Browser
+let browser: Browser | undefined
 
 function launchOptions() {
   if (process.platform === 'darwin' && fs.existsSync(SYSTEM_CHROME)) {
@@ -23,6 +23,7 @@ function launchOptions() {
 }
 
 async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
+  if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
   await page.setContent(`
     <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
@@ -55,7 +56,7 @@ describe('responsive utility gutter', () => {
   })
 
   afterAll(async () => {
-    await browser.close()
+    await browser?.close()
   })
 
   it('uses the compact closed-header reservation at tablet widths and retains drawer-open space', async () => {
